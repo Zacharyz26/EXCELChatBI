@@ -1,0 +1,25 @@
+# 结构化日志配置（CLAUDE 第6节：日志含 trace —— 模型/工具/耗时/token/成本）
+# 由 packages/common/logging.py 加载。
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  json:
+    # 实际格式化交给 structlog，这里只配置标准库桥接
+    format: "%(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: json
+    stream: ext://sys.stdout
+
+root:
+  level: INFO
+  handlers: [console]
+
+loggers:
+  chatbi:
+    level: INFO
+    handlers: [console]
+    propagate: false

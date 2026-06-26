@@ -1,0 +1,49 @@
+# 模型路由网关配置（model registry）
+# 复制为 config/models.yaml 使用。密钥不写在此处，用 ${ENV_VAR} 引用 .env。
+# 业务代码只按"场景"取模型，不出现具体模型名（红线 / CLAUDE 第4节）。
+
+version: 1
+
+# 模型清单：每个 provider 走 OpenAI 兼容适配层
+providers:
+  deepseek:
+    type: openai_compatible
+    api_base: ${DEEPSEEK_API_BASE}
+    api_key: ${DEEPSEEK_API_KEY}
+  vision:
+    type: openai_compatible
+    api_base: ${VISION_API_BASE}
+    api_key: ${VISION_API_KEY}
+
+models:
+  deepseek-v3:
+    provider: deepseek
+    model: deepseek-chat
+  deepseek-r1:
+    provider: deepseek
+    model: deepseek-reasoner
+  qwen-vl:
+    provider: vision
+    model: qwen2.5-vl
+
+# 场景 → 模型路由（含备选，用于降级）。场景枚举见 packages/models/types.py。
+routes:
+  core_reasoning:        # 核心推理：意图理解、规划、解读、代码生成
+    primary: deepseek-v3
+    fallback: [deepseek-r1]
+    temperature: 0.3
+  complex_reasoning:     # 复杂多步（B轨，MVP 暂不启用）
+    primary: deepseek-r1
+    fallback: [deepseek-v3]
+  vision:                # 多模态识图，结果回推理模型
+    primary: qwen-vl
+    fallback: []
+  lightweight:           # 轻量：query 改写、意图分类、指代消解
+    primary: deepseek-v3
+    fallback: []
+    temperature: 0.0
+
+# 统一调用策略（重试 / 超时 / 降级）
+defaults:
+  timeout_seconds: 60
+  max_retries: 2

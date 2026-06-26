@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# 环境与密钥（禁止提交）
+.env
+config/models.yaml
+config/*.local.yaml
+
+# 本地代理/编辑器元数据
+.agents/
+.codex/
+
+# uv
+# uv.lock 应提交，故不忽略
+
+# 前端
+apps/web/node_modules/
+apps/web/dist/
+apps/web/.env
+
+# 运行产物
+*.log
+.DS_Store
