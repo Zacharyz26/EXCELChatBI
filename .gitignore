@@ -27,3 +27,6 @@ apps/web/.env
 # 运行产物
 *.log
 .DS_Store
+
+# 本地数据集 / 上传文件（dataset_ref 落盘，切片用）
+.data/

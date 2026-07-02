@@ -1,0 +1,37 @@
+# 数据画像安全策略（默认段）。复制为 config/data_policy.yaml 使用。
+# 缺失此文件时用内置宽松默认，系统仍可安全运行（默认可用）。
+# 场景无关：不写死任何行业或业务列名，一切由配置 / 数据集元数据表达。
+
+version: 1
+
+default:
+  # 数据集整体敏感级别：open | internal | restricted（可扩展）
+  # 默认 open（最宽松）：默认宽松、按需收紧。
+  level: open
+
+  # 各级别“低基数”判定阈值：文本列 distinct ≤ 阈值 才给样本值，否则只给统计。
+  # 级别越严阈值越小 → 越少文本列给样本值。restricted=0 表示文本列一律不给原值。
+  low_cardinality_max_distinct:
+    open: 20
+    internal: 8
+    restricted: 0
+
+  # 第3层小分组保护：分组样本量 < 该阈值视为小分组。
+  small_group_min_size: 5
+  # 小分组处理：merge 合并到 other_label；drop 直接丢弃。
+  small_group_mode: merge
+  other_label: "其他"
+
+  # 脱敏掩码标记（DefaultRedactor 用；可替换为假名化等实现）。
+  mask_token: "***"
+
+# ── 数据集级覆盖示例（不生效；仅示范结构）──
+# 实际覆盖由上传接口的 policy 参数或数据集 sidecar 元数据携带，用通用占位列名。
+examples:
+  一个数据集的策略覆盖:
+    level: restricted          # 整体收紧
+    columns:                   # 列级规则覆盖按类型的默认行为
+      col_a: normal            # 用默认行为
+      col_b: mask              # 样本值打码，保留统计摘要
+      col_c: exclude           # 不给样本值也不给统计，仅留 schema
+    small_group_min_size: 10   # 可按数据集覆盖阈值

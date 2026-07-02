@@ -9,7 +9,9 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"        # CLAUDE 第4节锁定 Python 3.11
 license = { text = "Proprietary" }
 
-# ── 运行时依赖（按 CLAUDE 第4节选型，版本采用兼容性下界，uv.lock 固定具体版本）──
+# ── 核心运行时依赖（第一个垂直切片：Excel→画像→出图 即用这组，按 CLAUDE 第4节选型）──
+# 重依赖（统计/RAG/截图/报告/存储）按域拆进 optional-dependencies，按需安装，
+# 避免 prophet/weasyprint/playwright 等在未实现的切片里拖慢安装或编译失败。
 dependencies = [
     # Web / API
     "fastapi>=0.111,<0.116",
@@ -25,40 +27,42 @@ dependencies = [
     "httpx>=0.27,<0.29",
     "tenacity>=8.3,<9",                 # 重试/降级
 
-    # 数据处理
+    # 数据处理（解析 + 大表分块）
     "pandas>=2.2,<3",
     "openpyxl>=3.1,<4",
     "duckdb>=1.0,<2",
 
-    # 统计
-    "statsmodels>=0.14,<0.15",
-    "scikit-learn>=1.5,<2",
-    "prophet>=1.1,<2",
-
-    # 图表截图
-    "playwright>=1.44,<2",
-
-    # 报告导出
-    "weasyprint>=62,<63",
-
     # 治理：JSON Schema 校验（红线3）
     "jsonschema>=4.22,<5",
 
-    # 中文 RAG
+    # 可观测 / 日志
+    "structlog>=24.1,<25",
+]
+
+[project.optional-dependencies]
+# 统计分析切片（trend/anomaly/regression）
+stats = [
+    "statsmodels>=0.14,<0.15",
+    "scikit-learn>=1.5,<2",
+    "prophet>=1.1,<2",
+]
+# 中文 RAG 切片
+rag = [
     "jieba>=0.42.1",
     "pymilvus>=2.4,<3",
     "FlagEmbedding>=1.2,<2",            # bge embedding / reranker
-
-    # MCP 协议
-    "mcp>=1.0,<2",
-
-    # 存储客户端
+]
+# 图表服务端截图
+chart-screenshot = ["playwright>=1.44,<2"]
+# 报告导出
+report = ["weasyprint>=62,<63"]
+# 真·MCP-over-HTTP 服务
+mcp = ["mcp>=1.0,<2"]
+# 生产存储客户端（本地切片用本地落盘，无需启用）
+storage = [
     "redis>=5.0,<6",
     "minio>=7.2,<8",
     "psycopg[binary]>=3.1,<4",         # PostgreSQL
-
-    # 可观测 / 日志
-    "structlog>=24.1,<25",
 ]
 
 [dependency-groups]
@@ -88,6 +92,8 @@ src = ["apps", "mcp_servers", "packages", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008：FastAPI 依赖注入惯用 Depends() 作默认值，属预期写法
+ignore = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

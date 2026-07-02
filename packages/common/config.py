@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +40,15 @@ class Settings(BaseSettings):
     # 沙箱（红线5）
     sandbox_timeout_seconds: int = 30
     sandbox_max_memory_mb: int = 512
+
+    # 本地数据集存储（切片用本地落盘代替 MinIO；生产切 MinIO，留 TODO）
+    dataset_dir: str = ".data/datasets"
+    upload_dir: str = ".data/uploads"
+    # 超过此行数走 DuckDB 分块（占位阈值，分块逻辑留 TODO）
+    large_table_row_threshold: int = 500_000
+
+    # 数据画像安全策略配置（缺失时用内置宽松默认，见 packages/governance/data_boundary）
+    data_policy_path: str = "config/data_policy.yaml"
 
     # 中文模型
     embedding_model: str = "bge-large-zh-v1.5"

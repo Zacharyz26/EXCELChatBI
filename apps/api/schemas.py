@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 
@@ -21,6 +23,24 @@ class ChatChunk(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Excel 上传响应：返回数据集引用，前端据此展示画像供确认。"""
+    """Excel 上传响应：数据集引用 + 数据画像（供前端展示并确认）。
+
+    注意：返回的是画像，原始整表只在服务端以 dataset_ref 引用（红线1）。
+    """
 
     dataset_ref: str
+    profile: dict[str, Any]
+
+
+class AnalyzeRequest(BaseModel):
+    """分析请求：基于已上传数据集出图。"""
+
+    dataset_ref: str
+
+
+class ChartResponse(BaseModel):
+    """出图响应：ECharts 配置（数值来自真实数据，红线2）。"""
+
+    chart_id: str
+    chart_type: str
+    option: dict[str, Any]

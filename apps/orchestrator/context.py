@@ -7,4 +7,6 @@ from packages.session.state import SessionState
 
 def prepare_context(session_id: str, raw_query: str) -> tuple[SessionState, str]:
     """加载会话状态 + 指代消解 + 必要时压缩，返回 (状态, 改写后 query)。"""
-    raise NotImplementedError("TODO: SessionStore.load → coref.resolve_reference → compact_if_needed")
+    raise NotImplementedError(
+        "TODO: SessionStore.load → coref.resolve_reference → compact_if_needed"
+    )

@@ -8,8 +8,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from packages.common.logging import get_logger
+from packages.models.adapters.openai_compatible import OpenAICompatibleAdapter
 from packages.models.registry import ModelRegistry
 from packages.models.types import Message, ModelResponse, Scenario
+
+_log = get_logger("models.gateway")
 
 
 class ModelGateway:
@@ -28,16 +32,52 @@ class ModelGateway:
         Args:
             scenario: 路由场景。
             messages: 对话消息列表。
+
+        Raises:
+            RuntimeError: 主选与所有备选模型均失败。
         """
-        raise NotImplementedError(
-            "TODO: registry.resolve(scenario) → 选适配器调用 → 重试/超时/降级 → 记录可观测"
+        route = self._registry.resolve(scenario)
+        defaults = self._registry.defaults
+        candidates = [route.primary, *route.fallback]
+
+        # 红线1 可观测：记录发往模型的 payload 概况（不含原始数据，仅角色与长度）
+        _log.info(
+            "model.request",
+            scenario=scenario.value,
+            candidates=candidates,
+            message_roles=[m.role for m in messages],
+            payload_chars=sum(len(m.content) for m in messages),
         )
+
+        last_error: Exception | None = None
+        for name in candidates:
+            spec = self._registry.get_model(name)
+            try:
+                adapter = OpenAICompatibleAdapter(
+                    spec,
+                    timeout_seconds=defaults.timeout_seconds,
+                    max_retries=defaults.max_retries,
+                )
+                resp = await adapter.complete(messages, temperature=route.temperature)
+                _log.info(
+                    "model.response",
+                    model=resp.model,
+                    prompt_tokens=resp.prompt_tokens,
+                    completion_tokens=resp.completion_tokens,
+                    latency_ms=round(resp.latency_ms, 1),
+                )
+                return resp
+            except Exception as exc:  # 降级到下一个备选
+                last_error = exc
+                _log.warning("model.fallback", model=name, error=str(exc))
+
+        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
 
     async def stream(
         self,
         scenario: Scenario,
         messages: list[Message],
     ) -> AsyncIterator[str]:
-        """流式补全（SSE 用），逐 token 产出。"""
+        """流式补全（SSE 用），逐 token 产出。本切片暂未实现。"""
         raise NotImplementedError("TODO: 流式调用适配器并 yield 增量")
-        yield ""  # pragma: no cover  —— 标注此为异步生成器
+        yield ""  # pragma: no cover

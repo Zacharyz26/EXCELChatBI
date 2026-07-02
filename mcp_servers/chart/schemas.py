@@ -8,8 +8,22 @@ GEN_CHART_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "dataset_ref": {"type": "string"},
-        "chart_type": {"type": "string", "enum": ["line", "bar", "pie", "scatter", "heatmap"]},
-        "encoding": {"type": "object", "description": "x/y/series 等字段映射"},
+        "chart_type": {"type": "string", "enum": ["line", "bar", "pie", "scatter"]},
+        "encoding": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "string", "description": "维度列（类目/时间轴）"},
+                "y": {"type": "string", "description": "度量列"},
+                "agg": {
+                    "type": "string",
+                    "enum": ["sum", "mean", "count", "none"],
+                    "description": "聚合方式；scatter 用 none",
+                },
+                "top_n": {"type": "integer", "minimum": 1, "description": "可选，限制类目数"},
+            },
+            "required": ["x", "y"],
+            "additionalProperties": False,
+        },
     },
     "required": ["dataset_ref", "chart_type", "encoding"],
     "additionalProperties": False,
