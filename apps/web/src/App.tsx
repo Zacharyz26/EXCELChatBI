@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ExcelUpload } from "@/components/ExcelUpload";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
+import { KnowledgeQA } from "@/components/KnowledgeQA";
 import { analyze } from "@/api/client";
 import type { ChartResponse, DataProfile } from "@/types";
 
@@ -69,6 +70,8 @@ export default function App() {
           <EChartsRenderer option={chart.option} chartId={chart.chart_id} />
         </section>
       )}
+
+      <KnowledgeQA />
     </div>
   );
 }

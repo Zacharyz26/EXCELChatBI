@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # 数据画像安全策略配置（缺失时用内置宽松默认，见 packages/governance/data_boundary）
     data_policy_path: str = "config/data_policy.yaml"
 
+    # 中文 RAG（知识库问答）
+    rag_embedder: str = "hashing"        # hashing（默认，离线确定性）| bge（需装 .[rag]）
+    rag_reranker: str = "lexical"        # lexical（默认）| bge（需装 .[rag]）
+    embedding_dim: int = 256             # HashingEmbedder 向量维度
+    kb_index_dir: str = ".data/kb_index"  # 本地知识库索引落盘目录
+    kb_docs_dir: str = "docs/kb_samples"  # 默认摄入的样例文档目录
+
     # 中文模型
     embedding_model: str = "bge-large-zh-v1.5"
     rerank_model: str = "bge-reranker-v2-m3"

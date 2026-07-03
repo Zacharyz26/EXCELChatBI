@@ -37,3 +37,21 @@ export interface ChatRequest {
   message: string;
   image_refs?: string[];
 }
+
+export interface KBCitation {
+  source: string;
+  snippet: string;
+  section?: string | null;
+}
+
+export interface KBQueryResponse {
+  answer: string;
+  citations: KBCitation[];
+  is_empty: boolean;
+}
+
+export interface IngestResponse {
+  ingested_docs: number;
+  chunks: number;
+  total_chunks: number;
+}

@@ -61,10 +61,11 @@ class SkeletonContractTest(unittest.TestCase):
         self.assertEqual(Scenario.CORE_REASONING.value, "core_reasoning")
 
     def test_unimplemented_raises(self) -> None:
-        from packages.rag.tokenizer import tokenize
+        # 真实 bge 向量器属后续切片，仍为骨架，应抛 NotImplementedError
+        from packages.rag.embedding import BGEEmbedder
 
         with self.assertRaises(NotImplementedError):
-            tokenize("销售额同比增长")
+            BGEEmbedder("bge-large-zh-v1.5").embed(["销售额同比增长"])
 
     def test_mcp_server_registers_tools(self) -> None:
         from mcp_servers.excel_parser.server import build_server

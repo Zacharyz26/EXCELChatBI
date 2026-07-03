@@ -1,5 +1,10 @@
 // 后端 API 客户端
-import type { ChartResponse, UploadResponse } from "@/types";
+import type {
+  ChartResponse,
+  IngestResponse,
+  KBQueryResponse,
+  UploadResponse,
+} from "@/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
@@ -29,6 +34,28 @@ export async function analyze(datasetRef: string): Promise<ChartResponse> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dataset_ref: datasetRef }),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 摄入样例知识库（服务端目录 docs/kb_samples）。 */
+export async function ingestSamples(): Promise<IngestResponse> {
+  const resp = await fetch(`${API_BASE}/kb/ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "docs/kb_samples" }),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 知识库中文提问，返回答案与引用。 */
+export async function kbQuery(question: string): Promise<KBQueryResponse> {
+  const resp = await fetch(`${API_BASE}/kb/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
   });
   if (!resp.ok) return asError(resp);
   return resp.json();

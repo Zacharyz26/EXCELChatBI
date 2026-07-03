@@ -44,3 +44,42 @@ class ChartResponse(BaseModel):
     chart_id: str
     chart_type: str
     option: dict[str, Any]
+
+
+class IngestRequest(BaseModel):
+    """知识库摄入请求：路径（文件/目录）或内联文本，二选一。"""
+
+    path: str | None = None
+    text: str | None = None
+    source: str | None = None    # 内联文本时的来源标注
+
+
+class IngestResponse(BaseModel):
+    """摄入统计。"""
+
+    ingested_docs: int
+    chunks: int
+    total_chunks: int            # 库内片段总数
+
+
+class KBQueryRequest(BaseModel):
+    """知识库问答请求（单轮中文提问）。"""
+
+    question: str
+    top_k: int = 5
+
+
+class Citation(BaseModel):
+    """引用来源（红线6）。"""
+
+    source: str
+    snippet: str
+    section: str | None = None
+
+
+class KBQueryResponse(BaseModel):
+    """问答响应：答案 + 引用；无结果时如实告知。"""
+
+    answer: str
+    citations: list[Citation]
+    is_empty: bool

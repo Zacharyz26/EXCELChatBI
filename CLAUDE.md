@@ -116,6 +116,11 @@ uv sync
 uv run uvicorn apps.api.main:app --reload          # 默认 http://127.0.0.1:8000
 # 健康检查：curl http://127.0.0.1:8000/health
 
+# 知识库问答（F1，RAG）：先摄入样例文档，再提问（默认本地向量存储 + hashing embedder，
+# 真·bge/Milvus 需装 .[rag] 并在 config 切换 rag_embedder/rag_reranker）
+curl -X POST localhost:8000/kb/ingest -H 'Content-Type: application/json' -d '{"path":"docs/kb_samples"}'
+curl -X POST localhost:8000/kb/query  -H 'Content-Type: application/json' -d '{"question":"活跃用户怎么定义？"}'
+
 # 启动 MCP 工具服务（各自独立进程）
 uv run python -m mcp_servers.excel_parser.server   # :8101
 uv run python -m mcp_servers.stats.server          # :8102

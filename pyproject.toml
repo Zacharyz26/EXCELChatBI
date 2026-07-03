@@ -35,6 +35,9 @@ dependencies = [
     # 治理：JSON Schema 校验（红线3）
     "jsonschema>=4.22,<5",
 
+    # 中文分词（BM25 稀疏检索必须；纯 python 轻量，故入 core）
+    "jieba>=0.42.1",
+
     # 可观测 / 日志
     "structlog>=24.1,<25",
 ]
@@ -46,9 +49,8 @@ stats = [
     "scikit-learn>=1.5,<2",
     "prophet>=1.1,<2",
 ]
-# 中文 RAG 切片
+# 中文 RAG 的真实向量模型与向量库（默认走本地可替换实现，无需安装）
 rag = [
-    "jieba>=0.42.1",
     "pymilvus>=2.4,<3",
     "FlagEmbedding>=1.2,<2",            # bge embedding / reranker
 ]
