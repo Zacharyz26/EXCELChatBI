@@ -28,5 +28,12 @@ apps/web/.env
 *.log
 .DS_Store
 
+# WSL 资源分叉元数据
+*:Zone.Identifier
+
+# 本地测试用 Excel 样本（不入库）
+test.xlsx
+tests/test.xlsx
+
 # 本地数据集 / 上传文件（dataset_ref 落盘，切片用）
 .data/

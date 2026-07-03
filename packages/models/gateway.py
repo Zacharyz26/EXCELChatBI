@@ -26,12 +26,17 @@ class ModelGateway:
         self,
         scenario: Scenario,
         messages: list[Message],
+        *,
+        params: dict[str, object] | None = None,
     ) -> ModelResponse:
         """同步补全。按场景路由 → 调用适配器 → 失败按 fallback 降级。
 
         Args:
             scenario: 路由场景。
             messages: 对话消息列表。
+            params: 透传给底层接口的额外参数（如 response_format）。
+                注意：并非所有模型都支持（如推理型 fallback 可能不支持
+                response_format），故仅在需要时由调用方按主模型能力传入。
 
         Raises:
             RuntimeError: 主选与所有备选模型均失败。
@@ -39,6 +44,7 @@ class ModelGateway:
         route = self._registry.resolve(scenario)
         defaults = self._registry.defaults
         candidates = [route.primary, *route.fallback]
+        extra = params or {}
 
         # 红线1 可观测：记录发往模型的 payload 概况（不含原始数据，仅角色与长度）
         _log.info(
@@ -58,7 +64,9 @@ class ModelGateway:
                     timeout_seconds=defaults.timeout_seconds,
                     max_retries=defaults.max_retries,
                 )
-                resp = await adapter.complete(messages, temperature=route.temperature)
+                resp = await adapter.complete(
+                    messages, temperature=route.temperature, **extra
+                )
                 _log.info(
                     "model.response",
                     model=resp.model,

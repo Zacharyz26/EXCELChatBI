@@ -29,7 +29,9 @@ class FakeGateway:
         self._content = content
         self.received: list[Message] = []
 
-    async def complete(self, scenario: Scenario, messages: list[Message]) -> ModelResponse:
+    async def complete(
+        self, scenario: Scenario, messages: list[Message], *, params: dict | None = None
+    ) -> ModelResponse:
         self.received = messages
         return ModelResponse(content=self._content, model="fake")
 
