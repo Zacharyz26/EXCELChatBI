@@ -46,6 +46,32 @@ class ChartResponse(BaseModel):
     option: dict[str, Any]
 
 
+class StatsRequest(BaseModel):
+    """统计分析请求：基于已上传数据集跑趋势/异常/回归。
+
+    params 为工具专属入参（如 value_col/time_col/target/features），
+    与 dataset_ref 合并后经 Tool.invoke 做 JSON Schema 校验（红线3）。
+    """
+
+    dataset_ref: str
+    kind: str                      # trend | anomaly | regression
+    params: dict[str, Any] = {}
+    interpret: bool = False        # 是否附带 LLM 中文解读（默认关，不平白付模型成本）
+
+
+class StatsResponse(BaseModel):
+    """统计分析响应：结构化结果（数值来自工具，红线2）。
+
+    result 内可能含明细级数组（STL 逐行分量、异常点原值），仅供前端渲染；
+    interpretation 为可选的 LLM 中文解读——喂模型的只有摘要（红线1），
+    模型不可用时为 None（降级，统计结果照常返回）。
+    """
+
+    kind: str
+    result: dict[str, Any]
+    interpretation: str | None = None
+
+
 class IngestRequest(BaseModel):
     """知识库摄入请求：路径（文件/目录）或内联文本，二选一。"""
 
