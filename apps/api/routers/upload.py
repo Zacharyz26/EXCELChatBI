@@ -38,8 +38,10 @@ async def upload_excel(
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
-    saved = upload_dir / f"{uuid.uuid4().hex}_{file.filename}"
-    saved.write_bytes(await file.read())
+    # 只取 basename，避免用户传入 ../ 造成路径穿越（uuid 前缀保证唯一）
+    safe_name = Path(file.filename or "upload.xlsx").name
+    saved = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
+    await _save_within_limit(file, saved, settings.max_upload_mb)
 
     # 经 Tool.invoke 走 schema 校验（红线3）
     parsed = excel._tools["parse_excel"].invoke({"file_ref": str(saved)})
@@ -50,6 +52,26 @@ async def upload_excel(
 
     profile = excel._tools["infer_schema"].invoke({"dataset_ref": dataset_ref})
     return UploadResponse(dataset_ref=dataset_ref, profile=profile.to_dict())
+
+
+async def _save_within_limit(file: UploadFile, dest: Path, max_mb: int) -> None:
+    """分块流式写盘，累计超过 max_mb 即 413 并清理半成品（防内存 DoS）。"""
+    max_bytes = max_mb * 1024 * 1024
+    # 有可信 Content-Length 时先快速拒绝
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(status_code=413, detail=f"文件过大（上限 {max_mb} MB）")
+
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(1 << 20):  # 1 MB/块
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"文件过大（上限 {max_mb} MB）")
+                out.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)  # 清理半成品，避免残留超大文件
+        raise
 
 
 def _validate_policy(policy: str | None) -> dict | None:

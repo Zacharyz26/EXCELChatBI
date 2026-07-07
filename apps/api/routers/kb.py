@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from packages.common.config import Settings
 from packages.models.gateway import ModelGateway
 from packages.rag.embedding import Embedder
 from packages.rag.pipeline import chunk_and_embed
@@ -16,6 +17,7 @@ from apps.api.deps import (
     kb_store_dep,
     model_gateway_dep,
     retriever_dep,
+    settings_dep,
 )
 from apps.api.schemas import (
     Citation,
@@ -36,9 +38,10 @@ async def ingest(
     req: IngestRequest,
     embedder: Embedder = Depends(embedder_dep),
     store: KnowledgeStore = Depends(kb_store_dep),
+    settings: Settings = Depends(settings_dep),
 ) -> IngestResponse:
     """摄入文档：内联文本或路径（文件/目录，先支持 .md/.txt）。"""
-    docs = _collect_docs(req)
+    docs = _collect_docs(req, settings.kb_docs_dir)
     if not docs:
         raise HTTPException(status_code=400, detail="未提供可摄入内容（path 或 text）")
 
@@ -70,13 +73,22 @@ async def query(
     )
 
 
-def _collect_docs(req: IngestRequest) -> list[tuple[str, str]]:
-    """把请求归一为 [(source, text)] 列表。"""
+def _collect_docs(req: IngestRequest, kb_docs_dir: str) -> list[tuple[str, str]]:
+    """把请求归一为 [(source, text)] 列表。
+
+    path 摄入限定在配置的知识库目录 `kb_docs_dir` 白名单内，禁止任意服务端路径。
+    """
     if req.text:
         return [(req.source or "inline", req.text)]
     if not req.path:
         return []
-    p = Path(req.path)
+    base = Path(kb_docs_dir).resolve()
+    p = Path(req.path).resolve()
+    # 先做白名单校验（越界一律 403，不泄露越界路径是否存在）
+    if p != base and base not in p.parents:
+        raise HTTPException(
+            status_code=403, detail=f"path 超出允许的知识库目录: {kb_docs_dir}"
+        )
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {req.path}")
     files = (

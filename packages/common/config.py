@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # 本地数据集存储（切片用本地落盘代替 MinIO；生产切 MinIO，留 TODO）
     dataset_dir: str = ".data/datasets"
     upload_dir: str = ".data/uploads"
+    max_upload_mb: int = 50              # 上传文件大小上限（超限 413，防内存 DoS）
     # 超过此行数走 DuckDB 分块（占位阈值，分块逻辑留 TODO）
     large_table_row_threshold: int = 500_000
 

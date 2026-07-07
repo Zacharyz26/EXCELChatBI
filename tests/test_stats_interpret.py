@@ -1,12 +1,14 @@
-"""stats LLM 解读切片测试：摘要剔明细（红线1）+ 解读文本 + 降级。
+"""stats LLM 解读切片测试：摘要剔明细（红线1）+ 策略门控 + 解读文本 + 降级。
 
-重点：证明喂给模型的 payload 只含摘要，不含 trend 逐行分量、不含异常逐点原值。
+重点：证明喂给模型的 payload 只含摘要，不含 trend 逐行分量、不含异常逐点原值；
+且单异常点（小分组）与 EXCLUDE 列场景下摘要进一步降级（无原值 / 无系数）。
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -25,8 +27,16 @@ from apps.orchestrator.stats_interpreter import (  # noqa: E402
 )
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.stats.tools import anomaly_detect, regression, trend_analysis  # noqa: E402
-from packages.common.dataset_store import save_dataframe  # noqa: E402
+from packages.common.dataset_store import save_dataframe, save_metadata  # noqa: E402
 from packages.models.types import Message, ModelResponse, Scenario  # noqa: E402
+
+
+class Case(NamedTuple):
+    """一次统计的完整结果 + 数据集引用 + 入参（供 extract_summary 门控）。"""
+
+    result: dict
+    ref: str
+    params: dict
 
 
 class FakeGateway:
@@ -55,82 +65,125 @@ class DownGateway:
 # ── 真实统计结果（含明细）作为输入 ──
 
 @pytest.fixture
-def trend_result() -> dict:
+def trend_case() -> Case:
     n = 48
     x = np.arange(n)
     val = 10 + 0.5 * x + 3 * np.sin(2 * np.pi * x / 12)
     ref = save_dataframe(
         pd.DataFrame({"日期": pd.date_range("2024-01-01", periods=n, freq="D"), "销量": val})
     )
-    return trend_analysis(
-        {"dataset_ref": ref, "value_col": "销量", "time_col": "日期",
-         "method": "stl", "period": 12, "forecast_horizon": 3}
-    )
+    params = {"value_col": "销量", "time_col": "日期", "method": "stl",
+              "period": 12, "forecast_horizon": 3}
+    return Case(trend_analysis({"dataset_ref": ref, **params}), ref, params)
 
 
 @pytest.fixture
-def anomaly_result() -> dict:
+def anomaly_case() -> Case:
+    # 6 个异常点（≥ small_group_min_size=5），聚合描述应正常输出
     rng = np.random.default_rng(0)
     vals = 100 + rng.normal(0, 1, 30)
-    vals[5], vals[15], vals[25] = 500.0, 600.0, 700.0   # 三个不同的异常原值
+    for i, v in zip([3, 8, 13, 18, 23, 28], [500.0, 540.0, 580.0, 620.0, 660.0, 700.0],
+                    strict=True):
+        vals[i] = v
     ref = save_dataframe(pd.DataFrame({"v": vals}))
-    return anomaly_detect({"dataset_ref": ref, "value_col": "v", "method": "iqr"})
+    params = {"value_col": "v", "method": "iqr"}
+    return Case(anomaly_detect({"dataset_ref": ref, **params}), ref, params)
 
 
 @pytest.fixture
-def regression_result() -> dict:
+def regression_case() -> Case:
     rng = np.random.default_rng(1)
     x1 = np.arange(20, dtype=float)
     x2 = rng.normal(0, 1, 20)
     y = 5 + 2 * x1 + 3 * x2
     ref = save_dataframe(pd.DataFrame({"y": y, "x1": x1, "x2": x2}))
-    return regression({"dataset_ref": ref, "target": "y", "features": ["x1", "x2"], "kind": "ols"})
+    params = {"target": "y", "features": ["x1", "x2"], "kind": "ols"}
+    return Case(regression({"dataset_ref": ref, **params}), ref, params)
 
 
 # ── 摘要提取：白名单剔除明细（红线1）──
 
-def test_summary_trend_drops_rowwise_series(trend_result: dict) -> None:
-    assert "points" in trend_result and "time" in trend_result  # 完整结果确有明细
-    s = extract_summary("trend", trend_result)
+def test_summary_trend_drops_rowwise_series(trend_case: Case) -> None:
+    assert "points" in trend_case.result and "time" in trend_case.result  # 完整结果确有明细
+    s = extract_summary("trend", trend_case.result, trend_case.ref, trend_case.params)
     assert "points" not in s and "time" not in s               # 逐行分量/时间数组被剔除
     assert set(s) >= {"direction", "slope", "seasonality_strength", "forecast",
                       "time_start", "time_end"}
-    # forecast 是少量预测点（口径允许）；首末时间点是标量而非数组
+    assert "policy_redacted" not in s                          # 普通数据集不降级
     assert isinstance(s["time_start"], str) and isinstance(s["time_end"], str)
 
 
-def test_summary_anomaly_collapses_points_to_aggregate(anomaly_result: dict) -> None:
-    assert len(anomaly_result["anomalies"]) >= 3               # 完整结果含逐点原值
-    s = extract_summary("anomaly", anomaly_result)
+def test_summary_anomaly_collapses_points_to_aggregate(anomaly_case: Case) -> None:
+    assert len(anomaly_case.result["anomalies"]) >= 5          # 完整结果含逐点原值
+    s = extract_summary("anomaly", anomaly_case.result, anomaly_case.ref, anomaly_case.params)
     assert "anomalies" not in s                                # 逐点列表被剔除
-    assert s["n_anomalies"] == anomaly_result["n_anomalies"]
+    assert s["n_anomalies"] == anomaly_case.result["n_anomalies"]
     agg = s["anomaly_value_summary"]
     assert set(agg) == {"min", "max", "mean"}                  # 只剩聚合范围/均值
     assert agg["min"] == pytest.approx(500.0, abs=1) and agg["max"] == pytest.approx(700.0, abs=1)
 
 
-def test_summary_regression_passthrough(regression_result: dict) -> None:
-    s = extract_summary("regression", regression_result)
+def test_summary_regression_passthrough(regression_case: Case) -> None:
+    s = extract_summary("regression", regression_case.result, regression_case.ref,
+                        regression_case.params)
     assert set(s) == {"kind", "r_squared", "adj_r_squared", "n_obs",
                       "model_pvalue", "coefficients"}
 
 
 def test_summary_unknown_kind_raises() -> None:
     with pytest.raises(ValueError, match="未知统计类型"):
-        extract_summary("clustering", {})
+        extract_summary("clustering", {}, "someref", {})
+
+
+# ── 策略门控：单异常点（小分组）与 EXCLUDE 列降级 ──
+
+def test_summary_single_anomaly_omits_raw_values() -> None:
+    # 仅 1 个异常点 < small_group_min_size(5)：min/max/mean≈原值，必须只给计数
+    rng = np.random.default_rng(2)
+    vals = 100 + rng.normal(0, 1, 30)
+    vals[10] = 999.0
+    ref = save_dataframe(pd.DataFrame({"v": vals}))
+    params = {"value_col": "v", "method": "iqr"}
+    result = anomaly_detect({"dataset_ref": ref, **params})
+    assert result["n_anomalies"] < 5
+
+    s = extract_summary("anomaly", result, ref, params)
+    assert "anomaly_value_summary" not in s and "max_score" not in s  # 原值/分数被门控
+    assert s["n_anomalies"] == result["n_anomalies"]                  # 计数仍给
+    # 发给 LLM 的 payload 里不出现异常原值 999
+    user = build_messages("anomaly", s)[1].content
+    assert "999" not in user
+
+
+def test_summary_regression_excluded_column_drops_coefficients() -> None:
+    rng = np.random.default_rng(3)
+    x1 = np.arange(20, dtype=float)
+    x2 = rng.normal(0, 1, 20)
+    y = 5 + 2 * x1 + 3 * x2
+    ref = save_dataframe(pd.DataFrame({"y": y, "x1": x1, "x2": x2}))
+    save_metadata(ref, {"policy": {"columns": {"x1": "exclude"}}})   # 标 x1 敏感
+    params = {"target": "y", "features": ["x1", "x2"], "kind": "ols"}
+    result = regression({"dataset_ref": ref, **params})
+
+    s = extract_summary("regression", result, ref, params)
+    assert "coefficients" not in s                             # 系数被降级剔除
+    assert s.get("policy_redacted") is True
+    assert s["r_squared"] is not None                          # 拟合结论仍保留
+    # payload 里不出现系数字段
+    assert '"coefficients"' not in build_messages("regression", s)[1].content
 
 
 # ── 发往模型的 payload 不含明细 ──
 
-def test_payload_excludes_trend_series(trend_result: dict) -> None:
-    summary = extract_summary("trend", trend_result)
+def test_payload_excludes_trend_series(trend_case: Case) -> None:
+    summary = extract_summary("trend", trend_case.result, trend_case.ref, trend_case.params)
     user = build_messages("trend", summary)[1].content
     for marker in ('"points"', '"trend"', '"seasonal"', '"resid"', '"time"'):
         assert marker not in user
 
 
-def test_payload_excludes_anomaly_points(anomaly_result: dict) -> None:
-    summary = extract_summary("anomaly", anomaly_result)
+def test_payload_excludes_anomaly_points(anomaly_case: Case) -> None:
+    summary = extract_summary("anomaly", anomaly_case.result, anomaly_case.ref, anomaly_case.params)
     user = build_messages("anomaly", summary)[1].content
     assert '"anomalies"' not in user and '"index"' not in user and '"score"' not in user
 
@@ -138,17 +191,21 @@ def test_payload_excludes_anomaly_points(anomaly_result: dict) -> None:
 # ── 解读调用与降级 ──
 
 @pytest.mark.asyncio
-async def test_interpret_returns_text_and_sends_only_summary(trend_result: dict) -> None:
+async def test_interpret_returns_text_and_sends_only_summary(trend_case: Case) -> None:
     gw = FakeGateway()
-    text = await interpret_stats("trend", trend_result, gw)  # type: ignore[arg-type]
+    text = await interpret_stats(
+        "trend", trend_case.result, gw, trend_case.ref, trend_case.params  # type: ignore[arg-type]
+    )
     assert text == "销售额呈上升趋势，预计继续增长。"
     sent = "\n".join(m.content for m in gw.received)
     assert '"points"' not in sent and '"resid"' not in sent   # 模型收到的确无明细
 
 
 @pytest.mark.asyncio
-async def test_interpret_degrades_to_none_when_model_down(trend_result: dict) -> None:
-    text = await interpret_stats("trend", trend_result, DownGateway())  # type: ignore[arg-type]
+async def test_interpret_degrades_to_none_when_model_down(trend_case: Case) -> None:
+    text = await interpret_stats(
+        "trend", trend_case.result, DownGateway(), trend_case.ref, trend_case.params  # type: ignore[arg-type]
+    )
     assert text is None
 
 

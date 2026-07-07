@@ -61,5 +61,9 @@ async def analyze_stats(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # 完整结果（含明细）返回前端；仅摘要喂模型生成解读（红线1），失败降级为 None
-    interpretation = await interpret_stats(req.kind, result, gateway) if req.interpret else None
+    interpretation = (
+        await interpret_stats(req.kind, result, gateway, req.dataset_ref, req.params)
+        if req.interpret
+        else None
+    )
     return StatsResponse(kind=req.kind, result=result, interpretation=interpretation)
