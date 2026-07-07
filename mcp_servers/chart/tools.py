@@ -145,8 +145,36 @@ def _coerce(value: Any) -> Any:
 
 
 def chart_screenshot(args: dict[str, Any]) -> dict[str, Any]:
-    """用 Playwright 无头浏览器渲染 ECharts 并截图（实例池化）。"""
-    raise NotImplementedError("TODO: Playwright 加载 ECharts 配置渲染截图，返回图片引用")
+    """用 Playwright 无头浏览器把 ECharts option 渲染为 PNG，落盘并返回路径。
+
+    红线2：option 里的数值来自 gen_chart 的真实数据聚合，本工具只做渲染，不产数字。
+
+    Args:
+        args: {option, width?, height?}。
+
+    Returns:
+        {image_path, width, height, bytes}。
+    """
+    import uuid
+    from pathlib import Path as _Path
+
+    from packages.common.config import get_settings
+
+    from mcp_servers.chart.renderer import render_option_to_file
+
+    option: dict[str, Any] = args["option"]
+    width: int = args.get("width", 700)
+    height: int = args.get("height", 420)
+
+    out_dir = _Path(get_settings().report_dir) / "charts"
+    out_path = out_dir / f"chart_{uuid.uuid4().hex}.png"
+    render_option_to_file(option, out_path, width, height)
+    return {
+        "image_path": str(out_path),
+        "width": width,
+        "height": height,
+        "bytes": out_path.stat().st_size,
+    }
 
 
 def multi_layout(args: dict[str, Any]) -> dict[str, Any]:

@@ -29,10 +29,15 @@ GEN_CHART_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# 直接吃 ECharts option（gen_chart 的产出），不依赖 chart registry 持久化。
 CHART_SCREENSHOT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "properties": {"chart_id": {"type": "string"}},
-    "required": ["chart_id"],
+    "properties": {
+        "option": {"type": "object"},
+        "width": {"type": "integer", "minimum": 100, "maximum": 4000},
+        "height": {"type": "integer", "minimum": 100, "maximum": 4000},
+    },
+    "required": ["option"],
     "additionalProperties": False,
 }
 
