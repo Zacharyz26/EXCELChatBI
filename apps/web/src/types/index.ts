@@ -114,3 +114,31 @@ export interface StatsResponse {
   result: StatsResult;
   interpretation: string | null;
 }
+
+// ── 报告导出（/analyze/report）──
+
+export interface ReportChartSpec {
+  chart_type: string;
+  encoding: Record<string, unknown>;
+  caption?: string;
+}
+
+export interface ReportStatSpec {
+  kind: StatsKind;
+  params: Record<string, unknown>;
+  caption?: string;
+}
+
+export interface ReportRequest {
+  dataset_ref: string;
+  title: string;
+  charts: ReportChartSpec[];
+  stats: ReportStatSpec[];
+  interpret: boolean;
+}
+
+export interface ReportResponse {
+  report_id: string;
+  md_url: string;
+  pdf_url: string;
+}

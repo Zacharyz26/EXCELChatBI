@@ -56,8 +56,12 @@ rag = [
 ]
 # 图表服务端截图
 chart-screenshot = ["playwright>=1.44,<2"]
-# 报告导出
-report = ["weasyprint>=62,<63"]
+# 报告导出（Markdown→HTML→PDF）
+report = [
+    "weasyprint>=62,<63",
+    "pydyf==0.10.0",                    # weasyprint 62 需此版；0.11+ 改了 Stream API 会崩
+    "markdown>=3.6,<4",                 # Markdown → HTML
+]
 # 真·MCP-over-HTTP 服务
 mcp = ["mcp>=1.0,<2"]
 # 生产存储客户端（本地切片用本地落盘，无需启用）

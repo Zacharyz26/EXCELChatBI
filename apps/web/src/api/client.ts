@@ -3,6 +3,8 @@ import type {
   ChartResponse,
   IngestResponse,
   KBQueryResponse,
+  ReportRequest,
+  ReportResponse,
   StatsKind,
   StatsResponse,
   UploadResponse,
@@ -55,6 +57,22 @@ export async function analyzeStats(
   });
   if (!resp.ok) return asError(resp);
   return resp.json();
+}
+
+/** 生成报告：后端重跑分析组装 Markdown/PDF，返回下载链接。 */
+export async function generateReport(body: ReportRequest): Promise<ReportResponse> {
+  const resp = await fetch(`${API_BASE}/analyze/report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 把后端相对下载路径拼成经代理可访问的完整 URL。 */
+export function fileUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
 /** 摄入样例知识库（服务端目录 docs/kb_samples）。 */

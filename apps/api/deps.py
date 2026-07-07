@@ -11,6 +11,7 @@ from functools import lru_cache
 from mcp_servers.chart.server import build_server as build_chart_server
 from mcp_servers.common.base_server import MCPServer
 from mcp_servers.excel_parser.server import build_server as build_excel_server
+from mcp_servers.report.server import build_server as build_report_server
 from mcp_servers.stats.server import build_server as build_stats_server
 from packages.common.config import Settings, get_settings
 from packages.models.gateway import ModelGateway
@@ -50,6 +51,12 @@ def chart_tools_dep() -> MCPServer:
 def stats_tools_dep() -> MCPServer:
     """注入统计分析工具服务（进程内；需 uv sync --extra stats）。"""
     return build_stats_server()
+
+
+@lru_cache
+def report_tools_dep() -> MCPServer:
+    """注入报告工具服务（进程内；PDF 需 uv sync --extra report）。"""
+    return build_report_server()
 
 
 # ── 知识库问答（RAG）组件，后端由 config 选择，模型名不硬编码 ──

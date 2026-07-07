@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ExcelUpload } from "@/components/ExcelUpload";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { StatsPanel } from "@/components/StatsPanel";
+import { ReportPanel } from "@/components/ReportPanel";
 import { KnowledgeQA } from "@/components/KnowledgeQA";
 import { analyze } from "@/api/client";
 import type { ChartResponse, DataProfile } from "@/types";
@@ -73,6 +74,7 @@ export default function App() {
       )}
 
       {profile && <StatsPanel profile={profile} />}
+      {profile && <ReportPanel profile={profile} />}
 
       <KnowledgeQA />
     </div>

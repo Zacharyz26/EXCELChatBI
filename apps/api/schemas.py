@@ -72,6 +72,44 @@ class StatsResponse(BaseModel):
     interpretation: str | None = None
 
 
+class ReportChartSpec(BaseModel):
+    """报告中要包含的一张图（编排层重跑 gen_chart→chart_screenshot 出图片）。"""
+
+    chart_type: str
+    encoding: dict[str, Any]
+    caption: str | None = None
+
+
+class ReportStatSpec(BaseModel):
+    """报告中要包含的一项统计（编排层重跑 stats 工具拿真实结果）。"""
+
+    kind: str                      # trend | anomaly | regression
+    params: dict[str, Any] = {}
+    caption: str | None = None
+
+
+class ReportRequest(BaseModel):
+    """报告生成请求：基于 dataset_ref 重跑分析并组装成可下载报告。
+
+    interpret=true 时，各统计段的中文解读由编排层调 stats_interpreter（已门控的
+    唯一 LLM 出口）生成后传给 report 工具；report 工具本身不调 LLM（红线1/铁律）。
+    """
+
+    dataset_ref: str
+    title: str = "分析报告"
+    charts: list[ReportChartSpec] = []
+    stats: list[ReportStatSpec] = []
+    interpret: bool = False
+
+
+class ReportResponse(BaseModel):
+    """报告生成响应：报告 id 与下载链接。"""
+
+    report_id: str
+    md_url: str
+    pdf_url: str
+
+
 class IngestRequest(BaseModel):
     """知识库摄入请求：路径（文件/目录）或内联文本，二选一。"""
 
