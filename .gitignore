@@ -23,6 +23,7 @@ config/*.local.yaml
 apps/web/node_modules/
 apps/web/dist/
 apps/web/.env
+apps/web/*.tsbuildinfo
 
 # 运行产物
 *.log

@@ -55,3 +55,62 @@ export interface IngestResponse {
   chunks: number;
   total_chunks: number;
 }
+
+// ── 统计分析（/analyze/stats）──
+
+export type StatsKind = "trend" | "anomaly" | "regression";
+
+export interface TrendResult {
+  method: string;
+  direction: string;
+  slope: number | null;
+  seasonality_strength: number | null;
+  ma_window: number;
+  n: number;
+  time: string[] | null;
+  points: {
+    trend: (number | null)[];
+    seasonal: (number | null)[];
+    resid: (number | null)[];
+  };
+  forecast: (number | null)[];
+}
+
+export interface AnomalyPoint {
+  index: number;
+  value: number | null;
+  score: number | null;
+  time?: string;
+}
+
+export interface AnomalyResult {
+  method: string;
+  n_total: number;
+  n_anomalies: number;
+  anomalies: AnomalyPoint[];
+}
+
+export interface RegressionCoef {
+  name: string;
+  coef: number | null;
+  std_err: number | null;
+  p_value: number | null;
+  significant: boolean;
+}
+
+export interface RegressionResult {
+  kind: string;
+  r_squared: number | null;
+  adj_r_squared: number | null;
+  n_obs: number;
+  model_pvalue: number | null;
+  coefficients: RegressionCoef[];
+}
+
+export type StatsResult = TrendResult | AnomalyResult | RegressionResult;
+
+export interface StatsResponse {
+  kind: StatsKind;
+  result: StatsResult;
+  interpretation: string | null;
+}

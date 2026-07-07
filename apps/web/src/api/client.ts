@@ -3,6 +3,8 @@ import type {
   ChartResponse,
   IngestResponse,
   KBQueryResponse,
+  StatsKind,
+  StatsResponse,
   UploadResponse,
 } from "@/types";
 
@@ -34,6 +36,22 @@ export async function analyze(datasetRef: string): Promise<ChartResponse> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ dataset_ref: datasetRef }),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 统计分析：趋势/异常/回归，可选附带 LLM 中文解读（喂模型的只有摘要，红线1）。 */
+export async function analyzeStats(
+  datasetRef: string,
+  kind: StatsKind,
+  params: Record<string, unknown>,
+  interpret: boolean,
+): Promise<StatsResponse> {
+  const resp = await fetch(`${API_BASE}/analyze/stats`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dataset_ref: datasetRef, kind, params, interpret }),
   });
   if (!resp.ok) return asError(resp);
   return resp.json();
