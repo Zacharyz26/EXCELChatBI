@@ -126,6 +126,14 @@ class IngestResponse(BaseModel):
     total_chunks: int            # 库内片段总数
 
 
+class KBOverviewResponse(BaseModel):
+    """知识库概览：供前端展示"能问什么"与派生示例问题。"""
+
+    chunk_count: int
+    sources: list[str]
+    topics: list[str]
+
+
 class KBQueryRequest(BaseModel):
     """知识库问答请求（单轮中文提问）。"""
 

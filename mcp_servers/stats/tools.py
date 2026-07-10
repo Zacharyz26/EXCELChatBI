@@ -4,7 +4,7 @@
 算出，函数内绝无 LLM 调用，LLM 仅负责事后解读（本切片暂不接解读）。
 红线1：明细级输出（STL 逐行分量、异常点原值）随结果整体返回，供前端渲染（数据不出环境）；
 将来接 LLM 解读时，须在编排层收敛为摘要再喂模型，不得下发逐行明细。
-Prophet 预测按 CLAUDE 分阶段留后续（method 枚举预留）。
+趋势支持 STL / 移动平均 / Prophet（prophet 惰性导入，需 .[stats]）。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from packages.common.dataset_store import load_dataframe
+from scipy import stats as scipy_stats
 from sklearn.ensemble import IsolationForest
 from statsmodels.tsa.seasonal import STL
 
@@ -98,13 +99,59 @@ def _direction(slope: float, y: np.ndarray) -> str:
 
 # ── 趋势分析 ──
 
+def _prophet_decompose(
+    y: np.ndarray, labels: list[str], period: int | None, horizon: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float | None], float | None]:
+    """用 Prophet 拟合，返回 (趋势, 季节, 残差, 预测, 季节强度)。
+
+    红线2：趋势/预测值均由 Prophet 从真实数据拟合，非 LLM 产出。惰性导入 Prophet，
+    使未装/未用 prophet 时本模块其余功能不受影响。
+    """
+    import logging
+
+    from prophet import Prophet
+
+    # 静音 cmdstanpy/prophet 的 INFO 噪声
+    logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
+    logging.getLogger("prophet").setLevel(logging.WARNING)
+
+    ds = pd.to_datetime(labels)
+    df = pd.DataFrame({"ds": ds, "y": y})
+    model = Prophet(
+        weekly_seasonality=False, daily_seasonality=False, yearly_seasonality=False
+    )
+    if period:  # 与 STL 一致：显式周期才做季节项
+        model.add_seasonality(name="seasonal", period=period, fourier_order=3)
+    model.fit(df)
+
+    # 历史：对原始每行的 ds 预测，保证与 y 逐行对齐（Prophet 会把历史折叠成唯一日期，
+    # 直接切片会和含重复日期的原始行数对不上，故显式按原 ds 预测）。
+    hist = model.predict(df[["ds"]])
+    trend = hist["trend"].to_numpy()
+    yhat_hist = hist["yhat"].to_numpy()
+    seasonal = yhat_hist - trend
+    resid = y - yhat_hist
+
+    # 未来：单独外推 horizon 期（不含历史）
+    forecast: list[float | None] = []
+    if horizon > 0:
+        freq = pd.infer_freq(ds.sort_values()) or "D"
+        future = model.make_future_dataframe(periods=horizon, freq=freq, include_history=False)
+        forecast = [_f(v) for v in model.predict(future)["yhat"].to_numpy()[:horizon]]
+
+    denom = float(np.var(seasonal + resid))
+    strength = _f(max(0.0, 1 - float(np.var(resid)) / denom)) if denom else 0.0
+    return trend, seasonal, resid, forecast, strength
+
+
 def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
-    """趋势分析：STL 时序分解 + 移动平均 + 线性外推预测。
+    """趋势分析：STL 时序分解 / 移动平均 / Prophet + 预测。
 
     Args:
-        args: {dataset_ref, value_col, time_col, method?("stl"|"ma"),
+        args: {dataset_ref, value_col, time_col, method?("stl"|"ma"|"prophet"),
                period?, ma_window?, forecast_horizon?}。
-            method 缺省：给了 period 走 stl，否则 ma。
+            method 缺省：给了 period 走 stl，否则 ma；prophet 需显式指定。
+            stl/ma 用线性外推预测，prophet 用其自身预测。
 
     Returns:
         {method, direction, slope, seasonality_strength, ma_window, n,
@@ -124,6 +171,7 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
     ma_window = min(ma_window, n)
     ma = pd.Series(y).rolling(window=ma_window, min_periods=1, center=True).mean().to_numpy()
 
+    horizon: int = args.get("forecast_horizon", 0)
     seasonality_strength: float | None = None
     if method == "stl":
         if not period:
@@ -135,12 +183,18 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         # 季节强度 = max(0, 1 - Var(resid)/Var(seasonal+resid))（Hyndman 定义）
         denom = float(np.var(seasonal + resid))
         seasonality_strength = _f(max(0.0, 1 - float(np.var(resid)) / denom)) if denom else 0.0
+        # 线性外推预测（红线2：预测值来自拟合，不经 LLM）
+        forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
+    elif method == "prophet":
+        if period and n < 2 * period:
+            raise ValueError(f"Prophet 季节分解需至少 2 个完整周期（样本 {n} < 2×{period}）")
+        assert labels is not None  # require_time=True 保证有时间列
+        trend, seasonal, resid, forecast, seasonality_strength = _prophet_decompose(
+            y, labels, period, horizon
+        )
     else:  # ma：移动平均作趋势，残差 = 原值 - 趋势，无季节项
         trend, seasonal, resid = ma, np.zeros(n), y - ma
-
-    # 线性外推预测（红线2：预测值来自拟合，不经 LLM）
-    horizon: int = args.get("forecast_horizon", 0)
-    forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
+        forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
 
     return {
         "method": method,
@@ -288,4 +342,57 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
         "n_obs": int(res.nobs),
         "model_pvalue": model_pvalue,
         "coefficients": coefficients,
+    }
+
+
+# ── 相关性分析 ──
+
+def correlation(args: dict[str, Any]) -> dict[str, Any]:
+    """相关性分析：Pearson/Spearman 相关矩阵 + 最强相关对（含 p 值、显著性）。
+
+    Args:
+        args: {dataset_ref, columns[]（≥2）, method?("pearson"|"spearman")}。
+
+    Returns:
+        {method, columns, n_obs, matrix, top_pairs:[{a,b,corr,p_value,significant}]}。
+        matrix 为 n×n 相关系数（供前端热力图）；top_pairs 为上三角按 |corr| 降序的聚合摘要。
+    """
+    method: str = args.get("method", "pearson")
+    columns: list[str] = args["columns"]
+
+    df = load_dataframe(args["dataset_ref"])
+    _require_columns(df, columns)
+    data = df[columns].apply(pd.to_numeric, errors="coerce")
+    for col in columns:
+        if data[col].notna().sum() == 0:
+            raise ValueError(f"列 {col} 不是数值型，无法做相关性分析")
+    data = data.dropna()
+    if len(data) < _MIN_POINTS:
+        raise ValueError(f"有效样本量不足（{len(data)} < {_MIN_POINTS}），无法做相关性分析")
+
+    corr = data.corr(method=method)
+    n = len(columns)
+    matrix = [[_f(corr.iat[i, j]) for j in range(n)] for i in range(n)]
+
+    # 上三角所有列对逐对补 p 值（scipy），按 |corr| 降序取前 5 作摘要
+    pair_fn = scipy_stats.pearsonr if method == "pearson" else scipy_stats.spearmanr
+    pairs: list[dict[str, Any]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            r, p = pair_fn(data[columns[i]], data[columns[j]])
+            pairs.append({
+                "a": columns[i],
+                "b": columns[j],
+                "corr": _f(r),
+                "p_value": _f(p),
+                "significant": bool(p < 0.05),
+            })
+    pairs.sort(key=lambda d: abs(d["corr"]) if d["corr"] is not None else -1.0, reverse=True)
+
+    return {
+        "method": method,
+        "columns": columns,
+        "n_obs": int(len(data)),
+        "matrix": matrix,
+        "top_pairs": pairs[:5],
     }

@@ -12,7 +12,7 @@ TREND_ANALYSIS_SCHEMA: dict[str, Any] = {
         **_DATASET,
         "value_col": {"type": "string"},
         "time_col": {"type": "string"},
-        "method": {"type": "string", "enum": ["stl", "ma"]},
+        "method": {"type": "string", "enum": ["stl", "ma", "prophet"]},
         # 季节周期（点数）；给出才做 STL 季节分解，否则退化为移动平均 + 线性趋势。
         "period": {"type": "integer", "minimum": 2},
         # 移动平均窗口；缺省由数据量自适应。
@@ -49,5 +49,17 @@ REGRESSION_SCHEMA: dict[str, Any] = {
         "kind": {"type": "string", "enum": ["ols", "logit"]},
     },
     "required": ["dataset_ref", "target", "features"],
+    "additionalProperties": False,
+}
+
+CORRELATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **_DATASET,
+        # 显式给列（≥2）便于列级安全策略门控（红线1）
+        "columns": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+        "method": {"type": "string", "enum": ["pearson", "spearman"]},
+    },
+    "required": ["dataset_ref", "columns"],
     "additionalProperties": False,
 }

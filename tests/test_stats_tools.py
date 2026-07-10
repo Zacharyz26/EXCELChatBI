@@ -21,6 +21,7 @@ from apps.api.main import app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.stats.tools import (  # noqa: E402
     anomaly_detect,
+    correlation,
     regression,
     trend_analysis,
 )
@@ -78,6 +79,39 @@ def test_trend_stl_detects_upward_and_seasonality(trend_ref: str) -> None:
     assert res["forecast"][-1] > res["forecast"][0]
 
 
+def test_trend_prophet_forecasts(trend_ref: str) -> None:
+    try:
+        res = trend_analysis(
+            {"dataset_ref": trend_ref, "value_col": "销量", "time_col": "日期",
+             "method": "prophet", "period": 12, "forecast_horizon": 3}
+        )
+    except (ImportError, RuntimeError) as exc:  # prophet/cmdstan 不可用 → skip
+        pytest.skip(f"prophet 不可用：{exc}")
+    assert res["method"] == "prophet"
+    assert res["direction"] == "上升"                 # 数据本就上升
+    assert len(res["points"]["trend"]) == 48          # 逐行趋势分量
+    assert len(res["forecast"]) == 3                  # Prophet 预测 3 期
+    assert all(v is not None for v in res["forecast"])
+
+
+def test_trend_prophet_handles_duplicate_dates() -> None:
+    # 复现 test.xlsx 结构：多行共享同一日期（Prophet 会折叠历史，需按原 ds 对齐）
+    n = 60
+    days = np.repeat(np.arange(n // 3), 3)          # 每个日期 3 行
+    val = 100 + 5 * days + np.random.default_rng(0).normal(0, 1, n)
+    ref = save_dataframe(pd.DataFrame({
+        "日期": pd.to_datetime("2024-01-01") + pd.to_timedelta(days, unit="D"),
+        "销售额": val,
+    }))
+    try:
+        res = trend_analysis({"dataset_ref": ref, "value_col": "销售额", "time_col": "日期",
+                              "method": "prophet", "forecast_horizon": 3})
+    except (ImportError, RuntimeError) as exc:
+        pytest.skip(f"prophet 不可用：{exc}")
+    assert len(res["points"]["trend"]) == n          # 逐行对齐，无 shape 错
+    assert len(res["forecast"]) == 3
+
+
 def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
     res = trend_analysis({"dataset_ref": trend_ref, "value_col": "销量", "time_col": "日期"})
     assert res["method"] == "ma"                   # 无 period 退化为移动平均
@@ -116,6 +150,35 @@ def test_non_numeric_column_raises(anomaly_ref: str) -> None:
     ref = save_dataframe(pd.DataFrame({"名称": ["甲", "乙", "丙", "丁", "戊"]}))
     with pytest.raises(ValueError, match="不是数值型"):
         anomaly_detect({"dataset_ref": ref, "value_col": "名称", "method": "iqr"})
+
+
+@pytest.fixture
+def correlation_ref() -> str:
+    """b≈2a（强正相关）、c 独立。"""
+    rng = np.random.default_rng(7)
+    a = np.arange(40, dtype=float)
+    b = 2 * a + rng.normal(0, 1, 40)
+    c = rng.normal(0, 1, 40)
+    return save_dataframe(pd.DataFrame({"a": a, "b": b, "c": c}))
+
+
+def test_correlation_matrix_and_pairs(correlation_ref: str) -> None:
+    res = correlation({"dataset_ref": correlation_ref, "columns": ["a", "b", "c"]})
+    assert res["method"] == "pearson" and res["n_obs"] == 40
+    # 对角为 1、矩阵对称
+    assert res["matrix"][0][0] == pytest.approx(1.0)
+    assert res["matrix"][0][1] == pytest.approx(res["matrix"][1][0])
+    # a-b 强正相关排在最前
+    top = res["top_pairs"][0]
+    assert {top["a"], top["b"]} == {"a", "b"} and top["corr"] > 0.95 and top["significant"] is True
+
+
+def test_correlation_spearman_and_non_numeric(correlation_ref: str) -> None:
+    res = correlation({"dataset_ref": correlation_ref, "columns": ["a", "b"], "method": "spearman"})
+    assert res["method"] == "spearman" and res["matrix"][0][1] > 0.9
+    ref = save_dataframe(pd.DataFrame({"名称": list("甲乙丙丁戊"), "x": [1, 2, 3, 4, 5]}))
+    with pytest.raises(ValueError, match="不是数值型"):
+        correlation({"dataset_ref": ref, "columns": ["名称", "x"]})
 
 
 # ── 路由层（端到端，同 Excel 链路）──
@@ -162,3 +225,17 @@ def test_route_unknown_kind_returns_422(trend_ref: str) -> None:
         json={"dataset_ref": trend_ref, "kind": "clustering", "params": {}},
     )
     assert resp.status_code == 422
+
+
+def test_route_correlation_ok(correlation_ref: str) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/analyze/stats",
+        json={"dataset_ref": correlation_ref, "kind": "correlation",
+              "params": {"columns": ["a", "b", "c"], "method": "pearson"}},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "correlation"
+    assert len(body["result"]["matrix"]) == 3
+    assert body["result"]["top_pairs"][0]["significant"] is True

@@ -9,6 +9,7 @@ from __future__ import annotations
 import abc
 import json
 import math
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -46,6 +47,11 @@ _BM25_K1 = 1.5
 _BM25_B = 0.75
 
 
+def _norm(text: str) -> str:
+    """归一化文本（折叠空白），用于按内容去重（红线6：去重不改引用真实性）。"""
+    return " ".join(text.split())
+
+
 class KnowledgeStore(abc.ABC):
     """知识库存储抽象：向量检索 + BM25 检索。"""
 
@@ -69,6 +75,14 @@ class KnowledgeStore(abc.ABC):
     def clear(self) -> None:
         """清空索引。"""
 
+    @abc.abstractmethod
+    def sources(self) -> list[str]:
+        """去重后的来源文件列表（顺序稳定）。"""
+
+    @abc.abstractmethod
+    def topics(self) -> list[str]:
+        """去重后的小节标题列表（供问答引导，顺序稳定）。"""
+
 
 class LocalKnowledgeStore(KnowledgeStore):
     """本地落盘知识库（JSON 持久化 + numpy 余弦 + 自实现 BM25）。"""
@@ -78,24 +92,51 @@ class LocalKnowledgeStore(KnowledgeStore):
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "index.json"
         self._chunks: list[StoredChunk] = []
+        # 写锁：摄入进线程池后并发 add/clear 会真并发，需串行化改列表与写盘
+        self._write_lock = threading.Lock()
         self._load()
 
     # ── 写入 ──
 
     def add(self, chunks: list[StoredChunk]) -> int:
-        for c in chunks:
-            if not c.chunk_id:
-                c.chunk_id = uuid.uuid4().hex
-            self._chunks.append(c)
-        self._persist()
-        return len(chunks)
+        # 幂等去重（红线6 根因层）：同 (source, 归一化文本) 已存在则跳过，
+        # 重复摄入不再累积副本。返回实际新增数量。
+        with self._write_lock:
+            existing = {(c.source, _norm(c.text)) for c in self._chunks}
+            added = 0
+            for c in chunks:
+                key = (c.source, _norm(c.text))
+                if key in existing:
+                    continue
+                if not c.chunk_id:
+                    c.chunk_id = uuid.uuid4().hex
+                self._chunks.append(c)
+                existing.add(key)
+                added += 1
+            self._persist()
+            return added
 
     def count(self) -> int:
         return len(self._chunks)
 
     def clear(self) -> None:
-        self._chunks = []
-        self._persist()
+        with self._write_lock:
+            self._chunks = []
+            self._persist()
+
+    def sources(self) -> list[str]:
+        out: list[str] = []
+        for c in self._chunks:
+            if c.source not in out:
+                out.append(c.source)
+        return out
+
+    def topics(self) -> list[str]:
+        out: list[str] = []
+        for c in self._chunks:
+            if c.section and c.section not in out:
+                out.append(c.section)
+        return out
 
     # ── 检索 ──
 
@@ -160,6 +201,19 @@ class LocalKnowledgeStore(KnowledgeStore):
         self._path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def _load(self) -> None:
-        if self._path.exists():
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            self._chunks = [StoredChunk(**rec) for rec in data]
+        if not self._path.exists():
+            return
+        data = json.loads(self._path.read_text(encoding="utf-8"))
+        chunks = [StoredChunk(**rec) for rec in data]
+        # 自愈：清除历史重复摄入产生的完全相同副本，并写回净化后的索引
+        seen: set[tuple[str, str]] = set()
+        deduped: list[StoredChunk] = []
+        for c in chunks:
+            key = (c.source, _norm(c.text))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(c)
+        self._chunks = deduped
+        if len(deduped) != len(chunks):
+            self._persist()

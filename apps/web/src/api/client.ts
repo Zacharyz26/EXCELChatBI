@@ -2,6 +2,7 @@
 import type {
   ChartResponse,
   IngestResponse,
+  KBOverview,
   KBQueryResponse,
   ReportRequest,
   ReportResponse,
@@ -11,6 +12,23 @@ import type {
 } from "@/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+
+/** 把后端技术性校验报错兜底翻译成用户能懂的中文（前端预校验漏网时的最后一道友好层）。 */
+export function translateError(msg: string): string {
+  const m = msg || "";
+  if (/features/.test(m) && /(non-empty|too short|minItems|minimum)/i.test(m)) {
+    return "回归分析需至少选择 1 个自变量";
+  }
+  if (/columns/.test(m) && /(non-empty|too short|minItems|minimum)/i.test(m)) {
+    return "相关性分析需至少选择 2 列";
+  }
+  if (/不是数值型|not numeric/i.test(m)) return "所选列不是数值型，请改选数值列";
+  if (/method=stl|需要提供\s*period|need.*period/i.test(m)) return "STL 方法需填写季节周期";
+  // 已是中文的后端提示（样本量不足、列不存在等）直接透传
+  if (/[一-龥]/.test(m)) return m;
+  // 其余英文技术错误兜底
+  return "参数不完整或不合法，请检查填写";
+}
 
 async function asError(resp: Response): Promise<never> {
   let detail = `${resp.status} ${resp.statusText}`;
@@ -82,6 +100,13 @@ export async function ingestSamples(): Promise<IngestResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: "docs/kb_samples" }),
   });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 知识库概览：片段数、来源文件、主题（供展示与派生示例问题）。 */
+export async function kbOverview(): Promise<KBOverview> {
+  const resp = await fetch(`${API_BASE}/kb/overview`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }

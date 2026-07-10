@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
 from packages.common.logging import get_logger
 from packages.governance.schema_validator import SchemaValidationError
@@ -36,7 +37,10 @@ async def analyze(
 ) -> ChartResponse:
     """基于已上传数据集，自动规划并生成一张 ECharts 图。"""
     try:
-        profile = excel._tools["infer_schema"].invoke({"dataset_ref": req.dataset_ref})
+        # 阻塞的读盘/画像计算 → 线程池，不卡事件循环
+        profile = await run_in_threadpool(
+            excel._tools["infer_schema"].invoke, {"dataset_ref": req.dataset_ref}
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -68,9 +72,9 @@ async def _plan_and_generate(
     except ValueError as exc:  # 模型未吐合法 JSON
         raise _PlanFailure(f"模型未返回合法 JSON 规划：{exc}") from exc
 
-    # 红线2/3：经 Tool.invoke 校验入参后，用真实数据聚合出图
+    # 红线2/3：经 Tool.invoke 校验入参后，用真实数据聚合出图（DuckDB 聚合阻塞 → 线程池）
     try:
-        return chart._tools["gen_chart"].invoke(gen_args)
+        return await run_in_threadpool(chart._tools["gen_chart"].invoke, gen_args)
     except (SchemaValidationError, ValueError) as exc:
         enc = gen_args.get("encoding", {})
         raise _PlanFailure(

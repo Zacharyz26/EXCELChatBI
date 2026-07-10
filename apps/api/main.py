@@ -10,13 +10,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from packages.common.config import get_settings
 from packages.common.logging import configure_logging
 
+from apps.api.deps import embedder_dep, reranker_dep
 from apps.api.routers import analyze, chat, health, kb, report, stats, upload
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """启动时初始化结构化日志。"""
+    """启动时初始化结构化日志，并对 RAG 后端配置做 fail-fast 自检。"""
     configure_logging(get_settings().log_level)
+    # fail-fast：配置指向未实现的后端（如 rag_embedder=bge）时启动即报错，
+    # 而不是服务看似正常、首次检索请求才 500。
+    embedder_dep()
+    reranker_dep()
     yield
 
 

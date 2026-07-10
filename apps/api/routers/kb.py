@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from packages.common.config import Settings
 from packages.models.gateway import ModelGateway
 from packages.rag.embedding import Embedder
@@ -23,6 +24,7 @@ from apps.api.schemas import (
     Citation,
     IngestRequest,
     IngestResponse,
+    KBOverviewResponse,
     KBQueryRequest,
     KBQueryResponse,
 )
@@ -41,14 +43,31 @@ async def ingest(
     settings: Settings = Depends(settings_dep),
 ) -> IngestResponse:
     """摄入文档：内联文本或路径（文件/目录，先支持 .md/.txt）。"""
-    docs = _collect_docs(req, settings.kb_docs_dir)
+    # 读盘 + 分块 + embedding 是阻塞重活 → 线程池，不卡事件循环
+    docs = await run_in_threadpool(_collect_docs, req, settings.kb_docs_dir)
     if not docs:
         raise HTTPException(status_code=400, detail="未提供可摄入内容（path 或 text）")
 
-    added = 0
-    for source, text in docs:
-        added += store.add(chunk_and_embed(text, source, embedder))
+    def _ingest_all() -> int:
+        added = 0
+        for source, text in docs:
+            added += store.add(chunk_and_embed(text, source, embedder))
+        return added
+
+    added = await run_in_threadpool(_ingest_all)
     return IngestResponse(ingested_docs=len(docs), chunks=added, total_chunks=store.count())
+
+
+@router.get("/overview", response_model=KBOverviewResponse)
+async def overview(
+    store: KnowledgeStore = Depends(kb_store_dep),
+) -> KBOverviewResponse:
+    """知识库概览：片段数、来源文件、主题（小节标题）——供前端展示与派生示例问题。"""
+    return KBOverviewResponse(
+        chunk_count=store.count(),
+        sources=store.sources(),
+        topics=store.topics(),
+    )
 
 
 @router.post("/query", response_model=KBQueryResponse)

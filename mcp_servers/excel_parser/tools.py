@@ -9,16 +9,24 @@ import math
 from typing import Any
 
 import pandas as pd
+from packages.common.config import get_settings
 from packages.common.dataset_store import load_dataframe, save_dataframe
+from packages.common.logging import get_logger
 from packages.governance.data_boundary import resolve_policy
 from packages.governance.redaction import apply_policy
 
 from mcp_servers.excel_parser.profile import ColumnProfile, DataProfile
 
+_log = get_logger("mcp.excel_parser")
+
 # 默认样本行数（属"画像"范畴，可喂 LLM；见设计文档 6.1）
 _SAMPLE_ROWS = 5
 # 每列展示的样本值个数
 _SAMPLE_VALUES = 5
+
+
+class TableTooLargeError(ValueError):
+    """表行数超过处理上限（大表防护：整表读回内存前先拒绝）。"""
 
 
 def parse_excel(args: dict[str, Any]) -> dict[str, Any]:
@@ -35,7 +43,9 @@ def parse_excel(args: dict[str, Any]) -> dict[str, Any]:
     header_row: int = args.get("header_row", 0)
     nrows: int | None = args.get("nrows")
 
-    # TODO（大表）：超大文件应改用 DuckDB read 扫描/分块，避免整表入内存。
+    # 大表防护：读整表进内存前先查行数元数据，超阈值直接拒绝（防 OOM）。
+    # TODO（大表）：后续支持超阈值文件时改 DuckDB 扫描/分块，而非直接拒绝。
+    _guard_row_limit(file_ref, sheet, header_row, nrows)
     df = pd.read_excel(file_ref, sheet_name=sheet, header=header_row, nrows=nrows)
     dataset_ref = save_dataframe(df)
     return {
@@ -79,6 +89,57 @@ def data_preview(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── 内部辅助 ──
+
+def _guard_row_limit(
+    file_ref: str, sheet: str | int, header_row: int, nrows: int | None
+) -> None:
+    """行数上限防护：openpyxl read_only 只读工作表元数据，不解压整表数据。
+
+    上传大小上限只约束压缩后体积，高压缩比 xlsx 解开后仍可能打爆内存，
+    故在 pd.read_excel 之前按 `large_table_row_threshold` 拒绝超大表。
+
+    Args:
+        file_ref: 文件路径（仅 .xlsx/.xlsm 可查；.xls 走不了 openpyxl，跳过）。
+        sheet: 工作表名或序号。
+        header_row: 表头行号（0 基），行数按数据行计算。
+        nrows: 调用方限定的读取行数；不超阈值则无需检查。
+
+    Raises:
+        TableTooLargeError: 数据行数超过阈值。
+        ValueError: 工作表不存在。
+    """
+    limit = get_settings().large_table_row_threshold
+    if nrows is not None and nrows <= limit:
+        return
+    if not file_ref.lower().endswith((".xlsx", ".xlsm")):
+        return
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(file_ref, read_only=True)
+    try:
+        if isinstance(sheet, str):
+            if sheet not in wb.sheetnames:
+                raise ValueError(f"工作表不存在: {sheet}")
+            max_row = wb[sheet].max_row
+        else:
+            if not 0 <= sheet < len(wb.worksheets):
+                raise ValueError(f"工作表不存在: {sheet}")
+            max_row = wb.worksheets[sheet].max_row
+    finally:
+        wb.close()
+
+    if max_row is None:
+        # 个别生成器不写 dimension 元数据；跳过检查并告警，不误伤正常文件
+        _log.warning("excel.row_limit.unknown", file_ref=file_ref)
+        return
+    data_rows = max(0, max_row - 1 - header_row)  # 去掉表头及其上方行
+    if data_rows > limit:
+        raise TableTooLargeError(
+            f"表行数超过处理上限（约 {data_rows} 行 > {limit} 行），"
+            f"请拆分文件或缩小数据范围后重试"
+        )
+
 
 def _dtype_name(series: pd.Series) -> str:
     """把 pandas dtype 归一为画像用的简单类型名。"""

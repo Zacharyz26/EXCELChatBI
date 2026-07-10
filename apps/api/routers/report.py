@@ -3,9 +3,9 @@
 编排层职责（红线归属清晰）：
 - 重跑工具拿**真实结果**（红线2）：infer_schema / gen_chart / chart_screenshot / stats 工具。
 - 中文解读**唯一**在此经 `interpret_stats`（已门控出口）产出；report 工具零 LLM（铁律）。
-- 所有工具经 `Tool.invoke` 校验（红线3）；chart_screenshot 与 export_pdf 是同步阻塞
-  （无头浏览器 / WeasyPrint），放到线程池执行，避免阻塞事件循环、并规避 sync playwright
-  不能在事件循环内运行的限制。
+- 所有工具经 `Tool.invoke` 校验（红线3），且一律放线程池执行：既避免阻塞事件循环
+  （无头浏览器 / WeasyPrint / DuckDB / statsmodels 都是同步重活），也规避 sync
+  playwright 不能在事件循环内运行的限制。
 """
 
 from __future__ import annotations
@@ -37,8 +37,18 @@ router = APIRouter(prefix="/analyze/report", tags=["report"])
 
 _log = get_logger("api.report")
 
-_STATS_TOOLS = {"trend": "trend_analysis", "anomaly": "anomaly_detect", "regression": "regression"}
-_KIND_LABEL = {"trend": "趋势分析", "anomaly": "异常检测", "regression": "回归分析"}
+_STATS_TOOLS = {
+    "trend": "trend_analysis",
+    "anomaly": "anomaly_detect",
+    "regression": "regression",
+    "correlation": "correlation",
+}
+_KIND_LABEL = {
+    "trend": "趋势分析",
+    "anomaly": "异常检测",
+    "regression": "回归分析",
+    "correlation": "相关性分析",
+}
 
 
 @router.post("", response_model=ReportResponse)
@@ -59,26 +69,34 @@ async def create_report(
         interpret=req.interpret,
     )
     try:
-        profile = excel._tools["infer_schema"].invoke({"dataset_ref": req.dataset_ref}).to_dict()
+        # 阻塞的读盘/画像计算 → 线程池（本路由所有 Tool.invoke 同此，不卡事件循环）
+        profile_obj = await run_in_threadpool(
+            excel._tools["infer_schema"].invoke, {"dataset_ref": req.dataset_ref}
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    profile = profile_obj.to_dict()
 
     chart_sections = await _build_charts(req, chart)
     stat_sections, insight_items = await _build_stats(req, stats, gateway)
 
     insights_md = None
     if insight_items:
-        insight = report._tools["insight_summary"].invoke({"items": insight_items})
+        insight = await run_in_threadpool(
+            report._tools["insight_summary"].invoke, {"items": insight_items}
+        )
         insights_md = insight["summary_md"]
 
-    md = report._tools["gen_report_md"].invoke(
+    # base64 内嵌图片 + 落盘 → 线程池
+    md = await run_in_threadpool(
+        report._tools["gen_report_md"].invoke,
         {
             "title": req.title,
             "profile": profile,
             "charts": chart_sections,
             "stats": stat_sections,
             "insights": insights_md,
-        }
+        },
     )
     report_id = md["report_id"]
     # WeasyPrint 阻塞 → 线程池
@@ -96,12 +114,13 @@ async def _build_charts(req: ReportRequest, chart: MCPServer) -> list[dict[str, 
     sections: list[dict[str, Any]] = []
     for spec in req.charts:
         try:
-            res = chart._tools["gen_chart"].invoke(
+            res = await run_in_threadpool(
+                chart._tools["gen_chart"].invoke,
                 {
                     "dataset_ref": req.dataset_ref,
                     "chart_type": spec.chart_type,
                     "encoding": spec.encoding,
-                }
+                },
             )
         except (SchemaValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"图表参数无效：{exc}") from exc
@@ -126,7 +145,9 @@ async def _build_stats(
         if tool is None:
             raise HTTPException(status_code=422, detail=f"不支持的统计类型: {spec.kind}")
         try:
-            result = stats._tools[tool].invoke({"dataset_ref": req.dataset_ref, **spec.params})
+            result = await run_in_threadpool(
+                stats._tools[tool].invoke, {"dataset_ref": req.dataset_ref, **spec.params}
+            )
         except (SchemaValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"统计参数无效：{exc}") from exc
 

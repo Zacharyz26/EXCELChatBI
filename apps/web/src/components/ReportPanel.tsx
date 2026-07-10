@@ -1,7 +1,7 @@
 // 报告面板：勾选要包含的图表/统计 → 生成报告 → 下载 PDF / Markdown
 // 后端重跑分析拿真实结果、解读来自 stats_interpreter（已门控出口），前端只提交选择。
 import { useMemo, useState } from "react";
-import { fileUrl, generateReport } from "@/api/client";
+import { fileUrl, generateReport, translateError } from "@/api/client";
 import type { DataProfile, ReportChartSpec, ReportResponse, ReportStatSpec } from "@/types";
 
 interface Props {
@@ -18,17 +18,18 @@ export function ReportPanel({ profile }: Props) {
   const [title, setTitle] = useState("分析报告");
   const [interpret, setInterpret] = useState(true);
 
+  // 要求数值的字段（y/趋势数值/回归因变量·自变量）只从数值列取；维度列（x/时间）用全部列
   const [inclChart, setInclChart] = useState(true);
   const [chartX, setChartX] = useState(cols[0] ?? "");
-  const [chartY, setChartY] = useState(numericCols[0] ?? cols[0] ?? "");
+  const [chartY, setChartY] = useState(numericCols[0] ?? "");
 
   const [inclTrend, setInclTrend] = useState(true);
-  const [trendVal, setTrendVal] = useState(numericCols[0] ?? cols[0] ?? "");
+  const [trendVal, setTrendVal] = useState(numericCols[0] ?? "");
   const [trendTime, setTrendTime] = useState(cols[0] ?? "");
   const [trendPeriod, setTrendPeriod] = useState("");
 
   const [inclReg, setInclReg] = useState(false);
-  const [regTarget, setRegTarget] = useState(numericCols[0] ?? cols[0] ?? "");
+  const [regTarget, setRegTarget] = useState(numericCols[0] ?? "");
   const [regFeatures, setRegFeatures] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -37,6 +38,17 @@ export function ReportPanel({ profile }: Props) {
 
   function toggleFeature(name: string) {
     setRegFeatures((f) => (f.includes(name) ? f.filter((x) => x !== name) : [...f, name]));
+  }
+
+  // 逐项校验：明确指出是哪个分析缺什么参数（返回中文提示数组）
+  function reportErrors(): string[] {
+    const errs: string[] = [];
+    if (!inclChart && !inclTrend && !inclReg) errs.push("请至少勾选一项要包含的分析");
+    if (inclChart && (!chartX || !chartY)) errs.push("柱状图需选择 x 轴列与 y（数值）列");
+    if (inclTrend && (!trendVal || !trendTime)) errs.push("趋势分析需选择数值列与时间列");
+    if (inclReg && !regTarget) errs.push("回归分析需选择因变量");
+    if (inclReg && regFeatures.length < 1) errs.push("回归分析需至少选择 1 个自变量");
+    return errs;
   }
 
   function buildRequest() {
@@ -75,11 +87,13 @@ export function ReportPanel({ profile }: Props) {
     try {
       setReport(await generateReport(buildRequest()));
     } catch (e) {
-      setError((e as Error).message);
+      setError(translateError((e as Error).message));
     } finally {
       setLoading(false);
     }
   }
+
+  const errs = reportErrors();
 
   return (
     <section style={{ margin: "24px 0", borderTop: "1px solid #eee", paddingTop: 16 }}>
@@ -108,9 +122,9 @@ export function ReportPanel({ profile }: Props) {
               <select value={chartX} onChange={(e) => setChartX(e.target.value)}>
                 {cols.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>{" "}
-              y{" "}
+              y（数值）{" "}
               <select value={chartY} onChange={(e) => setChartY(e.target.value)}>
-                {cols.map((c) => <option key={c} value={c}>{c}</option>)}
+                {numericCols.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </span>
           )}
@@ -125,13 +139,13 @@ export function ReportPanel({ profile }: Props) {
             <span style={{ marginLeft: 8 }}>
               数值{" "}
               <select value={trendVal} onChange={(e) => setTrendVal(e.target.value)}>
-                {cols.map((c) => <option key={c} value={c}>{c}</option>)}
+                {numericCols.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>{" "}
               时间{" "}
               <select value={trendTime} onChange={(e) => setTrendTime(e.target.value)}>
                 {cols.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>{" "}
-              周期{" "}
+              周期<span style={{ color: "#888", fontSize: 12 }}>（选填）</span>{" "}
               <input
                 style={{ width: 56 }}
                 value={trendPeriod}
@@ -151,10 +165,10 @@ export function ReportPanel({ profile }: Props) {
             <span style={{ marginLeft: 8 }}>
               因变量{" "}
               <select value={regTarget} onChange={(e) => setRegTarget(e.target.value)}>
-                {cols.map((c) => <option key={c} value={c}>{c}</option>)}
+                {numericCols.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>{" "}
-              自变量：
-              {cols.filter((c) => c !== regTarget).map((c) => (
+              自变量（至少选 1 个）：
+              {numericCols.filter((c) => c !== regTarget).map((c) => (
                 <label key={c} style={{ marginLeft: 6 }}>
                   <input type="checkbox" checked={regFeatures.includes(c)} onChange={() => toggleFeature(c)} /> {c}
                 </label>
@@ -164,8 +178,14 @@ export function ReportPanel({ profile }: Props) {
         </div>
       </div>
 
+      {errs.length > 0 && (
+        <ul style={{ margin: "10px 0 0", color: "#b26a00", fontSize: 13 }}>
+          {errs.map((m) => <li key={m}>{m}</li>)}
+        </ul>
+      )}
+
       <p>
-        <button onClick={onGenerate} disabled={loading}>
+        <button onClick={onGenerate} disabled={loading || errs.length > 0}>
           {loading ? "生成中…（渲染图表 + 排版 PDF，稍候）" : "生成报告"}
         </button>
       </p>

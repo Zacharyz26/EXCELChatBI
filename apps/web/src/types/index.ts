@@ -56,9 +56,15 @@ export interface IngestResponse {
   total_chunks: number;
 }
 
+export interface KBOverview {
+  chunk_count: number;
+  sources: string[];
+  topics: string[];
+}
+
 // ── 统计分析（/analyze/stats）──
 
-export type StatsKind = "trend" | "anomaly" | "regression";
+export type StatsKind = "trend" | "anomaly" | "regression" | "correlation";
 
 export interface TrendResult {
   method: string;
@@ -107,7 +113,23 @@ export interface RegressionResult {
   coefficients: RegressionCoef[];
 }
 
-export type StatsResult = TrendResult | AnomalyResult | RegressionResult;
+export interface CorrelationPair {
+  a: string;
+  b: string;
+  corr: number | null;
+  p_value: number | null;
+  significant: boolean;
+}
+
+export interface CorrelationResult {
+  method: string;
+  columns: string[];
+  n_obs: number;
+  matrix: (number | null)[][];
+  top_pairs: CorrelationPair[];
+}
+
+export type StatsResult = TrendResult | AnomalyResult | RegressionResult | CorrelationResult;
 
 export interface StatsResponse {
   kind: StatsKind;

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
 from packages.common.logging import get_logger
 from packages.governance.schema_validator import SchemaValidationError
@@ -27,6 +28,7 @@ _TOOLS = {
     "trend": "trend_analysis",
     "anomaly": "anomaly_detect",
     "regression": "regression",
+    "correlation": "correlation",
 }
 
 
@@ -53,7 +55,8 @@ async def analyze_stats(
         interpret=req.interpret,
     )
     try:
-        result = stats._tools[tool_name].invoke(args)
+        # Prophet/STL/OLS 是重 CPU 计算 → 线程池，不卡事件循环（多人并发关键路径）
+        result = await run_in_threadpool(stats._tools[tool_name].invoke, args)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (SchemaValidationError, ValueError) as exc:

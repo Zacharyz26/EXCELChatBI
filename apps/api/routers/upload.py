@@ -7,7 +7,9 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
+from mcp_servers.excel_parser.tools import TableTooLargeError
 from packages.common.config import Settings
 from packages.common.dataset_store import save_metadata
 from packages.governance.data_boundary import parse_policy_override
@@ -43,14 +45,25 @@ async def upload_excel(
     saved = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
     await _save_within_limit(file, saved, settings.max_upload_mb)
 
-    # 经 Tool.invoke 走 schema 校验（红线3）
-    parsed = excel._tools["parse_excel"].invoke({"file_ref": str(saved)})
+    # 经 Tool.invoke 走 schema 校验（红线3）；解析是阻塞重活 → 线程池，不卡事件循环
+    try:
+        parsed = await run_in_threadpool(
+            excel._tools["parse_excel"].invoke, {"file_ref": str(saved)}
+        )
+    except TableTooLargeError as exc:
+        saved.unlink(missing_ok=True)  # 拒绝的文件不留盘
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except ValueError as exc:  # 格式无法解析/工作表不存在等 → 可读 422 而非 500
+        saved.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=f"Excel 解析失败：{exc}") from exc
     dataset_ref = parsed["dataset_ref"]
     if override is not None:
         # 落数据集级安全策略，infer_schema 脱敏时读取
         save_metadata(dataset_ref, {"policy": override})
 
-    profile = excel._tools["infer_schema"].invoke({"dataset_ref": dataset_ref})
+    profile = await run_in_threadpool(
+        excel._tools["infer_schema"].invoke, {"dataset_ref": dataset_ref}
+    )
     return UploadResponse(dataset_ref=dataset_ref, profile=profile.to_dict())
 
 

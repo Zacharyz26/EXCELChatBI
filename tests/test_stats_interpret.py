@@ -26,7 +26,12 @@ from apps.orchestrator.stats_interpreter import (  # noqa: E402
     interpret_stats,
 )
 from fastapi.testclient import TestClient  # noqa: E402
-from mcp_servers.stats.tools import anomaly_detect, regression, trend_analysis  # noqa: E402
+from mcp_servers.stats.tools import (  # noqa: E402
+    anomaly_detect,
+    correlation,
+    regression,
+    trend_analysis,
+)
 from packages.common.dataset_store import save_dataframe, save_metadata  # noqa: E402
 from packages.models.types import Message, ModelResponse, Scenario  # noqa: E402
 
@@ -60,6 +65,22 @@ class DownGateway:
         self, scenario: Scenario, messages: list[Message], *, params: dict | None = None
     ) -> ModelResponse:
         raise RuntimeError("所有候选模型均失败")
+
+
+class ErrorGateway:
+    """模拟网关抛任意异常（覆盖 registry 未配场景 / key 缺失等配置错误）。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def complete(
+        self,
+        scenario: Scenario,
+        messages: list[Message],
+        *,
+        params: dict[str, object] | None = None,
+    ) -> ModelResponse:
+        raise self._exc
 
 
 # ── 真实统计结果（含明细）作为输入 ──
@@ -155,6 +176,35 @@ def test_summary_single_anomaly_omits_raw_values() -> None:
     assert "999" not in user
 
 
+def test_summary_correlation_sends_pairs_not_matrix() -> None:
+    rng = np.random.default_rng(4)
+    a = np.arange(40, dtype=float)
+    df = pd.DataFrame({"a": a, "b": 2 * a + rng.normal(0, 1, 40), "c": rng.normal(0, 1, 40)})
+    ref = save_dataframe(df)
+    params = {"columns": ["a", "b", "c"], "method": "pearson"}
+    result = correlation({"dataset_ref": ref, **params})
+
+    s = extract_summary("correlation", result, ref, params)
+    assert "matrix" not in s                       # n×n 矩阵不进 LLM（仅前端热力图）
+    assert set(s) == {"method", "columns", "n_obs", "top_pairs"}
+    assert s["top_pairs"][0]["significant"] is True
+
+
+def test_summary_correlation_excluded_column_drops_pairs() -> None:
+    rng = np.random.default_rng(5)
+    a = np.arange(40, dtype=float)
+    df = pd.DataFrame({"a": a, "薪资": 2 * a + rng.normal(0, 1, 40), "c": rng.normal(0, 1, 40)})
+    ref = save_dataframe(df)
+    save_metadata(ref, {"policy": {"columns": {"薪资": "exclude"}}})   # 标敏感列
+    params = {"columns": ["a", "薪资", "c"], "method": "pearson"}
+    result = correlation({"dataset_ref": ref, **params})
+
+    s = extract_summary("correlation", result, ref, params)
+    assert "top_pairs" not in s and "columns" not in s   # 相关对会暴露敏感列关系 → 去掉
+    assert s.get("policy_redacted") is True
+    assert set(s) == {"method", "n_columns", "policy_redacted"}
+
+
 def test_summary_regression_excluded_column_drops_coefficients() -> None:
     rng = np.random.default_rng(3)
     x1 = np.arange(20, dtype=float)
@@ -207,6 +257,16 @@ async def test_interpret_degrades_to_none_when_model_down(trend_case: Case) -> N
         "trend", trend_case.result, DownGateway(), trend_case.ref, trend_case.params  # type: ignore[arg-type]
     )
     assert text is None
+
+
+@pytest.mark.asyncio
+async def test_interpret_degrades_on_config_errors(trend_case: Case) -> None:
+    """registry 未配场景(KeyError) / key 缺失(ValueError) 同样降级，不拖垮统计接口。"""
+    for exc in (KeyError("registry 未配置场景路由"), ValueError("缺少 API key")):
+        text = await interpret_stats(
+            "trend", trend_case.result, ErrorGateway(exc), trend_case.ref, trend_case.params
+        )
+        assert text is None, f"{type(exc).__name__} 应降级为 None 而非抛出"
 
 
 # ── 路由端到端 ──

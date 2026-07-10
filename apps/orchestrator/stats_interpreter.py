@@ -31,7 +31,12 @@ class _Gateway(Protocol):
     ) -> ModelResponse: ...
 
 
-_KIND_LABEL = {"trend": "趋势分析", "anomaly": "异常检测", "regression": "回归分析"}
+_KIND_LABEL = {
+    "trend": "趋势分析",
+    "anomaly": "异常检测",
+    "regression": "回归分析",
+    "correlation": "相关性分析",
+}
 
 _SYSTEM_PROMPT = """你是一名 BI 数据解读助手。你只会收到一次统计分析的**结果摘要**\
 （不含任何逐行明细或原始数据）。请用简洁、通顺的中文，写出对业务有意义的洞察解读。
@@ -51,6 +56,8 @@ def _columns_used(kind: str, params: dict[str, Any]) -> list[str]:
     if kind == "regression":
         cols = [params.get("target"), *(params.get("features") or [])]
         return [c for c in cols if isinstance(c, str)]
+    if kind == "correlation":
+        return [c for c in (params.get("columns") or []) if isinstance(c, str)]
     return []
 
 
@@ -80,7 +87,7 @@ def extract_summary(
     Raises:
         ValueError: 未知统计类型。
     """
-    if kind not in ("trend", "anomaly", "regression"):
+    if kind not in ("trend", "anomaly", "regression", "correlation"):
         raise ValueError(f"未知统计类型: {kind}")
 
     policy = resolve_policy(dataset_ref)
@@ -125,7 +132,7 @@ def extract_summary(
                     "max": max(vals),
                     "mean": round(sum(vals) / len(vals), 6),
                 }
-    else:  # regression
+    elif kind == "regression":
         summary = {
             "kind": result.get("kind"),
             "r_squared": result.get("r_squared"),
@@ -135,6 +142,19 @@ def extract_summary(
         }
         if not redacted:
             summary["coefficients"] = result.get("coefficients")
+    else:  # correlation
+        cols = result.get("columns") or []
+        if redacted:
+            # 相关对会暴露敏感列的关系 → 只留方法与列数
+            summary = {"method": result.get("method"), "n_columns": len(cols)}
+        else:
+            # 只发聚合的强相关对，不发整个 n×n 矩阵（矩阵仅供前端热力图）
+            summary = {
+                "method": result.get("method"),
+                "columns": cols,
+                "n_obs": result.get("n_obs"),
+                "top_pairs": result.get("top_pairs"),
+            }
 
     if redacted:
         # 让解读模型知道数据受限，并使 payload 日志能证明门控生效
@@ -188,7 +208,9 @@ async def interpret_stats(
     messages = build_messages(kind, summary)
     try:
         resp = await gateway.complete(Scenario.CORE_REASONING, messages)
-    except RuntimeError as exc:  # 主选与所有备选均失败（模型不可用/网络/超时）
+    # 解读不可得的情形一律降级（承诺：解读失败不拖垮统计接口）：
+    # RuntimeError=全候选失败；KeyError=registry 未配场景/模型；ValueError=API key 缺失。
+    except (RuntimeError, KeyError, ValueError) as exc:
         _log.warning("stats.interpret.degraded", kind=kind, reason=str(exc))
         return None
     text = resp.content.strip()

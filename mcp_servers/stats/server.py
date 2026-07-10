@@ -19,6 +19,9 @@ def build_server() -> MCPServer:
     server.register(
         Tool("regression", "回归分析", schemas.REGRESSION_SCHEMA, tools.regression)
     )
+    server.register(
+        Tool("correlation", "相关性分析", schemas.CORRELATION_SCHEMA, tools.correlation)
+    )
     return server
 
 

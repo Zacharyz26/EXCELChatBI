@@ -49,7 +49,8 @@ class Settings(BaseSettings):
 
     # 图表服务端截图（Playwright 无头 chromium）；留空则自动探测已安装的 chromium
     chromium_executable_path: str = ""
-    # 超过此行数走 DuckDB 分块（占位阈值，分块逻辑留 TODO）
+    # 表行数处理上限：parse_excel 读表前按元数据检查，超过直接拒绝（防解压后 OOM）；
+    # 后续支持超大表时改 DuckDB 分块而非拒绝（留 TODO）
     large_table_row_threshold: int = 500_000
 
     # 数据画像安全策略配置（缺失时用内置宽松默认，见 packages/governance/data_boundary）

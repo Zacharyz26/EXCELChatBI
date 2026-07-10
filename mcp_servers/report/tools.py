@@ -212,6 +212,17 @@ def _stat_md(section: dict[str, Any]) -> list[str]:
                 for c in coefs
             ]
             out.append("")
+    elif kind == "correlation":
+        cols = result.get("columns") or []
+        matrix = result.get("matrix") or []
+        out += [f"- 方法 {result.get('method', '—')} · 样本 {_fmt(result.get('n_obs'))}", ""]
+        if cols and matrix:
+            out += ["| | " + " | ".join(cols) + " |", "|---" * (len(cols) + 1) + "|"]
+            out += [
+                f"| {cols[i]} | " + " | ".join(_fmt(v) for v in row) + " |"
+                for i, row in enumerate(matrix)
+            ]
+            out.append("")
 
     interp = section.get("interpretation")
     if interp:

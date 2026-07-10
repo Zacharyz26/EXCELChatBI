@@ -23,13 +23,18 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 @dataclass
 class ModelSpec:
-    """单个模型的接入规格（解析自 registry）。"""
+    """单个模型的接入规格（解析自 registry）。
+
+    drop_params: 该模型不支持的调用参数名（如推理型不支持 response_format），
+    网关分发时会剥掉这些参数，保证降级到该模型时调用仍可用。
+    """
 
     name: str
     provider: str
     model: str
     api_base: str
     api_key: str
+    drop_params: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -80,6 +85,7 @@ class ModelRegistry:
                 model=cfg["model"],
                 api_base=pcfg["api_base"],
                 api_key=pcfg["api_key"],
+                drop_params=[str(p) for p in (cfg.get("drop_params") or [])],
             )
 
         for scenario, cfg in (raw.get("routes") or {}).items():

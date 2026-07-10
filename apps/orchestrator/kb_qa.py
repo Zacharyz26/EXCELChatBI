@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
+from anyio import to_thread
 from packages.common.logging import get_logger
 from packages.models.gateway import ModelGateway
 from packages.models.types import Message, Scenario
 from packages.rag.retriever import HybridRetriever
+from packages.rag.store import SearchHit
 
 _log = get_logger("orchestrator.kb_qa")
 
@@ -43,6 +46,23 @@ def normalize_query(query: str) -> str:
     return query.strip().strip("？?。.！!，, ")
 
 
+def _dedup_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    """按 (source, 归一化文本) 去重，保留排名最高的一份（红线6：不改引用真实性）。
+
+    展示层兜底：即便索引仍含重复副本（或高度重叠窗口的展示片段相同），
+    引用与喂给模型的材料也只留一份，不重复列同一片段。
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[SearchHit] = []
+    for h in hits:
+        key = (h.source, " ".join(h.text.split()))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
+
+
 def build_messages(query: str, hits: list) -> list[Message]:
     """构造带编号资料的生成消息（资料用分隔符包裹，防注入，红线4）。"""
     blocks: list[str] = []
@@ -59,24 +79,28 @@ async def answer_question(
 ) -> dict:
     """回答一个中文问题，返回 {answer, citations, is_empty}。"""
     q = normalize_query(query)
-    result = retriever.retrieve(q, top_k=top_k)
+    # 检索是同步计算（向量点积 + BM25 循环）→ 下线程执行，不卡事件循环
+    result = await to_thread.run_sync(partial(retriever.retrieve, q, top_k=top_k))
 
     if result.is_empty:
         # 红线6：无结果如实告知，不调用模型、不编造
         _log.info("kb_qa.no_result", query=q)
         return {"answer": _NO_RESULT, "citations": [], "is_empty": True}
 
+    # 按内容去重后再建引用 / 喂模型（同一片段只列一次）
+    hits = _dedup_hits(result.hits)
     citations = [
         Citation(source=h.source, snippet=h.text[:_SNIPPET_MAX], section=h.section)
-        for h in result.hits
+        for h in hits
     ]
     _log.info(
         "kb_qa.retrieved",
         query=q,
         hit_count=len(result.hits),
-        sources=[h.source for h in result.hits],
+        unique_hits=len(hits),
+        sources=[h.source for h in hits],
     )
-    resp = await gateway.complete(Scenario.CORE_REASONING, build_messages(q, result.hits))
+    resp = await gateway.complete(Scenario.CORE_REASONING, build_messages(q, hits))
     return {
         "answer": resp.content,
         "citations": [c.__dict__ for c in citations],

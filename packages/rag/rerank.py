@@ -45,7 +45,12 @@ class BGEReranker(Reranker):
     """基于 FlagEmbedding 的 bge-reranker（需装 .[rag]）。"""
 
     def __init__(self, model_name: str) -> None:
-        self._model_name = model_name
+        # fail-fast：后端尚未实现，构造期即报错（配合启动自检），
+        # 避免服务正常启动、首次检索请求才 500。
+        raise NotImplementedError(
+            "BGE rerank 后端尚未实现：请将配置 rag_reranker 改回 lexical；"
+            f"真实接入 {model_name} 需安装 .[rag] 并实现 BGEReranker"
+        )
 
     def rerank(
         self, query: str, candidates: list[str], top_k: int = 5

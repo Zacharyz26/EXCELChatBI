@@ -1,10 +1,11 @@
 // 统计分析面板（/analyze/stats）：趋势/异常/回归 + 中文解读
 // 红线说明：前端可渲染后端返回的完整明细（逐行分量、异常原值）；红线1 只约束"不进 LLM"。
 import { useMemo, useState } from "react";
-import { analyzeStats } from "@/api/client";
+import { analyzeStats, translateError } from "@/api/client";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import type {
   AnomalyResult,
+  CorrelationResult,
   DataProfile,
   RegressionResult,
   StatsKind,
@@ -27,12 +28,16 @@ export function StatsPanel({ profile }: Props) {
   );
 
   const [kind, setKind] = useState<StatsKind>("trend");
-  const [valueCol, setValueCol] = useState(numericCols[0] ?? cols[0] ?? "");
+  // 要求数值的字段只从数值列取默认值（选择器也只列数值列，从源头避免"不是数值型"）
+  const [valueCol, setValueCol] = useState(numericCols[0] ?? "");
   const [timeCol, setTimeCol] = useState(cols[0] ?? "");
   const [period, setPeriod] = useState("");
   const [method, setMethod] = useState<string>("iqr");
-  const [target, setTarget] = useState(numericCols[0] ?? cols[0] ?? "");
+  const [trendMethod, setTrendMethod] = useState<string>("auto");
+  const [target, setTarget] = useState(numericCols[0] ?? "");
   const [features, setFeatures] = useState<string[]>([]);
+  const [corrMethod, setCorrMethod] = useState<string>("pearson");
+  const [corrCols, setCorrCols] = useState<string[]>(numericCols.slice(0, 3));
   const [interpret, setInterpret] = useState(true);
 
   const [resp, setResp] = useState<StatsResponse | null>(null);
@@ -43,10 +48,40 @@ export function StatsPanel({ profile }: Props) {
     setFeatures((f) => (f.includes(name) ? f.filter((x) => x !== name) : [...f, name]));
   }
 
+  function toggleCorrCol(name: string) {
+    setCorrCols((c) => (c.includes(name) ? c.filter((x) => x !== name) : [...c, name]));
+  }
+
+  // 前端预校验：返回中文提示（不完整时禁用按钮），null 表示可运行
+  function validationError(): string | null {
+    if (kind === "trend") {
+      if (!valueCol) return "趋势分析需选择数值列（该数据集无数值列）";
+      if (!timeCol) return "趋势分析需选择时间列";
+      return null; // 季节周期选填：不填走移动平均，填了启用 STL
+    }
+    if (kind === "anomaly") {
+      if (!valueCol) return "异常检测需选择数值列（该数据集无数值列）";
+      if (method === "stl") {
+        if (!timeCol) return "STL 异常检测需选择时间列";
+        if (!period) return "STL 异常检测需填写季节周期";
+      }
+      return null;
+    }
+    if (kind === "correlation") {
+      if (corrCols.length < 2) return "相关性分析需至少选择 2 列（仅数值列）";
+      return null;
+    }
+    // regression
+    if (!target) return "回归分析需选择因变量（该数据集无数值列）";
+    if (features.length < 1) return "回归分析需至少选择 1 个自变量";
+    return null;
+  }
+
   function buildParams(): Record<string, unknown> {
     if (kind === "trend") {
       const p: Record<string, unknown> = { value_col: valueCol, time_col: timeCol };
       if (period) p.period = Number(period);
+      if (trendMethod === "prophet") p.method = "prophet";
       p.forecast_horizon = 3;
       return p;
     }
@@ -58,6 +93,9 @@ export function StatsPanel({ profile }: Props) {
       }
       return p;
     }
+    if (kind === "correlation") {
+      return { columns: corrCols, method: corrMethod };
+    }
     return { target, features, kind: "ols" };
   }
 
@@ -68,11 +106,13 @@ export function StatsPanel({ profile }: Props) {
       setResp(await analyzeStats(profile.dataset_ref, kind, buildParams(), interpret));
     } catch (e) {
       setResp(null);
-      setError((e as Error).message);
+      setError(translateError((e as Error).message));
     } finally {
       setLoading(false);
     }
   }
+
+  const invalid = validationError();
 
   return (
     <section style={{ margin: "24px 0", borderTop: "1px solid #eee", paddingTop: 16 }}>
@@ -85,6 +125,7 @@ export function StatsPanel({ profile }: Props) {
             <option value="trend">趋势分析</option>
             <option value="anomaly">异常检测</option>
             <option value="regression">回归分析</option>
+            <option value="correlation">相关性分析</option>
           </select>
         </label>
 
@@ -92,7 +133,7 @@ export function StatsPanel({ profile }: Props) {
           <label>
             数值列{" "}
             <select value={valueCol} onChange={(e) => setValueCol(e.target.value)}>
-              {cols.map((c) => (
+              {numericCols.map((c) => (
                 <option key={c} value={c}>{c}</option>
               ))}
             </select>
@@ -112,7 +153,10 @@ export function StatsPanel({ profile }: Props) {
 
         {(kind === "trend" || (kind === "anomaly" && method === "stl")) && (
           <label>
-            季节周期{" "}
+            季节周期
+            <span style={{ color: "#888", fontSize: 12 }}>
+              {kind === "trend" ? "（选填；填写后启用 STL 季节分解）" : "（必填）"}
+            </span>{" "}
             <input
               style={{ width: 64 }}
               value={period}
@@ -133,13 +177,33 @@ export function StatsPanel({ profile }: Props) {
           </label>
         )}
 
+        {kind === "trend" && (
+          <label>
+            预测方法{" "}
+            <select value={trendMethod} onChange={(e) => setTrendMethod(e.target.value)}>
+              <option value="auto">自动（STL/MA）</option>
+              <option value="prophet">Prophet</option>
+            </select>
+          </label>
+        )}
+
         {kind === "regression" && (
           <label>
             因变量{" "}
             <select value={target} onChange={(e) => setTarget(e.target.value)}>
-              {cols.map((c) => (
+              {numericCols.map((c) => (
                 <option key={c} value={c}>{c}</option>
               ))}
+            </select>
+          </label>
+        )}
+
+        {kind === "correlation" && (
+          <label>
+            方法{" "}
+            <select value={corrMethod} onChange={(e) => setCorrMethod(e.target.value)}>
+              <option value="pearson">pearson</option>
+              <option value="spearman">spearman</option>
             </select>
           </label>
         )}
@@ -149,21 +213,33 @@ export function StatsPanel({ profile }: Props) {
           附带中文解读
         </label>
 
-        <button onClick={onRun} disabled={loading}>
+        <button onClick={onRun} disabled={loading || invalid !== null}>
           {loading ? "分析中…" : "运行分析"}
         </button>
+        {invalid && <span style={{ color: "#b26a00", fontSize: 13 }}>{invalid}</span>}
       </div>
 
       {kind === "regression" && (
         <div style={{ marginTop: 8, fontSize: 13 }}>
-          自变量（可多选）：
-          {cols
+          自变量（至少选 1 个，仅数值列）：
+          {numericCols
             .filter((c) => c !== target)
             .map((c) => (
               <label key={c} style={{ marginLeft: 8 }}>
                 <input type="checkbox" checked={features.includes(c)} onChange={() => toggleFeature(c)} /> {c}
               </label>
             ))}
+        </div>
+      )}
+
+      {kind === "correlation" && (
+        <div style={{ marginTop: 8, fontSize: 13 }}>
+          参与列（至少选 2 列，仅数值列）：
+          {numericCols.map((c) => (
+            <label key={c} style={{ marginLeft: 8 }}>
+              <input type="checkbox" checked={corrCols.includes(c)} onChange={() => toggleCorrCol(c)} /> {c}
+            </label>
+          ))}
         </div>
       )}
 
@@ -174,6 +250,7 @@ export function StatsPanel({ profile }: Props) {
           {resp.kind === "trend" && <TrendView result={resp.result as TrendResult} />}
           {resp.kind === "anomaly" && <AnomalyView result={resp.result as AnomalyResult} />}
           {resp.kind === "regression" && <RegressionView result={resp.result as RegressionResult} />}
+          {resp.kind === "correlation" && <CorrelationView result={resp.result as CorrelationResult} />}
           {resp.interpretation && (
             <div style={{ marginTop: 12, padding: 12, background: "#f4f8ff", borderLeft: "3px solid #4a7" }}>
               <strong>中文解读：</strong>
@@ -272,6 +349,61 @@ function RegressionView({ result }: { result: RegressionResult }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── 相关性：ECharts 热力图（复用 EChartsRenderer）+ 最强相关对表 ──
+function CorrelationView({ result }: { result: CorrelationResult }) {
+  const cols = result.columns;
+  const data: [number, number, number | null][] = [];
+  result.matrix.forEach((row, i) => row.forEach((v, j) => data.push([j, i, v])));
+
+  const option = {
+    title: { text: `相关性热力图（${result.method}）` },
+    tooltip: { position: "top" },
+    grid: { height: "70%", top: "12%" },
+    xAxis: { type: "category", data: cols, splitArea: { show: true } },
+    yAxis: { type: "category", data: cols, splitArea: { show: true } },
+    visualMap: {
+      min: -1, max: 1, calculable: true, orient: "horizontal", left: "center", bottom: "0%",
+      inRange: { color: ["#2b6cb0", "#ffffff", "#c53030"] },
+    },
+    series: [{
+      type: "heatmap",
+      data,
+      label: {
+        show: true,
+        formatter: (p: { value: [number, number, number | null] }) =>
+          p.value[2] == null ? "" : p.value[2].toFixed(2),
+      },
+    }],
+  };
+
+  return (
+    <div>
+      <p style={{ fontSize: 14 }}>
+        方法 {result.method} · 样本 {result.n_obs} · 列数 {cols.length}
+      </p>
+      <EChartsRenderer option={option} chartId={`corr-${result.method}`} />
+      {result.top_pairs.length > 0 && (
+        <table style={{ borderCollapse: "collapse", fontSize: 13, border: "1px solid #ccc", marginTop: 8 }}>
+          <thead>
+            <tr><th style={cell}>列 A</th><th style={cell}>列 B</th><th style={cell}>相关系数</th><th style={cell}>p 值</th><th style={cell}>显著</th></tr>
+          </thead>
+          <tbody>
+            {result.top_pairs.map((p, i) => (
+              <tr key={i}>
+                <td style={cell}>{p.a}</td>
+                <td style={cell}>{p.b}</td>
+                <td style={cell}>{fmt(p.corr)}</td>
+                <td style={cell}>{fmt(p.p_value)}</td>
+                <td style={cell}>{p.significant ? "✓" : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

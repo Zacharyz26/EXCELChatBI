@@ -1,6 +1,6 @@
-"""API 硬化测试（R2）：上传文件名穿越、ingest 路径白名单、上传大小上限。
+"""API 硬化测试（R2）：上传文件名穿越、ingest 路径白名单、上传大小上限、行数上限。
 
-补上 upload router 的测试盲区，钉住三个安全修复。
+补上 upload router 的测试盲区，钉住安全/健壮性修复。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -18,7 +19,7 @@ if str(ROOT) not in sys.path:
 from apps.api.deps import settings_dep  # noqa: E402
 from apps.api.main import app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from packages.common.config import Settings  # noqa: E402
+from packages.common.config import Settings, get_settings  # noqa: E402
 
 _XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -62,6 +63,28 @@ def test_upload_oversize_rejected(tmp_path: Path) -> None:
         assert not up.exists() or list(up.glob("*")) == []  # 无残留半成品
     finally:
         app.dependency_overrides.clear()
+
+
+def test_upload_rejects_rows_over_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 阈值压到 2，样例表 3 行数据 → 读表前按元数据拒绝（413），且不留盘（大表防护 V3）
+    monkeypatch.setenv("LARGE_TABLE_ROW_THRESHOLD", "2")
+    get_settings.cache_clear()
+    up = tmp_path / "uploads"
+    app.dependency_overrides[settings_dep] = lambda: Settings(upload_dir=str(up))
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/upload/excel",
+            files={"file": ("big.xlsx", _xlsx_bytes(), _XLSX_CT)},
+        )
+        assert resp.status_code == 413, resp.text
+        assert "行数" in resp.json()["detail"]
+        assert list(up.glob("*.xlsx")) == []  # 被拒文件不留盘
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()  # 恢复默认阈值，避免污染其他测试
 
 
 def test_ingest_path_outside_whitelist_forbidden(tmp_path: Path) -> None:

@@ -22,6 +22,8 @@ models:
   deepseek-r1:
     provider: deepseek
     model: deepseek-reasoner
+    # 推理模型不支持 JSON 输出模式；网关降级到它时会剥掉该参数
+    drop_params: [response_format]
   qwen-vl:
     provider: vision
     model: qwen2.5-vl
