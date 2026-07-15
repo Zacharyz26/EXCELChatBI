@@ -11,7 +11,7 @@ from packages.common.config import get_settings
 from packages.common.logging import configure_logging
 
 from apps.api.deps import embedder_dep, reranker_dep
-from apps.api.routers import analyze, chat, health, kb, report, stats, upload
+from apps.api.routers import analyze, chat, health, kb, report, stats, upload, workspace
 
 
 @asynccontextmanager
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(report.router)
     app.include_router(kb.router)
     app.include_router(chat.router)
+    app.include_router(workspace.router)
     return app
 
 

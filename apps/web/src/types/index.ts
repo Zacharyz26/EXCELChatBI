@@ -24,6 +24,8 @@ export interface DataProfile {
 export interface UploadResponse {
   dataset_ref: string;
   profile: DataProfile;
+  messages?: WorkspaceMessage[] | null;
+  artifact?: WorkspaceArtifact | null;
 }
 
 export interface ChartResponse {
@@ -36,6 +38,65 @@ export interface ChatRequest {
   session_id: string;
   message: string;
   image_refs?: string[];
+}
+
+// ── 对话工作区（阶段 1）──
+
+export interface WorkspaceProject {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface WorkspaceConversation {
+  id: string;
+  project_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceDataset {
+  ref: string;
+  project_id: string;
+  filename: string;
+  profile: DataProfile;
+  parent_ref: string | null;
+  transform: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface WorkspaceMessage {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant" | "system" | string;
+  content: string;
+  tool_calls: Record<string, unknown>[] | null;
+  created_at: string;
+}
+
+export interface WorkspaceArtifact {
+  id: string;
+  conversation_id: string;
+  message_id: string;
+  type: string;
+  payload: Record<string, unknown> | null;
+  file_ref: string | null;
+  source_tool: string | null;
+  params: Record<string, unknown> | null;
+  dataset_ref: string | null;
+  created_at: string;
+}
+
+export interface ConversationDetail {
+  conversation: WorkspaceConversation;
+  messages: WorkspaceMessage[];
+  artifacts: WorkspaceArtifact[];
+}
+
+export interface ChatStreamEvent {
+  event: string;
+  data: Record<string, unknown>;
 }
 
 export interface KBCitation {

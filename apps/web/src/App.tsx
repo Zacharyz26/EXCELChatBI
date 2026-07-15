@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { analyze } from "@/api/client";
+import { ChatWorkspace } from "@/components/ChatWorkspace";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { ExcelUpload } from "@/components/ExcelUpload";
 import { KnowledgeQA } from "@/components/KnowledgeQA";
@@ -25,8 +26,23 @@ const NAV_ITEMS: NavItem[] = [
   { id: "knowledge", label: "知识库问答", description: "基于企业知识库检索问答", icon: "knowledge" },
 ];
 
-/** 应用根组件：保留各业务组件状态，仅在工作台视图之间切换可见性。 */
+/** 对话工作区为主入口；经典模式在阶段 4 收尾前始终可用。 */
 export default function App() {
+  const [mode, setMode] = useState<"conversation" | "classic">("conversation");
+  return (
+    <>
+      <div className={mode === "conversation" ? "mode-layer" : "mode-layer mode-layer--hidden"}>
+        <ChatWorkspace onOpenClassic={() => setMode("classic")} />
+      </div>
+      <div className={mode === "classic" ? "mode-layer" : "mode-layer mode-layer--hidden"}>
+        <ClassicWorkspace onOpenChat={() => setMode("conversation")} />
+      </div>
+    </>
+  );
+}
+
+/** 经典工作台：保留原业务组件和页面状态，仅增加返回对话入口。 */
+function ClassicWorkspace({ onOpenChat }: { onOpenChat: () => void }) {
   const [activeView, setActiveView] = useState<WorkspaceView>("data");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [profile, setProfile] = useState<DataProfile | null>(null);
@@ -64,6 +80,12 @@ export default function App() {
             <div className="brand__caption">智能数据工作台</div>
           </div>
         </div>
+
+        <button type="button" className="chat-mode-button" onClick={onOpenChat}>
+          <span className="chat-mode-button__icon" aria-hidden="true">✦</span>
+          <span><strong>对话工作台</strong><small>返回 AI 分析入口</small></span>
+          <span aria-hidden="true">→</span>
+        </button>
 
         <nav className="sidebar__nav" aria-label="工作台功能导航">
           <div className="sidebar__label">工作空间</div>

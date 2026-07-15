@@ -1,6 +1,8 @@
-"""会话状态对象（存 Redis，key 按 session_id，设过期）。
+"""旧运行态结构，保留供迁移期兼容。
 
-结构对应设计文档 5.2.2 的 SessionState。
+阶段 1 起，项目、对话、消息和工件以 SQLite 为真相源；完整持久化模型见
+``packages.session.models``。本模块暂不参与新对话工作区，等阶段 3 Agent 上下文
+装配时再移除兼容结构。
 """
 
 from __future__ import annotations
@@ -20,8 +22,8 @@ class Turn:
 class ChartEntry:
     """已生成图表的注册项，用于图表追问（设计文档 6.2）。"""
 
-    data_ref: str         # 底层数据引用（PostgreSQL / MinIO）
-    gen_params: dict      # 生成参数，便于复算
+    data_ref: str  # 底层数据引用（PostgreSQL / MinIO）
+    gen_params: dict[str, object]  # 生成参数，便于复算
 
 
 @dataclass

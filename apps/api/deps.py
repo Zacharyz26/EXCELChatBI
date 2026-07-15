@@ -20,6 +20,7 @@ from packages.rag.embedding import BGEEmbedder, Embedder, HashingEmbedder
 from packages.rag.rerank import BGEReranker, LexicalReranker, Reranker
 from packages.rag.retriever import HybridRetriever
 from packages.rag.store import KnowledgeStore, LocalKnowledgeStore
+from packages.session.store import SessionStore
 
 
 def settings_dep() -> Settings:
@@ -33,6 +34,16 @@ def model_gateway_dep() -> ModelGateway:
     registry = ModelRegistry(get_settings().model_registry_path)
     registry.load()
     return ModelGateway(registry)
+
+
+@lru_cache
+def session_store_dep() -> SessionStore:
+    """注入 SQLite 会话持久层单例（内部连接按操作创建，可在线程池中调用）。"""
+    settings = get_settings()
+    return SessionStore(
+        settings.chat_db_path,
+        cache_size=settings.conversation_cache_size,
+    )
 
 
 @lru_cache

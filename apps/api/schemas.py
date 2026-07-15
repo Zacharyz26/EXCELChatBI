@@ -2,9 +2,120 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StringConstraints
+
+WorkspaceName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+]
+ConversationTitle = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+ConversationId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+]
+ChatMessageText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
+]
+
+
+class ProjectCreate(BaseModel):
+    """创建项目。"""
+
+    name: WorkspaceName
+
+
+class ProjectUpdate(BaseModel):
+    """重命名项目。"""
+
+    name: WorkspaceName
+
+
+class ProjectResponse(BaseModel):
+    """项目响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    created_at: str
+
+
+class ConversationCreate(BaseModel):
+    """在项目内创建对话。"""
+
+    title: ConversationTitle = "新对话"
+
+
+class ConversationUpdate(BaseModel):
+    """修改对话标题。"""
+
+    title: ConversationTitle
+
+
+class ConversationResponse(BaseModel):
+    """对话摘要。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class DatasetResponse(BaseModel):
+    """项目内数据集登记项。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    ref: str
+    project_id: str
+    filename: str
+    profile: dict[str, Any]
+    parent_ref: str | None
+    transform: dict[str, Any] | None
+    created_at: str
+
+
+class MessageResponse(BaseModel):
+    """持久化消息。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    tool_calls: list[dict[str, Any]] | None
+    created_at: str
+
+
+class ArtifactResponse(BaseModel):
+    """消息关联工件。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    conversation_id: str
+    message_id: str
+    type: str
+    payload: dict[str, Any] | None
+    file_ref: str | None
+    source_tool: str | None
+    params: dict[str, Any] | None
+    dataset_ref: str | None
+    created_at: str
+
+
+class ConversationDetailResponse(BaseModel):
+    """历史对话及其消息、工件快照。"""
+
+    conversation: ConversationResponse
+    messages: list[MessageResponse]
+    artifacts: list[ArtifactResponse]
 
 
 class ChatRequest(BaseModel):
@@ -13,6 +124,13 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     image_refs: list[str] = []     # 多模态：图像引用（设计文档 F3）
+
+
+class ChatStreamRequest(BaseModel):
+    """阶段 1 的纯 LLM 流式对话请求。"""
+
+    conversation_id: ConversationId
+    message: ChatMessageText
 
 
 class ChatChunk(BaseModel):
@@ -30,6 +148,8 @@ class UploadResponse(BaseModel):
 
     dataset_ref: str
     profile: dict[str, Any]
+    messages: list[MessageResponse] | None = None
+    artifact: ArtifactResponse | None = None
 
 
 class AnalyzeRequest(BaseModel):

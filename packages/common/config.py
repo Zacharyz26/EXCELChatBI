@@ -27,7 +27,13 @@ class Settings(BaseSettings):
     vision_api_base: str = ""
     vision_api_key: str = ""
 
-    # 存储
+    # 对话工作区持久层（SQLite 真相源 + 单进程内存热缓存）
+    chat_db_path: str = ".data/chatbi.db"
+    conversation_cache_size: int = 128
+    chat_history_limit: int = 20
+    chat_profile_max_chars: int = 12_000
+
+    # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
     session_ttl_seconds: int = 3600
