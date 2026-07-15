@@ -57,6 +57,15 @@ def regression_ref() -> str:
     return save_dataframe(pd.DataFrame({"y": y, "x1": x1, "x2": x2}))
 
 
+@pytest.fixture
+def order_regression_ref() -> str:
+    """订单数可作为 OLS 因变量，销售额为有效自变量。"""
+    rng = np.random.default_rng(11)
+    sales = np.linspace(1_000, 20_000, 24)
+    orders = np.rint(5 + sales / 180 + rng.normal(0, 2, len(sales))).astype(int)
+    return save_dataframe(pd.DataFrame({"销售额": sales, "订单数": orders}))
+
+
 # ── 工具层 ──
 
 def test_trend_stl_detects_upward_and_seasonality(trend_ref: str) -> None:
@@ -144,6 +153,44 @@ def test_regression_ols_recovers_coefficients(regression_ref: str) -> None:
     assert coef["const"]["coef"] == pytest.approx(5.0, abs=1e-6)
     assert res["r_squared"] == pytest.approx(1.0, abs=1e-6)
     assert coef["x1"]["significant"] is True
+
+
+def test_regression_order_count_as_target(order_regression_ref: str) -> None:
+    res = regression(
+        {
+            "dataset_ref": order_regression_ref,
+            "target": "订单数",
+            "features": ["销售额"],
+            "kind": "ols",
+        }
+    )
+    assert res["n_obs"] == 24
+    assert res["r_squared"] is not None and res["r_squared"] > 0.9
+    assert {coef["name"] for coef in res["coefficients"]} == {"const", "销售额"}
+
+
+def test_regression_rejects_target_as_feature(order_regression_ref: str) -> None:
+    with pytest.raises(ValueError, match="因变量不能同时作为自变量"):
+        regression(
+            {
+                "dataset_ref": order_regression_ref,
+                "target": "订单数",
+                "features": ["订单数"],
+                "kind": "ols",
+            }
+        )
+
+
+def test_regression_rejects_duplicate_features(order_regression_ref: str) -> None:
+    with pytest.raises(ValueError, match="自变量不能重复"):
+        regression(
+            {
+                "dataset_ref": order_regression_ref,
+                "target": "订单数",
+                "features": ["销售额", "销售额"],
+                "kind": "ols",
+            }
+        )
 
 
 def test_non_numeric_column_raises(anomaly_ref: str) -> None:
@@ -239,3 +286,44 @@ def test_route_correlation_ok(correlation_ref: str) -> None:
     assert body["kind"] == "correlation"
     assert len(body["result"]["matrix"]) == 3
     assert body["result"]["top_pairs"][0]["significant"] is True
+
+
+def test_route_regression_order_count_as_target(order_regression_ref: str) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/analyze/stats",
+        json={
+            "dataset_ref": order_regression_ref,
+            "kind": "regression",
+            "params": {"target": "订单数", "features": ["销售额"], "kind": "ols"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "regression"
+    assert body["result"]["n_obs"] == 24
+
+
+@pytest.mark.parametrize(
+    ("features", "detail"),
+    [
+        (["订单数"], "因变量不能同时作为自变量"),
+        (["销售额", "销售额"], "自变量不能重复"),
+    ],
+)
+def test_route_regression_rejects_invalid_feature_roles(
+    order_regression_ref: str,
+    features: list[str],
+    detail: str,
+) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/analyze/stats",
+        json={
+            "dataset_ref": order_regression_ref,
+            "kind": "regression",
+            "params": {"target": "订单数", "features": features, "kind": "ols"},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == detail

@@ -1,6 +1,6 @@
 // 统计分析面板（/analyze/stats）：趋势/异常/回归 + 中文解读
 // 红线说明：前端可渲染后端返回的完整明细（逐行分量、异常原值）；红线1 只约束"不进 LLM"。
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { analyzeStats, translateError } from "@/api/client";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import type {
@@ -18,6 +18,12 @@ interface Props {
 }
 
 const ANOMALY_METHODS = ["iqr", "3sigma", "isolation_forest", "stl"] as const;
+const KIND_LABELS: Record<StatsKind, string> = {
+  trend: "趋势分析",
+  anomaly: "异常检测",
+  regression: "回归分析",
+  correlation: "相关性分析",
+};
 
 export function StatsPanel({ profile }: Props) {
   const cols = useMemo(() => profile.columns.map((c) => c.name), [profile]);
@@ -43,6 +49,26 @@ export function StatsPanel({ profile }: Props) {
   const [resp, setResp] = useState<StatsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 类型切换或重复运行时使旧请求失效，避免迟到响应覆盖当前类型的状态。
+  const requestIdRef = useRef(0);
+
+  function onKindChange(nextKind: StatsKind) {
+    requestIdRef.current += 1;
+    setKind(nextKind);
+    setResp(null);
+    setError(null);
+    setLoading(false);
+  }
+
+  function onTargetChange(nextTarget: string) {
+    // 因变量不能同时留在自变量中；切换参数时旧结果与旧请求一并失效。
+    requestIdRef.current += 1;
+    setTarget(nextTarget);
+    setFeatures((current) => current.filter((feature) => feature !== nextTarget));
+    setResp(null);
+    setError(null);
+    setLoading(false);
+  }
 
   function toggleFeature(name: string) {
     setFeatures((f) => (f.includes(name) ? f.filter((x) => x !== name) : [...f, name]));
@@ -73,6 +99,7 @@ export function StatsPanel({ profile }: Props) {
     }
     // regression
     if (!target) return "回归分析需选择因变量（该数据集无数值列）";
+    if (features.includes(target)) return "因变量不能同时作为自变量";
     if (features.length < 1) return "回归分析需至少选择 1 个自变量";
     return null;
   }
@@ -100,19 +127,32 @@ export function StatsPanel({ profile }: Props) {
   }
 
   async function onRun() {
+    const runKind = kind;
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
+    setResp(null);
     try {
-      setResp(await analyzeStats(profile.dataset_ref, kind, buildParams(), interpret));
+      const nextResp = await analyzeStats(profile.dataset_ref, runKind, buildParams(), interpret);
+      if (requestId !== requestIdRef.current) return;
+      if (nextResp.kind !== runKind) {
+        setError(`返回结果类型与当前${KIND_LABELS[runKind]}不一致，请重新运行`);
+        return;
+      }
+      setResp(nextResp);
     } catch (e) {
-      setResp(null);
-      setError(translateError((e as Error).message));
+      if (requestId === requestIdRef.current) {
+        setResp(null);
+        setError(translateError((e as Error).message));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }
 
   const invalid = validationError();
+  // 双重约束结果类型：即使状态未来由其他路径写入，也不渲染非当前类型结果。
+  const currentResp = resp?.kind === kind ? resp : null;
 
   return (
     <section style={{ margin: "24px 0", borderTop: "1px solid #eee", paddingTop: 16 }}>
@@ -121,7 +161,7 @@ export function StatsPanel({ profile }: Props) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
         <label>
           类型{" "}
-          <select value={kind} onChange={(e) => setKind(e.target.value as StatsKind)}>
+          <select value={kind} onChange={(e) => onKindChange(e.target.value as StatsKind)}>
             <option value="trend">趋势分析</option>
             <option value="anomaly">异常检测</option>
             <option value="regression">回归分析</option>
@@ -190,7 +230,7 @@ export function StatsPanel({ profile }: Props) {
         {kind === "regression" && (
           <label>
             因变量{" "}
-            <select value={target} onChange={(e) => setTarget(e.target.value)}>
+            <select value={target} onChange={(e) => onTargetChange(e.target.value)}>
               {numericCols.map((c) => (
                 <option key={c} value={c}>{c}</option>
               ))}
@@ -245,16 +285,25 @@ export function StatsPanel({ profile }: Props) {
 
       {error && <p style={{ color: "crimson" }}>出错：{error}</p>}
 
-      {resp && (
+      {!loading && !error && !currentResp && (
+        <p
+          style={{ marginTop: 16, padding: 16, color: "#666", background: "#f7f7f7" }}
+          role="status"
+        >
+          尚未运行{KIND_LABELS[kind]}，请配置参数后点击“运行分析”。
+        </p>
+      )}
+
+      {currentResp && (
         <div style={{ marginTop: 16 }}>
-          {resp.kind === "trend" && <TrendView result={resp.result as TrendResult} />}
-          {resp.kind === "anomaly" && <AnomalyView result={resp.result as AnomalyResult} />}
-          {resp.kind === "regression" && <RegressionView result={resp.result as RegressionResult} />}
-          {resp.kind === "correlation" && <CorrelationView result={resp.result as CorrelationResult} />}
-          {resp.interpretation && (
+          {currentResp.kind === "trend" && <TrendView result={currentResp.result as TrendResult} />}
+          {currentResp.kind === "anomaly" && <AnomalyView result={currentResp.result as AnomalyResult} />}
+          {currentResp.kind === "regression" && <RegressionView result={currentResp.result as RegressionResult} />}
+          {currentResp.kind === "correlation" && <CorrelationView result={currentResp.result as CorrelationResult} />}
+          {currentResp.interpretation && (
             <div style={{ marginTop: 12, padding: 12, background: "#f4f8ff", borderLeft: "3px solid #4a7" }}>
               <strong>中文解读：</strong>
-              <p style={{ margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{resp.interpretation}</p>
+              <p style={{ margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{currentResp.interpretation}</p>
             </div>
           )}
         </div>

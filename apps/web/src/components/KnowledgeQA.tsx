@@ -72,6 +72,7 @@ export function KnowledgeQA() {
             {examples.map((q) => (
               <button
                 key={q}
+                className="question-chip"
                 onClick={() => onAsk(q)}
                 disabled={loading}
                 style={{

@@ -302,6 +302,11 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
     target: str = args["target"]
     features: list[str] = args["features"]
 
+    if target in features:
+        raise ValueError("因变量不能同时作为自变量")
+    if len(features) != len(set(features)):
+        raise ValueError("自变量不能重复")
+
     df = load_dataframe(args["dataset_ref"])
     _require_columns(df, [target, *features])
     used = [target, *features]
