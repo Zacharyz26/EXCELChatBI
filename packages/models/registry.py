@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]  # 存量：yaml 无内置 stubs（装 types-PyYAML 可移除）
 from dotenv import dotenv_values
 
 from packages.models.types import Scenario
@@ -27,6 +27,11 @@ class ModelSpec:
 
     drop_params: 该模型不支持的调用参数名（如推理型不支持 response_format），
     网关分发时会剥掉这些参数，保证降级到该模型时调用仍可用。
+
+    supports_tools: 该模型是否支持 function calling。工具与普通参数不同，
+    **不可静默剥掉**——带工具的请求降级到不支持的模型会变成"不会用工具的
+    聊天"（比报错更糟，决策10）。网关对带 tools 的请求直接**跳过**不支持
+    的候选，而非剥参数。
     """
 
     name: str
@@ -35,6 +40,7 @@ class ModelSpec:
     api_base: str
     api_key: str
     drop_params: list[str] = field(default_factory=list)
+    supports_tools: bool = True
 
 
 @dataclass
@@ -86,6 +92,7 @@ class ModelRegistry:
                 api_base=pcfg["api_base"],
                 api_key=pcfg["api_key"],
                 drop_params=[str(p) for p in (cfg.get("drop_params") or [])],
+                supports_tools=bool(cfg.get("supports_tools", True)),
             )
 
         for scenario, cfg in (raw.get("routes") or {}).items():

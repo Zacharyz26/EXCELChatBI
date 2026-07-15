@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 from openai import OpenAIError
 
@@ -46,6 +47,7 @@ class ModelGateway:
         messages: list[Message],
         *,
         params: dict[str, object] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelResponse:
         """同步补全。按场景路由 → 调用适配器 → 失败按 fallback 降级。
 
@@ -55,9 +57,12 @@ class ModelGateway:
             params: 透传给底层接口的额外参数（如 response_format）。
                 模型不支持的参数按 registry 中该模型的 drop_params 自动剥掉
                 （如推理型 fallback 不支持 response_format），保证降级可用。
+            tools: OpenAI 兼容工具定义；None 表示不启用。工具是能力要求而非
+                普通参数：带 tools 的请求**跳过** supports_tools=False 的候选，
+                而非剥掉 tools 静默降级成"不会用工具的聊天"（决策10）。
 
         Raises:
-            RuntimeError: 主选与所有备选模型均失败。
+            RuntimeError: 主选与所有备选模型均失败（或均不支持工具调用）。
         """
         route = self._registry.resolve(scenario)
         candidates = [route.primary, *route.fallback]
@@ -68,6 +73,7 @@ class ModelGateway:
             "model.request",
             scenario=scenario.value,
             candidates=candidates,
+            with_tools=tools is not None,
             message_roles=[m.role for m in messages],
             payload_chars=sum(len(m.content) for m in messages),
         )
@@ -75,19 +81,24 @@ class ModelGateway:
         last_error: Exception | None = None
         for name in candidates:
             spec = self._registry.get_model(name)
+            if tools is not None and not spec.supports_tools:
+                # 决策10：不支持 function calling 的候选直接跳过，绝不静默丢工具
+                _log.warning("model.skip_no_tools", model=name, scenario=scenario.value)
+                continue
             # 按模型能力过滤参数（drop_params 来自 registry 配置）：
             # 主选支持的参数（如 response_format）备选未必支持，不剥掉则降级必失败。
             call_params: dict[str, object] = {"temperature": route.temperature, **extra}
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
             try:
                 adapter = self._get_adapter(spec)
-                resp = await adapter.complete(messages, **call_params)
+                resp = await adapter.complete(messages, tools=tools, **call_params)
                 _log.info(
                     "model.response",
                     model=resp.model,
                     prompt_tokens=resp.prompt_tokens,
                     completion_tokens=resp.completion_tokens,
                     latency_ms=round(resp.latency_ms, 1),
+                    tool_call_count=len(resp.tool_calls),
                 )
                 return resp
             # 只把"模型不可用"降级到下一候选：OpenAIError 覆盖 API/网络/超时/限流，
@@ -97,13 +108,60 @@ class ModelGateway:
                 last_error = exc
                 _log.warning("model.fallback", model=name, error=str(exc))
 
+        if last_error is None and tools is not None:
+            raise RuntimeError(
+                f"场景 {scenario.value} 的候选模型（{candidates}）均不支持工具调用；"
+                "请在 config/models.yaml 为该场景配置 supports_tools 的模型（决策10）"
+            )
         raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
 
     async def stream(
         self,
         scenario: Scenario,
         messages: list[Message],
+        *,
+        params: dict[str, object] | None = None,
     ) -> AsyncIterator[str]:
-        """流式补全（SSE 用），逐 token 产出。本切片暂未实现。"""
-        raise NotImplementedError("TODO: 流式调用适配器并 yield 增量")
-        yield ""  # pragma: no cover
+        """流式补全（SSE 用），逐段产出文本增量。
+
+        降级语义：**首个增量产出之前**失败（连接/鉴权/限流）→ 切下一候选；
+        已开始产出后中途失败 → 如实上抛，不换模型重来（避免用户看到
+        两个模型拼接的答案）。不支持 tools（Agent 工具轮走 complete）。
+
+        Raises:
+            RuntimeError: 所有候选模型均在开流前失败。
+        """
+        route = self._registry.resolve(scenario)
+        candidates = [route.primary, *route.fallback]
+        extra = params or {}
+
+        _log.info(
+            "model.stream.request",
+            scenario=scenario.value,
+            candidates=candidates,
+            message_roles=[m.role for m in messages],
+            payload_chars=sum(len(m.content) for m in messages),
+        )
+
+        last_error: Exception | None = None
+        for name in candidates:
+            spec = self._registry.get_model(name)
+            call_params: dict[str, object] = {"temperature": route.temperature, **extra}
+            call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
+            try:
+                adapter = self._get_adapter(spec)
+                chunks = aiter(adapter.stream(messages, **call_params))
+                first = await anext(chunks, None)
+            except (OpenAIError, ValueError) as exc:
+                last_error = exc
+                _log.warning("model.stream.fallback", model=name, error=str(exc))
+                continue
+            # 已成功开流（含空流）：之后的错误如实上抛，不再降级
+            if first is not None:
+                yield first
+                async for piece in chunks:
+                    yield piece
+            _log.info("model.stream.done", model=spec.model)
+            return
+
+        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")

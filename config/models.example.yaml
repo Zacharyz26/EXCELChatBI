@@ -24,6 +24,8 @@ models:
     model: deepseek-reasoner
     # 推理模型不支持 JSON 输出模式；网关降级到它时会剥掉该参数
     drop_params: [response_format]
+    # 不支持 function calling：带 tools 的请求会跳过本模型而非静默丢工具（决策10）
+    supports_tools: false
   qwen-vl:
     provider: vision
     model: qwen2.5-vl
@@ -44,6 +46,12 @@ routes:
     primary: deepseek-v3
     fallback: []
     temperature: 0.0
+  agent:                 # 对话式 Agent（第 14 章）：function-calling 循环
+    # 决策10：本场景降级链不得含不支持 function calling 的模型（如 deepseek-r1）；
+    # 网关对带 tools 的请求会跳过 supports_tools=false 的候选做兜底。
+    primary: deepseek-v3
+    fallback: []
+    temperature: 0.3
 
 # 统一调用策略（重试 / 超时 / 降级）
 defaults:
