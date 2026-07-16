@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     chat_history_limit: int = 20
     chat_profile_max_chars: int = 12_000
 
+    # Agent 循环护栏（14.5.1 初值，按真实使用调优）
+    agent_max_tool_calls: int = 6          # 单轮对话工具调用总数上限
+    agent_tool_result_max_chars: int = 6_000  # 工具结果回填模型前的截断上限
+    agent_registry_max_entries: int = 12   # 分析登记表全量条目上限，更旧的摘要化
+
     # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379

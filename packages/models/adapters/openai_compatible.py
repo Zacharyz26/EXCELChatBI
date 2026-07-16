@@ -112,10 +112,67 @@ class OpenAICompatibleAdapter(ModelAdapter):
             tool_calls=_parse_tool_calls(message),
         )
 
+    async def stream_turn(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **params: object,
+    ) -> AsyncIterator[str | ModelResponse]:
+        """带 tools 的流式轮次：文本增量即时产出，tool_calls 增量按 index 聚合。
+
+        最后一项恒为 `ModelResponse`（聚合全文 + 完整 tool_calls）。
+        """
+        started = time.perf_counter()
+        kwargs: dict[str, Any] = dict(params)
+        if tools is not None:
+            kwargs["tools"] = tools
+        stream = await self._client.chat.completions.create(
+            model=self._spec.model,
+            # 线格式在 _to_wire 构造并有测试兜底；cast 适配 SDK 的 TypedDict 入参
+            messages=cast(list[ChatCompletionMessageParam], _to_wire(messages)),
+            stream=True,
+            **kwargs,
+        )
+        parts: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        async for chunk in stream:
+            if not chunk.choices:
+                continue  # 部分供应商的末尾 usage chunk 无 choices
+            delta = chunk.choices[0].delta
+            piece = getattr(delta, "content", None)
+            if piece:
+                parts.append(piece)
+                yield piece
+            for tc in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(tc, "index", 0) or 0)
+                acc = calls.setdefault(index, {"id": "", "name": "", "arguments": []})
+                if getattr(tc, "id", None):
+                    acc["id"] = str(tc.id)
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        acc["name"] = str(fn.name)
+                    if getattr(fn, "arguments", None):
+                        acc["arguments"].append(str(fn.arguments))
+        yield ModelResponse(
+            content="".join(parts),
+            model=self._spec.model,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            tool_calls=[
+                ToolCall(
+                    id=str(call["id"]),
+                    name=str(call["name"]),
+                    arguments="".join(call["arguments"]),
+                )
+                for _, call in sorted(calls.items())
+            ],
+        )
+
     async def stream(
         self, messages: list[Message], **params: object
     ) -> AsyncIterator[str]:
-        """流式补全，逐段 yield 文本增量（不支持 tools，见基类说明）。"""
+        """流式补全，逐段 yield 文本增量（不带 tools 的纯文本流）。"""
         kwargs: dict[str, Any] = dict(params)
         stream = await self._client.chat.completions.create(
             model=self._spec.model,

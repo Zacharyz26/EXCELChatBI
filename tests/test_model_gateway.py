@@ -425,3 +425,186 @@ def test_parse_tool_calls_none_is_empty() -> None:
         tool_calls = None
 
     assert _parse_tool_calls(_Msg()) == []
+
+
+# ── 阶段3：stream_turn（带 tools 的流式轮次，Agent 循环用）──
+
+
+class _StreamTurnAdapter:
+    """按脚本产出文本增量 + 末尾 ModelResponse 的假 adapter。"""
+
+    def __init__(
+        self,
+        pieces: list[str] | None = None,
+        tool_calls: list[ToolCall] | None = None,
+        fail_before_first: bool = False,
+    ) -> None:
+        self._pieces = pieces or []
+        self._tool_calls = tool_calls or []
+        self._fail_before_first = fail_before_first
+        self.tools: list[dict[str, Any]] | None = None
+
+    async def stream_turn(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **params: object,
+    ) -> AsyncIterator[str | ModelResponse]:
+        self.tools = tools
+        if self._fail_before_first:
+            raise APIConnectionError(request=httpx.Request("POST", "http://t"))
+        for p in self._pieces:
+            yield p
+        yield ModelResponse(
+            content="".join(self._pieces), model="m", tool_calls=self._tool_calls
+        )
+
+
+async def _collect_turn(
+    gen: AsyncIterator[str | ModelResponse],
+) -> tuple[list[str], ModelResponse | None]:
+    pieces: list[str] = []
+    final: ModelResponse | None = None
+    async for item in gen:
+        if isinstance(item, ModelResponse):
+            final = item
+        else:
+            pieces.append(item)
+    return pieces, final
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_yields_text_then_response() -> None:
+    """正常轮次：文本增量逐段产出，最后一项是聚合 ModelResponse。"""
+    gw = ModelGateway(_registry())
+    calls = [ToolCall(id="c1", name="gen_chart", arguments="{}")]
+    _seed(gw, {"primary": _StreamTurnAdapter(["你", "好"], tool_calls=calls)})
+
+    pieces, final = await _collect_turn(
+        gw.stream_turn(Scenario.CORE_REASONING, _MSGS, tools=_TOOLS)
+    )
+
+    assert pieces == ["你", "好"]
+    assert final is not None
+    assert final.content == "你好"
+    assert final.tool_calls == calls
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_skips_unsupported_candidate_with_tools() -> None:
+    """带 tools 时跳过 supports_tools=False 的主选（决策10），tools 原样送达备选。"""
+    gw = ModelGateway(_tools_registry())
+    rec = _StreamTurnAdapter(["答"])
+    _seed(gw, {"backup": rec})  # primary 若被调用会走真实构造并失败 → 用例即穿帮
+
+    pieces, final = await _collect_turn(
+        gw.stream_turn(Scenario.CORE_REASONING, _MSGS, tools=_TOOLS)
+    )
+
+    assert pieces == ["答"]
+    assert final is not None and final.tool_calls == []
+    assert rec.tools == _TOOLS
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_all_unsupported_raises() -> None:
+    """全部候选都不支持工具 → 明确报错，不退化成普通聊天。"""
+    reg = _tools_registry()
+    reg._models["backup"] = ModelSpec(
+        "backup", "p", "m-backup", "", "key", supports_tools=False
+    )
+    gw = ModelGateway(reg)
+
+    with pytest.raises(RuntimeError, match="均不支持工具调用"):
+        await _collect_turn(gw.stream_turn(Scenario.CORE_REASONING, _MSGS, tools=_TOOLS))
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_falls_back_before_first_chunk() -> None:
+    """开流前失败 → 降级到备选，语义与 stream 一致。"""
+    gw = ModelGateway(_registry())
+    _seed(
+        gw,
+        {
+            "primary": _StreamTurnAdapter(fail_before_first=True),
+            "backup": _StreamTurnAdapter(["降级"]),
+        },
+    )
+
+    pieces, final = await _collect_turn(gw.stream_turn(Scenario.CORE_REASONING, _MSGS))
+
+    assert pieces == ["降级"]
+    assert final is not None and final.model == "m"
+
+
+# ── 阶段3：适配器 stream_turn 的 tool_calls 增量聚合 ──
+
+
+def _chunk(content: str | None = None, tool_deltas: list[Any] | None = None) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=tool_deltas))]
+    )
+
+
+def _tool_delta(
+    index: int, id: str | None = None, name: str | None = None, arguments: str | None = None
+) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments)
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_stream_turn_accumulates_tool_call_fragments() -> None:
+    """OpenAI 流式 tool_calls 分片按 index 聚合，arguments 原样拼接（红线3 归编排层）。"""
+    from types import SimpleNamespace
+
+    from packages.models.adapters.openai_compatible import OpenAICompatibleAdapter
+
+    chunks = [
+        _chunk(content="我先"),
+        _chunk(content="看看"),
+        _chunk(tool_deltas=[_tool_delta(0, id="c1", name="gen_chart", arguments='{"x"')]),
+        _chunk(tool_deltas=[_tool_delta(0, arguments=':"月份"}')]),
+        _chunk(tool_deltas=[_tool_delta(1, id="c2", name="kb_search", arguments="{}")]),
+    ]
+
+    class _FakeStream:
+        def __aiter__(self) -> Any:
+            self._it = iter(chunks)
+            return self
+
+        async def __anext__(self) -> Any:
+            try:
+                return next(self._it)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    created: dict[str, Any] = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            created.update(kwargs)
+            return _FakeStream()
+
+    adapter = OpenAICompatibleAdapter(ModelSpec("n", "p", "m-x", "", "key"))
+    adapter._client = cast(
+        Any, SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    )
+
+    pieces, final = await _collect_turn(adapter.stream_turn(_MSGS, tools=_TOOLS))
+
+    assert created["stream"] is True
+    assert created["tools"] == _TOOLS
+    assert pieces == ["我先", "看看"]
+    assert final is not None
+    assert final.content == "我先看看"
+    assert [(c.id, c.name, c.arguments) for c in final.tool_calls] == [
+        ("c1", "gen_chart", '{"x":"月份"}'),
+        ("c2", "kb_search", "{}"),
+    ]

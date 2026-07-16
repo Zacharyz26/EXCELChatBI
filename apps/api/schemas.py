@@ -118,26 +118,11 @@ class ConversationDetailResponse(BaseModel):
     artifacts: list[ArtifactResponse]
 
 
-class ChatRequest(BaseModel):
-    """对话请求。"""
-
-    session_id: str
-    message: str
-    image_refs: list[str] = []     # 多模态：图像引用（设计文档 F3）
-
-
 class ChatStreamRequest(BaseModel):
-    """阶段 1 的纯 LLM 流式对话请求。"""
+    """对话式 Agent 的流式对话请求（/chat/stream）。"""
 
     conversation_id: ConversationId
     message: ChatMessageText
-
-
-class ChatChunk(BaseModel):
-    """SSE 流式返回的增量片段。"""
-
-    type: str                      # token | step | chart | error
-    data: str
 
 
 class UploadResponse(BaseModel):

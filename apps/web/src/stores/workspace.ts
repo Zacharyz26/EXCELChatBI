@@ -11,6 +11,8 @@ import {
 } from "@/api/client";
 import type {
   ChatStreamEvent,
+  LiveTurnItem,
+  ToolStep,
   WorkspaceArtifact,
   WorkspaceConversation,
   WorkspaceDataset,
@@ -31,7 +33,8 @@ interface WorkspaceState {
   artifacts: WorkspaceArtifact[];
   activeProjectId: string | null;
   activeConversationId: string | null;
-  streamingMessageId: string | null;
+  /** 正在流式进行的 Agent 轮次卡片（理解/执行/工件/正文）；结束后并入 messages。 */
+  liveTurn: LiveTurnItem[];
   initialize: () => Promise<void>;
   selectProject: (projectId: string) => Promise<void>;
   addProject: (name: string) => Promise<void>;
@@ -43,6 +46,12 @@ interface WorkspaceState {
 }
 
 let navigationSequence = 0;
+let liveItemSequence = 0;
+
+function nextItemId(): string {
+  liveItemSequence += 1;
+  return `live-${liveItemSequence}`;
+}
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   initialized: false,
@@ -57,7 +66,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   artifacts: [],
   activeProjectId: null,
   activeConversationId: null,
-  streamingMessageId: null,
+  liveTurn: [],
 
   initialize: async () => {
     if (get().initialized || get().loading) return;
@@ -87,6 +96,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       datasets: [],
       messages: [],
       artifacts: [],
+      liveTurn: [],
       loading: true,
       error: null,
     });
@@ -144,6 +154,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activeConversationId: conversation.id,
         messages: [],
         artifacts: [],
+        liveTurn: [],
       }));
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
@@ -163,6 +174,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeConversationId: conversationId,
       messages: [],
       artifacts: [],
+      liveTurn: [],
       loading: true,
       error: null,
     });
@@ -234,7 +246,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({
       messages: [...state.messages, pendingUser],
       streaming: true,
-      streamingMessageId: null,
+      liveTurn: [],
       error: null,
     }));
 
@@ -243,15 +255,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         if (get().activeConversationId !== conversationId) return;
         if (event.event === "meta") {
           applyMetaEvent(event, temporaryUserId, conversationId, set);
-        } else if (event.event === "text.delta") {
-          const delta = stringValue(event.data.delta);
-          if (delta) appendDelta(delta, conversationId, set, get);
         } else if (event.event === "error") {
           terminalEventReceived = true;
           streamError = stringValue(event.data.message) || "对话生成失败，请重试。";
           set({ error: streamError });
         } else if (event.event === "done") {
           terminalEventReceived = true;
+        } else {
+          applyTurnEvent(event, set);
         }
       });
       if (!terminalEventReceived) {
@@ -262,22 +273,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     try {
-      const [detail, conversations] = await Promise.all([
+      // 工具轮可能产生了新消息、工件与衍生数据集：一并刷新
+      const [detail, conversations, datasets] = await Promise.all([
         getConversation(conversationId),
         listConversations(projectId),
+        listDatasets(projectId),
       ]);
       if (get().activeConversationId === conversationId) {
         set({
           messages: detail.messages,
           artifacts: detail.artifacts,
           conversations,
+          datasets,
           error: streamError,
         });
       }
     } catch (error) {
       set({ error: streamError ?? errorMessage(error) });
     } finally {
-      set({ streaming: false, streamingMessageId: null });
+      set({ streaming: false, liveTurn: [] });
     }
   },
 
@@ -285,7 +299,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 }));
 
 type WorkspaceSetter = StoreApi<WorkspaceState>["setState"];
-type WorkspaceGetter = StoreApi<WorkspaceState>["getState"];
 
 function applyMetaEvent(
   event: ChatStreamEvent,
@@ -293,28 +306,14 @@ function applyMetaEvent(
   conversationId: string,
   set: WorkspaceSetter,
 ): void {
-  const assistantMessageId = stringValue(event.data.message_id);
   const userMessageId = stringValue(event.data.user_message_id);
   const title = stringValue(event.data.title);
-  if (!assistantMessageId) return;
-  const assistant: WorkspaceMessage = {
-    id: assistantMessageId,
-    conversation_id: conversationId,
-    role: "assistant",
-    content: "",
-    tool_calls: null,
-    created_at: new Date().toISOString(),
-  };
   set((state) => ({
-    streamingMessageId: assistantMessageId,
-    messages: [
-      ...state.messages.map((message) => (
-        message.id === temporaryUserId && userMessageId
-          ? { ...message, id: userMessageId }
-          : message
-      )),
-      assistant,
-    ],
+    messages: state.messages.map((message) => (
+      message.id === temporaryUserId && userMessageId
+        ? { ...message, id: userMessageId }
+        : message
+    )),
     conversations: state.conversations.map((conversation) => (
       conversation.id === conversationId && title
         ? { ...conversation, title }
@@ -323,19 +322,86 @@ function applyMetaEvent(
   }));
 }
 
-function appendDelta(
-  delta: string,
-  conversationId: string,
+/** 把一条 14.5.3 透明度事件并入实时轮次卡片流。 */
+function applyTurnEvent(event: ChatStreamEvent, set: WorkspaceSetter): void {
+  if (event.event === "text.delta") {
+    const delta = stringValue(event.data.delta);
+    if (!delta) return;
+    set((state) => {
+      const items = [...state.liveTurn];
+      const last = items[items.length - 1];
+      if (last && last.kind === "text") {
+        items[items.length - 1] = { ...last, content: `${last.content}${delta}` };
+      } else {
+        items.push({ kind: "text", id: nextItemId(), content: delta });
+      }
+      return { liveTurn: items };
+    });
+  } else if (event.event === "understanding") {
+    const text = stringValue(event.data.text);
+    if (!text) return;
+    set((state) => {
+      // 工具轮开场白此前以 text.delta 流出：就地转换为“理解卡”，避免重复展示
+      const items = [...state.liveTurn];
+      const last = items[items.length - 1];
+      if (last && last.kind === "text") {
+        items[items.length - 1] = { kind: "understanding", id: last.id, text };
+      } else {
+        items.push({ kind: "understanding", id: nextItemId(), text });
+      }
+      return { liveTurn: items };
+    });
+  } else if (event.event === "plan") {
+    const steps = Array.isArray(event.data.steps) ? event.data.steps : [];
+    const toolSteps: ToolStep[] = steps
+      .filter((step): step is Record<string, unknown> => !!step && typeof step === "object")
+      .map((step) => ({
+        id: stringValue(step.id),
+        tool: stringValue(step.tool),
+        label: stringValue(step.label) || stringValue(step.tool),
+        status: "pending",
+      }));
+    if (toolSteps.length === 0) return;
+    set((state) => ({
+      liveTurn: [...state.liveTurn, { kind: "tools", id: nextItemId(), steps: toolSteps }],
+    }));
+  } else if (event.event === "tool_start") {
+    updateToolStep(set, stringValue(event.data.id), (step) => ({
+      ...step,
+      status: "running",
+      argsPreview: stringValue(event.data.args_preview) || step.argsPreview,
+    }));
+  } else if (event.event === "tool_end") {
+    const ok = stringValue(event.data.status) === "ok";
+    updateToolStep(set, stringValue(event.data.id), (step) => ({
+      ...step,
+      status: ok ? "ok" : "error",
+      summary: stringValue(event.data.summary) || step.summary,
+      message: stringValue(event.data.message) || step.message,
+    }));
+  } else if (event.event === "artifact") {
+    const artifact = event.data as unknown as WorkspaceArtifact;
+    if (!artifact || typeof artifact.id !== "string") return;
+    set((state) => ({
+      liveTurn: [...state.liveTurn, { kind: "artifact", id: nextItemId(), artifact }],
+    }));
+  }
+}
+
+function updateToolStep(
   set: WorkspaceSetter,
-  get: WorkspaceGetter,
+  stepId: string,
+  update: (step: ToolStep) => ToolStep,
 ): void {
-  const messageId = get().streamingMessageId;
-  if (!messageId) return;
+  if (!stepId) return;
   set((state) => ({
-    messages: state.messages.map((message) => (
-      message.id === messageId && message.conversation_id === conversationId
-        ? { ...message, content: `${message.content}${delta}` }
-        : message
+    liveTurn: state.liveTurn.map((item) => (
+      item.kind === "tools" && item.steps.some((step) => step.id === stepId)
+        ? {
+          ...item,
+          steps: item.steps.map((step) => (step.id === stepId ? update(step) : step)),
+        }
+        : item
     )),
   }));
 }

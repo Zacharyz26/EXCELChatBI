@@ -115,6 +115,70 @@ class ModelGateway:
             )
         raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
 
+    async def stream_turn(
+        self,
+        scenario: Scenario,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        params: dict[str, object] | None = None,
+    ) -> AsyncIterator[str | ModelResponse]:
+        """带 tools 的流式轮次（Agent 循环用）：文本增量即时产出，
+        最后一项恒为聚合的 `ModelResponse`（含完整 tool_calls）。
+
+        降级语义与 `stream` 相同：首个增量产出前失败切下一候选，开流后
+        中途失败如实上抛。带 tools 的请求跳过 supports_tools=False 的候选
+        （决策10：绝不静默丢工具能力）。
+
+        Raises:
+            RuntimeError: 所有候选模型均在开流前失败（或均不支持工具调用）。
+        """
+        route = self._registry.resolve(scenario)
+        candidates = [route.primary, *route.fallback]
+        extra = params or {}
+
+        # 13.5 可观测：记录发往模型的 payload 概况（角色与长度，不含原始数据）
+        _log.info(
+            "model.stream_turn.request",
+            scenario=scenario.value,
+            candidates=candidates,
+            with_tools=tools is not None,
+            message_roles=[m.role for m in messages],
+            payload_chars=sum(len(m.content) for m in messages),
+        )
+
+        last_error: Exception | None = None
+        for name in candidates:
+            spec = self._registry.get_model(name)
+            if tools is not None and not spec.supports_tools:
+                # 决策10：不支持 function calling 的候选直接跳过，绝不静默丢工具
+                _log.warning("model.skip_no_tools", model=name, scenario=scenario.value)
+                continue
+            call_params: dict[str, object] = {"temperature": route.temperature, **extra}
+            call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
+            try:
+                adapter = self._get_adapter(spec)
+                chunks = aiter(adapter.stream_turn(messages, tools=tools, **call_params))
+                first = await anext(chunks, None)
+            except (OpenAIError, ValueError) as exc:
+                last_error = exc
+                _log.warning("model.stream_turn.fallback", model=name, error=str(exc))
+                continue
+            # 已成功开流：之后的错误如实上抛，不再降级
+            if first is not None:
+                yield first
+                async for piece in chunks:
+                    yield piece
+            _log.info("model.stream_turn.done", model=spec.model)
+            return
+
+        if last_error is None and tools is not None:
+            raise RuntimeError(
+                f"场景 {scenario.value} 的候选模型（{candidates}）均不支持工具调用；"
+                "请在 config/models.yaml 为该场景配置 supports_tools 的模型（决策10）"
+            )
+        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
+
     async def stream(
         self,
         scenario: Scenario,
@@ -126,7 +190,7 @@ class ModelGateway:
 
         降级语义：**首个增量产出之前**失败（连接/鉴权/限流）→ 切下一候选；
         已开始产出后中途失败 → 如实上抛，不换模型重来（避免用户看到
-        两个模型拼接的答案）。不支持 tools（Agent 工具轮走 complete）。
+        两个模型拼接的答案）。不支持 tools（Agent 循环走 `stream_turn`）。
 
         Raises:
             RuntimeError: 所有候选模型均在开流前失败。

@@ -38,8 +38,19 @@ class ModelAdapter(abc.ABC):
     def stream(
         self, messages: list[Message], **params: object
     ) -> AsyncIterator[str]:
-        """流式补全，逐段产出文本增量。
+        """流式补全，逐段产出文本增量（不带 tools 的纯文本流）。"""
 
-        不支持 tools：Agent 循环的工具调用轮走 `complete`，仅最终答复轮
-        用 stream 流式输出（第 14 章 14.5.1 的设计取舍）。
+    @abc.abstractmethod
+    def stream_turn(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        **params: object,
+    ) -> AsyncIterator[str | ModelResponse]:
+        """带 tools 的流式轮次（Agent 循环用，14.5.1"返回文本流式吐前端"）。
+
+        逐段产出文本增量（str）；工具调用增量在内部聚合，轮次结束时产出
+        **最后一项** `ModelResponse`（含聚合全文与完整 tool_calls，arguments
+        保持原样 JSON 字符串，解析与校验仍归编排层，红线3）。
         """

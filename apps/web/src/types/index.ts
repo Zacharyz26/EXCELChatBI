@@ -99,6 +99,26 @@ export interface ChatStreamEvent {
   data: Record<string, unknown>;
 }
 
+// ── 对话式 Agent 实时轮次（阶段 3，SSE 事件 14.5.3 → 消息卡片）──
+
+/** 一次工具调用步骤（计划卡/执行卡合一渲染，随 tool_start/tool_end 更新）。 */
+export interface ToolStep {
+  id: string;
+  tool: string;
+  label: string;
+  status: "pending" | "running" | "ok" | "error";
+  argsPreview?: string;
+  summary?: string;
+  message?: string;
+}
+
+/** 正在流式进行的一轮 Agent 回复中的一个卡片。 */
+export type LiveTurnItem =
+  | { kind: "text"; id: string; content: string }
+  | { kind: "understanding"; id: string; text: string }
+  | { kind: "tools"; id: string; steps: ToolStep[] }
+  | { kind: "artifact"; id: string; artifact: WorkspaceArtifact };
+
 export interface KBCitation {
   source: string;
   snippet: string;
