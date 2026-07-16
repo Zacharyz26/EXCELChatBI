@@ -99,7 +99,32 @@ def load_metadata(dataset_ref: str) -> dict[str, Any] | None:
     p = _meta_path_of(dataset_ref)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else None
+
+
+def duplicate_row_count(dataset_ref: str) -> int:
+    """整行完全重复的行数（总行数 - 去重行数），下推 DuckDB 计算不进内存。
+
+    Args:
+        dataset_ref: 数据集引用。
+
+    Raises:
+        FileNotFoundError: 引用不存在。
+    """
+    path = _path_of(dataset_ref)
+    if not path.exists():
+        raise FileNotFoundError(f"数据集不存在: {dataset_ref}")
+    con = duckdb.connect()
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) - (SELECT COUNT(*) FROM (SELECT DISTINCT * FROM read_parquet(?))) "
+            "FROM read_parquet(?)",
+            [path.as_posix(), path.as_posix()],
+        ).fetchone()
+    finally:
+        con.close()
+    return int(row[0]) if row else 0
 
 
 # ── 第2层：聚合下推到 DuckDB 执行（数据不出环境；大表友好）──

@@ -68,6 +68,7 @@
 │   ├── stats/
 │   ├── chart/
 │   ├── report/
+│   ├── dataset_ops/          # 结构化变换/聚合（阶段2，决策3修订落点）
 │   ├── code_interpreter/
 │   └── internal_data/
 ├── packages/
@@ -142,6 +143,7 @@ uv run python -m mcp_servers.stats.server          # :8102
 uv run python -m mcp_servers.chart.server          # :8103
 uv run python -m mcp_servers.report.server         # :8104
 uv run python -m mcp_servers.code_interpreter.server  # :8105（沙箱选型确认后启用）
+uv run python -m mcp_servers.dataset_ops.server     # :8106（变换/聚合，阶段2新增）
 
 # 前端（Vite + TS，需 Node 18+ 与 pnpm）
 cd apps/web && pnpm install && pnpm dev            # 默认 http://127.0.0.1:5173
