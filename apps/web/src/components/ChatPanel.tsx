@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -76,6 +77,31 @@ export function ChatPanel() {
     );
   }
 
+  // 历史执行卡精确回放：role=tool 消息记录了每步 {tool_call_id, status, 摘要/错误}
+  const toolOutcomes = useMemo(() => {
+    const map: Record<string, ToolOutcome> = {};
+    for (const message of messages) {
+      if (message.role !== "tool") continue;
+      try {
+        const parsed: unknown = JSON.parse(message.content);
+        if (
+          parsed && typeof parsed === "object"
+          && typeof (parsed as Record<string, unknown>).tool_call_id === "string"
+        ) {
+          const record = parsed as Record<string, unknown>;
+          map[String(record.tool_call_id)] = {
+            status: record.status === "error" ? "error" : "ok",
+            summary: typeof record.summary === "string" ? record.summary : undefined,
+            message: typeof record.message === "string" ? record.message : undefined,
+          };
+        }
+      } catch {
+        /* 阶段3 之前的旧对话没有结果消息，忽略 */
+      }
+    }
+    return map;
+  }, [messages]);
+
   const busy = streaming || uploading;
 
   return (
@@ -97,6 +123,7 @@ export function ChatPanel() {
                 key={message.id}
                 message={message}
                 artifacts={artifacts.filter((item) => item.message_id === message.id)}
+                toolOutcomes={toolOutcomes}
                 onAdjust={adjustParams}
                 busy={busy}
               />
@@ -234,18 +261,26 @@ const TOOL_LABELS: Record<string, string> = {
 
 // ── 消息与卡片 ──
 
+interface ToolOutcome {
+  status: "ok" | "error";
+  summary?: string;
+  message?: string;
+}
+
 function MessageItem({
   message,
   artifacts,
+  toolOutcomes,
   onAdjust,
   busy,
 }: {
   message: WorkspaceMessage;
   artifacts: WorkspaceArtifact[];
+  toolOutcomes: Record<string, ToolOutcome>;
   onAdjust: (tool: string, label: string, argsJson: string) => void;
   busy: boolean;
 }) {
-  if (message.role === "tool") return null; // 工具结果原文不进消息流（工件卡承载）
+  if (message.role === "tool") return null; // 结果消息由执行卡消费，不直接展示
   const isUser = message.role === "user";
   const toolCalls = message.tool_calls ?? [];
   return (
@@ -263,6 +298,7 @@ function MessageItem({
               {toolCalls.map((call, index) => {
                 const tool = stringOf(call.name);
                 const args = prettyArguments(call.arguments);
+                const outcome = toolOutcomes[stringOf(call.id)];
                 return (
                   <ToolStepRow
                     key={stringOf(call.id) || index}
@@ -270,7 +306,9 @@ function MessageItem({
                       id: stringOf(call.id),
                       tool,
                       label: TOOL_LABELS[tool] ?? tool,
-                      status: "ok",
+                      status: outcome?.status ?? "ok",
+                      summary: outcome?.summary,
+                      message: outcome?.message,
                       argsPreview: args,
                     }}
                     onAdjust={onAdjust}

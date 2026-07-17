@@ -204,13 +204,18 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert artifact.params is not None and artifact.params["analysis_id"]
     assert by_name["artifact"]["id"] == artifact.id
 
-    # 消息：user + 工具轮 assistant（带 tool_calls）+ 最终 assistant；tool 结果不落消息表
+    # 消息：user + 工具轮 assistant（带 tool_calls）+ 每步结果（role=tool，供历史
+    # 执行卡精确回放）+ 最终 assistant；工具结果原文不落消息表
     messages = store.list_messages(conversation.id)
-    assert [m.role for m in messages] == ["user", "assistant", "assistant"]
+    assert [m.role for m in messages] == ["user", "assistant", "tool", "assistant"]
     assert messages[1].tool_calls == [
         {"id": "c1", "name": "get_data_profile", "arguments": '{"dataset_ref":"d1"}'}
     ]
-    assert messages[2].content == "结论：共 3 行。"
+    outcome = json.loads(messages[2].content)
+    assert outcome["tool_call_id"] == "c1"
+    assert outcome["status"] == "ok"
+    assert "3 行" in outcome["summary"]
+    assert messages[3].content == "结论：共 3 行。"
 
     # 第二轮模型请求里回填了 tool 结果
     second_call = gateway.calls[1]["messages"]
@@ -272,6 +277,16 @@ async def test_consecutive_same_tool_same_args_circuit_breaks(
     assert "熔断" in ends[1]["message"]
     assert len(registry.executed) == 1          # 第二次没有真正执行
     assert gateway.calls[2]["tools"] is None    # 熔断后禁用 tools 强制作答
+    # 每步结果都有回放记录（含未执行的熔断步）
+    outcomes = [
+        json.loads(m.content)
+        for m in store.list_messages(conversation.id)
+        if m.role == "tool"
+    ]
+    assert [(o["tool_call_id"], o["status"]) for o in outcomes] == [
+        ("c1", "ok"),
+        ("c2", "error"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -13,8 +13,8 @@
 ```
 
 - **Dify 已放弃**（2026-07 拍板，理由见设计文档 5.2）：门控必须落在代码里；离线局域网下 Dify 照样要自部署 embedding；助手主体自研后其低代码卖点用不上。**不要再按"A 轨 = Dify"开发。**
-- **产品形态（v2.2 定案，设计文档第 14 章）**：对话式数据分析 Agent——自然语言对话是主入口（`/chat/stream` SSE + DeepSeek function-calling 循环，`Scenario.AGENT`），Agent 自动规划并调用全部分析工具。**重构中，五阶段迁移，第 14 章为当前阶段唯一开发依据。**
-- **过渡期**：FastAPI 路由直调编排函数（analyze / stats / report / kb）与旧功能页**迁移完成前一律保留**，灰度后收敛。
+- **产品形态（v2.3，设计文档第 14 章重构已完成）**：对话式数据分析 Agent——自然语言对话是**唯一产品入口**（`/chat/stream` SSE + DeepSeek function-calling 循环，`Scenario.AGENT`），Agent 自动规划并调用全部分析工具，SSE 透明度卡片全程可见。
+- **兼容 API**：旧直调端点（/analyze、/analyze/stats、/analyze/report、/kb/*）保留，红线1 的原有端点门控继续生效；经典五页前端已于阶段 4 按能力清单核对后下线。
 - **复杂多步分析**：暂不实现；引入时再评估 LangGraph vs 自研状态机。
 - MCP 工具当前以进程内 `Tool.invoke` 挂载（仍强制 schema 校验）；MCP-over-HTTP 是可选演进，不是现状。
 
@@ -91,25 +91,19 @@
 - 用户可见文案、prompt、解读输出一律中文。
 - 提交前过 lint 与类型检查。
 
-## 7. 当前阶段范围（对话式 Agent 重构，设计文档第 14 章，别越界）
+## 7. 当前阶段范围（对话式 Agent 重构已完成 v2.3，别越界）
 
 **已完成（勿重复开发）：**
-- Excel 分析出图（含带错重规划）、统计四件套（趋势/异常/回归/相关）+ 中文解读、知识库问答（词面替身后端）、报告导出（MD+PDF）、图表截图（Playwright）、模型路由网关、React 前端（旧五页）。
+- **对话式 Agent 全链路（14.8 五阶段全部交付）**：模型网关（tool_calls/stream/`stream_turn`/`Scenario.AGENT`）、SQLite 对话工作区（项目/数据集/对话/消息/工件 + LRU 热缓存）、Agent 工具注册表（11 个工具，喂模型 parameters 与 Tool.invoke 校验 schema 同源）、Agent 循环（`/chat/stream`：真流式 + 14.5.3 SSE 透明度协议 + 分析登记表 + 护栏：调用数上限/同参熔断/带错重试）、经典五页下线（能力清单核对后；知识库摄入/概览迁入上下文面板）、历史执行卡精确回放（role=tool 结果消息）。
+- Excel 分析出图（含带错重规划）、统计四件套（趋势/异常/回归/相关）+ 中文解读、知识库问答（词面替身后端）、报告导出（MD+PDF）、图表截图（Playwright）。
+- 旧端点 /analyze、/analyze/stats、/analyze/report、/kb/* 为**兼容 API**：保留、按红线1 原有门控执行，不得随意下线或放松。
 
-**本阶段做——五阶段迁移（14.8），执行纪律最高优先级：**
+**待调优（不改架构）：**
+- Agent 循环护栏阈值（`AGENT_MAX_TOOL_CALLS` 等，14.5.1 初值）按真实使用调优。
 
-> **纪律 1：严格按阶段顺序走（0→1→2→3→4），不跳阶段、不一口气冲到底。每个阶段完成后停下，交用户独立验证 + 提交，确认后才进下一阶段。**
-> **纪律 2：旧分析能力（五个功能页与对应端点）迁移完成前一律保留，不丢功能。**
-
-- 阶段 0 网关地基：Message 加 tool_calls、adapter 传 tools、实现 stream、新增 `Scenario.AGENT`（降级链剔除不支持 function-calling 的模型）。
-- 阶段 1 对话工作区：SQLite 持久层（项目/对话/消息/工件）+ CRUD API + 前端新骨架（侧边栏/消息流/输入框+上传，zustand）。
-- 阶段 2 工具封装：Agent 工具注册表（现有 8 个 + 新增 transform_dataset / aggregate_preview）+ 衍生数据集血缘 + report 组装式重构。
-- 阶段 3 Agent 循环：function-calling 循环 + SSE 透明度协议 + 分析登记表 + 追问关联 + 快捷指令条。
-- 阶段 4 迁移收尾：旧页面"经典模式"灰度 → 能力清单核对后下线；文档升版。
-
-**本阶段明确不做（已拍板）：**
-- 自由 SQL 取数（决策 3 修订后仍禁止；只做结构化枚举白名单工具）。
-- bge-m3/Milvus 检索升级（**独立并行轨**，本重构用替身检索开发，两轨互不阻塞）。
+**当前明确不做（已拍板）：**
+- 自由 SQL 取数（决策 3 修订后仍禁止；只有结构化枚举白名单工具）。
+- bge-m3/Milvus 检索升级（**独立并行轨**，替身检索仍在线，两轨互不阻塞）。
 - Redis session（触发条件不变：多 worker/多实例）。
 - B 轨复杂多步、内部数据接入、多租户审计、MCP-over-HTTP、MinIO/PostgreSQL 接入、全量上下文压缩与指代消解（登记表瘦身除外）、多模态识图。
 

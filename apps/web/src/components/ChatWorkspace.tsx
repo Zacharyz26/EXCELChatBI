@@ -1,14 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { ingestSamples, kbOverview } from "@/api/client";
 import { ChatPanel } from "@/components/ChatPanel";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { WorkspaceArtifact, WorkspaceDataset } from "@/types";
+import type { KBOverview, WorkspaceArtifact, WorkspaceDataset } from "@/types";
 
-interface ChatWorkspaceProps {
-  onOpenClassic: () => void;
-}
-
-/** 对话式产品主入口；经典五页仍通过显式入口保留。 */
-export function ChatWorkspace({ onOpenClassic }: ChatWorkspaceProps) {
+/** 对话式产品主入口（阶段4：经典五页已下线，全部能力经对话链路提供）。 */
+export function ChatWorkspace() {
   const initialize = useWorkspaceStore((state) => state.initialize);
   const initialized = useWorkspaceStore((state) => state.initialized);
   const loading = useWorkspaceStore((state) => state.loading);
@@ -139,11 +136,6 @@ export function ChatWorkspace({ onOpenClassic }: ChatWorkspaceProps) {
           </div>
         </div>
 
-        <button type="button" className="classic-mode-button" onClick={onOpenClassic} disabled={busy}>
-          <GridIcon />
-          <span><strong>经典模式</strong><small>使用原分析功能页</small></span>
-          <span aria-hidden="true">→</span>
-        </button>
       </aside>
 
       {sidebarOpen && (
@@ -194,39 +186,88 @@ function DatasetContext({
   const profileArtifact = [...artifacts]
     .reverse()
     .find((artifact) => artifact.type === "profile" && artifact.dataset_ref);
-  const dataset = datasets.find((item) => item.ref === profileArtifact?.dataset_ref);
-  if (!dataset) {
-    return (
-      <aside className="dataset-context" aria-label="数据上下文">
-        <div className="context-heading"><span>CONTEXT</span><h2>数据上下文</h2></div>
-        <div className="context-empty">
-          <DatasetIcon />
-          <strong>尚未连接数据</strong>
-          <p>从输入框左侧上传 Excel 后，字段画像会显示在这里。</p>
-        </div>
-      </aside>
-    );
-  }
+  const dataset = datasets.find((item) => item.ref === profileArtifact?.dataset_ref)
+    ?? datasets[datasets.length - 1];
+  const columns = dataset && Array.isArray(dataset.profile.columns)
+    ? dataset.profile.columns
+    : [];
 
-  const columns = Array.isArray(dataset.profile.columns) ? dataset.profile.columns : [];
   return (
     <aside className="dataset-context" aria-label="数据上下文">
-      <div className="context-heading"><span>CONTEXT</span><h2>当前数据集</h2></div>
-      <div className="context-dataset-name">
-        <div><DatasetIcon /></div>
-        <span><strong>{dataset.filename}</strong><small>{dataset.profile.row_count} 行 · {dataset.profile.column_count} 列</small></span>
-      </div>
-      <div className="context-section-title">字段</div>
-      <div className="context-fields">
-        {columns.map((column) => (
-          <div key={column.name}>
-            <span>{column.name}</span>
-            <small>{column.dtype}</small>
+      {dataset ? (
+        <>
+          <div className="context-heading"><span>CONTEXT</span><h2>当前数据集</h2></div>
+          <div className="context-dataset-name">
+            <div><DatasetIcon /></div>
+            <span><strong>{dataset.filename}</strong><small>{dataset.profile.row_count} 行 · {dataset.profile.column_count} 列</small></span>
           </div>
-        ))}
-      </div>
-      {datasets.length > 1 && <p className="context-more">另有 {datasets.length - 1} 个历史数据集</p>}
+          <div className="context-section-title">字段</div>
+          <div className="context-fields">
+            {columns.map((column) => (
+              <div key={column.name}>
+                <span>{column.name}</span>
+                <small>{column.dtype}</small>
+              </div>
+            ))}
+          </div>
+          {datasets.length > 1 && <p className="context-more">另有 {datasets.length - 1} 个历史数据集</p>}
+        </>
+      ) : (
+        <>
+          <div className="context-heading"><span>CONTEXT</span><h2>数据上下文</h2></div>
+          <div className="context-empty">
+            <DatasetIcon />
+            <strong>尚未连接数据</strong>
+            <p>从输入框左侧上传 Excel 后，字段画像会显示在这里。</p>
+          </div>
+        </>
+      )}
+      <KnowledgeSection />
     </aside>
+  );
+}
+
+/** 知识库入口（原知识库页的摄入/概览能力迁入，问答走对话 kb_search）。 */
+function KnowledgeSection() {
+  const [overview, setOverview] = useState<KBOverview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    kbOverview().then(setOverview).catch(() => setOverview(null));
+  }, []);
+
+  async function onIngest() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await ingestSamples();
+      setNotice(`已摄入 ${result.ingested_docs} 篇文档，共 ${result.total_chunks} 个片段`);
+      setOverview(await kbOverview());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "摄入失败，请稍后重试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="context-knowledge">
+      <div className="context-section-title">知识库</div>
+      {overview && overview.chunk_count > 0 ? (
+        <p className="context-knowledge__summary">
+          {overview.chunk_count} 个片段
+          {overview.topics.length > 0 && ` · 主题：${overview.topics.join("、")}`}
+          <br />在对话中直接询问指标口径即可检索。
+        </p>
+      ) : (
+        <p className="context-knowledge__summary">知识库为空，可先摄入样例文档。</p>
+      )}
+      <button type="button" onClick={() => void onIngest()} disabled={busy}>
+        {busy ? "正在摄入…" : "摄入样例知识库"}
+      </button>
+      {notice && <p className="context-knowledge__notice">{notice}</p>}
+    </div>
   );
 }
 
@@ -248,10 +289,6 @@ function DatasetIcon() {
 
 function MessageIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 3Z" /></svg>;
-}
-
-function GridIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /></svg>;
 }
 
 function MenuIcon() {

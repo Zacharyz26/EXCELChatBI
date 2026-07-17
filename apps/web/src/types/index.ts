@@ -28,18 +28,6 @@ export interface UploadResponse {
   artifact?: WorkspaceArtifact | null;
 }
 
-export interface ChartResponse {
-  chart_id: string;
-  chart_type: string;
-  option: Record<string, unknown>; // ECharts option（数值来自真实数据）
-}
-
-export interface ChatRequest {
-  session_id: string;
-  message: string;
-  image_refs?: string[];
-}
-
 // ── 对话工作区（阶段 1）──
 
 export interface WorkspaceProject {
@@ -119,18 +107,6 @@ export type LiveTurnItem =
   | { kind: "tools"; id: string; steps: ToolStep[] }
   | { kind: "artifact"; id: string; artifact: WorkspaceArtifact };
 
-export interface KBCitation {
-  source: string;
-  snippet: string;
-  section?: string | null;
-}
-
-export interface KBQueryResponse {
-  answer: string;
-  citations: KBCitation[];
-  is_empty: boolean;
-}
-
 export interface IngestResponse {
   ingested_docs: number;
   chunks: number;
@@ -141,107 +117,4 @@ export interface KBOverview {
   chunk_count: number;
   sources: string[];
   topics: string[];
-}
-
-// ── 统计分析（/analyze/stats）──
-
-export type StatsKind = "trend" | "anomaly" | "regression" | "correlation";
-
-export interface TrendResult {
-  method: string;
-  direction: string;
-  slope: number | null;
-  seasonality_strength: number | null;
-  ma_window: number;
-  n: number;
-  time: string[] | null;
-  points: {
-    trend: (number | null)[];
-    seasonal: (number | null)[];
-    resid: (number | null)[];
-  };
-  forecast: (number | null)[];
-}
-
-export interface AnomalyPoint {
-  index: number;
-  value: number | null;
-  score: number | null;
-  time?: string;
-}
-
-export interface AnomalyResult {
-  method: string;
-  n_total: number;
-  n_anomalies: number;
-  anomalies: AnomalyPoint[];
-}
-
-export interface RegressionCoef {
-  name: string;
-  coef: number | null;
-  std_err: number | null;
-  p_value: number | null;
-  significant: boolean;
-}
-
-export interface RegressionResult {
-  kind: string;
-  r_squared: number | null;
-  adj_r_squared: number | null;
-  n_obs: number;
-  model_pvalue: number | null;
-  coefficients: RegressionCoef[];
-}
-
-export interface CorrelationPair {
-  a: string;
-  b: string;
-  corr: number | null;
-  p_value: number | null;
-  significant: boolean;
-}
-
-export interface CorrelationResult {
-  method: string;
-  columns: string[];
-  n_obs: number;
-  matrix: (number | null)[][];
-  top_pairs: CorrelationPair[];
-}
-
-export type StatsResult = TrendResult | AnomalyResult | RegressionResult | CorrelationResult;
-
-export interface StatsResponse {
-  kind: StatsKind;
-  result: StatsResult;
-  interpretation: string | null;
-}
-
-// ── 报告导出（/analyze/report）──
-
-export interface ReportChartSpec {
-  chart_type: string;
-  encoding: Record<string, unknown>;
-  caption?: string;
-}
-
-export interface ReportStatSpec {
-  kind: StatsKind;
-  params: Record<string, unknown>;
-  caption?: string;
-}
-
-export interface ReportRequest {
-  dataset_ref: string;
-  title: string;
-  charts: ReportChartSpec[];
-  stats: ReportStatSpec[];
-  interpret: boolean;
-}
-
-export interface ReportResponse {
-  report_id: string;
-  md_url: string;
-  pdf_url: string;
 }

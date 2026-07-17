@@ -349,6 +349,16 @@ async def stream_agent_chat(
                     working.append(
                         ModelMessage(role="tool", content=feedback, tool_call_id=call.id)
                     )
+                    await _persist_tool_outcome(
+                        store,
+                        conversation_id,
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "status": "error",
+                            "message": feedback,
+                        },
+                    )
                     continue
 
                 calls_used += 1
@@ -371,6 +381,16 @@ async def stream_agent_chat(
                             tool_call_id=call.id,
                         )
                     )
+                    await _persist_tool_outcome(
+                        store,
+                        conversation_id,
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "status": "error",
+                            "message": error_text,
+                        },
+                    )
                     continue
 
                 artifact = await _persist_artifact(
@@ -383,6 +403,16 @@ async def stream_agent_chat(
                 yield _event(
                     "tool_end",
                     {"id": call.id, "tool": call.name, "status": "ok", "summary": summary},
+                )
+                await _persist_tool_outcome(
+                    store,
+                    conversation_id,
+                    {
+                        "tool_call_id": call.id,
+                        "tool": call.name,
+                        "status": "ok",
+                        "summary": summary,
+                    },
                 )
                 model_view = _model_view(call.name, result, config.tool_result_max_chars)
                 _log.info(
@@ -547,6 +577,29 @@ def _history_messages(
 
 
 # ── 工具执行与工件持久化 ──
+
+
+async def _persist_tool_outcome(
+    store: SessionStore, conversation_id: str, outcome: JsonObject
+) -> None:
+    """把一步工具执行结果落为 role=tool 消息（历史执行卡精确回放，阶段4）。
+
+    非关键路径：写入失败只记日志，不中断本轮对话。
+    """
+    try:
+        await run_in_threadpool(
+            store.append_message,
+            conversation_id=conversation_id,
+            role="tool",
+            content=json.dumps(outcome, ensure_ascii=False, separators=(",", ":")),
+        )
+    except sqlite3.Error as exc:
+        _log.warning(
+            "agent.persist_tool_outcome_failed",
+            conversation_id=conversation_id,
+            tool=outcome.get("tool"),
+            error=str(exc),
+        )
 
 
 async def _execute_tool(
