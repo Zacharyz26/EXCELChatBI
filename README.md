@@ -74,6 +74,11 @@ cd apps/web && pnpm install && pnpm dev
 uv run pytest
 uv run ruff check .
 uv run mypy .
+
+# 7. 浏览器 E2E（首次运行先安装 Chromium）
+cd apps/web
+pnpm exec playwright install chromium
+pnpm test:e2e
 ```
 
 > 未装 uv/pytest 时，骨架冒烟测试也可用标准库直接跑：`python3 -m unittest discover -s tests`
