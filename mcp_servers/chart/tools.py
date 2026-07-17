@@ -93,7 +93,11 @@ def _aggregate(
 def _categorical_option(
     chart_type: str, x_col: str, y_col: str, cats: list, values: list
 ) -> dict[str, Any]:
-    """组装类目型图表（line/bar/pie）的 ECharts option。"""
+    """组装类目型图表（line/bar/pie）的 ECharts option。
+
+    视觉默认值：柱状图限制柱宽（barMaxWidth），避免分类少时柱子过宽；
+    grid containLabel 收敛四周留白。纯样式，数值仍全部来自真实聚合（红线2）。
+    """
     title = f"{y_col} by {x_col}"
     if chart_type == "pie":
         return {
@@ -109,12 +113,17 @@ def _categorical_option(
                 }
             ],
         }
+    series: dict[str, Any] = {"name": y_col, "type": chart_type, "data": values}
+    if chart_type == "bar":
+        series["barMaxWidth"] = 48
+        series["itemStyle"] = {"borderRadius": [4, 4, 0, 0]}
     return {
         "title": {"text": title},
         "tooltip": {"trigger": "axis"},
+        "grid": {"left": 12, "right": 20, "top": 48, "bottom": 12, "containLabel": True},
         "xAxis": {"type": "category", "data": [str(c) for c in cats]},
         "yAxis": {"type": "value"},
-        "series": [{"name": y_col, "type": chart_type, "data": values}],
+        "series": [series],
     }
 
 

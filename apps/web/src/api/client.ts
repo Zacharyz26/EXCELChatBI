@@ -86,11 +86,65 @@ export async function createConversation(
   return resp.json();
 }
 
+/** 重命名历史对话。 */
+export async function updateConversation(
+  conversationId: string,
+  title: string,
+): Promise<WorkspaceConversation> {
+  const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 删除历史对话（级联删除其消息与工件）。 */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) return asError(resp);
+}
+
 /** 读取一个对话的消息和工件快照。 */
 export async function getConversation(conversationId: string): Promise<ConversationDetail> {
   const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`);
   if (!resp.ok) return asError(resp);
   return resp.json();
+}
+
+/** 重命名数据集显示名。 */
+export async function updateDataset(
+  datasetRef: string,
+  filename: string,
+): Promise<WorkspaceDataset> {
+  const resp = await fetch(`${API_BASE}/datasets/${encodeURIComponent(datasetRef)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename }),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 删除数据集。被对话引用且未 force 时后端返回 409（误删保护），此处转为 warning。 */
+export async function deleteDataset(
+  datasetRef: string,
+  force = false,
+): Promise<{ deleted: boolean; warning?: string }> {
+  const url = `${API_BASE}/datasets/${encodeURIComponent(datasetRef)}${force ? "?force=true" : ""}`;
+  const resp = await fetch(url, { method: "DELETE" });
+  if (resp.status === 409) {
+    const body = await resp.json().catch(() => null);
+    return {
+      deleted: false,
+      warning: typeof body?.detail === "string" ? body.detail : "数据集正在被使用。",
+    };
+  }
+  if (!resp.ok) return asError(resp);
+  return { deleted: true };
 }
 
 /** 读取项目内登记的数据集。 */

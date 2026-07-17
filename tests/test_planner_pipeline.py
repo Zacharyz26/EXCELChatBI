@@ -84,3 +84,6 @@ async def test_full_link_numbers_from_data(dataset_ref: str) -> None:
     # 红线2：数值是真实聚合（华东=1200.5+1800=3000.5，华北=950+900=1850）
     assert by_cat["华东"] == 3000.5
     assert by_cat["华北"] == 1850.0
+    # 视觉默认值：柱宽上限防止分类少时柱子过宽；grid 收敛留白（纯样式不碰数值）
+    assert option["series"][0]["barMaxWidth"] == 48
+    assert option["grid"]["containLabel"] is True

@@ -9,6 +9,7 @@ import {
 } from "react";
 import { fileUrl } from "@/api/client";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
+import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
   LiveTurnItem,
@@ -32,10 +33,20 @@ export function ChatPanel() {
   const clearError = useWorkspaceStore((state) => state.clearError);
   const [draft, setDraft] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  // 是否“贴底”：用户上滚阅读时停止自动跟随，回到底部附近后恢复
+  const stickToBottomRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  function onMessagesScroll() {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  }
+
   useEffect(() => {
+    if (!stickToBottomRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: streaming ? "auto" : "smooth" });
   }, [messages, liveTurn, streaming]);
 
@@ -43,6 +54,7 @@ export function ChatPanel() {
     const content = draft.trim();
     if (!content || !activeConversationId || streaming || uploading) return;
     setDraft("");
+    stickToBottomRef.current = true; // 自己发消息后跳到最新回复
     await sendMessage(content);
   }
 
@@ -93,6 +105,7 @@ export function ChatPanel() {
             status: record.status === "error" ? "error" : "ok",
             summary: typeof record.summary === "string" ? record.summary : undefined,
             message: typeof record.message === "string" ? record.message : undefined,
+            fields: typeof record.fields === "string" ? record.fields : undefined,
           };
         }
       } catch {
@@ -106,7 +119,12 @@ export function ChatPanel() {
 
   return (
     <section className="chat-panel" aria-label="对话消息">
-      <div className="chat-messages" aria-live="polite">
+      <div
+        className="chat-messages"
+        aria-live="polite"
+        ref={messagesScrollRef}
+        onScroll={onMessagesScroll}
+      >
         {loading && messages.length === 0 ? (
           <div className="chat-loading">
             <span /><span /><span />
@@ -265,6 +283,7 @@ interface ToolOutcome {
   status: "ok" | "error";
   summary?: string;
   message?: string;
+  fields?: string;
 }
 
 function MessageItem({
@@ -292,7 +311,9 @@ function MessageItem({
           <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
         </div>
         <div className="message-bubble">
-          {message.content && <p>{message.content}</p>}
+          {message.content && (
+            isUser ? <p>{message.content}</p> : <MarkdownText content={message.content} />
+          )}
           {toolCalls.length > 0 && (
             <div className="tool-steps-card">
               {toolCalls.map((call, index) => {
@@ -309,6 +330,7 @@ function MessageItem({
                       status: outcome?.status ?? "ok",
                       summary: outcome?.summary,
                       message: outcome?.message,
+                      fields: outcome?.fields,
                       argsPreview: args,
                     }}
                     onAdjust={onAdjust}
@@ -341,7 +363,12 @@ function LiveTurnBlock({ items }: { items: LiveTurnItem[] }) {
           {items.map((item, index) => {
             const isLast = index === items.length - 1;
             if (item.kind === "text") {
-              return <p key={item.id}>{item.content}{isLast && <TypingCursor />}</p>;
+              return (
+                <div key={item.id} className="live-text">
+                  <MarkdownText content={item.content} />
+                  {isLast && <TypingCursor />}
+                </div>
+              );
             }
             if (item.kind === "understanding") {
               return (
@@ -413,8 +440,8 @@ function ToolStepRow({
           </button>
         )}
       </div>
-      {step.argsPreview && !adjusting && (
-        <code className="tool-step__args">{step.argsPreview}</code>
+      {step.fields && !adjusting && (
+        <p className="tool-step__fields">{step.fields}</p>
       )}
       {adjusting && (
         <form className="tool-step__form" onSubmit={submitAdjust}>

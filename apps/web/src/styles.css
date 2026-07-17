@@ -1372,18 +1372,6 @@ select {
   background: #f3f5ff;
 }
 
-.tool-step__args {
-  display: block;
-  overflow-x: auto;
-  margin-top: 6px;
-  padding: 6px 8px;
-  color: #66718a;
-  font-size: 10.5px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  background: #f7f8fb;
-  border-radius: 7px;
-}
 
 .tool-step__form {
   margin-top: 7px;
@@ -1622,4 +1610,382 @@ select {
   margin: 8px 0 0;
   color: #26805e;
   font-size: 10.5px;
+}
+
+/* ── 可读性修复：助手正文 Markdown 排版 ── */
+
+.md-content {
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.md-content > *:first-child { margin-top: 0; }
+.md-content > *:last-child { margin-bottom: 0; }
+
+.md-content p {
+  margin: 0 0 8px;
+}
+
+.md-content ul,
+.md-content ol {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+}
+
+.md-content li {
+  margin: 2px 0;
+}
+
+.md-content li::marker {
+  color: #8b96a6;
+}
+
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4 {
+  margin: 14px 0 6px;
+  color: #2a3447;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.md-content strong {
+  color: #263248;
+}
+
+.md-content code {
+  padding: 1px 5px;
+  color: #4d61ce;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  background: #f3f5ff;
+  border-radius: 5px;
+}
+
+.md-content pre {
+  overflow-x: auto;
+  margin: 6px 0 10px;
+  padding: 10px;
+  background: #f7f8fb;
+  border-radius: 8px;
+}
+
+.md-content pre code {
+  padding: 0;
+  color: #303b4e;
+  background: transparent;
+}
+
+.md-content blockquote {
+  margin: 6px 0 10px;
+  padding: 4px 12px;
+  color: #66718a;
+  border-left: 3px solid #ccd4f0;
+}
+
+.md-content hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid #e8ebf1;
+}
+
+.md-table-scroll {
+  overflow-x: auto;
+  margin: 6px 0 10px;
+  border: 1px solid #e5e9f0;
+  border-radius: 8px;
+}
+
+.md-content table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.md-content th,
+.md-content td {
+  padding: 6px 11px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.md-content th {
+  color: #8b96a6;
+  font-size: 10.5px;
+  background: #fafbfc;
+}
+
+.md-content tr:last-child td {
+  border-bottom: none;
+}
+
+.live-text {
+  position: relative;
+}
+
+/* ── 可读性修复：执行卡人话参数行 ── */
+
+.tool-step__fields {
+  overflow: hidden;
+  display: -webkit-box;
+  margin: 5px 0 0 26px;
+  color: #77839a;
+  font-size: 11px;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* ── 对话项：主按钮 + 悬停操作（重命名/删除）── */
+
+.conversation-item__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.conversation-item__main > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-item__action {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: #76869a;
+  font-size: 12px;
+  line-height: 1;
+  visibility: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.conversation-item:hover .conversation-item__action,
+.conversation-item--active .conversation-item__action {
+  visibility: visible;
+}
+
+.conversation-item__action:hover:not(:disabled) {
+  color: #e3e9f2;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.conversation-item__action--danger:hover:not(:disabled) {
+  color: #ff8f88;
+}
+
+.conversation-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px;
+}
+
+.conversation-rename-form input {
+  min-width: 0;
+  height: 28px;
+  flex: 1;
+  padding: 0 8px;
+  color: #e9eef6;
+  font-size: 11.5px;
+  background: #1a2434;
+  border: 1px solid #344156;
+  border-radius: 6px;
+}
+
+.conversation-rename-form button {
+  padding: 4px 8px;
+  color: #dce4ff;
+  font-size: 10.5px;
+  background: #33448e;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.conversation-rename-form button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 助手气泡占满行宽：图表/表格卡不再被文字宽度压窄 */
+.message-row--assistant .message-content {
+  flex: 1;
+}
+
+/* ── 数据集条目：可点选查看 + 悬停删除 ── */
+
+.dataset-item__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.dataset-item__main > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dataset-item__main:hover {
+  color: #d8dfeb;
+}
+
+.dataset-item--active {
+  color: #d8dfeb;
+  background: rgba(255, 255, 255, 0.045);
+  border-radius: 6px;
+}
+
+.dataset-item__action {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: #76869a;
+  font-size: 12px;
+  line-height: 1;
+  visibility: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dataset-item:hover .dataset-item__action {
+  visibility: visible;
+}
+
+.dataset-item__action:hover:not(:disabled) {
+  color: #e3e9f2;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.dataset-item__action--danger:hover:not(:disabled) {
+  color: #ff8f88;
+}
+
+.dataset-item__badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: #7ec7a4;
+  font-size: 9px;
+  background: rgba(56, 142, 104, 0.18);
+  border-radius: 999px;
+}
+
+.context-lineage {
+  margin: -6px 0 12px;
+  color: #8b96a6;
+  font-size: 10.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* ── 上下文面板：对话-数据集关联 ── */
+
+.context-use-button {
+  margin: 0 0 14px;
+  padding: 6px 13px;
+  color: #4d61ce;
+  font-size: 11px;
+  background: #f3f5ff;
+  border: 1px solid #ccd4f0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.context-use-button:hover:not(:disabled) {
+  background: #e5e9fd;
+}
+
+.context-use-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.context-used-datasets {
+  display: grid;
+  gap: 4px;
+}
+
+.context-used-dataset {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: #4d5a70;
+  font-size: 11.5px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.context-used-dataset:hover {
+  background: #f3f5ff;
+}
+
+.context-used-dataset--current {
+  color: #2a3447;
+  background: #f3f5ff;
+  border-color: #dfe4f8;
+}
+
+.context-used-dataset svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.context-used-dataset > span {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-used-dataset small {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: #8b96a6;
+  font-size: 9px;
+  background: #eef1f6;
+  border-radius: 999px;
 }

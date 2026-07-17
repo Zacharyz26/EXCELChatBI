@@ -66,6 +66,12 @@ class ConversationResponse(BaseModel):
     updated_at: str
 
 
+class DatasetUpdate(BaseModel):
+    """重命名数据集显示名。"""
+
+    filename: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+
+
 class DatasetResponse(BaseModel):
     """项目内数据集登记项。"""
 

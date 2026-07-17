@@ -181,12 +181,14 @@ def build_registry(
         ),
         _wrap_mcp(
             stats, "correlation",
-            "相关性分析（Pearson/Spearman）：给定 ≥2 个数值列，输出相关矩阵与强相关对。",
+            "相关性分析（Pearson/Spearman）：给定 ≥2 个数值列，输出相关矩阵与强相关对"
+            "（含 p_value/significant）。结果仅支持共变关系结论，不支持因果推断。",
         ),
         _wrap_mcp(
             chart, "gen_chart",
-            "生成 ECharts 图表：选择图型(line/bar/pie/scatter)与列映射，"
-            "数据由服务端真实聚合。用户要看图/可视化时调用。",
+            "生成 ECharts 图表：选择图型(line/bar/pie/scatter)与列映射(encoding.x/y/agg)，"
+            "工具内部会对原始数据真实聚合，**无需先用 aggregate_preview 预聚合**，"
+            "直接在原数据集上出图即可。用户要看图/可视化时调用。",
         ),
         _wrap_mcp(
             chart, "chart_screenshot",

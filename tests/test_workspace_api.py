@@ -225,3 +225,62 @@ def test_upload_link_requires_matching_project_and_conversation(
     assert mismatch.json()["detail"] == "对话不属于指定项目"
     assert not upload_dir.exists()
     assert store.get_dataset("fake-dataset") is None
+
+
+def test_delete_dataset_removes_registry_and_files_keeps_derived(
+    workspace_client: tuple[TestClient, SessionStore, Path],
+) -> None:
+    """删除数据集：登记项删除、parquet 落盘清理；衍生数据集保留（血缘置空）。"""
+    import pandas as pd
+    from packages.common.dataset_store import _path_of, save_dataframe
+
+    client, store, _ = workspace_client
+    project = _create_project(client)
+    parent_ref = save_dataframe(pd.DataFrame({"a": [1, 2]}))
+    store.register_dataset(
+        ref=parent_ref, project_id=project["id"], filename="test.xlsx",
+        profile={"row_count": 2, "column_count": 1, "columns": []},
+    )
+    store.register_dataset(
+        ref="child-ref", project_id=project["id"], filename="test.xlsx（衍生）",
+        profile={"row_count": 1, "column_count": 1, "columns": []},
+        parent_ref=parent_ref, transform={"drop_nulls": []},
+    )
+    assert _path_of(parent_ref).exists()
+
+    # 误删保护：存在衍生子集（或被对话引用）→ 409，不删除
+    blocked = client.delete(f"/datasets/{parent_ref}")
+    assert blocked.status_code == 409
+    assert "衍生数据集" in blocked.json()["detail"]
+    assert store.get_dataset(parent_ref) is not None
+
+    # force 确认后删除：登记项删除、parquet 清理；衍生保留、血缘置空
+    response = client.delete(f"/datasets/{parent_ref}?force=true")
+    assert response.status_code == 204
+    assert store.get_dataset(parent_ref) is None
+    assert not _path_of(parent_ref).exists()
+    child = store.get_dataset("child-ref")
+    assert child is not None and child.parent_ref is None
+    # 再删返回 404；删不存在的也是 404；无引用的数据集不需要 force
+    assert client.delete(f"/datasets/{parent_ref}").status_code == 404
+    assert client.delete("/datasets/nonexistent").status_code == 404
+    assert client.delete("/datasets/child-ref").status_code == 204
+
+
+def test_rename_dataset(workspace_client: tuple[TestClient, SessionStore, Path]) -> None:
+    """数据集重命名：显示名更新，血缘与数据文件不动。"""
+    client, store, _ = workspace_client
+    project = _create_project(client)
+    store.register_dataset(
+        ref="ds-1", project_id=project["id"], filename="原名.xlsx",
+        profile={"row_count": 1, "column_count": 1, "columns": []},
+    )
+
+    response = client.patch("/datasets/ds-1", json={"filename": "销售数据 2024"})
+
+    assert response.status_code == 200
+    assert response.json()["filename"] == "销售数据 2024"
+    dataset = store.get_dataset("ds-1")
+    assert dataset is not None and dataset.filename == "销售数据 2024"
+    assert client.patch("/datasets/missing", json={"filename": "x"}).status_code == 404
+    assert client.patch("/datasets/ds-1", json={"filename": "  "}).status_code == 422

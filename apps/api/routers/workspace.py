@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from packages.common.dataset_store import delete_dataset as delete_dataset_files
 from packages.session.models import Project
 from packages.session.store import SessionStore
 
@@ -14,6 +15,7 @@ from apps.api.schemas import (
     ConversationResponse,
     ConversationUpdate,
     DatasetResponse,
+    DatasetUpdate,
     MessageResponse,
     ProjectCreate,
     ProjectResponse,
@@ -79,6 +81,49 @@ def list_project_datasets(
     """列出项目登记的数据集。"""
     _require_project(store, project_id)
     return [DatasetResponse.model_validate(item) for item in store.list_datasets(project_id)]
+
+
+@router.patch("/datasets/{dataset_ref}", response_model=DatasetResponse)
+def rename_dataset(
+    dataset_ref: str,
+    req: DatasetUpdate,
+    store: SessionStore = Depends(session_store_dep),
+) -> DatasetResponse:
+    """重命名数据集显示名（不动数据文件与血缘）。"""
+    dataset = store.update_dataset_filename(dataset_ref, req.filename)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    return DatasetResponse.model_validate(dataset)
+
+
+@router.delete("/datasets/{dataset_ref}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_dataset(
+    dataset_ref: str,
+    force: bool = False,
+    store: SessionStore = Depends(session_store_dep),
+) -> Response:
+    """删除数据集登记与落盘文件。
+
+    误删保护：数据集仍被对话引用或有衍生子集时返回 409，需 force=true 确认；
+    删除后衍生数据集与历史工件按外键置空保留，但相关对话无法再对该数据集分析。
+    """
+    if store.get_dataset(dataset_ref) is None:
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    conversations_used, derived_count = store.dataset_usage(dataset_ref)
+    if not force and (conversations_used or derived_count):
+        parts = []
+        if conversations_used:
+            parts.append(f"{conversations_used} 个对话正在使用该数据集")
+        if derived_count:
+            parts.append(f"{derived_count} 个衍生数据集基于它")
+        raise HTTPException(
+            status_code=409,
+            detail=f"{'，'.join(parts)}。删除后相关对话将无法继续基于它分析。",
+        )
+    if not store.delete_dataset(dataset_ref):
+        raise HTTPException(status_code=404, detail="数据集不存在")
+    delete_dataset_files(dataset_ref)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

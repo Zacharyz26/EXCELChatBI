@@ -33,8 +33,9 @@ class Settings(BaseSettings):
     chat_history_limit: int = 20
     chat_profile_max_chars: int = 12_000
 
-    # Agent 循环护栏（14.5.1 初值，按真实使用调优）
-    agent_max_tool_calls: int = 6          # 单轮对话工具调用总数上限
+    # Agent 循环护栏（14.5.1 初值 6，2026-07-17 按真实使用调优为 12：
+    # 多指标出图的常见计划是 3×统计 + 3×聚合 + 3×图表，6 次会把图表全部挡掉）
+    agent_max_tool_calls: int = 12         # 单轮对话工具调用总数上限
     agent_tool_result_max_chars: int = 6_000  # 工具结果回填模型前的截断上限
     agent_registry_max_entries: int = 12   # 分析登记表全量条目上限，更旧的摘要化
 

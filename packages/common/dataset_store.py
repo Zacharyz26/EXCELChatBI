@@ -103,6 +103,22 @@ def load_metadata(dataset_ref: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def delete_dataset(dataset_ref: str) -> bool:
+    """删除数据集的 parquet 与元数据文件；返回是否确实删掉了数据文件。
+
+    幂等：文件不存在时静默返回 False，不抛错（数据库登记与落盘可能不同步）。
+    """
+    removed = False
+    path = _path_of(dataset_ref)
+    if path.exists():
+        path.unlink()
+        removed = True
+    meta = _meta_path_of(dataset_ref)
+    if meta.exists():
+        meta.unlink()
+    return removed
+
+
 def duplicate_row_count(dataset_ref: str) -> int:
     """整行完全重复的行数（总行数 - 去重行数），下推 DuckDB 计算不进内存。
 

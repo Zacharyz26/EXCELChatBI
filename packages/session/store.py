@@ -251,6 +251,46 @@ class SessionStore:
             ).fetchall()
         return [_dataset_from_row(row) for row in rows]
 
+    def update_dataset_filename(self, dataset_ref: str, filename: str) -> Dataset | None:
+        """重命名数据集显示名；不存在返回 None。"""
+        clean = _required_text(filename, "文件名")
+        with self._connection() as connection, connection:
+            cursor = connection.execute(
+                "UPDATE datasets SET filename = ? WHERE ref = ?", (clean, dataset_ref)
+            )
+        if not cursor.rowcount:
+            return None
+        self._cache.clear()  # 画像卡等缓存快照里可能带旧名
+        return self.get_dataset(dataset_ref)
+
+    def dataset_usage(self, dataset_ref: str) -> tuple[int, int]:
+        """数据集的使用面：(引用它的对话数, 衍生子数据集数)。误删保护用。"""
+        with self._connection() as connection:
+            conversations = connection.execute(
+                "SELECT COUNT(DISTINCT conversation_id) FROM artifacts WHERE dataset_ref = ?",
+                (dataset_ref,),
+            ).fetchone()
+            derived = connection.execute(
+                "SELECT COUNT(*) FROM datasets WHERE parent_ref = ?", (dataset_ref,)
+            ).fetchone()
+        return int(conversations[0]), int(derived[0])
+
+    def delete_dataset(self, dataset_ref: str) -> bool:
+        """删除数据集登记项。
+
+        外键行为：衍生数据集的 parent_ref 与工件的 dataset_ref 均 ON DELETE SET NULL，
+        衍生数据与历史工件本身保留。parquet 文件的清理由调用方（路由层）负责。
+        """
+        with self._connection() as connection, connection:
+            cursor = connection.execute(
+                "DELETE FROM datasets WHERE ref = ?", (dataset_ref,)
+            )
+        if cursor.rowcount:
+            # 受影响对话不可枚举（工件 dataset_ref 被置空），整体失效热缓存
+            self._cache.clear()
+            return True
+        return False
+
     def record_profile_upload(
         self,
         *,

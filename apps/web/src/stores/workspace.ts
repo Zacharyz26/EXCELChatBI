@@ -2,11 +2,15 @@ import { create, type StoreApi } from "zustand";
 import {
   createConversation as createConversationRequest,
   createProject as createProjectRequest,
+  deleteConversation as deleteConversationRequest,
+  deleteDataset as deleteDatasetRequest,
   getConversation,
   listConversations,
   listDatasets,
   listProjects,
   streamChat,
+  updateConversation as updateConversationRequest,
+  updateDataset as updateDatasetRequest,
   uploadExcel,
 } from "@/api/client";
 import type {
@@ -40,6 +44,14 @@ interface WorkspaceState {
   addProject: (name: string) => Promise<void>;
   addConversation: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
+  renameConversation: (conversationId: string, title: string) => Promise<void>;
+  removeConversation: (conversationId: string) => Promise<void>;
+  /** 上下文面板当前查看的数据集（点击侧边栏条目设置） */
+  activeDatasetRef: string | null;
+  selectDataset: (datasetRef: string) => void;
+  renameDataset: (datasetRef: string, filename: string) => Promise<void>;
+  /** 删除数据集；被引用时不删除并返回后端的影响面警告文案（由调用方二次确认后 force） */
+  removeDataset: (datasetRef: string, force?: boolean) => Promise<string | null>;
   uploadFile: (file: File) => Promise<void>;
   sendMessage: (message: string) => Promise<void>;
   clearError: () => void;
@@ -66,6 +78,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   artifacts: [],
   activeProjectId: null,
   activeConversationId: null,
+  activeDatasetRef: null,
   liveTurn: [],
 
   initialize: async () => {
@@ -92,6 +105,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({
       activeProjectId: projectId,
       activeConversationId: null,
+      activeDatasetRef: null,
       conversations: [],
       datasets: [],
       messages: [],
@@ -182,6 +196,90 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const detail = await getConversation(conversationId);
       if (requestSequence !== navigationSequence) return;
       set({ messages: detail.messages, artifacts: detail.artifacts });
+    } catch (error) {
+      if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
+    } finally {
+      if (requestSequence === navigationSequence) set({ loading: false });
+    }
+  },
+
+  selectDataset: (datasetRef) => set({ activeDatasetRef: datasetRef }),
+
+  renameDataset: async (datasetRef, filename) => {
+    const clean = filename.trim();
+    if (!clean || get().streaming || get().uploading) return;
+    try {
+      const updated = await updateDatasetRequest(datasetRef, clean);
+      set((state) => ({
+        datasets: state.datasets.map((item) => (item.ref === datasetRef ? updated : item)),
+      }));
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  removeDataset: async (datasetRef, force = false) => {
+    if (get().streaming || get().uploading) return null;
+    try {
+      const result = await deleteDatasetRequest(datasetRef, force);
+      if (!result.deleted) return result.warning ?? "数据集正在被使用。";
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return null;
+    }
+    set((state) => ({
+      datasets: state.datasets.filter((item) => item.ref !== datasetRef),
+      activeDatasetRef: state.activeDatasetRef === datasetRef ? null : state.activeDatasetRef,
+    }));
+    return null;
+  },
+
+  renameConversation: async (conversationId, title) => {
+    const cleanTitle = title.trim();
+    if (!cleanTitle || get().streaming || get().uploading) return;
+    try {
+      const updated = await updateConversationRequest(conversationId, cleanTitle);
+      set((state) => ({
+        conversations: state.conversations.map((item) => (
+          item.id === conversationId ? updated : item
+        )),
+      }));
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    }
+  },
+
+  removeConversation: async (conversationId) => {
+    if (get().streaming || get().uploading) return;
+    const projectId = get().activeProjectId;
+    try {
+      await deleteConversationRequest(conversationId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      return;
+    }
+    const remaining = get().conversations.filter((item) => item.id !== conversationId);
+    set({ conversations: remaining });
+    if (get().activeConversationId !== conversationId) return;
+
+    // 删的是当前对话：切到最近一条；一条不剩则新建（项目内始终有可用对话）
+    const requestSequence = ++navigationSequence;
+    set({ activeConversationId: null, messages: [], artifacts: [], liveTurn: [], loading: true });
+    try {
+      let next = remaining[0];
+      if (!next && projectId) {
+        next = await createConversationRequest(projectId);
+        if (requestSequence !== navigationSequence) return;
+        set({ conversations: [next] });
+      }
+      if (!next) return;
+      const detail = await getConversation(next.id);
+      if (requestSequence !== navigationSequence) return;
+      set({
+        activeConversationId: next.id,
+        messages: detail.messages,
+        artifacts: detail.artifacts,
+      });
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -369,6 +467,7 @@ function applyTurnEvent(event: ChatStreamEvent, set: WorkspaceSetter): void {
     updateToolStep(set, stringValue(event.data.id), (step) => ({
       ...step,
       status: "running",
+      fields: stringValue(event.data.fields) || step.fields,
       argsPreview: stringValue(event.data.args_preview) || step.argsPreview,
     }));
   } else if (event.event === "tool_end") {

@@ -95,6 +95,9 @@ export interface ToolStep {
   tool: string;
   label: string;
   status: "pending" | "running" | "ok" | "error";
+  /** 人话参数摘要（后端 _humanize_args 生成，默认展示） */
+  fields?: string;
+  /** 原始入参 JSON（仅供“调整参数”表单预填） */
   argsPreview?: string;
   summary?: string;
   message?: string;
