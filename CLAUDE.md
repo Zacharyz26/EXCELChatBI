@@ -101,9 +101,19 @@
 **待调优（不改架构）：**
 - Agent 循环护栏阈值（`AGENT_MAX_TOOL_CALLS` 等，14.5.1 初值）按真实使用调优。
 
+**检索升级并行轨（13.6 步骤 0/1，已验收通过 2026-07-20）：**
+- bge-m3 双路（稠密+稀疏 lexical weights）embedding、bge-reranker、`MilvusKnowledgeStore`
+  （Milvus Lite，`MILVUS_URI` 换 standalone 只改配置）均已实现并跑通验收（语义 hit@1 90%/
+  hit@3 100%、负例拒答 100%、阈值 `RAG_MIN_RELEVANCE=0.02`）；**默认后端仍是替身**
+  （hashing/lexical/local），切换与验收流程、阈值标定见 `docs/知识库升级验收基线.md`，
+  评测执行器 `scripts/kb_eval.py`。
+- 已知约束（都在基线文档"已验证事项"）：pymilvus 需 `[milvus_lite]` extra；transformers
+  必须 `<5`；代理环境需 `NO_PROXY=127.0.0.1`；相关性阈值按 **top1** 判定拒答（不逐条过滤，
+  否则误伤次位相关命中）；Milvus Lite 用独占文件锁，常驻后端与 `pytest` 不能同占一个
+  `MILVUS_URI`。
+
 **当前明确不做（已拍板）：**
 - 自由 SQL 取数（决策 3 修订后仍禁止；只有结构化枚举白名单工具）。
-- bge-m3/Milvus 检索升级（**独立并行轨**，替身检索仍在线，两轨互不阻塞）。
 - Redis session（触发条件不变：多 worker/多实例）。
 - B 轨复杂多步、内部数据接入、多租户审计、MCP-over-HTTP、MinIO/PostgreSQL 接入、全量上下文压缩与指代消解（登记表瘦身除外）、多模态识图。
 

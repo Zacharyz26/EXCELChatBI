@@ -9,7 +9,10 @@ from packages.rag.tokenizer import tokenize
 
 
 def chunk_and_embed(text: str, source: str, embedder: Embedder) -> list[StoredChunk]:
-    """把一篇文档切块，并为每块生成分词与向量，返回可入库的 StoredChunk 列表。
+    """把一篇文档切块，并为每块生成分词与稠密/稀疏表示，返回可入库的 StoredChunk。
+
+    bge-m3 后端单次编码同时产出稀疏 lexical weights（决策1）；
+    替身后端 sparse 为空，检索时走中文 BM25 备路。
 
     Args:
         text: 文档全文。
@@ -19,7 +22,9 @@ def chunk_and_embed(text: str, source: str, embedder: Embedder) -> list[StoredCh
     chunks = split_document(text, source)
     if not chunks:
         return []
-    vectors = embedder.embed([c.text for c in chunks])
+    vectors, sparse_vectors = embedder.embed_with_sparse([c.text for c in chunks])
+    if sparse_vectors is None:
+        sparse_vectors = [{} for _ in chunks]
     return [
         StoredChunk(
             text=c.text,
@@ -27,6 +32,7 @@ def chunk_and_embed(text: str, source: str, embedder: Embedder) -> list[StoredCh
             section=c.section,
             tokens=tokenize(c.text),
             vector=vec,
+            sparse=sparse,
         )
-        for c, vec in zip(chunks, vectors, strict=True)
+        for c, vec, sparse in zip(chunks, vectors, sparse_vectors, strict=True)
     ]

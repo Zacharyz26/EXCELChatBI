@@ -15,8 +15,8 @@ from packages.rag.tokenizer import tokenize
 # 每路召回数量与 RRF 常数（检索参数，非模型名）。
 _RECALL_K = 20
 _RRF_K = 60
-# 相关性门槛：重排分数 ≤ 该值视为不相关。低于门槛则如实告知无结果（红线6）。
-# 切到真实 bge-reranker 时应改为按其分数分布配置的阈值。
+# 相关性门槛默认值：重排分数 ≤ 该值视为不相关，如实告知无结果（红线6）。
+# 真实阈值走配置 RAG_MIN_RELEVANCE，按 reranker 分数分布标定（见验收基线文档）。
 _MIN_RELEVANCE = 0.0
 
 
@@ -29,36 +29,62 @@ class RetrievalResult:
 
 
 class HybridRetriever:
-    """向量 + BM25 混合检索，RRF 融合后再过 reranker。"""
+    """稠密 + 稀疏双路混合检索，RRF 融合后再过 reranker。
+
+    稀疏路（决策1）：embedder 与 store 都支持 bge-m3 稀疏时走 lexical weights
+    检索；否则回退自实现中文 BM25 备路（替身链路不受影响）。
+    """
 
     def __init__(
-        self, embedder: Embedder, store: KnowledgeStore, reranker: Reranker
+        self,
+        embedder: Embedder,
+        store: KnowledgeStore,
+        reranker: Reranker,
+        *,
+        min_relevance: float = _MIN_RELEVANCE,
     ) -> None:
-        self._embedder = embedder
-        self._store = store
+        self.embedder = embedder
+        self.store = store
         self._reranker = reranker
+        self._min_relevance = min_relevance
 
     def retrieve(self, query: str, top_k: int = 5) -> RetrievalResult:
         """混合检索并重排，返回带来源的片段。
 
         无命中时 `is_empty=True`，上层须如实告知"知识库无相关内容"。
-        两路（向量 + 中文 BM25）都参与召回，RRF 融合后交给 reranker。
+        重排分数写回命中项 score，供阈值标定与观测。
         """
-        if self._store.count() == 0:
+        if self.store.count() == 0:
             return RetrievalResult(hits=[], is_empty=True)
 
-        query_vec = self._embedder.embed([query])[0]
-        vec_hits = self._store.vector_search(query_vec, _RECALL_K)
-        bm25_hits = self._store.bm25_search(tokenize(query), _RECALL_K)
+        sparse_hits: list[SearchHit] = []
+        if self.store.supports_sparse:
+            query_vecs, query_sparse = self.embedder.embed_with_sparse([query])
+            query_vec = query_vecs[0]
+            if query_sparse is not None:
+                sparse_hits = self.store.sparse_search(query_sparse[0], _RECALL_K)
+        else:
+            query_vec = self.embedder.embed([query])[0]
+        if not sparse_hits:
+            sparse_hits = self.store.bm25_search(tokenize(query), _RECALL_K)
+        vec_hits = self.store.vector_search(query_vec, _RECALL_K)
 
-        fused = self._rrf_fuse(vec_hits, bm25_hits)
+        fused = self._rrf_fuse(vec_hits, sparse_hits)
         if not fused:
             return RetrievalResult(hits=[], is_empty=True)
 
         ranked = self._reranker.rerank(query, [h.text for h in fused], top_k=top_k)
-        # 相关性门槛：过滤掉低于门槛的候选，避免"检索无结果却硬凑答案"（红线6）
-        hits = [fused[idx] for idx, score in ranked if score > _MIN_RELEVANCE]
-        return RetrievalResult(hits=hits, is_empty=len(hits) == 0)
+        # 相关性门槛按 top1 判定"知识库是否有相关内容"（红线6：无结果如实告知）。
+        # 不逐条过滤：一旦确认相关，重排序列即排序依据——次位命中分数天然偏低，
+        # 逐条绝对分截断会误伤真实相关的次位结果（对任何语料成立，非个例调参）。
+        if not ranked or ranked[0][1] <= self._min_relevance:
+            return RetrievalResult(hits=[], is_empty=True)
+        hits = []
+        for idx, score in ranked:
+            hit = fused[idx]
+            hit.score = score  # 重排分数是最终排序依据，回写供观测/标定
+            hits.append(hit)
+        return RetrievalResult(hits=hits, is_empty=False)
 
     @staticmethod
     def _rrf_fuse(

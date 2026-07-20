@@ -81,29 +81,39 @@ def dataset_ops_tools_dep() -> MCPServer:
 
 @lru_cache
 def embedder_dep() -> Embedder:
-    """注入向量器（默认 hashing；bge 需装 .[rag]）。"""
+    """注入向量器（默认 hashing；bge-m3 需装 .[rag]，device 走配置）。"""
     s = get_settings()
     if s.rag_embedder == "bge":
-        return BGEEmbedder(s.embedding_model)
+        return BGEEmbedder(s.embedding_model, device=s.embedding_device)
     return HashingEmbedder(dim=s.embedding_dim)
 
 
 @lru_cache
 def reranker_dep() -> Reranker:
-    """注入重排器（默认 lexical；bge 需装 .[rag]）。"""
+    """注入重排器（默认 lexical；bge 需装 .[rag]，device 走配置）。"""
     s = get_settings()
     if s.rag_reranker == "bge":
-        return BGEReranker(s.rerank_model)
+        return BGEReranker(s.rerank_model, device=s.embedding_device)
     return LexicalReranker()
 
 
 @lru_cache
 def kb_store_dep() -> KnowledgeStore:
-    """注入本地知识库存储单例。"""
-    return LocalKnowledgeStore(get_settings().kb_index_dir)
+    """注入知识库存储单例（local JSON 落盘 | Milvus Lite/standalone，决策2）。"""
+    s = get_settings()
+    if s.rag_store == "milvus":
+        from packages.rag.milvus_store import MilvusKnowledgeStore
+
+        return MilvusKnowledgeStore(s.milvus_uri)
+    return LocalKnowledgeStore(s.kb_index_dir)
 
 
 @lru_cache
 def retriever_dep() -> HybridRetriever:
-    """注入混合检索器单例。"""
-    return HybridRetriever(embedder_dep(), kb_store_dep(), reranker_dep())
+    """注入混合检索器单例（相关性阈值走配置，按分数分布标定）。"""
+    return HybridRetriever(
+        embedder_dep(),
+        kb_store_dep(),
+        reranker_dep(),
+        min_relevance=get_settings().rag_min_relevance,
+    )

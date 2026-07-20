@@ -6,14 +6,14 @@
 
 ## 进度
 
-**对话式 Agent 产品重构已完成**（设计文档第 14 章，v2.3）——五阶段全部交付，自然语言对话是唯一产品入口：上传 Excel 后直接提需求，Agent 自动规划并调用画像/统计/图表/变换/检索/报告工具，全过程以透明度卡片展示。经典五页已按能力清单核对后下线（旧后端端点保留为兼容 API）。后续独立并行轨：bge-m3/Milvus 检索升级；护栏阈值按真实使用调优。
+**对话式 Agent 产品重构已完成**（设计文档第 14 章，v2.3）——五阶段全部交付，自然语言对话是唯一产品入口：上传 Excel 后直接提需求，Agent 自动规划并调用画像/统计/图表/变换/检索/报告工具，全过程以透明度卡片展示。经典五页已按能力清单核对后下线（旧后端端点保留为兼容 API）。并行轨 bge-m3 + Milvus Lite 语义检索升级已验收通过（2026-07-20）。
 
 **已实现**
 - **Excel 自动分析出图**：上传 → 数据画像（脱敏）→ DeepSeek 规划 → 真实数据聚合出 ECharts 图（含带错重规划）。
 - **统计分析四件套 + 中文解读**：趋势（STL/移动平均/预测）、异常（IQR/3σ/孤立森林/STL）、回归（OLS/Logit）、相关性（Pearson/Spearman）；结果经**摘要门控**后交模型生成中文洞察。
 - **报告导出**：Markdown + PDF（WeasyPrint），由真实工具结果组装，report 工具零 LLM。
 - **图表截图**：Playwright 无头浏览器服务端渲染。
-- **知识库问答**：中文混合检索（向量 + BM25，RRF 融合）+ 重排，答案带引用、无结果如实告知（当前为 hashing/词面替身后端，语义升级开发中）。
+- **知识库问答**：中文混合检索（稠密 + 稀疏双路，RRF 融合）+ 重排，答案带引用、无结果如实告知。默认 hashing/词面替身后端；**bge-m3（稠密+稀疏）/bge-reranker/Milvus Lite 已实现**，切换配置与验收流程见 `docs/知识库升级验收基线.md`（评测器 `scripts/kb_eval.py`）。
 - **前端**：React 18 + ECharts 5 + Zustand；对话工作区为唯一入口，覆盖项目/历史对话、上传画像、SSE 透明度卡片流（理解/执行/图表/表格/报告卡）、快捷指令条与执行卡"调整参数"；知识库摄入/概览在上下文面板。
 - **安全红线**：数据与推理分离（原有端点门控不变；/chat 助手通道例外已拍板，见 CLAUDE.md 红线1）、数值必来自工具、工具入参 schema 校验、脱敏与小分组保护、防注入、问答带引用；上传/摄入做了路径与大小硬化。
 
@@ -24,8 +24,11 @@
 - ✅ 阶段 3 Agent 循环：`/chat/stream` 切换为 function-calling 循环（`stream_turn` 全程真流式：文本增量即时推送、tool_calls 增量聚合）+ SSE 透明度协议（meta/understanding/plan/tool_start/tool_end/artifact/text.delta/error/done）+ 分析登记表（analysis_id 落工件 params，追问改参数/组装报告引用）+ 护栏（调用数上限、连续同参熔断、带错回传重试）+ 前端理解卡/执行卡/图表卡/表格卡/报告卡 + 快捷指令条 + 执行卡"调整参数"（结构化追问回流对话）。
 - ✅ 阶段 4 迁移收尾：旧五页能力清单逐项核对（知识库摄入/概览迁入上下文面板补齐缺口）后，经典模式前端下线；**旧后端端点（/analyze、/analyze/stats、/analyze/report、/kb/*）保留为兼容 API**，红线1 原有端点门控不动；历史执行卡按每步真实成败精确回放（role=tool 结果消息）；文档升版 v2.3。
 
-**并行轨（本重构不掺入，用替身检索开发）**
-- bge-m3 + Milvus Lite 语义检索升级（device 配置项 auto/cpu/cuda，权重离线侧载）。
+**并行轨：bge-m3 + Milvus Lite 语义检索升级（已验收通过，2026-07-20）**
+- ✅ `BGEEmbedder`（bge-m3 稠密+稀疏单次编码）、`BGEReranker`（sigmoid 归一分数）、`MilvusKnowledgeStore`（Milvus Lite 稀疏向量已实机验证；换 standalone 只改 `MILVUS_URI`）。
+- ✅ device 配置项（`EMBEDDING_DEVICE=auto/cpu/cuda`）、相关性阈值按 top1 判定拒答并配置化（`RAG_MIN_RELEVANCE`，标定方法见基线文档）、替身链路回归保持全绿。
+- ✅ 验收实测（RTX 5070，`scripts/kb_eval.py --enforce`）：语义 hit@1 90% / hit@3 100%、负例拒答 100%、GPU 单查询 avg 143ms，标定阈值 `RAG_MIN_RELEVANCE=0.02`。完整基线见 `docs/知识库升级验收基线.md`。
+- ⚠️ 启用 `RAG_STORE=milvus` 后，Milvus Lite 对本地 `.db` 用独占文件锁：常驻后端与 `pytest` 不能同时占用同一 `MILVUS_URI`，跑测试前先停后端（或给测试单独配 URI）。
 
 **未实现（后续阶段）**
 - 自由 SQL 取数（已拍板不做）、复杂多步分析（LangGraph 或自研状态机）、内部数据接入、鉴权/审计、沙箱、大表 DuckDB 下推、MCP-over-HTTP、MinIO/Redis/PostgreSQL 接入、多模态识图。

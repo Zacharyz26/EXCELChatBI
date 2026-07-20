@@ -1,0 +1,21 @@
+{"query": "活跃用户怎么定义？", "type": "lexical", "expected_sections": ["活跃用户"]}
+{"query": "留存率的计算公式是什么", "type": "lexical", "expected_sections": ["留存率"]}
+{"query": "什么是转化率", "type": "lexical", "expected_sections": ["转化率"]}
+{"query": "复购率是什么意思", "type": "lexical", "expected_sections": ["复购率"]}
+{"query": "收入口径怎么算", "type": "lexical", "expected_sections": ["收入口径"]}
+{"query": "新增用户按什么时间归属", "type": "lexical", "expected_sections": ["新增用户"]}
+{"query": "DAU 和 MAU 分别按什么周期统计", "type": "lexical", "expected_sections": ["活跃用户"]}
+{"query": "用户第二天还回来使用的比例叫什么指标", "type": "semantic", "expected_sections": ["留存率"]}
+{"query": "同一个人一天登录了三次，算几个活跃", "type": "semantic", "expected_sections": ["活跃用户"]}
+{"query": "买过两次以上的顾客占比是哪个指标", "type": "semantic", "expected_sections": ["复购率"]}
+{"query": "退款的钱要不要从业绩里扣掉", "type": "semantic", "expected_sections": ["收入口径"]}
+{"query": "从进入漏斗到完成下单的成功比例怎么衡量", "type": "semantic", "expected_sections": ["转化率"]}
+{"query": "老用户第七天还在使用，对应什么指标", "type": "semantic", "expected_sections": ["留存率"]}
+{"query": "刚注册但还没完成激活的人算不算新客", "type": "semantic", "expected_sections": ["新增用户"]}
+{"query": "没付款的订单会被统计进营收吗", "type": "semantic", "expected_sections": ["收入口径"]}
+{"query": "重复注册的账号会重复计数吗", "type": "semantic", "expected_sections": ["新增用户"]}
+{"query": "衡量用户粘性和回访的核心指标是什么", "type": "semantic", "expected_sections": ["留存率", "活跃用户"]}
+{"query": "今天天气怎么样", "type": "negative", "expected_sections": []}
+{"query": "如何配置 Kubernetes 集群", "type": "negative", "expected_sections": []}
+{"query": "公司年假有几天", "type": "negative", "expected_sections": []}
+{"query": "帮我写一首关于秋天的诗", "type": "negative", "expected_sections": []}

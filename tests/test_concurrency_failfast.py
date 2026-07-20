@@ -73,24 +73,38 @@ def test_kb_store_concurrent_add_is_safe(tmp_path: Path) -> None:
     assert LocalKnowledgeStore(index_dir=str(tmp_path / "kb")).count() == 64
 
 
-# ── D5：bge 存根 fail-fast ──
+# ── D5：bge 后端缺依赖时的 fail-fast ──
 
-def test_bge_stubs_fail_at_construction() -> None:
-    """未实现的 bge 后端在构造期即报错，并指引改回可用配置。"""
-    with pytest.raises(NotImplementedError, match="hashing"):
-        BGEEmbedder("bge-large-zh-v1.5")
-    with pytest.raises(NotImplementedError, match="lexical"):
+_HAS_FLAG_EMBEDDING = True
+try:
+    import FlagEmbedding  # noqa: F401
+except ImportError:
+    _HAS_FLAG_EMBEDDING = False
+
+_NEEDS_MISSING_RAG_EXTRA = pytest.mark.skipif(
+    _HAS_FLAG_EMBEDDING,
+    reason="已安装 FlagEmbedding：构造会真实加载权重，缺依赖契约不适用",
+)
+
+
+@_NEEDS_MISSING_RAG_EXTRA
+def test_bge_backends_fail_fast_without_rag_extra() -> None:
+    """未装 .[rag] 时 bge 后端构造期即报错，并指引安装或改回替身配置。"""
+    with pytest.raises(RuntimeError, match="hashing"):
+        BGEEmbedder("bge-m3")
+    with pytest.raises(RuntimeError, match="lexical"):
         BGEReranker("bge-reranker-v2-m3")
 
 
+@_NEEDS_MISSING_RAG_EXTRA
 def test_startup_failfast_when_bge_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """配置 rag_embedder=bge（未实现）时，服务启动即失败，而非请求中途 500。"""
+    """配置 rag_embedder=bge 但缺依赖时，服务启动即失败，而非请求中途 500。"""
     monkeypatch.setenv("RAG_EMBEDDER", "bge")
     get_settings.cache_clear()
     embedder_dep.cache_clear()
     reranker_dep.cache_clear()
     try:
-        with pytest.raises(NotImplementedError, match="rag_embedder"):
+        with pytest.raises(RuntimeError, match="FlagEmbedding"):
             with TestClient(app):   # context manager 触发 lifespan 启动自检
                 pass
     finally:

@@ -21,13 +21,15 @@ from packages.common.config import get_settings
 
 @dataclass
 class StoredChunk:
-    """入库的片段：文本 + 来源 + 分词 + 向量。"""
+    """入库的片段：文本 + 来源 + 分词 + 稠密向量 +（可选）稀疏表示。"""
 
     text: str
     source: str
     section: str | None = None
     tokens: list[str] = field(default_factory=list)
     vector: list[float] = field(default_factory=list)
+    # bge-m3 lexical weights（token_id → 权重）；替身 embedder 下为空 dict
+    sparse: dict[str, float] = field(default_factory=dict)
     chunk_id: str = ""
 
 
@@ -53,7 +55,11 @@ def _norm(text: str) -> str:
 
 
 class KnowledgeStore(abc.ABC):
-    """知识库存储抽象：向量检索 + BM25 检索。"""
+    """知识库存储抽象：稠密向量 + 稀疏（BM25 或 bge-m3 lexical）双路检索。"""
+
+    #: 是否支持 bge-m3 稀疏向量检索（决策1：稀疏路取代自实现 BM25）。
+    #: True 时检索层优先走 sparse_search；否则回退中文 BM25 备路。
+    supports_sparse: bool = False
 
     @abc.abstractmethod
     def add(self, chunks: list[StoredChunk]) -> int:
@@ -65,7 +71,14 @@ class KnowledgeStore(abc.ABC):
 
     @abc.abstractmethod
     def bm25_search(self, query_tokens: list[str], top_k: int) -> list[SearchHit]:
-        """中文 BM25 稀疏检索。"""
+        """中文 BM25 稀疏检索（替身/本地后端的稀疏路）。"""
+
+    def sparse_search(
+        self, query_sparse: dict[str, float], top_k: int
+    ) -> list[SearchHit]:
+        """bge-m3 稀疏向量检索；仅 supports_sparse=True 的后端实现。"""
+        del query_sparse, top_k
+        return []
 
     @abc.abstractmethod
     def count(self) -> int:

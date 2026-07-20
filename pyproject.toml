@@ -51,8 +51,9 @@ stats = [
 ]
 # 中文 RAG 的真实向量模型与向量库（默认走本地可替换实现，无需安装）
 rag = [
-    "pymilvus>=2.4,<3",
+    "pymilvus[milvus_lite]>=2.4,<3",    # pymilvus 2.6 起 Milvus Lite 需显式 extra
     "FlagEmbedding>=1.2,<2",            # bge embedding / reranker
+    "transformers>=4.44,<5",            # FlagEmbedding 用 4.x API（5.x 移除 prepare_for_model，reranker 崩）
 ]
 # 图表服务端截图
 chart-screenshot = ["playwright>=1.44,<2"]

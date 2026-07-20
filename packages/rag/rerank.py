@@ -42,19 +42,47 @@ class LexicalReranker(Reranker):
 
 
 class BGEReranker(Reranker):
-    """基于 FlagEmbedding 的 bge-reranker（需装 .[rag]）。"""
+    """bge-reranker-v2-m3 交叉编码重排（FlagEmbedding，需装 .[rag]）。
 
-    def __init__(self, model_name: str) -> None:
-        # fail-fast：后端尚未实现，构造期即报错（配合启动自检），
-        # 避免服务正常启动、首次检索请求才 500。
-        raise NotImplementedError(
-            "BGE rerank 后端尚未实现：请将配置 rag_reranker 改回 lexical；"
-            f"真实接入 {model_name} 需安装 .[rag] 并实现 BGEReranker"
-        )
+    - model_name 可为模型名或本地权重目录（离线侧载）。
+    - device 走配置 auto/cpu/cuda（决策4）；cuda 下启用 fp16。
+    - 分数经 sigmoid 归一到 (0,1)，便于配置统一的相关性阈值
+      （RAG_MIN_RELEVANCE，按真实分数分布标定，见验收基线文档）。
+    - 构造期加载模型（fail-fast）：依赖/权重缺失在启动时报错，而非首次检索 500。
+    """
+
+    def __init__(self, model_name: str, device: str = "auto") -> None:
+        try:
+            from FlagEmbedding import FlagReranker
+        except ImportError as exc:
+            raise RuntimeError(
+                "缺少 FlagEmbedding：请先 `uv sync --extra rag`，"
+                "或将配置 rag_reranker 改回 lexical"
+            ) from exc
+        from packages.rag.embedding import resolve_device
+
+        resolved = resolve_device(device)
+        try:
+            self._model = FlagReranker(
+                model_name, use_fp16=(resolved == "cuda"), device=resolved
+            )
+        except TypeError:
+            # 旧版 FlagEmbedding 无 device 入参：退化为库内默认设备选择
+            self._model = FlagReranker(model_name, use_fp16=(resolved == "cuda"))
 
     def rerank(
         self, query: str, candidates: list[str], top_k: int = 5
     ) -> list[tuple[int, float]]:
-        raise NotImplementedError(
-            "TODO: 装 .[rag] 后用 bge-reranker 对 (query, candidate) 打分排序"
+        if not candidates:
+            return []
+        scores = self._model.compute_score(
+            [[query, text] for text in candidates], normalize=True
         )
+        if isinstance(scores, int | float):  # 单候选时库返回标量
+            scores = [scores]
+        ranked = sorted(
+            ((i, float(s)) for i, s in enumerate(scores)),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return ranked[:top_k]

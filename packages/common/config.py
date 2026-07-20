@@ -71,13 +71,17 @@ class Settings(BaseSettings):
     # 中文 RAG（知识库问答）
     rag_embedder: str = "hashing"        # hashing（默认，离线确定性）| bge（需装 .[rag]）
     rag_reranker: str = "lexical"        # lexical（默认）| bge（需装 .[rag]）
+    rag_store: str = "local"             # local（默认 JSON 落盘）| milvus（Milvus Lite/standalone）
+    milvus_uri: str = ".data/milvus_lite.db"  # 本地文件=Milvus Lite；http(s)://…=standalone（决策2）
+    embedding_device: str = "auto"       # auto | cpu | cuda（决策4：切换不改代码）
+    rag_min_relevance: float = 0.0       # 重排相关性门槛；bge 后端按分数分布标定（见验收基线）
     embedding_dim: int = 256             # HashingEmbedder 向量维度
     kb_index_dir: str = ".data/kb_index"  # 本地知识库索引落盘目录
     kb_docs_dir: str = "docs/kb_samples"  # 默认摄入的样例文档目录
 
-    # 中文模型
-    embedding_model: str = "bge-large-zh-v1.5"
-    rerank_model: str = "bge-reranker-v2-m3"
+    # 中文模型（决策1：bge-m3；可配本地权重目录路径实现离线侧载）
+    embedding_model: str = "BAAI/bge-m3"
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
 
 
 @lru_cache

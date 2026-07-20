@@ -60,12 +60,17 @@ class SkeletonContractTest(unittest.TestCase):
 
         self.assertEqual(Scenario.CORE_REASONING.value, "core_reasoning")
 
-    def test_unimplemented_raises(self) -> None:
-        # 真实 bge 向量器属后续切片，仍为骨架，应抛 NotImplementedError
-        from packages.rag.embedding import BGEEmbedder
+    def test_bge_failfast_without_rag_extra(self) -> None:
+        # bge 后端已实现（并行轨）；未装 .[rag] 时构造期 fail-fast 并指引安装
+        try:
+            import FlagEmbedding  # noqa: F401
+        except ImportError:
+            from packages.rag.embedding import BGEEmbedder
 
-        with self.assertRaises(NotImplementedError):
-            BGEEmbedder("bge-large-zh-v1.5").embed(["销售额同比增长"])
+            with self.assertRaises(RuntimeError):
+                BGEEmbedder("bge-m3")
+        else:
+            self.skipTest("已安装 FlagEmbedding：构造会真实加载权重，此契约不适用")
 
     def test_mcp_server_registers_tools(self) -> None:
         from mcp_servers.excel_parser.server import build_server
