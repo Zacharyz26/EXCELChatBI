@@ -108,9 +108,16 @@
   （hashing/lexical/local），切换与验收流程、阈值标定见 `docs/知识库升级验收基线.md`，
   评测执行器 `scripts/kb_eval.py`。
 - 已知约束（都在基线文档"已验证事项"）：pymilvus 需 `[milvus_lite]` extra；transformers
-  必须 `<5`；代理环境需 `NO_PROXY=127.0.0.1`；相关性阈值按 **top1** 判定拒答（不逐条过滤，
+  必须 `<5`；本地代理豁免由客户端自动配置；相关性阈值按 **top1** 判定拒答（不逐条过滤，
   否则误伤次位相关命中）；Milvus Lite 用独占文件锁，常驻后端与 `pytest` 不能同占一个
   `MILVUS_URI`。
+- 知识库文档生命周期已完成：稳定 document_id、内容哈希、版本/更新时间清单，增量更新、
+  按来源删除、全量原子重建（Lite 指针 / standalone alias）及前端管理入口。运维命令与
+  迁移说明见 `docs/知识库部署与运维.md`。
+- 知识库第三/第四阶段已完成：CI 可读质量门禁、分段耗时/候选数/拒答原因观测、引用
+  Artifact 前端持久回放、readiness，以及固定版本 Standalone Compose + 鉴权初始化、
+  active/previous 状态、alias 回滚、历史清理、离线备份恢复和只读并发负载工具。目标机
+  首次 Docker 部署与恢复演练仍属于运维执行，不应在无 Docker 的开发机伪报完成。
 
 **当前明确不做（已拍板）：**
 - 自由 SQL 取数（决策 3 修订后仍禁止；只有结构化枚举白名单工具）。
@@ -140,6 +147,7 @@ uv run uvicorn apps.api.main:app --reload          # 默认 http://127.0.0.1:800
 # 模型权重需离线预下载侧载，device 走配置 auto/cpu/cuda）
 curl -X POST localhost:8000/kb/ingest -H 'Content-Type: application/json' -d '{"path":"docs/kb_samples"}'
 curl -X POST localhost:8000/kb/query  -H 'Content-Type: application/json' -d '{"question":"活跃用户怎么定义？"}'
+uv run python scripts/kb_rebuild.py --mode full
 
 # 启动 MCP 工具服务（各自独立进程）
 uv run python -m mcp_servers.excel_parser.server   # :8101
@@ -166,7 +174,6 @@ python3 -m unittest discover -s tests
 - 复杂多步分析的引入方式（LangGraph vs 自研状态机）与触发时机。
 - 沙箱实现选型（Docker / gVisor / 限权进程）。
 - 内部数据源清单与权限模型。
-- 知识库文档范围与索引重建机制。
 - 多租户隔离粒度与数据留存合规。
 - Agent 循环护栏阈值（最大调用次数、同参熔断）按真实使用调优（初值见设计文档 14.5）。
 

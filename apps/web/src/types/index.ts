@@ -114,10 +114,24 @@ export interface IngestResponse {
   ingested_docs: number;
   chunks: number;
   total_chunks: number;
+  created: string[];
+  updated: string[];
+  skipped: string[];
+  deleted: string[];
+}
+
+export interface KBDocument {
+  document_id: string;
+  source: string;
+  content_hash: string;
+  version: number;
+  updated_at: string;
+  chunk_count: number;
 }
 
 export interface KBOverview {
   chunk_count: number;
   sources: string[];
   topics: string[];
+  documents: KBDocument[];
 }

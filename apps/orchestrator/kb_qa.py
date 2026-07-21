@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 from anyio import to_thread
 from packages.common.logging import get_logger
@@ -63,7 +65,7 @@ def _dedup_hits(hits: list[SearchHit]) -> list[SearchHit]:
     return out
 
 
-def build_messages(query: str, hits: list) -> list[Message]:
+def build_messages(query: str, hits: list[SearchHit]) -> list[Message]:
     """构造带编号资料的生成消息（资料用分隔符包裹，防注入，红线4）。"""
     blocks: list[str] = []
     for i, h in enumerate(hits, start=1):
@@ -76,7 +78,7 @@ def build_messages(query: str, hits: list) -> list[Message]:
 
 async def answer_question(
     query: str, retriever: HybridRetriever, gateway: ModelGateway, top_k: int = 5
-) -> dict:
+) -> dict[str, Any]:
     """回答一个中文问题，返回 {answer, citations, is_empty}。"""
     q = normalize_query(query)
     # 检索是同步计算（向量点积 + BM25 循环）→ 下线程执行，不卡事件循环
@@ -84,7 +86,12 @@ async def answer_question(
 
     if result.is_empty:
         # 红线6：无结果如实告知，不调用模型、不编造
-        _log.info("kb_qa.no_result", query=q)
+        _log.info(
+            "kb_qa.no_result",
+            query_fingerprint=_query_fingerprint(q),
+            query_chars=len(q),
+            rejection_reason=result.diagnostics.rejection_reason,
+        )
         return {"answer": _NO_RESULT, "citations": [], "is_empty": True}
 
     # 按内容去重后再建引用 / 喂模型（同一片段只列一次）
@@ -95,7 +102,8 @@ async def answer_question(
     ]
     _log.info(
         "kb_qa.retrieved",
-        query=q,
+        query_fingerprint=_query_fingerprint(q),
+        query_chars=len(q),
         hit_count=len(result.hits),
         unique_hits=len(hits),
         sources=[h.source for h in hits],
@@ -106,3 +114,8 @@ async def answer_question(
         "citations": [c.__dict__ for c in citations],
         "is_empty": False,
     }
+
+
+def _query_fingerprint(query: str) -> str:
+    """不可逆短指纹用于关联重复请求，日志不落原始问题。"""
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]

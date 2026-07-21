@@ -137,6 +137,7 @@ _ARTIFACT_TYPES = {
     "correlation": "stats",
     "gen_chart": "chart",
     "aggregate_preview": "table",
+    "kb_search": "citations",
     "generate_report": "report",
 }
 

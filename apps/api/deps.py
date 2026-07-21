@@ -104,7 +104,11 @@ def kb_store_dep() -> KnowledgeStore:
     if s.rag_store == "milvus":
         from packages.rag.milvus_store import MilvusKnowledgeStore
 
-        return MilvusKnowledgeStore(s.milvus_uri)
+        return MilvusKnowledgeStore(
+            s.milvus_uri,
+            collection=s.milvus_collection,
+            token=s.milvus_token,
+        )
     return LocalKnowledgeStore(s.kb_index_dir)
 
 

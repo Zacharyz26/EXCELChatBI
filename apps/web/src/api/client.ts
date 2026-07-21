@@ -238,4 +238,24 @@ export async function kbOverview(): Promise<KBOverview> {
   return resp.json();
 }
 
+/** 从默认文档目录完整构建新索引并原子切换。 */
+export async function rebuildKnowledgeBase(): Promise<IngestResponse> {
+  const resp = await fetch(`${API_BASE}/kb/rebuild`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 删除一个来源文档及其全部片段。 */
+export async function deleteKnowledgeDocument(documentId: string): Promise<void> {
+  const resp = await fetch(
+    `${API_BASE}/kb/documents/${encodeURIComponent(documentId)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) return asError(resp);
+}
+
 export { API_BASE };

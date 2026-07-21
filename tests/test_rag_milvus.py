@@ -42,7 +42,9 @@ def _chunks() -> list[StoredChunk]:
 def store(tmp_path: Path) -> Any:
     from packages.rag.milvus_store import MilvusKnowledgeStore
 
-    return MilvusKnowledgeStore(str(tmp_path / "lite.db"))
+    instance = MilvusKnowledgeStore(str(tmp_path / "lite.db"))
+    yield instance
+    instance.close()
 
 
 def test_roundtrip_dedupe_and_scalar_fields(store: Any) -> None:
@@ -98,3 +100,85 @@ def test_retriever_with_milvus_and_sparse_embedder(tmp_path: Path) -> None:
     assert not result.is_empty
     assert result.hits[0].source == "d.md"
     assert result.hits[0].section == "转化率"
+    store.close()
+
+
+def test_existing_collection_is_loaded_after_reconnect(tmp_path: Path) -> None:
+    """真实回归：重启后已有集合默认 released，构造时必须主动 load。"""
+    from packages.rag.milvus_store import MilvusKnowledgeStore
+
+    uri = str(tmp_path / "reconnect.db")
+    first = MilvusKnowledgeStore(uri)
+    first.add(_chunks())
+    first.close()
+
+    second = MilvusKnowledgeStore(uri)
+    try:
+        assert second.count() == 3
+        assert second.sources() == ["a.md", "b.md", "c.md"]
+        assert second.vector_search([1.0, 0.0, 0.0, 0.0], 1)[0].source == "a.md"
+    finally:
+        second.close()
+
+
+def test_document_rebuild_switch_persists_across_reconnect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packages.rag.embedding import HashingEmbedder
+    from packages.rag.lifecycle import SourceDocument, sync_documents
+    from packages.rag.milvus_store import MilvusKnowledgeStore
+
+    uri = str(tmp_path / "lifecycle.db")
+    store = MilvusKnowledgeStore(uri)
+    embedder = HashingEmbedder(dim=16)
+    sync_documents([SourceDocument("old.md", "旧知识")], embedder, store)
+    active_before_failure = store._collection
+    original_insert = store._client.insert
+
+    def fail_candidate_insert(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("collection_name") != active_before_failure:
+            raise RuntimeError("candidate insert failed")
+        return original_insert(*args, **kwargs)
+
+    monkeypatch.setattr(store._client, "insert", fail_candidate_insert)
+    with pytest.raises(RuntimeError, match="candidate insert failed"):
+        sync_documents(
+            [SourceDocument("broken.md", "不会发布")], embedder, store, full=True
+        )
+    assert store._collection == active_before_failure
+    assert [item.source for item in store.documents()] == ["old.md"]
+    monkeypatch.setattr(store._client, "insert", original_insert)
+
+    rebuilt = sync_documents(
+        [SourceDocument("new.md", "新知识")], embedder, store, full=True
+    )
+    assert rebuilt.deleted == ["old.md"]
+    assert [item.source for item in store.documents()] == ["new.md"]
+    store.close()
+
+    reopened = MilvusKnowledgeStore(uri)
+    try:
+        document = reopened.documents()[0]
+        assert document.source == "new.md"
+        assert document.content_hash
+        assert document.version == 1
+        assert reopened.delete_document(document.document_id) > 0
+        assert reopened.count() == 0
+        status = reopened.status()
+        assert status.backend == "milvus_lite"
+        assert status.active_collection
+        assert status.previous_collection
+
+        rolled_back = reopened.rollback()
+        assert rolled_back.chunk_count > 0
+        assert reopened.documents()[0].source == "new.md"
+        # 回滚采用双向交换；再次回滚恢复删除后的空代际。
+        assert reopened.rollback().chunk_count == 0
+        generations = [
+            name
+            for name in reopened._client.list_collections()
+            if reopened._is_generation(name)
+        ]
+        assert len(generations) <= 2
+    finally:
+        reopened.close()

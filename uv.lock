@@ -546,6 +546,9 @@ rag = [
     { name = "pymilvus", extra = ["milvus-lite"] },
     { name = "transformers" },
 ]
+rag-store = [
+    { name = "pymilvus", extra = ["milvus-lite"] },
+]
 report = [
     { name = "markdown" },
     { name = "pydyf" },
@@ -591,6 +594,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.3,<3" },
     { name = "pydyf", marker = "extra == 'report'", specifier = "==0.10.0" },
     { name = "pymilvus", extras = ["milvus-lite"], marker = "extra == 'rag'", specifier = ">=2.4,<3" },
+    { name = "pymilvus", extras = ["milvus-lite"], marker = "extra == 'rag-store'", specifier = ">=2.4,<3" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "redis", marker = "extra == 'storage'", specifier = ">=5.0,<6" },
@@ -603,7 +607,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.35" },
     { name = "weasyprint", marker = "extra == 'report'", specifier = ">=62,<63" },
 ]
-provides-extras = ["stats", "rag", "chart-screenshot", "report", "mcp", "storage"]
+provides-extras = ["stats", "rag", "rag-store", "chart-screenshot", "report", "mcp", "storage"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -23,6 +23,7 @@ config/*.local.yaml
 apps/web/node_modules/
 apps/web/dist/
 apps/web/.env
+deploy/milvus/.env
 apps/web/*.tsbuildinfo
 apps/web/playwright-report/
 apps/web/test-results/

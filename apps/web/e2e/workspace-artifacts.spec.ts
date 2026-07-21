@@ -8,6 +8,7 @@ interface MockWorkspaceState {
   datasets: Array<Record<string, unknown>>;
   messages: Array<Record<string, unknown>>;
   artifacts: Array<Record<string, unknown>>;
+  kbDocuments: Array<Record<string, unknown>>;
   turn: number;
 }
 
@@ -90,7 +91,7 @@ function artifact(
     file_ref: null,
     source_tool: sourceTool,
     params: { analysis_id: `${id}-analysis` },
-    dataset_ref: type === "report" ? null : "sales-ref",
+    dataset_ref: type === "report" || type === "citations" ? null : "sales-ref",
     created_at: NOW,
   };
 }
@@ -278,6 +279,88 @@ function persistReportTurn(state: MockWorkspaceState, prompt: string): {
   };
 }
 
+function persistKnowledgeTurn(state: MockWorkspaceState, prompt: string): {
+  frames: Array<[string, Record<string, unknown>]>;
+} {
+  const suffix = String(++state.turn);
+  const userId = `kb-user-${suffix}`;
+  const toolMessageId = `kb-tool-message-${suffix}`;
+  const callId = `kb-call-${suffix}`;
+  const citations = artifact(
+    `kb-artifact-${suffix}`,
+    toolMessageId,
+    "citations",
+    {
+      is_empty: false,
+      hits: [{
+        source: "指标口径.md",
+        section: "活跃用户",
+        text: "活跃用户指统计周期内有效登录的去重用户数。",
+      }],
+    },
+    "kb_search",
+  );
+  state.messages.push(
+    message(userId, "user", prompt),
+    message(toolMessageId, "assistant", "我先查询知识库中的指标口径。", [
+      { id: callId, name: "kb_search", arguments: '{"query":"活跃用户怎么定义"}' },
+    ]),
+    message(
+      `kb-outcome-${suffix}`,
+      "tool",
+      JSON.stringify({
+        tool_call_id: callId,
+        tool: "kb_search",
+        status: "ok",
+        summary: "命中 1 条片段",
+        fields: "检索词: 活跃用户怎么定义",
+      }),
+    ),
+    message(
+      `kb-final-${suffix}`,
+      "assistant",
+      "活跃用户指统计周期内有效登录的去重用户数（来源：指标口径.md）。",
+    ),
+  );
+  state.artifacts.push(citations);
+  return {
+    frames: [
+      ["meta", {
+        conversation_id: "conversation-1",
+        message_id: `kb-final-${suffix}`,
+        user_message_id: userId,
+        title: "活跃用户口径",
+      }],
+      ["understanding", { text: "我先查询知识库中的指标口径。" }],
+      ["plan", {
+        message_id: toolMessageId,
+        steps: [{ id: callId, tool: "kb_search", label: "知识库检索" }],
+      }],
+      ["tool_start", {
+        id: callId,
+        tool: "kb_search",
+        fields: "检索词: 活跃用户怎么定义",
+        args_preview: '{"query":"活跃用户怎么定义"}',
+      }],
+      ["artifact", citations],
+      ["tool_end", {
+        id: callId,
+        tool: "kb_search",
+        status: "ok",
+        summary: "命中 1 条片段",
+      }],
+      ["text.delta", {
+        delta: "活跃用户指统计周期内有效登录的去重用户数（来源：指标口径.md）。",
+      }],
+      ["done", {
+        conversation_id: "conversation-1",
+        message_id: `kb-final-${suffix}`,
+        tool_calls: 1,
+      }],
+    ],
+  };
+}
+
 async function installMockApi(
   page: Page,
   options: { withDataset?: boolean } = { withDataset: true },
@@ -294,6 +377,7 @@ async function installMockApi(
     datasets: options.withDataset === false ? [] : [dataset()],
     messages: [],
     artifacts: [],
+    kbDocuments: [],
     turn: 0,
   };
 
@@ -323,7 +407,50 @@ async function installMockApi(
       return;
     }
     if (method === "GET" && path === "/kb/overview") {
-      await json(route, { chunk_count: 0, sources: [], topics: [] });
+      await json(route, {
+        chunk_count: state.kbDocuments.length * 2,
+        sources: state.kbDocuments.map((item) => item.source),
+        topics: state.kbDocuments.length > 0 ? ["指标口径"] : [],
+        documents: state.kbDocuments,
+      });
+      return;
+    }
+    if (method === "POST" && path === "/kb/ingest") {
+      state.kbDocuments = [{
+        document_id: "metrics-doc",
+        source: "metrics.md",
+        content_hash: "abc123",
+        version: 1,
+        updated_at: NOW,
+        chunk_count: 2,
+      }];
+      await json(route, {
+        ingested_docs: 1,
+        chunks: 2,
+        total_chunks: 2,
+        created: ["metrics.md"],
+        updated: [],
+        skipped: [],
+        deleted: [],
+      });
+      return;
+    }
+    if (method === "POST" && path === "/kb/rebuild") {
+      state.kbDocuments = state.kbDocuments.map((item) => ({ ...item, version: 2 }));
+      await json(route, {
+        ingested_docs: state.kbDocuments.length,
+        chunks: state.kbDocuments.length * 2,
+        total_chunks: state.kbDocuments.length * 2,
+        created: [],
+        updated: [],
+        skipped: state.kbDocuments.map((item) => item.source),
+        deleted: [],
+      });
+      return;
+    }
+    if (method === "DELETE" && path === "/kb/documents/metrics-doc") {
+      state.kbDocuments = [];
+      await json(route, { document_id: "metrics-doc", removed_chunks: 2 });
       return;
     }
     if (method === "POST" && path === "/upload/excel") {
@@ -356,7 +483,9 @@ async function installMockApi(
       const prompt = body.message ?? "";
       const turn = prompt.includes("报告")
         ? persistReportTurn(state, prompt)
-        : persistChartTurn(state, prompt);
+        : prompt.includes("定义") || prompt.includes("口径")
+          ? persistKnowledgeTurn(state, prompt)
+          : persistChartTurn(state, prompt);
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream; charset=utf-8",
@@ -450,4 +579,38 @@ test("Report Artifact 渲染 PDF 下载入口并可在刷新后恢复", async ({
   await page.reload();
   await expect(page.locator(".report-artifact")).toBeVisible();
   await expect(page.getByRole("link", { name: "下载 PDF" })).toBeVisible();
+});
+
+test("知识库支持同步、全量重建和按来源删除", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "同步样例" }).click();
+  await expect(page.getByText("metrics.md", { exact: true })).toBeVisible();
+  await expect(page.locator(".context-knowledge__notice")).toContainText("新增 1");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "全量重建" }).click();
+  await expect(page.locator(".context-knowledge__notice")).toContainText("重建完成");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "删除 metrics.md" }).click();
+  await expect(page.getByText("知识库为空，可先摄入样例文档。")).toBeVisible();
+  await expect(page.locator(".context-knowledge__notice")).toContainText("已删除 metrics.md");
+});
+
+test("知识库问答生成并持久化来源引用卡", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "活跃用户怎么定义？");
+
+  const citation = page.locator(".citation-artifact");
+  await expect(citation).toContainText("知识库来源");
+  await expect(citation).toContainText("指标口径.md");
+  await expect(citation).toContainText("有效登录的去重用户数");
+  await expect(page.getByText(/来源：指标口径\.md/)).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator(".citation-artifact")).toContainText("指标口径.md");
 });

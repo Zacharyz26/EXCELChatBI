@@ -467,7 +467,32 @@ function ArtifactCard({ artifact }: { artifact: WorkspaceArtifact }) {
   if (artifact.type === "table") return <TableArtifact artifact={artifact} />;
   if (artifact.type === "stats") return <StatsArtifact artifact={artifact} />;
   if (artifact.type === "report") return <ReportArtifact artifact={artifact} />;
+  if (artifact.type === "citations") return <CitationArtifact artifact={artifact} />;
   return null;
+}
+
+function CitationArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
+  const rawHits = Array.isArray(artifact.payload?.hits) ? artifact.payload.hits : [];
+  const hits = rawHits.filter(isRecord);
+  if (hits.length === 0) return null;
+  return (
+    <section className="citation-artifact">
+      <div className="citation-artifact__heading">
+        <span>引用</span>
+        <strong>知识库来源</strong>
+        <span className="artifact-status">{hits.length} 条</span>
+      </div>
+      <ol>
+        {hits.map((hit, index) => (
+          <li key={`${stringOf(hit.source)}-${index}`}>
+            <strong>{stringOf(hit.source) || "未知来源"}</strong>
+            {stringOf(hit.section) && <small>{stringOf(hit.section)}</small>}
+            <p>{stringOf(hit.text)}</p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
 }
 
 function ProfileArtifact({ artifact }: { artifact: WorkspaceArtifact }) {

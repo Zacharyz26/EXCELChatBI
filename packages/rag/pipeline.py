@@ -8,7 +8,16 @@ from packages.rag.store import StoredChunk
 from packages.rag.tokenizer import tokenize
 
 
-def chunk_and_embed(text: str, source: str, embedder: Embedder) -> list[StoredChunk]:
+def chunk_and_embed(
+    text: str,
+    source: str,
+    embedder: Embedder,
+    *,
+    document_id: str = "",
+    content_hash: str = "",
+    version: int = 1,
+    updated_at: str = "",
+) -> list[StoredChunk]:
     """把一篇文档切块，并为每块生成分词与稠密/稀疏表示，返回可入库的 StoredChunk。
 
     bge-m3 后端单次编码同时产出稀疏 lexical weights（决策1）；
@@ -33,6 +42,10 @@ def chunk_and_embed(text: str, source: str, embedder: Embedder) -> list[StoredCh
             tokens=tokenize(c.text),
             vector=vec,
             sparse=sparse,
+            document_id=document_id,
+            content_hash=content_hash,
+            version=version,
+            updated_at=updated_at,
         )
         for c, vec, sparse in zip(chunks, vectors, sparse_vectors, strict=True)
     ]

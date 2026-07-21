@@ -1,5 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { ingestSamples, kbOverview } from "@/api/client";
+import {
+  deleteKnowledgeDocument,
+  ingestSamples,
+  kbOverview,
+  rebuildKnowledgeBase,
+} from "@/api/client";
 import { ChatPanel } from "@/components/ChatPanel";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { KBOverview, WorkspaceArtifact, WorkspaceDataset } from "@/types";
@@ -429,7 +434,7 @@ function DatasetContext({
 /** 知识库入口（原知识库页的摄入/概览能力迁入，问答走对话 kb_search）。 */
 function KnowledgeSection() {
   const [overview, setOverview] = useState<KBOverview | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -437,16 +442,46 @@ function KnowledgeSection() {
   }, []);
 
   async function onIngest() {
-    setBusy(true);
+    setBusy("ingest");
     setNotice(null);
     try {
       const result = await ingestSamples();
-      setNotice(`已摄入 ${result.ingested_docs} 篇文档，共 ${result.total_chunks} 个片段`);
+      setNotice(formatSyncNotice("同步完成", result));
       setOverview(await kbOverview());
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "摄入失败，请稍后重试");
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  }
+
+  async function onRebuild() {
+    if (!window.confirm("从默认文档目录全量重建知识库？旧索引会保留到新索引就绪。")) return;
+    setBusy("rebuild");
+    setNotice(null);
+    try {
+      const result = await rebuildKnowledgeBase();
+      setNotice(formatSyncNotice("重建完成", result));
+      setOverview(await kbOverview());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "重建失败，请稍后重试");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onDelete(documentId: string, source: string) {
+    if (!window.confirm(`从知识库删除「${source}」？`)) return;
+    setBusy(documentId);
+    setNotice(null);
+    try {
+      await deleteKnowledgeDocument(documentId);
+      setNotice(`已删除 ${source}`);
+      setOverview(await kbOverview());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "删除失败，请稍后重试");
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -462,12 +497,45 @@ function KnowledgeSection() {
       ) : (
         <p className="context-knowledge__summary">知识库为空，可先摄入样例文档。</p>
       )}
-      <button type="button" onClick={() => void onIngest()} disabled={busy}>
-        {busy ? "正在摄入…" : "摄入样例知识库"}
-      </button>
+      {overview && overview.documents.length > 0 && (
+        <div className="context-knowledge__documents">
+          {overview.documents.map((document) => (
+            <div className="context-knowledge__document" key={document.document_id}>
+              <span title={document.source}>{document.source}</span>
+              <small>v{document.version} · {document.chunk_count} 片段</small>
+              <button
+                type="button"
+                aria-label={`删除 ${document.source}`}
+                onClick={() => void onDelete(document.document_id, document.source)}
+                disabled={busy !== null}
+              >
+                {busy === document.document_id ? "删除中…" : "删除"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="context-knowledge__actions">
+        <button type="button" onClick={() => void onIngest()} disabled={busy !== null}>
+          {busy === "ingest" ? "正在同步…" : "同步样例"}
+        </button>
+        <button type="button" onClick={() => void onRebuild()} disabled={busy !== null}>
+          {busy === "rebuild" ? "正在重建…" : "全量重建"}
+        </button>
+      </div>
       {notice && <p className="context-knowledge__notice">{notice}</p>}
     </div>
   );
+}
+
+function formatSyncNotice(prefix: string, result: import("@/types").IngestResponse): string {
+  const changes = [
+    result.created.length > 0 ? `新增 ${result.created.length}` : "",
+    result.updated.length > 0 ? `更新 ${result.updated.length}` : "",
+    result.skipped.length > 0 ? `未变 ${result.skipped.length}` : "",
+    result.deleted.length > 0 ? `删除 ${result.deleted.length}` : "",
+  ].filter(Boolean).join("，");
+  return `${prefix}${changes ? `（${changes}）` : ""}，共 ${result.total_chunks} 个片段`;
 }
 
 function PlusIcon() {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 WorkspaceName = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
@@ -224,9 +224,15 @@ class ReportResponse(BaseModel):
 class IngestRequest(BaseModel):
     """知识库摄入请求：路径（文件/目录）或内联文本，二选一。"""
 
-    path: str | None = None
+    path: str | None = Field(default=None, max_length=4096)
     text: str | None = None
-    source: str | None = None    # 内联文本时的来源标注
+    source: str | None = Field(default=None, max_length=512)  # 内联文本时的来源标注
+
+    @model_validator(mode="after")
+    def exactly_one_input(self) -> IngestRequest:
+        if bool(self.path) == bool(self.text):
+            raise ValueError("path 与 text 必须且只能提供一个")
+        return self
 
 
 class IngestResponse(BaseModel):
@@ -234,7 +240,28 @@ class IngestResponse(BaseModel):
 
     ingested_docs: int
     chunks: int
-    total_chunks: int            # 库内片段总数
+    total_chunks: int  # 库内片段总数
+    created: list[str] = Field(default_factory=list)
+    updated: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+    deleted: list[str] = Field(default_factory=list)
+
+
+class RebuildRequest(BaseModel):
+    """全量重建请求；未传路径时使用配置的知识库目录。"""
+
+    path: str | None = Field(default=None, max_length=4096)
+
+
+class KBDocumentResponse(BaseModel):
+    """知识库文档清单项。"""
+
+    document_id: str
+    source: str
+    content_hash: str
+    version: int
+    updated_at: str
+    chunk_count: int
 
 
 class KBOverviewResponse(BaseModel):
@@ -243,13 +270,21 @@ class KBOverviewResponse(BaseModel):
     chunk_count: int
     sources: list[str]
     topics: list[str]
+    documents: list[KBDocumentResponse] = Field(default_factory=list)
+
+
+class DeleteDocumentResponse(BaseModel):
+    """删除文档结果。"""
+
+    document_id: str
+    removed_chunks: int
 
 
 class KBQueryRequest(BaseModel):
     """知识库问答请求（单轮中文提问）。"""
 
     question: str
-    top_k: int = 5
+    top_k: int = Field(default=5, ge=1, le=20)
 
 
 class Citation(BaseModel):

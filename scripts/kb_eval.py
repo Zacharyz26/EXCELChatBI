@@ -1,16 +1,9 @@
-"""知识库检索评测（验收基线执行器，见 docs/知识库升级验收基线.md）。
+"""知识库检索质量评测：人类报告 + CI 可读 JSON 门禁。
 
-对 docs/kb_samples 语料跑 scripts/kb_eval_set.jsonl 评测集，输出：
-hit@1 / hit@3 / MRR（按 lexical / semantic 分组）、负例拒答率、单查询延迟、
-重排分数分布（供 RAG_MIN_RELEVANCE 阈值标定）。
+默认按当前后端自动选择 baseline（hashing/local）或 semantic（bge/milvus）阈值：
 
-用法（后端由 .env / 环境变量选择，与线上同一构造路径）：
-    uv run python scripts/kb_eval.py                  # 当前配置的后端
-    RAG_EMBEDDER=bge RAG_RERANKER=bge RAG_STORE=milvus \
-        uv run python scripts/kb_eval.py              # bge + Milvus Lite
-    uv run python scripts/kb_eval.py --enforce        # 按验收阈值判定退出码（CI 用）
-
-评测索引写入临时目录，不污染 .data 下的真实索引。
+    uv run python scripts/kb_eval.py --enforce
+    uv run python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
 """
 
 from __future__ import annotations
@@ -29,71 +22,83 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.common.config import get_settings  # noqa: E402
-from packages.rag.pipeline import chunk_and_embed  # noqa: E402
+from packages.rag.lifecycle import SourceDocument, sync_documents  # noqa: E402
 from packages.rag.retriever import HybridRetriever  # noqa: E402
 
 EVAL_SET = Path(__file__).parent / "kb_eval_set.jsonl"
 
-# 验收阈值（bge-m3 + bge-reranker 达标线，见基线文档；替身跑分仅记录不判定）
-THRESHOLDS = {
-    "lexical_hit3": 1.0,
-    "semantic_hit1": 0.9,
-    "semantic_hit3": 1.0,
-    "negative_reject": 1.0,
+THRESHOLD_PROFILES: dict[str, dict[str, float]] = {
+    "baseline": {
+        "lexical_hit3": 1.0,
+        "semantic_hit1": 0.7,
+        "semantic_hit3": 0.9,
+        "negative_reject": 1.0,
+        "citation_source_rate": 1.0,
+    },
+    "semantic": {
+        "lexical_hit3": 1.0,
+        "semantic_hit1": 0.9,
+        "semantic_hit3": 1.0,
+        "negative_reject": 1.0,
+        "citation_source_rate": 1.0,
+    },
 }
 
 
 def _build_components(index_dir: str) -> tuple[HybridRetriever, str]:
-    """按当前配置构造检索组件（与 apps/api/deps.py 同一选择逻辑），索引落临时目录。"""
-    from packages.rag.embedding import Embedder
-    from packages.rag.rerank import Reranker
-    from packages.rag.store import KnowledgeStore
+    """按线上配置构造组件，但把评测索引隔离到临时目录。"""
+    from packages.rag.embedding import BGEEmbedder, Embedder, HashingEmbedder
+    from packages.rag.rerank import BGEReranker, LexicalReranker, Reranker
+    from packages.rag.store import KnowledgeStore, LocalKnowledgeStore
 
-    s = get_settings()
-    embedder: Embedder
-    reranker: Reranker
+    settings = get_settings()
+    embedder: Embedder = (
+        BGEEmbedder(settings.embedding_model, device=settings.embedding_device)
+        if settings.rag_embedder == "bge"
+        else HashingEmbedder(dim=settings.embedding_dim)
+    )
+    reranker: Reranker = (
+        BGEReranker(settings.rerank_model, device=settings.embedding_device)
+        if settings.rag_reranker == "bge"
+        else LexicalReranker()
+    )
     store: KnowledgeStore
-    if s.rag_embedder == "bge":
-        from packages.rag.embedding import BGEEmbedder
-        embedder = BGEEmbedder(s.embedding_model, device=s.embedding_device)
-    else:
-        from packages.rag.embedding import HashingEmbedder
-        embedder = HashingEmbedder(dim=s.embedding_dim)
-    if s.rag_reranker == "bge":
-        from packages.rag.rerank import BGEReranker
-        reranker = BGEReranker(s.rerank_model, device=s.embedding_device)
-    else:
-        from packages.rag.rerank import LexicalReranker
-        reranker = LexicalReranker()
-    if s.rag_store == "milvus":
+    if settings.rag_store == "milvus":
         from packages.rag.milvus_store import MilvusKnowledgeStore
-        store = MilvusKnowledgeStore(str(Path(index_dir) / "milvus_eval.db"))
+
+        store = MilvusKnowledgeStore(
+            str(Path(index_dir) / "milvus_eval.db"),
+            collection=settings.milvus_collection,
+        )
     else:
-        from packages.rag.store import LocalKnowledgeStore
         store = LocalKnowledgeStore(index_dir)
-    backend = f"embedder={s.rag_embedder} reranker={s.rag_reranker} store={s.rag_store}"
+    evaluation_store = (
+        "milvus_lite_isolated" if settings.rag_store == "milvus" else "local_isolated"
+    )
+    backend = (
+        f"embedder={settings.rag_embedder} "
+        f"reranker={settings.rag_reranker} store={evaluation_store}"
+    )
     return (
-        HybridRetriever(embedder, store, reranker, min_relevance=s.rag_min_relevance),
+        HybridRetriever(
+            embedder,
+            store,
+            reranker,
+            min_relevance=settings.rag_min_relevance,
+        ),
         backend,
     )
 
 
 def _ingest(retriever: HybridRetriever) -> tuple[int, float]:
-    """摄入 docs/kb_samples + 评测干扰语料，返回 (片段数, 耗时秒)。
-
-    干扰语料（scripts/kb_eval_distractors.md）扩大候选池，避免语料过小时
-    top-k 命中率虚高，保证评测区分度。
-    """
     docs_dir = ROOT / "docs" / "kb_samples"
     paths = sorted(docs_dir.glob("*.md")) + [Path(__file__).parent / "kb_eval_distractors.md"]
+    documents = [
+        SourceDocument(path.name, path.read_text(encoding="utf-8")) for path in paths
+    ]
     started = time.perf_counter()
-    total = 0
-    for path in paths:
-        chunks = chunk_and_embed(
-            path.read_text(encoding="utf-8"), path.name, retriever.embedder
-        )
-        total += retriever.store.add(chunks)
-    return total, time.perf_counter() - started
+    result = sync_documents(documents, retriever.embedder, retriever.store, full=True)
+    return result.total_chunks, time.perf_counter() - started
 
 
 def _rank_of(hits: list[Any], expected_sections: list[str]) -> int | None:
@@ -103,86 +108,164 @@ def _rank_of(hits: list[Any], expected_sections: list[str]) -> int | None:
     return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="知识库检索评测")
-    parser.add_argument("--enforce", action="store_true", help="按验收阈值判定退出码")
-    parser.add_argument("--top-k", type=int, default=5)
-    args = parser.parse_args()
+def _evaluate(
+    retriever: HybridRetriever, cases: list[dict[str, Any]], top_k: int
+) -> tuple[dict[str, float], list[dict[str, Any]], dict[str, float | None]]:
+    rows: list[dict[str, Any]] = []
+    latencies: list[float] = []
+    positive_top_scores: list[float] = []
+    negative_top_scores: list[float] = []
+    for index, case in enumerate(cases, start=1):
+        started = time.perf_counter()
+        result = retriever.retrieve(str(case["query"]), top_k=top_k)
+        latency = time.perf_counter() - started
+        latencies.append(latency)
+        rank = _rank_of(result.hits, list(case["expected_sections"]))
+        top_score = result.hits[0].score if result.hits else None
+        if case["type"] == "negative":
+            if top_score is not None:
+                negative_top_scores.append(top_score)
+            ok = result.is_empty
+        else:
+            if top_score is not None:
+                positive_top_scores.append(top_score)
+            ok = rank is not None and rank <= 3
+        rows.append(
+            {
+                "case": index,
+                "type": case["type"],
+                "rank": rank,
+                "ok": ok,
+                "is_empty": result.is_empty,
+                "top_score": top_score,
+                "sources": [hit.source for hit in result.hits],
+                "latency_ms": round(latency * 1_000, 3),
+                "rejection_reason": result.diagnostics.rejection_reason,
+            }
+        )
 
-    lines = EVAL_SET.read_text(encoding="utf-8").splitlines()
-    cases = [json.loads(line) for line in lines if line.strip()]
+    metrics: dict[str, float] = {}
+    for group in ("lexical", "semantic"):
+        subset = [row for row in rows if row["type"] == group]
+        metrics[f"{group}_hit1"] = sum(row["rank"] == 1 for row in subset) / len(subset)
+        metrics[f"{group}_hit3"] = sum(
+            row["rank"] is not None and row["rank"] <= 3 for row in subset
+        ) / len(subset)
+        metrics[f"{group}_mrr"] = sum(
+            1 / row["rank"] for row in subset if row["rank"] is not None
+        ) / len(subset)
+    negatives = [row for row in rows if row["type"] == "negative"]
+    positives = [row for row in rows if row["type"] != "negative"]
+    metrics["negative_reject"] = sum(row["is_empty"] for row in negatives) / len(negatives)
+    metrics["citation_source_rate"] = sum(
+        bool(row["sources"]) and all(row["sources"]) for row in positives
+    ) / len(positives)
+    distribution: dict[str, float | None] = {
+        "latency_avg_ms": round(statistics.mean(latencies) * 1_000, 3),
+        "latency_max_ms": round(max(latencies) * 1_000, 3),
+        "positive_top_min": min(positive_top_scores) if positive_top_scores else None,
+        "positive_top_median": (
+            statistics.median(positive_top_scores) if positive_top_scores else None
+        ),
+        "negative_top_max": max(negative_top_scores) if negative_top_scores else None,
+    }
+    return metrics, rows, distribution
+
+
+def _print_human(report: dict[str, Any]) -> None:
+    metrics = report["metrics"]
+    distribution = report["distribution"]
+    print(f"后端：{report['backend']}")
+    print(f"摄入：{report['chunks']} 个片段，{report['ingest_seconds']:.2f}s\n")
+    print("| 分组 | hit@1 | hit@3 | MRR |")
+    print("|------|-------|-------|-----|")
+    for group in ("lexical", "semantic"):
+        print(
+            f"| {group} | {metrics[f'{group}_hit1']:.0%} "
+            f"| {metrics[f'{group}_hit3']:.0%} | {metrics[f'{group}_mrr']:.2f} |"
+        )
+    print(f"\n负例拒答率：{metrics['negative_reject']:.0%}")
+    print(f"引用来源完整率：{metrics['citation_source_rate']:.0%}")
+    print(
+        f"单查询延迟：avg {distribution['latency_avg_ms']:.0f}ms · "
+        f"max {distribution['latency_max_ms']:.0f}ms"
+    )
+    failed = [row for row in report["cases"] if not row["ok"]]
+    if failed:
+        print("\n未命中用例（是否阻断由所选 profile 阈值决定）：")
+        for row in failed:
+            print(
+                f"  [case {row['case']} · {row['type']}] "
+                f"rank={row['rank']} empty={row['is_empty']}"
+            )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="知识库检索质量评测")
+    parser.add_argument("--enforce", action="store_true", help="低于阈值时退出码为 1")
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--profile", choices=("auto", "baseline", "semantic"), default="auto"
+    )
+    parser.add_argument("--json-output", help="把机器可读报告写入指定路径，'-' 表示 stdout")
+    args = parser.parse_args()
+    if args.top_k < 1:
+        parser.error("--top-k 必须大于 0")
+
+    cases = [
+        json.loads(line)
+        for line in EVAL_SET.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    settings = get_settings()
+    profile = args.profile
+    if profile == "auto":
+        profile = "semantic" if settings.rag_embedder == "bge" else "baseline"
+    thresholds = THRESHOLD_PROFILES[profile]
 
     with tempfile.TemporaryDirectory() as tmp:
         retriever, backend = _build_components(tmp)
-        n_chunks, ingest_seconds = _ingest(retriever)
-        print(f"后端：{backend}")
-        print(f"摄入：{n_chunks} 个片段，{ingest_seconds:.2f}s\n")
+        try:
+            chunks, ingest_seconds = _ingest(retriever)
+            metrics, rows, distribution = _evaluate(retriever, cases, args.top_k)
+        finally:
+            retriever.store.close()
 
-        rows: list[dict[str, Any]] = []
-        latencies: list[float] = []
-        positive_top_scores: list[float] = []
-        negative_top_scores: list[float] = []
-        for case in cases:
-            started = time.perf_counter()
-            result = retriever.retrieve(case["query"], top_k=args.top_k)
-            latency = time.perf_counter() - started
-            latencies.append(latency)
-            rank = _rank_of(result.hits, case["expected_sections"])
-            top_score = result.hits[0].score if result.hits else None
-            if case["type"] == "negative":
-                if top_score is not None:
-                    negative_top_scores.append(top_score)
-                ok = result.is_empty
-            else:
-                if top_score is not None:
-                    positive_top_scores.append(top_score)
-                ok = rank is not None and rank <= 3
-            rows.append({**case, "rank": rank, "ok": ok, "latency": latency,
-                         "empty": result.is_empty, "top_score": top_score})
+    misses = {
+        name: {"actual": metrics[name], "required": required}
+        for name, required in thresholds.items()
+        if metrics.get(name, 0.0) < required
+    }
+    report: dict[str, Any] = {
+        "backend": backend,
+        "profile": profile,
+        "chunks": chunks,
+        "ingest_seconds": round(ingest_seconds, 3),
+        "metrics": metrics,
+        "thresholds": thresholds,
+        "distribution": distribution,
+        "cases": rows,
+        "passed": not misses,
+        "misses": misses,
+    }
+    if args.json_output == "-":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_human(report)
+        if args.json_output:
+            output = Path(args.json_output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            print(f"\nJSON 报告：{output}")
 
-        metrics: dict[str, float] = {}
-        for group in ("lexical", "semantic"):
-            sub = [r for r in rows if r["type"] == group]
-            metrics[f"{group}_hit1"] = sum(1 for r in sub if r["rank"] == 1) / len(sub)
-            hit3 = sum(1 for r in sub if r["rank"] and r["rank"] <= 3)
-            metrics[f"{group}_hit3"] = hit3 / len(sub)
-            metrics[f"{group}_mrr"] = sum(1 / r["rank"] for r in sub if r["rank"]) / len(sub)
-        negatives = [r for r in rows if r["type"] == "negative"]
-        metrics["negative_reject"] = sum(1 for r in negatives if r["empty"]) / len(negatives)
-
-        print("| 分组 | hit@1 | hit@3 | MRR |")
-        print("|------|-------|-------|-----|")
-        for group in ("lexical", "semantic"):
-            print(f"| {group} | {metrics[f'{group}_hit1']:.0%} "
-                  f"| {metrics[f'{group}_hit3']:.0%} | {metrics[f'{group}_mrr']:.2f} |")
-        print(f"\n负例拒答率：{metrics['negative_reject']:.0%}"
-              f"（{sum(1 for r in negatives if r['empty'])}/{len(negatives)}）")
-        print(f"单查询延迟：avg {statistics.mean(latencies) * 1000:.0f}ms · "
-              f"max {max(latencies) * 1000:.0f}ms")
-
-        # 阈值标定素材：正例应答分 vs 负例应答分的分布（RAG_MIN_RELEVANCE 取分离点）
-        if positive_top_scores:
-            print(f"正例 top1 重排分：min {min(positive_top_scores):.4f} · "
-                  f"median {statistics.median(positive_top_scores):.4f}")
-        if negative_top_scores:
-            print(f"负例 top1 重排分（漏拒答的）：max {max(negative_top_scores):.4f}")
-        else:
-            print("负例 top1 重排分：全部已被阈值拒答")
-
-        failed = [r for r in rows if not r["ok"]]
-        if failed:
-            print("\n未达标用例：")
-            for r in failed:
-                print(f"  [{r['type']}] {r['query']} → rank={r['rank']} empty={r['empty']}")
-
-        if args.enforce:
-            misses = {k: v for k, v in THRESHOLDS.items() if metrics.get(k, 0.0) < v}
-            if misses:
-                detail = {k: f"{metrics[k]:.0%} < {v:.0%}" for k, v in misses.items()}
-                print(f"\n验收未通过：{detail}")
-                return 1
-            print("\n验收通过：全部指标达标")
-        return 0
+    if args.enforce and misses:
+        print(f"\n验收未通过（{profile}）：{misses}")
+        return 1
+    if args.enforce:
+        print(f"\n验收通过：{profile} 全部指标达标")
+    return 0
 
 
 if __name__ == "__main__":

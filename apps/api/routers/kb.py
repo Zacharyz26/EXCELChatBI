@@ -1,7 +1,8 @@
-"""知识库接口（F1）：摄入 /kb/ingest 与问答 /kb/query。"""
+"""知识库接口：文档同步、生命周期管理与带引用问答。"""
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,7 +10,12 @@ from fastapi.concurrency import run_in_threadpool
 from packages.common.config import Settings
 from packages.models.gateway import ModelGateway
 from packages.rag.embedding import Embedder
-from packages.rag.pipeline import chunk_and_embed
+from packages.rag.lifecycle import (
+    SourceDocument,
+    SyncResult,
+    load_text_documents,
+    sync_documents,
+)
 from packages.rag.retriever import HybridRetriever
 from packages.rag.store import KnowledgeStore
 
@@ -22,17 +28,18 @@ from apps.api.deps import (
 )
 from apps.api.schemas import (
     Citation,
+    DeleteDocumentResponse,
     IngestRequest,
     IngestResponse,
+    KBDocumentResponse,
     KBOverviewResponse,
     KBQueryRequest,
     KBQueryResponse,
+    RebuildRequest,
 )
 from apps.orchestrator.kb_qa import answer_question
 
 router = APIRouter(prefix="/kb", tags=["kb"])
-
-_TEXT_SUFFIXES = {".md", ".txt", ".markdown"}
 
 
 @router.post("/ingest", response_model=IngestResponse)
@@ -42,31 +49,55 @@ async def ingest(
     store: KnowledgeStore = Depends(kb_store_dep),
     settings: Settings = Depends(settings_dep),
 ) -> IngestResponse:
-    """摄入文档：内联文本或路径（文件/目录，先支持 .md/.txt）。"""
-    # 读盘 + 分块 + embedding 是阻塞重活 → 线程池，不卡事件循环
-    docs = await run_in_threadpool(_collect_docs, req, settings.kb_docs_dir)
-    if not docs:
-        raise HTTPException(status_code=400, detail="未提供可摄入内容（path 或 text）")
+    """增量同步文档：内容未变时跳过，内容变化时按 source 替换并递增版本。"""
+    documents = await run_in_threadpool(_collect_docs, req, settings)
+    if not documents:
+        raise HTTPException(status_code=400, detail="路径内没有可摄入的文本文件")
+    result = await run_in_threadpool(sync_documents, documents, embedder, store)
+    return _sync_response(result)
 
-    def _ingest_all() -> int:
-        added = 0
-        for source, text in docs:
-            added += store.add(chunk_and_embed(text, source, embedder))
-        return added
 
-    added = await run_in_threadpool(_ingest_all)
-    return IngestResponse(ingested_docs=len(docs), chunks=added, total_chunks=store.count())
+@router.post("/rebuild", response_model=IngestResponse)
+async def rebuild(
+    req: RebuildRequest,
+    embedder: Embedder = Depends(embedder_dep),
+    store: KnowledgeStore = Depends(kb_store_dep),
+    settings: Settings = Depends(settings_dep),
+) -> IngestResponse:
+    """从目录完整构建新索引，准备成功后原子替换活动索引。"""
+    ingest_req = IngestRequest(path=req.path or settings.kb_docs_dir)
+    documents = await run_in_threadpool(_collect_docs, ingest_req, settings)
+    result = await run_in_threadpool(
+        sync_documents, documents, embedder, store, full=True
+    )
+    return _sync_response(result)
+
+
+@router.delete("/documents/{document_id}", response_model=DeleteDocumentResponse)
+async def delete_document(
+    document_id: str,
+    store: KnowledgeStore = Depends(kb_store_dep),
+) -> DeleteDocumentResponse:
+    """按稳定文档 ID 删除来源及其所有片段。"""
+    removed = await run_in_threadpool(store.delete_document, document_id)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail="知识库文档不存在")
+    return DeleteDocumentResponse(document_id=document_id, removed_chunks=removed)
 
 
 @router.get("/overview", response_model=KBOverviewResponse)
 async def overview(
     store: KnowledgeStore = Depends(kb_store_dep),
 ) -> KBOverviewResponse:
-    """知识库概览：片段数、来源文件、主题（小节标题）——供前端展示与派生示例问题。"""
+    """知识库概览与可管理文档清单。"""
+    count, sources, topics, documents = await run_in_threadpool(
+        lambda: (store.count(), store.sources(), store.topics(), store.documents())
+    )
     return KBOverviewResponse(
-        chunk_count=store.count(),
-        sources=store.sources(),
-        topics=store.topics(),
+        chunk_count=count,
+        sources=sources,
+        topics=topics,
+        documents=[KBDocumentResponse(**asdict(item)) for item in documents],
     )
 
 
@@ -81,43 +112,54 @@ async def query(
         raise HTTPException(status_code=400, detail="问题不能为空")
     try:
         result = await answer_question(req.question, retriever, gateway, top_k=req.top_k)
-    except Exception as exc:  # 生成失败友好降级（红线：不静默吞异常）
+    except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"生成失败（检查 DEEPSEEK_API_KEY 与网络）：{exc}"
         ) from exc
     return KBQueryResponse(
         answer=result["answer"],
-        citations=[Citation(**c) for c in result["citations"]],
+        citations=[Citation(**citation) for citation in result["citations"]],
         is_empty=result["is_empty"],
     )
 
 
-def _collect_docs(req: IngestRequest, kb_docs_dir: str) -> list[tuple[str, str]]:
-    """把请求归一为 [(source, text)] 列表。
+def _collect_docs(req: IngestRequest, settings: Settings) -> list[SourceDocument]:
+    """把请求归一为文档列表，并限制服务端路径、文件数与单文档大小。"""
+    if req.text is not None:
+        if len(req.text) > settings.kb_max_document_chars:
+            raise HTTPException(
+                status_code=413,
+                detail=f"文档超过字符上限 {settings.kb_max_document_chars}",
+            )
+        return [SourceDocument(source=req.source or "inline", text=req.text)]
 
-    path 摄入限定在配置的知识库目录 `kb_docs_dir` 白名单内，禁止任意服务端路径。
-    """
-    if req.text:
-        return [(req.source or "inline", req.text)]
-    if not req.path:
-        return []
-    base = Path(kb_docs_dir).resolve()
-    p = Path(req.path).resolve()
-    # 先做白名单校验（越界一律 403，不泄露越界路径是否存在）
-    if p != base and base not in p.parents:
+    base = Path(settings.kb_docs_dir).resolve()
+    path = Path(req.path or settings.kb_docs_dir).resolve()
+    if path != base and base not in path.parents:
         raise HTTPException(
-            status_code=403, detail=f"path 超出允许的知识库目录: {kb_docs_dir}"
+            status_code=403, detail=f"path 超出允许的知识库目录: {settings.kb_docs_dir}"
         )
-    if not p.exists():
+    if not path.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {req.path}")
-    files = (
-        [f for f in sorted(p.rglob("*")) if f.suffix.lower() in _TEXT_SUFFIXES]
-        if p.is_dir()
-        else [p]
+    try:
+        return load_text_documents(
+            path,
+            source_root=base,
+            max_files=settings.kb_max_files,
+            max_document_chars=settings.kb_max_document_chars,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _sync_response(result: SyncResult) -> IngestResponse:
+    """把生命周期结果映射为兼容原字段的 API 响应。"""
+    return IngestResponse(
+        ingested_docs=result.documents,
+        chunks=result.chunks,
+        total_chunks=result.total_chunks,
+        created=result.created,
+        updated=result.updated,
+        skipped=result.skipped,
+        deleted=result.deleted,
     )
-    docs: list[tuple[str, str]] = []
-    for f in files:
-        if f.suffix.lower() not in _TEXT_SUFFIXES:
-            raise HTTPException(status_code=400, detail=f"暂仅支持纯文本 .md/.txt: {f.name}")
-        docs.append((f.name, f.read_text(encoding="utf-8")))
-    return docs

@@ -6,15 +6,15 @@
 
 ## 进度
 
-**对话式 Agent 产品重构已完成**（设计文档第 14 章，v2.3）——五阶段全部交付，自然语言对话是唯一产品入口：上传 Excel 后直接提需求，Agent 自动规划并调用画像/统计/图表/变换/检索/报告工具，全过程以透明度卡片展示。经典五页已按能力清单核对后下线（旧后端端点保留为兼容 API）。并行轨 bge-m3 + Milvus Lite 语义检索升级已验收通过（2026-07-20）。
+**对话式 Agent 产品重构已完成**（设计文档第 14 章，v2.3）——五阶段全部交付，自然语言对话是唯一产品入口：上传 Excel 后直接提需求，Agent 自动规划并调用画像/统计/图表/变换/检索/报告工具，全过程以透明度卡片展示。经典五页已按能力清单核对后下线（旧后端端点保留为兼容 API）。知识库升级第一至第四阶段代码与运维基线已完成（2026-07-20）。
 
 **已实现**
 - **Excel 自动分析出图**：上传 → 数据画像（脱敏）→ DeepSeek 规划 → 真实数据聚合出 ECharts 图（含带错重规划）。
 - **统计分析四件套 + 中文解读**：趋势（STL/移动平均/预测）、异常（IQR/3σ/孤立森林/STL）、回归（OLS/Logit）、相关性（Pearson/Spearman）；结果经**摘要门控**后交模型生成中文洞察。
 - **报告导出**：Markdown + PDF（WeasyPrint），由真实工具结果组装，report 工具零 LLM。
 - **图表截图**：Playwright 无头浏览器服务端渲染。
-- **知识库问答**：中文混合检索（稠密 + 稀疏双路，RRF 融合）+ 重排，答案带引用、无结果如实告知。默认 hashing/词面替身后端；**bge-m3（稠密+稀疏）/bge-reranker/Milvus Lite 已实现**，切换配置与验收流程见 `docs/知识库升级验收基线.md`（评测器 `scripts/kb_eval.py`）。
-- **前端**：React 18 + ECharts 5 + Zustand；对话工作区为唯一入口，覆盖项目/历史对话、上传画像、SSE 透明度卡片流（理解/执行/图表/表格/报告卡）、快捷指令条与执行卡"调整参数"；知识库摄入/概览在上下文面板。
+- **知识库问答**：中文混合检索（稠密 + 稀疏双路，RRF 融合）+ 重排，答案带可回放引用卡、无结果如实告知。默认 hashing/词面替身后端；**bge-m3（稠密+稀疏）/bge-reranker/Milvus Lite/Standalone 已实现**。文档具备稳定 ID、内容哈希与版本，可增量更新、按来源删除及全量原子重建；另有 CI 质量门禁、分段耗时诊断、readiness、代际状态/回滚/清理和备份工具。部署与运维见 `docs/知识库部署与运维.md`，质量验收见 `docs/知识库升级验收基线.md`。
+- **前端**：React 18 + ECharts 5 + Zustand；对话工作区为唯一入口，覆盖项目/历史对话、上传画像、SSE 透明度卡片流（理解/执行/图表/表格/报告卡）、快捷指令条与执行卡"调整参数"；知识库文档状态、同步、删除与全量重建在上下文面板。
 - **安全红线**：数据与推理分离（原有端点门控不变；/chat 助手通道例外已拍板，见 CLAUDE.md 红线1）、数值必来自工具、工具入参 schema 校验、脱敏与小分组保护、防注入、问答带引用；上传/摄入做了路径与大小硬化。
 
 **重构记录（对话式 Agent，五阶段，设计文档 14.8，已全部完成）**
@@ -29,9 +29,12 @@
 - ✅ device 配置项（`EMBEDDING_DEVICE=auto/cpu/cuda`）、相关性阈值按 top1 判定拒答并配置化（`RAG_MIN_RELEVANCE`，标定方法见基线文档）、替身链路回归保持全绿。
 - ✅ 验收实测（RTX 5070，`scripts/kb_eval.py --enforce`）：语义 hit@1 90% / hit@3 100%、负例拒答 100%、GPU 单查询 avg 143ms，标定阈值 `RAG_MIN_RELEVANCE=0.02`。完整基线见 `docs/知识库升级验收基线.md`。
 - ⚠️ 启用 `RAG_STORE=milvus` 后，Milvus Lite 对本地 `.db` 用独占文件锁：常驻后端与 `pytest` 不能同时占用同一 `MILVUS_URI`，跑测试前先停后端（或给测试单独配 URI）。
+- ✅ 知识库稳定性与生命周期：已有 Milvus 集合重连自动加载、本地代理自动豁免；增量同步、版本清单、按来源删除，以及“新集合构建完成后再切换”的全量重建均已实现。
+- ✅ 质量与产品闭环：确定性/语义双阈值评测、CI JSON 报告、检索分段诊断日志、`/health/ready`，以及 Agent 引用 Artifact 的浏览器渲染/刷新回放均已覆盖。
+- ✅ Standalone 运维基线：固定版本 Compose、鉴权与业务账号初始化、active/previous 代际状态、alias 原子回滚、历史清理、Local/Lite 校验备份恢复、只读并发负载报告和上线/回滚手册均已提供；首次真实部署需在有 Docker 的目标机完成演练。
 
 **未实现（后续阶段）**
-- 自由 SQL 取数（已拍板不做）、复杂多步分析（LangGraph 或自研状态机）、内部数据接入、鉴权/审计、沙箱、大表 DuckDB 下推、MCP-over-HTTP、MinIO/Redis/PostgreSQL 接入、多模态识图。
+- 自由 SQL 取数（已拍板不做）、复杂多步分析（LangGraph 或自研状态机）、内部数据接入、应用层用户鉴权/多租户审计、沙箱、大表 DuckDB 下推、MCP-over-HTTP、独立业务 MinIO/Redis/PostgreSQL 接入、多模态识图。
 
 ## 架构（五层）
 
@@ -109,4 +112,13 @@ uv sync --extra rag
 #   BAAI/bge-m3（≈2.3GB）与 BAAI/bge-reranker-v2-m3（≈2.3GB），
 # 拷入服务器本地目录，配 HF_HUB_OFFLINE=1 与模型路径；
 # 推理 device 走配置（auto/cpu/cuda），本地开发与 GPU 服务器切换不改代码。
+
+# 知识库增量同步 / 全量原子重建
+uv run python scripts/kb_rebuild.py --mode incremental
+uv run python scripts/kb_rebuild.py --mode full
+
+# 质量门禁 / 状态 / 并发检索冒烟
+uv run python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
+uv run python scripts/kb_admin.py status
+uv run python scripts/kb_load_test.py --requests 50 --concurrency 2
 ```

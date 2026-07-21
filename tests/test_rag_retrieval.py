@@ -39,6 +39,11 @@ def test_recall_top_hit(store: LocalKnowledgeStore) -> None:
     res = retriever.retrieve("活跃用户是怎么定义的", top_k=3)
     assert not res.is_empty
     assert res.hits[0].source == "指标.md"
+    assert res.diagnostics.backend.endswith("LocalKnowledgeStore")
+    assert res.diagnostics.returned_hits == len(res.hits)
+    assert res.diagnostics.dense_candidates > 0
+    assert res.diagnostics.sparse_candidates > 0
+    assert res.diagnostics.total_ms >= 0
 
 
 def test_both_paths_participate(store: LocalKnowledgeStore) -> None:
@@ -58,3 +63,4 @@ def test_no_result_is_honest(store: LocalKnowledgeStore) -> None:
     res = retriever.retrieve("量子纠缠与航天器轨道力学", top_k=3)
     assert res.is_empty
     assert res.hits == []
+    assert res.diagnostics.rejection_reason == "below_threshold"

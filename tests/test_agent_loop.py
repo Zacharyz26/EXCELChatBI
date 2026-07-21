@@ -230,6 +230,53 @@ async def test_tool_round_emits_transparency_events_and_persists(
 
 
 @pytest.mark.asyncio
+async def test_kb_search_persists_traceable_citation_artifact(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    result = {
+        "is_empty": False,
+        "hits": [
+            {
+                "source": "指标口径.md",
+                "section": "活跃用户",
+                "text": "活跃用户指统计周期内有效登录的去重用户数。",
+            }
+        ],
+    }
+    registry = FakeRegistry({"kb_search": lambda args: result})
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["我先查询指标口径。"],
+                "tool_calls": [
+                    ToolCall(
+                        id="kb-call",
+                        name="kb_search",
+                        arguments='{"query":"活跃用户怎么定义"}',
+                    )
+                ],
+            },
+            {"deltas": ["活跃用户是有效登录的去重用户数（来源：指标口径.md）。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="活跃用户怎么定义？",
+    )
+
+    artifact_event = next(payload for name, payload in events if name == "artifact")
+    assert artifact_event["type"] == "citations"
+    assert artifact_event["payload"]["hits"][0]["source"] == "指标口径.md"
+    artifact = store.list_artifacts(conversation.id)[0]
+    assert artifact.type == "citations"
+    assert artifact.source_tool == "kb_search"
+
+
+@pytest.mark.asyncio
 async def test_explicit_chart_request_cannot_finish_before_chart_artifact(
     store: SessionStore, conversation: Conversation
 ) -> None:

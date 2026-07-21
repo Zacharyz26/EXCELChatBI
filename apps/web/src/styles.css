@@ -1565,6 +1565,55 @@ select {
   background: #e5e9fd;
 }
 
+.citation-artifact {
+  margin-top: 10px;
+  overflow: hidden;
+  background: #fbfcff;
+  border: 1px solid #dfe4f2;
+  border-radius: 10px;
+}
+
+.citation-artifact__heading {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  color: #536079;
+  border-bottom: 1px solid #e8ebf3;
+}
+
+.citation-artifact__heading > span:first-child {
+  color: #586bd7;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.citation-artifact ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px 12px 34px;
+}
+
+.citation-artifact li {
+  padding-left: 3px;
+  color: #49546b;
+  font-size: 11px;
+}
+
+.citation-artifact li small {
+  margin-left: 7px;
+  color: #8a94a9;
+}
+
+.citation-artifact li p {
+  margin: 3px 0 0;
+  color: #69748b;
+  line-height: 1.55;
+}
+
 .profile-artifact__quality {
   margin: 0;
   padding: 0 15px 12px;
@@ -1587,7 +1636,7 @@ select {
   line-height: 1.65;
 }
 
-.context-knowledge button {
+.context-knowledge__actions button {
   padding: 6px 13px;
   color: #4d61ce;
   font-size: 11px;
@@ -1610,6 +1659,52 @@ select {
   margin: 8px 0 0;
   color: #26805e;
   font-size: 10.5px;
+}
+
+.context-knowledge__documents {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+
+.context-knowledge__document {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 6px;
+  align-items: center;
+  padding: 7px 8px;
+  background: #f8f9fc;
+  border-radius: 7px;
+}
+
+.context-knowledge__document span {
+  overflow: hidden;
+  color: #46516a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-knowledge__document small {
+  color: #8b94a8;
+  font-size: 9.5px;
+}
+
+.context-knowledge__document button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 3px 7px;
+  color: #a44b4b;
+  font-size: 9.5px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.context-knowledge__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 /* ── 可读性修复：助手正文 Markdown 排版 ── */

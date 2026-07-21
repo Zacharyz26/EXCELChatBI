@@ -55,6 +55,10 @@ rag = [
     "FlagEmbedding>=1.2,<2",            # bge embedding / reranker
     "transformers>=4.44,<5",            # FlagEmbedding 用 4.x API（5.x 移除 prepare_for_model，reranker 崩）
 ]
+# CI 可只安装向量存储，验证 Lite 重连/原子切换而无需下载 torch 与模型权重。
+rag-store = [
+    "pymilvus[milvus_lite]>=2.4,<3",
+]
 # 图表服务端截图
 chart-screenshot = ["playwright>=1.44,<2"]
 # 报告导出（Markdown→HTML→PDF）

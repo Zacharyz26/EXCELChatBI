@@ -29,15 +29,39 @@ jobs:
           enable-cache: true
 
       - name: Install backend dependencies
-        run: uv sync --frozen --extra stats --extra report
+        run: uv sync --frozen --extra stats --extra report --extra rag-store
 
       - name: Run backend tests
         run: uv run --frozen pytest -q
         env:
           MODEL_REGISTRY_PATH: config/models.example.yaml
 
+      - name: Run deterministic knowledge quality gate
+        run: >-
+          uv run --frozen python scripts/kb_eval.py
+          --enforce --profile baseline --json-output .data/kb-eval.json
+        env:
+          RAG_EMBEDDER: hashing
+          RAG_RERANKER: lexical
+          RAG_STORE: local
+          RAG_MIN_RELEVANCE: "0.0"
+
+      - name: Upload knowledge evaluation report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: kb-evaluation
+          path: .data/kb-eval.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run Ruff
         run: uv run --frozen ruff check .
+
+      - name: Validate Milvus Standalone Compose
+        run: >-
+          docker compose --env-file deploy/milvus/.env.example
+          -f deploy/milvus/docker-compose.yml config --quiet
 
   frontend:
     name: Frontend build and browser E2E
