@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from typing import Any
 
 from openai import OpenAIError
@@ -88,7 +89,11 @@ class ModelGateway:
                 continue
             # 按模型能力过滤参数（drop_params 来自 registry 配置）：
             # 主选支持的参数（如 response_format）备选未必支持，不剥掉则降级必失败。
-            call_params: dict[str, object] = {"temperature": route.temperature, **extra}
+            call_params: dict[str, object] = {
+                **spec.request_params,
+                "temperature": route.temperature,
+                **extra,
+            }
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
             try:
                 with trace_span(
@@ -99,15 +104,18 @@ class ModelGateway:
                 ) as span:
                     adapter = self._get_adapter(spec)
                     resp = await adapter.complete(messages, tools=tools, **call_params)
+                    _apply_pricing(resp, spec)
                     span.set_attributes(
                         actual_model=resp.model,
                         prompt_tokens=resp.prompt_tokens,
                         completion_tokens=resp.completion_tokens,
-                        token_usage_available=bool(
-                            resp.prompt_tokens or resp.completion_tokens
-                        ),
+                        token_usage_available=resp.usage_available,
                         model_latency_ms=round(resp.latency_ms, 3),
-                        cost=resp.cost if resp.cost != 0 else "unavailable",
+                        cost=resp.cost if resp.cost is not None else "unavailable",
+                        cost_currency=resp.cost_currency or "unavailable",
+                        pricing_effective_date=(
+                            resp.pricing_effective_date or "unavailable"
+                        ),
                         tool_call_count=len(resp.tool_calls),
                     )
                 _log.info(
@@ -172,7 +180,11 @@ class ModelGateway:
                 # 决策10：不支持 function calling 的候选直接跳过，绝不静默丢工具
                 _log.warning("model.skip_no_tools", model=name, scenario=scenario.value)
                 continue
-            call_params: dict[str, object] = {"temperature": route.temperature, **extra}
+            call_params: dict[str, object] = {
+                **spec.request_params,
+                "temperature": route.temperature,
+                **extra,
+            }
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
             stream_started = False
             try:
@@ -190,10 +202,12 @@ class ModelGateway:
                     stream_started = True
                     if first is not None:
                         if isinstance(first, ModelResponse):
+                            _apply_pricing(first, spec)
                             _set_response_trace(span, first)
                         yield first
                         async for piece in chunks:
                             if isinstance(piece, ModelResponse):
+                                _apply_pricing(piece, spec)
                                 _set_response_trace(span, piece)
                             yield piece
             except (OpenAIError, ValueError) as exc:
@@ -243,7 +257,11 @@ class ModelGateway:
         last_error: Exception | None = None
         for name in candidates:
             spec = self._registry.get_model(name)
-            call_params: dict[str, object] = {"temperature": route.temperature, **extra}
+            call_params: dict[str, object] = {
+                **spec.request_params,
+                "temperature": route.temperature,
+                **extra,
+            }
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
             stream_started = False
             try:
@@ -278,10 +296,30 @@ def _set_response_trace(span: TraceSpan, response: ModelResponse) -> None:
         actual_model=response.model,
         prompt_tokens=response.prompt_tokens,
         completion_tokens=response.completion_tokens,
-        token_usage_available=bool(
-            response.prompt_tokens or response.completion_tokens
-        ),
+        token_usage_available=response.usage_available,
         model_latency_ms=round(response.latency_ms, 3),
-        cost=response.cost if response.cost != 0 else "unavailable",
+        cost=response.cost if response.cost is not None else "unavailable",
+        cost_currency=response.cost_currency or "unavailable",
+        pricing_effective_date=response.pricing_effective_date or "unavailable",
         tool_call_count=len(response.tool_calls),
     )
+
+
+def _apply_pricing(response: ModelResponse, spec: ModelSpec) -> None:
+    """Estimate response cost from trusted registry pricing and returned usage."""
+    response.usage_available = response.usage_available or bool(
+        response.prompt_tokens or response.completion_tokens
+    )
+    pricing = spec.pricing
+    if pricing is None or not response.usage_available:
+        response.cost = None
+        response.cost_currency = None
+        response.pricing_effective_date = None
+        return
+    cost = (
+        Decimal(response.prompt_tokens) * Decimal(str(pricing.input_per_1k))
+        + Decimal(response.completion_tokens) * Decimal(str(pricing.output_per_1k))
+    ) / Decimal(1000)
+    response.cost = float(cost)
+    response.cost_currency = pricing.currency
+    response.pricing_effective_date = pricing.effective_date

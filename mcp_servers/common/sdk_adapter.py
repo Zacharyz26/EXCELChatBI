@@ -7,20 +7,43 @@ core API can still be installed without the optional ``mcp`` dependency.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hmac
 import os
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import mcp.server.stdio
 import mcp.types as types
+import uvicorn
+from dotenv import dotenv_values
+from mcp.server.auth.middleware.bearer_auth import (
+    BearerAuthBackend,
+    RequireAuthMiddleware,
+)
+from mcp.server.auth.provider import AccessToken
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.lowlevel.server import request_ctx
 from mcp.server.models import InitializationOptions
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import (
+    TransportSecurityMiddleware,
+    TransportSecuritySettings,
+)
+from starlette.applications import Starlette
+from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mcp_servers.common.adapter import MCPServerAdapter
 from mcp_servers.common.contracts import MCPRequestContext
 
 SERVER_VERSION = "0.1.0"
+MCP_PROTOCOL_VERSION = "2025-11-25"
+DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
+_DOTENV = dotenv_values(".env")
 
 
 def build_sdk_server(adapter: MCPServerAdapter) -> Server[Any, Any]:
@@ -84,14 +107,226 @@ async def _run_stdio(adapter: MCPServerAdapter) -> None:
         )
 
 
-def run_adapter(adapter: MCPServerAdapter) -> None:
-    """Run the selected transport; stage 1 exposes stdio, HTTP follows the probe."""
-    transport = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
-    if transport != "stdio":
-        raise RuntimeError(
-            "当前已验收的 MCP 服务入口仅为 stdio；Streamable HTTP 必须先完成阶段 0 探针"
+class _StaticTokenVerifier:
+    """Minimal internal-service verifier; external OAuth belongs to v3.0."""
+
+    def __init__(self, token: str, *, client_id: str) -> None:
+        self._token = token
+        self._client_id = client_id
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(token, self._token):
+            return None
+        return AccessToken(
+            token=token,
+            client_id=self._client_id,
+            subject=self._client_id,
+            scopes=["mcp:invoke"],
         )
-    run_stdio(adapter)
+
+
+class _PinnedProtocolMiddleware:
+    """Reject initialize requests outside ChatBI's reviewed MCP protocol."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        protocol_version: str = MCP_PROTOCOL_VERSION,
+        max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+    ) -> None:
+        self._app = app
+        self._protocol_version = protocol_version
+        self._max_request_bytes = max_request_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self._app(scope, receive, send)
+            return
+        messages: list[Message] = []
+        body = bytearray()
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.request":
+                body.extend(message.get("body", b""))
+                if len(body) > self._max_request_bytes:
+                    await Response("Request body too large", status_code=413)(
+                        scope, receive, send
+                    )
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+        try:
+            import json
+
+            payload = json.loads(body)
+        except (UnicodeDecodeError, ValueError):
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("method") == "initialize"
+            and (payload.get("params") or {}).get("protocolVersion")
+            != self._protocol_version
+        ):
+            await JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "error": {
+                        "code": -32600,
+                        "message": (
+                            "Unsupported protocol version; "
+                            f"expected {self._protocol_version}"
+                        ),
+                    },
+                },
+                status_code=400,
+            )(scope, receive, send)
+            return
+        iterator = iter(messages)
+
+        async def replay() -> Message:
+            try:
+                return next(iterator)
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self._app(scope, replay, send)
+
+
+class _PreflightTransportSecurity:
+    """Validate Host/Origin before the SDK allocates a stateful session."""
+
+    def __init__(self, app: ASGIApp, settings: TransportSecuritySettings) -> None:
+        self._app = app
+        self._validator = TransportSecurityMiddleware(settings)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        response = await self._validator.validate_request(
+            Request(scope, receive),
+            is_post=scope.get("method") == "POST",
+        )
+        if response is not None:
+            await response(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+def create_streamable_http_app(
+    adapter: MCPServerAdapter,
+    *,
+    service_token: str,
+    allowed_hosts: list[str],
+    allowed_origins: list[str],
+) -> ASGIApp:
+    """Build a stateful, authenticated Streamable HTTP ASGI application."""
+    if not service_token.strip():
+        raise ValueError("Streamable HTTP 必须配置非空 MCP_SERVICE_TOKEN")
+    if not allowed_hosts:
+        raise ValueError("Streamable HTTP 必须配置至少一个 allowed host")
+    server = build_sdk_server(adapter)
+    security_settings = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+    manager = StreamableHTTPSessionManager(
+        server,
+        stateless=False,
+        json_response=True,
+        security_settings=security_settings,
+        session_idle_timeout=300,
+    )
+    endpoint: ASGIApp = _PinnedProtocolMiddleware(manager.handle_request)
+    endpoint = _PreflightTransportSecurity(endpoint, security_settings)
+    endpoint = RequireAuthMiddleware(endpoint, required_scopes=["mcp:invoke"])
+    endpoint = AuthenticationMiddleware(
+        endpoint,
+        backend=BearerAuthBackend(
+            _StaticTokenVerifier(service_token, client_id=adapter.name)
+        ),
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+        async with manager.run():
+            yield
+
+    return Starlette(routes=[Mount("/mcp", app=endpoint)], lifespan=lifespan)
+
+
+def run_streamable_http(
+    adapter: MCPServerAdapter,
+    *,
+    host: str,
+    port: int,
+    service_token: str,
+    allowed_hosts: list[str],
+    allowed_origins: list[str],
+) -> None:
+    """Run the reviewed stateful Streamable HTTP endpoint."""
+    app = create_streamable_http_app(
+        adapter,
+        service_token=service_token,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        access_log=False,
+        server_header=False,
+        proxy_headers=False,
+    )
+
+
+def run_adapter(adapter: MCPServerAdapter, *, default_port: int = 8000) -> None:
+    """Run stdio or authenticated stateful Streamable HTTP."""
+    transport = _env("MCP_TRANSPORT", "stdio").strip().lower()
+    if transport == "stdio":
+        run_stdio(adapter)
+        return
+    if transport not in {"streamable-http", "streamable_http"}:
+        raise RuntimeError(f"不支持的 MCP_TRANSPORT: {transport}")
+    host = _env("MCP_HTTP_HOST", "127.0.0.1").strip()
+    port = int(_env("MCP_HTTP_PORT", str(default_port)))
+    token = _env("MCP_SERVICE_TOKEN", "")
+    configured_hosts = _csv_env("MCP_ALLOWED_HOSTS")
+    if configured_hosts:
+        allowed_hosts = configured_hosts
+    elif host in {"127.0.0.1", "localhost", "::1"}:
+        allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    else:
+        raise RuntimeError(
+            "非 loopback MCP_HTTP_HOST 必须显式配置 MCP_ALLOWED_HOSTS"
+        )
+    run_streamable_http(
+        adapter,
+        host=host,
+        port=port,
+        service_token=token,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS"),
+    )
+
+
+def _csv_env(name: str) -> list[str]:
+    return [item.strip() for item in _env(name, "").split(",") if item.strip()]
+
+
+def _env(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    dotenv_value = _DOTENV.get(name)
+    return str(dotenv_value) if dotenv_value is not None else default
 
 
 def _to_sdk_tool(raw: dict[str, Any]) -> types.Tool:

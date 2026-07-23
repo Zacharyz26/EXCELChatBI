@@ -61,7 +61,8 @@ def test_report_tools_import_no_llm() -> None:
 
 def test_llm_exit_points_remain_explicitly_allowlisted() -> None:
     # 全库调用 gateway.complete( 的文件必须恰好是已评审的 LLM 出口。
-    # semantic_verifier 当前仅供隔离评测，生产接入仍受 go/no-go 门禁约束。
+    # semantic_verifier 与 planner_prompt 当前仅供隔离评测，生产接入仍受 go/no-go
+    # 门禁约束（planner_prompt 未被 chat/agent_loop 引用，属编排层出口而非工具）。
     roots = [ROOT / "apps", ROOT / "packages", ROOT / "mcp_servers"]
     callers = set()
     for root in roots:
@@ -73,6 +74,7 @@ def test_llm_exit_points_remain_explicitly_allowlisted() -> None:
         "stats_interpreter.py",
         "kb_qa.py",
         "semantic_verifier.py",
+        "planner_prompt.py",
     }, callers
 
 

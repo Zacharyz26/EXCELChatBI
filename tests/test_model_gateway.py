@@ -20,6 +20,7 @@ from packages.models.adapters.base import ModelAdapter  # noqa: E402
 from packages.models.gateway import ModelGateway  # noqa: E402
 from packages.models.registry import (  # noqa: E402
     Defaults,
+    ModelPricing,
     ModelRegistry,
     ModelSpec,
     RouteSpec,
@@ -275,6 +276,166 @@ routes:
     assert reg.get_model("reasoner").supports_tools is False
 
 
+def test_registry_loads_pricing_and_rejects_incomplete_pricing(tmp_path: Path) -> None:
+    cfg = tmp_path / "models.yaml"
+    cfg.write_text(
+        """
+providers:
+  p: {api_base: "", api_key: "k"}
+models:
+  priced:
+    provider: p
+    model: m-priced
+    pricing:
+      input_per_1k: 0.001
+      output_per_1k: 0.002
+      currency: usd
+      effective_date: "2026-07-01"
+routes:
+  core_reasoning: {primary: priced, fallback: []}
+""",
+        encoding="utf-8",
+    )
+    reg = ModelRegistry(str(cfg))
+    reg.load()
+    assert reg.get_model("priced").pricing == ModelPricing(
+        input_per_1k=0.001,
+        output_per_1k=0.002,
+        currency="USD",
+        effective_date="2026-07-01",
+    )
+
+    cfg.write_text(
+        """
+providers:
+  p: {api_base: "", api_key: "k"}
+models:
+  broken: {provider: p, model: m, pricing: {input_per_1k: 0.1}}
+routes: {}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="pricing 缺少字段"):
+        ModelRegistry(str(cfg)).load()
+
+
+def test_registry_loads_provider_request_params_and_rejects_reserved_keys(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "models.yaml"
+    cfg.write_text(
+        """
+providers:
+  p: {api_base: "", api_key: "k"}
+models:
+  v4:
+    provider: p
+    model: deepseek-v4-flash
+    request_params:
+      extra_body: {thinking: {type: disabled}}
+routes:
+  core_reasoning: {primary: v4, fallback: []}
+""",
+        encoding="utf-8",
+    )
+    reg = ModelRegistry(str(cfg))
+    reg.load()
+
+    assert reg.get_model("v4").request_params == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+
+    cfg.write_text(
+        """
+providers:
+  p: {api_base: "", api_key: "k"}
+models:
+  broken:
+    provider: p
+    model: m
+    request_params: {model: forbidden}
+routes: {}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="不得覆盖保留参数"):
+        ModelRegistry(str(cfg)).load()
+
+
+@pytest.mark.asyncio
+async def test_gateway_merges_model_request_params_before_call_params() -> None:
+    reg = _registry()
+    reg._models["primary"].request_params = {
+        "extra_body": {"thinking": {"type": "disabled"}},
+        "max_tokens": 1024,
+    }
+    rec = _RecordingAdapter()
+    gw = ModelGateway(reg)
+    _seed(gw, {"primary": rec})
+
+    await gw.complete(
+        Scenario.CORE_REASONING,
+        _MSGS,
+        params={"max_tokens": 2048},
+    )
+
+    assert rec.params == {
+        "extra_body": {"thinking": {"type": "disabled"}},
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "tools": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_estimates_cost_from_usage_and_registry_pricing() -> None:
+    reg = _registry()
+    reg._models["primary"].pricing = ModelPricing(0.002, 0.004, "USD", "2026-07-01")
+
+    class _UsageAdapter:
+        async def complete(
+            self, messages: list[Message], **params: object
+        ) -> ModelResponse:
+            return ModelResponse(
+                content="ok",
+                model="m-primary",
+                prompt_tokens=1500,
+                completion_tokens=250,
+                usage_available=True,
+            )
+
+    gw = ModelGateway(reg)
+    _seed(gw, {"primary": _UsageAdapter()})
+    response = await gw.complete(Scenario.CORE_REASONING, _MSGS)
+
+    assert response.cost == pytest.approx(0.004)
+    assert response.cost_currency == "USD"
+    assert response.pricing_effective_date == "2026-07-01"
+
+
+@pytest.mark.asyncio
+async def test_gateway_keeps_cost_unavailable_when_pricing_is_missing() -> None:
+    class _UsageAdapter:
+        async def complete(
+            self, messages: list[Message], **params: object
+        ) -> ModelResponse:
+            return ModelResponse(
+                content="ok",
+                model="m-primary",
+                prompt_tokens=10,
+                completion_tokens=5,
+                usage_available=True,
+            )
+
+    gw = ModelGateway(_registry())
+    _seed(gw, {"primary": _UsageAdapter()})
+    response = await gw.complete(Scenario.CORE_REASONING, _MSGS)
+
+    assert response.cost is None
+    assert response.cost_currency is None
+    assert response.pricing_effective_date is None
+
+
 def test_evaluation_route_is_isolated_from_fallback() -> None:
     """独立评测只保留指定模型，不能把 fallback 成功记到候选模型头上。"""
     reg = _registry()
@@ -285,12 +446,15 @@ def test_evaluation_route_is_isolated_from_fallback() -> None:
         Scenario.CORE_REASONING,
         "backup",
         temperature=0.0,
+        timeout_seconds=30,
+        max_retries=0,
     )
     route = isolated.resolve(Scenario.CORE_REASONING)
     assert route.primary == "backup"
     assert route.fallback == []
     assert route.temperature == 0.0
     assert isolated.route_candidates(Scenario.CORE_REASONING) == ("backup",)
+    assert isolated.defaults == Defaults(timeout_seconds=30, max_retries=0)
     with pytest.raises(KeyError, match="registry 未配置模型"):
         isolated.get_model("primary")
 
@@ -561,11 +725,16 @@ async def test_stream_turn_falls_back_before_first_chunk() -> None:
 # ── 阶段3：适配器 stream_turn 的 tool_calls 增量聚合 ──
 
 
-def _chunk(content: str | None = None, tool_deltas: list[Any] | None = None) -> Any:
+def _chunk(
+    content: str | None = None,
+    tool_deltas: list[Any] | None = None,
+    usage: Any = None,
+) -> Any:
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=tool_deltas))]
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=tool_deltas))],
+        usage=usage,
     )
 
 
@@ -592,6 +761,10 @@ async def test_adapter_stream_turn_accumulates_tool_call_fragments() -> None:
         _chunk(tool_deltas=[_tool_delta(0, id="c1", name="gen_chart", arguments='{"x"')]),
         _chunk(tool_deltas=[_tool_delta(0, arguments=':"月份"}')]),
         _chunk(tool_deltas=[_tool_delta(1, id="c2", name="kb_search", arguments="{}")]),
+        SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=120, completion_tokens=30),
+        ),
     ]
 
     class _FakeStream:
@@ -612,7 +785,16 @@ async def test_adapter_stream_turn_accumulates_tool_call_fragments() -> None:
             created.update(kwargs)
             return _FakeStream()
 
-    adapter = OpenAICompatibleAdapter(ModelSpec("n", "p", "m-x", "", "key"))
+    adapter = OpenAICompatibleAdapter(
+        ModelSpec(
+            "n",
+            "p",
+            "m-x",
+            "",
+            "key",
+            pricing=ModelPricing(0.001, 0.002, "USD", "2026-07-01"),
+        )
+    )
     adapter._client = cast(
         Any, SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
     )
@@ -620,10 +802,13 @@ async def test_adapter_stream_turn_accumulates_tool_call_fragments() -> None:
     pieces, final = await _collect_turn(adapter.stream_turn(_MSGS, tools=_TOOLS))
 
     assert created["stream"] is True
+    assert created["stream_options"] == {"include_usage": True}
     assert created["tools"] == _TOOLS
     assert pieces == ["我先", "看看"]
     assert final is not None
     assert final.content == "我先看看"
+    assert final.usage_available is True
+    assert (final.prompt_tokens, final.completion_tokens) == (120, 30)
     assert [(c.id, c.name, c.arguments) for c in final.tool_calls] == [
         ("c1", "gen_chart", '{"x":"月份"}'),
         ("c2", "kb_search", "{}"),

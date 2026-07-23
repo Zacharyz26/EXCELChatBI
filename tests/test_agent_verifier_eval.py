@@ -6,13 +6,18 @@ import json
 from pathlib import Path
 
 import pytest
-from scripts.agent_verifier_eval import DEFAULT_CASES, _score_rows, load_cases
+from scripts.agent_verifier_eval import (
+    DEFAULT_CASES,
+    LEGACY_V2_CASES,
+    _score_rows,
+    load_cases,
+)
 
 
 def test_default_semantic_cases_are_paired_and_split() -> None:
     cases = load_cases(DEFAULT_CASES)
 
-    assert len(cases) == 14
+    assert len(cases) == 16
     assert {case["split"] for case in cases} == {"public", "heldout"}
     assert {case["expected_verdict"] for case in cases} == {
         "PASS",
@@ -24,8 +29,24 @@ def test_default_semantic_cases_are_paired_and_split() -> None:
         by_category.setdefault(str(case["category"]), set()).add(
             str(case["expected_verdict"])
         )
-    for category in ("coverage", "overclaim", "limitations", "scope", "assumption"):
+    for category in (
+        "coverage",
+        "overclaim",
+        "limitations",
+        "claim_scope",
+        "method_disclosure",
+        "filter_scope",
+        "alternative_explanation",
+    ):
         assert by_category[category] == {"PASS", "NEEDS_ACTION"}
+    assert by_category["clarification"] == {"WAITING_USER", "NEEDS_ACTION"}
+
+
+def test_legacy_v2_fixture_remains_reproducible() -> None:
+    legacy = load_cases(LEGACY_V2_CASES)
+
+    assert len(legacy) == 14
+    assert {case["id"] for case in legacy} == {f"SV{i:02d}" for i in range(1, 15)}
 
 
 def test_case_loader_rejects_duplicate_ids(tmp_path: Path) -> None:

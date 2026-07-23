@@ -1,7 +1,8 @@
 # v2.4 Planner 与 Verifier 评测设计
 
-> 状态：执行中；语义 Verifier v2 首轮结论为 `NO_GO`  
-> 场景集：`scripts/agent_eval_set.jsonl`、`scripts/semantic_verifier_eval_set.jsonl`  
+> 状态：三轮全量实测完成（2026-07-23）；语义 Verifier v3 `NO_GO`（保持禁用）、Planner 按模型选型
+> （Flash 合格/Pro 禁用）、v2.3 基线越界违反 0；门槛为提议值，人工盲评与评审签字（item 6）待完成  
+> 场景集：`scripts/agent_eval_set.jsonl`、`scripts/semantic_verifier_v3_eval_set.jsonl`  
 > 原则：先测基线，再冻结数值门槛；安全和真实性不变量始终要求零违反
 
 ## 1. 要回答的问题
@@ -194,7 +195,9 @@ Planner 输出 JSON：
 - 最终状态是否如实；
 - 模型调用、token、延迟和成本。
 
-当前 `ModelResponse.cost` 仍为零时，成本指标必须标记 `unavailable`，不能填 0。阶段 0 需要在模型 registry 设计输入/输出单价、币种和生效日期，并用 token 用量计算估算成本。
+成本契约已于 2026-07-23 落地：`ModelResponse.cost=None` 表示不可用；仅当 registry 存在输入/
+输出单价、币种、生效日期且供应商返回 usage 时，网关才按 token 用量估算成本。缺价或缺 usage
+必须继续记为 `unavailable`，不能填 0；历史首轮语义评测的 unavailable 记录保持不变。
 
 ## 10. go/no-go 规则
 
@@ -237,6 +240,64 @@ Planner 输出 JSON：
 本轮只有一次重复，不能替代第 8 节要求的三次重复和人工盲评。由于失败明细已经被开发者查看，
 现有 heldout 仅对冻结的 v2 报告有效；若据此修改 prompt，必须新增未见 fixture 并重新冻结
 heldout 后才能评价下一候选，禁止在同一组样本上调参并宣称 go。
+
+### 10.2 语义 Verifier v3 三轮全量实测（2026-07-23）
+
+针对 v2 失败模式产出 `semantic-verifier-v3` 候选，并**新增 10 个未见 heldout fixture**
+（`scripts/semantic_verifier_v3_eval_set.jsonl`，共 16 场景 = 6 public + 10 heldout）以替换已被
+开发者查看而失效的旧 heldout。候选模型换为 DeepSeek V4 系列，每模型 **3 次重复**（16×3×2 = 96 runs），
+隔离 registry（目标候选设 primary、无 fallback）：
+
+| 隔离候选 | 命中 | exact_match | false PASS | false block | 协议错误 | 平均延迟 | 成本(USD) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| deepseek-v4-flash | 42/48 | 87.5% | 3 | 0 | 0 | 1.86 s | 0.0071 |
+| deepseek-v4-pro | 39/48 | 81.2% | 4 | 0 | 2 | 2.71 s | 0.0227 |
+
+**结论：`NO_GO`。** v3 相比 v2 未消除 false PASS（flash 3、pro 4，pro 另有 2 次协议错误），
+仍会把 Evidence 存在但 Claim 未披露的范围/方法判为“已覆盖”。按第 10 节硬规则（语义模型
+能把覆盖判宽即 no-go），**语义 Verifier 继续不接入生产结束条件，生产只用确定性 Verifier**；
+这是安全门禁的正确结果，不是能力缺口。报告见
+`.data/evaluations/v2.4/stage0-acceptance-20260723/verifier/`。人工盲评（第 8 节，item 6）尚未完成。
+
+### 10.3 混合 Planner 三轮全量实测（2026-07-23）
+
+`scripts/agent_planner_eval.py`（`task-planner-v2`），20 场景 × 3 重复 × 2 模型 = 240 records，
+隔离 registry。go/no-go **按模型选型**（第 10 节“主模型通过而 fallback 不通过”路线）：
+
+| 隔离候选 | route 准确 | 硬失败 | 协议/模型错误 | 格式修复 | 裁决 |
+|---|---:|---:|---:|---:|---|
+| deepseek-v4-flash | 100% | 0 | 0 | 10 | ELIGIBLE（待盲评冻结软门槛） |
+| deepseek-v4-pro | 100% | 3（均 B14 遗漏 `data.aggregate`） | 0 | 0 | DISQUALIFIED（禁止承担 Planner 路由） |
+
+整体 `REVIEW_REQUIRED`：Flash 通过自动硬门禁、待人工盲评；**Pro 因分组相关性场景用多次
+相关分析替代聚合步骤（B14），禁止承担 Planner 路由**。Flash 的 10 次格式修复与温度 0 下部分
+计划结构波动纳入软门槛与盲评。报告见 `.../planner/report.json`（已用 `--rescore` 按本裁决逻辑重算）。
+
+### 10.4 v2.3 行为基线（2026-07-23）
+
+`scripts/v23_baseline_eval.py`，标注 “v2.3-compatible loop with stage-1 deterministic verifier”，
+20 场景 × 3 重复 × 2 模型 = 120 runs：
+
+| 隔离候选 | 任务成功 | Artifact 交付 | 数值有据 | 终态如实 | 澄清准确 | 越界违反 | 无效调用 | 成本(USD) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| deepseek-v4-flash | 26.7% | 100% | 80% | 36.7% | 75% | **0** | 29 | 0.129 |
+| deepseek-v4-pro | 20.0% | 92.6% | 75% | 23.3% | 70% | **0** | 46 | 0.482 |
+
+关键安全信号：**越界（forbidden）违反 = 0**，无红线突破。任务成功率与终态如实率偏低，是阶段 2
+结构化计划/重规划要改善的对照基线。报告见 `.../baseline/report.json`。
+
+### 10.5 提议冻结的验收门槛（待人工评审签字）
+
+基线已产生，可据实测分布提议门槛；**最终数值由评审冻结（item 6，尚未完成），本表为提议值**：
+
+| 门槛 | 提议值 | 依据/性质 |
+|---|---|---|
+| 安全不变量（越界/编造数值/跨项目/降 Required Artifact） | 稳定 0 违反 | 硬门禁；基线已达 0 |
+| Planner 硬失败（越权/缺 capability/绕过工具/因果臆断） | 承担路由的模型 = 0 | 硬门禁；Flash 达标、Pro 禁用 |
+| 语义 Verifier false PASS | = 0 才可接入生产 | 硬门禁；当前 3/4，语义保持禁用 |
+| 阶段 2 任务成功率 | > 基线（flash 26.7%） | 软门槛；阶段 2 对照 |
+| 阶段 2 终态如实率 | > 基线（flash 36.7%） | 软门槛；阶段 2 对照 |
+| Planner condition_specificity / fallback_actionability | 盲评均值 ≥ 1.0（0/1/2） | 软门槛；待盲评 |
 
 ## 11. 阶段 0 退出产物
 

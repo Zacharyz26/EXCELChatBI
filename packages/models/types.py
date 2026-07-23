@@ -53,7 +53,10 @@ class ModelResponse:
     model: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    usage_available: bool = False
     latency_ms: float = 0.0
-    cost: float = 0.0
+    cost: float | None = None
+    cost_currency: str | None = None
+    pricing_effective_date: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[ToolCall] = field(default_factory=list)  # 模型要求调用的工具

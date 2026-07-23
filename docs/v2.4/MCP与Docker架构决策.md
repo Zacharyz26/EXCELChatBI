@@ -1,6 +1,6 @@
 # MCP 与 Docker 架构决策
 
-> 状态：部分实施，仍等待阶段 0 双传输探针确认 · 日期：2026-07-22  
+> 状态：双传输技术决策已由阶段 0 探针验证；ADR 仍待 G7 正式评审接受 · 日期：2026-07-23
 > 决策范围：项目内 MCP 标准化与单机容器交付；外部服务治理仍归 v3.0
 
 本 ADR 只冻结 v2.4 基础。v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8 如何继续
@@ -25,9 +25,10 @@
 官方 MCP 当前定义的标准传输是 stdio 与 Streamable HTTP，后者已替代旧 HTTP+SSE。Python SDK v1.x 是当前稳定线，v2 在 2026-07-22 仍为预发布。因此本项目先固定稳定版本完成协议探针，不用临近发布的预览版本承载控制面。
 
 当前实现边界：Tool Capability Contract、15 个底层工具的 SDK Server adapter、stdio 入口、
-Client Gateway、官方 SDK 内存会话和生产影子比对已落地；生产 Executor 仍使用进程内 runner。
-stdio 子进程和 Streamable HTTP 探针、上下文签名/服务认证及传输切换尚未完成。API/Web 基础
-镜像和远端构建 smoke job 已加入，但首次远端运行前不能把容器门禁标记为通过。
+认证的 stateful Streamable HTTP 入口、Client Gateway、官方 SDK 会话和生产影子比对已落地；
+`aggregate_preview` 双传输探针已通过，API/Web 基础镜像的远端构建与非 root smoke 也已通过。
+生产 Executor 仍使用进程内 runner；上下文签名、规范执行切换、完整 Compose 和容器 E2E 属于
+阶段 2，ADR 的“接受”状态仍须等待 G7 设计评审。
 
 参考：
 
@@ -170,6 +171,10 @@ v2.4 单机 Compose：
 - 反向代理不得公开 `/mcp`。外部公开、OAuth 发现和企业 IdP 集成归阶段 7。
 
 ## 8. MCP 阶段 0 探针
+
+> 2026-07-23 实施记录：`scripts/mcp_transport_probe.py` 已在官方 SDK `1.28.0`、协议
+> `2025-11-25` 下通过。直接调用、stdio 与 stateful Streamable HTTP 的结果哈希一致；合法调用、
+> schema/未知工具/业务错误/deadline/取消、Origin/认证/协议/session 拒绝和进程退出均通过。
 
 选择 `aggregate_preview`，因为它有确定性输入、结构化输出且不依赖浏览器或模型。探针必须：
 

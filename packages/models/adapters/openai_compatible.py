@@ -106,8 +106,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             model=self._spec.model,
             prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            usage_available=usage is not None,
             latency_ms=latency_ms,
-            cost=0.0,  # TODO: 按 registry 价目表计算成本
             raw={},
             tool_calls=_parse_tool_calls(message),
         )
@@ -127,6 +127,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         kwargs: dict[str, Any] = dict(params)
         if tools is not None:
             kwargs["tools"] = tools
+        if self._spec.pricing is not None:
+            kwargs.setdefault("stream_options", {"include_usage": True})
         stream = await self._client.chat.completions.create(
             model=self._spec.model,
             # 线格式在 _to_wire 构造并有测试兜底；cast 适配 SDK 的 TypedDict 入参
@@ -136,7 +138,15 @@ class OpenAICompatibleAdapter(ModelAdapter):
         )
         parts: list[str] = []
         calls: dict[int, dict[str, Any]] = {}
+        prompt_tokens = 0
+        completion_tokens = 0
+        usage_available = False
         async for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                usage_available = True
+                prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                completion_tokens = getattr(usage, "completion_tokens", 0) or 0
             if not chunk.choices:
                 continue  # 部分供应商的末尾 usage chunk 无 choices
             delta = chunk.choices[0].delta
@@ -158,6 +168,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
         yield ModelResponse(
             content="".join(parts),
             model=self._spec.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            usage_available=usage_available,
             latency_ms=(time.perf_counter() - started) * 1000,
             tool_calls=[
                 ToolCall(

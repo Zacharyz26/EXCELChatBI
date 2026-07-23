@@ -75,12 +75,14 @@ def _pass_payload() -> dict[str, Any]:
                 "criterion_id": "regions",
                 "status": "pass",
                 "reason": "Claim 覆盖两个地区的比较。",
+                "claim_ids": ["claim-1"],
                 "evidence_ids": ["evidence-trend"],
             },
             {
                 "criterion_id": "limitations",
                 "status": "pass",
                 "reason": "Claim 披露第一季度样本限制。",
+                "claim_ids": ["claim-1"],
                 "evidence_ids": ["evidence-trend"],
             },
         ],
@@ -148,6 +150,7 @@ async def test_semantic_failure_becomes_needs_action() -> None:
         "criterion_id": "regions",
         "status": "fail",
         "reason": "只描述了华东，遗漏华南。",
+        "claim_ids": ["claim-1"],
         "evidence_ids": ["evidence-trend"],
     }
     payload["next_action"] = {"kind": "revise", "reason": "补充华南比较。"}
@@ -168,6 +171,7 @@ async def test_uncertain_criterion_with_clarification_waits_for_user() -> None:
         "criterion_id": "regions",
         "status": "uncertain",
         "reason": "地区口径存在两个同样合理的定义。",
+        "claim_ids": ["claim-1"],
         "evidence_ids": ["evidence-trend"],
     }
     payload["next_action"] = {"kind": "clarify", "reason": "请用户确认地区口径。"}
@@ -185,6 +189,13 @@ async def test_unknown_evidence_or_accepting_known_issue_is_protocol_error() -> 
     unknown["criteria"][0]["evidence_ids"] = ["invented-evidence"]
     with pytest.raises(SemanticVerifierProtocolError, match="不存在的 Evidence"):
         await SemanticVerifier(_Gateway(unknown)).evaluate(
+            _request(), hard_result=VerificationResult(verdict="PASS")
+        )
+
+    unknown_claim = _pass_payload()
+    unknown_claim["criteria"][0]["claim_ids"] = ["invented-claim"]
+    with pytest.raises(SemanticVerifierProtocolError, match="不存在的 Claim"):
+        await SemanticVerifier(_Gateway(unknown_claim)).evaluate(
             _request(), hard_result=VerificationResult(verdict="PASS")
         )
 

@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from mcp import ClientSession  # noqa: E402
+from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
 from mcp_servers.chart.server import build_server as build_chart_server  # noqa: E402
 from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding  # noqa: E402
@@ -29,7 +36,11 @@ from mcp_servers.common.contracts import (  # noqa: E402
     MCPRequestContext,
     MCPToolDescriptor,
 )
-from mcp_servers.common.sdk_adapter import build_sdk_server  # noqa: E402
+from mcp_servers.common.sdk_adapter import (  # noqa: E402
+    MCP_PROTOCOL_VERSION,
+    build_sdk_server,
+    create_streamable_http_app,
+)
 from mcp_servers.dataset_ops.server import build_server as build_data_server  # noqa: E402
 from mcp_servers.excel_parser.server import build_server as build_excel_server  # noqa: E402
 from mcp_servers.report.server import build_server as build_report_server  # noqa: E402
@@ -81,6 +92,42 @@ def _adapter(*, bad_output: bool = False) -> MCPServerAdapter:
         else (lambda args: {"doubled": args["value"] * 2})
     )
     return MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+
+
+@asynccontextmanager
+async def _http_client(
+    adapter: MCPServerAdapter,
+    *,
+    token: str,
+) -> AsyncIterator[tuple[httpx.AsyncClient, str]]:
+    app = create_streamable_http_app(
+        adapter,
+        service_token=token,
+        allowed_hosts=["127.0.0.1:*"],
+        allowed_origins=["https://trusted.example"],
+    )
+    lifespan_context = app.router.lifespan_context  # type: ignore[attr-defined]
+    async with lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:8000",
+            timeout=3,
+        ) as client:
+            yield client, "http://127.0.0.1:8000/mcp/"
+
+
+def _initialize_payload(protocol: str = MCP_PROTOCOL_VERSION) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol,
+            "capabilities": {},
+            "clientInfo": {"name": "chatbi-test", "version": "1"},
+        },
+    }
 
 
 def test_request_context_is_host_metadata_and_rejects_expired_deadline() -> None:
@@ -168,16 +215,19 @@ async def test_official_sdk_tools_list_call_and_gateway_round_trip() -> None:
         assert len(listed.tools) == 1
         assert listed.tools[0].inputSchema == INPUT_SCHEMA
         assert listed.tools[0].outputSchema == OUTPUT_SCHEMA
+        assert listed.tools[0].meta is not None
         assert listed.tools[0].meta["com.chatbi/capabilities"] == ["test.double"]
 
         no_context = await session.call_tool("double", {"value": 3})
         assert no_context.isError is True
+        assert no_context.meta is not None
         assert no_context.meta["com.chatbi/error-code"] == "invalid_request_context"
 
         invalid = await session.call_tool(
             "double", {"value": "3"}, meta=_context().to_request_meta()
         )
         assert invalid.isError is True
+        assert invalid.meta is not None
         assert invalid.meta["com.chatbi/error-code"] == "invalid_arguments"
 
         transport = OfficialSDKSessionTransport(session)
@@ -190,6 +240,138 @@ async def test_official_sdk_tools_list_call_and_gateway_round_trip() -> None:
         assert discovery.healthy is True
         result = await gateway.call_tool("double", {"value": 3}, _context())
         assert result.structured_content == {"doubled": 6}
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_is_stateful_authenticated_and_fail_closed() -> None:
+    token = "stage0-test-token"
+    auth = {"Authorization": f"Bearer {token}"}
+    async with _http_client(_adapter(), token=token) as (client, url):
+        no_auth = await client.post(url, json=_initialize_payload())
+        assert no_auth.status_code == 401
+
+        bad_origin = await client.post(
+            url,
+            json=_initialize_payload(),
+            headers={**auth, "Origin": "https://evil.example"},
+        )
+        assert bad_origin.status_code == 403
+
+        bad_protocol = await client.post(
+            url,
+            json=_initialize_payload("2099-01-01"),
+            headers=auth,
+        )
+        assert bad_protocol.status_code == 400
+        assert MCP_PROTOCOL_VERSION in bad_protocol.text
+
+        stale_session = await client.post(
+            url,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            headers={
+                **auth,
+                "mcp-session-id": "no-such-session",
+                "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+            },
+        )
+        assert stale_session.status_code == 404
+
+        client.headers.update(auth)
+        async with streamable_http_client(url, http_client=client) as streams:
+            read_stream, write_stream, get_session_id = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                initialized = await session.initialize()
+                assert initialized.protocolVersion == MCP_PROTOCOL_VERSION
+                assert get_session_id()
+                listed = await session.list_tools()
+                assert [tool.name for tool in listed.tools] == ["double"]
+                called = await session.call_tool(
+                    "double",
+                    {"value": 7},
+                    meta=_context().to_request_meta(),
+                )
+                assert called.isError is False
+                assert called.structuredContent == {"doubled": 14}
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_client_cancellation_keeps_session_usable() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    descriptor = _adapter().list_tools()[0]
+
+    def slow_handler(args: dict[str, Any]) -> dict[str, int]:
+        started.set()
+        release.wait(timeout=2)
+        return {"doubled": args["value"] * 2}
+
+    adapter = MCPServerAdapter(
+        "slow-tools", [MCPToolBinding(descriptor, slow_handler)]
+    )
+    token = "stage0-cancel-token"
+    async with _http_client(adapter, token=token) as (client, url):
+        auth = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        }
+        initialized = await client.post(url, json=_initialize_payload(), headers=auth)
+        assert initialized.status_code == 200
+        session_id = initialized.headers["mcp-session-id"]
+        session_headers = {
+            **auth,
+            "mcp-session-id": session_id,
+            "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+        }
+        ready = await client.post(
+            url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            },
+            headers=session_headers,
+        )
+        assert ready.status_code == 202
+        call = asyncio.create_task(
+            client.post(
+                url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "double",
+                        "arguments": {"value": 2},
+                        "_meta": _context().to_request_meta(),
+                    },
+                },
+                headers=session_headers,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        cancelled = await client.post(
+            url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 2, "reason": "probe cancellation"},
+            },
+            headers=session_headers,
+        )
+        assert cancelled.status_code == 202
+        release.set()
+        result = await asyncio.wait_for(call, timeout=2)
+        assert result.status_code == 200
+        assert result.json()["error"]["message"] == "Request cancelled"
+        listed = await client.post(
+            url,
+            json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
+            headers=session_headers,
+        )
+        assert listed.status_code == 200
+        assert [tool["name"] for tool in listed.json()["result"]["tools"]] == ["double"]
+        terminated = await client.delete(url, headers=session_headers)
+        assert terminated.status_code == 200
 
 
 def test_every_project_server_exports_governed_mcp_metadata() -> None:

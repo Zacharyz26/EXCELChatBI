@@ -16,16 +16,33 @@ providers:
     api_key: ${VISION_API_KEY}
 
 models:
-  deepseek-v3:
+  deepseek-v4-flash:
     provider: deepseek
-    model: deepseek-chat
-  deepseek-r1:
+    model: deepseek-v4-flash
+    # V4 默认开启 thinking；当前多轮工具适配层不回传 reasoning_content，
+    # 因此显式关闭，保证 JSON/温度参数和 function-calling 往返可复现。
+    request_params:
+      extra_body:
+        thinking:
+          type: disabled
+    # 估算价按每千 token 配置；采用缓存未命中价，实际账单以供应商为准。
+    pricing:
+      input_per_1k: 0.00014
+      output_per_1k: 0.00028
+      currency: USD
+      effective_date: "2026-04-24"
+  deepseek-v4-pro:
     provider: deepseek
-    model: deepseek-reasoner
-    # 推理模型不支持 JSON 输出模式；网关降级到它时会剥掉该参数
-    drop_params: [response_format]
-    # 不支持 function calling：带 tools 的请求会跳过本模型而非静默丢工具（决策10）
-    supports_tools: false
+    model: deepseek-v4-pro
+    request_params:
+      extra_body:
+        thinking:
+          type: disabled
+    pricing:
+      input_per_1k: 0.000435
+      output_per_1k: 0.00087
+      currency: USD
+      effective_date: "2026-04-24"
   qwen-vl:
     provider: vision
     model: qwen2.5-vl
@@ -33,24 +50,23 @@ models:
 # 场景 → 模型路由（含备选，用于降级）。场景枚举见 packages/models/types.py。
 routes:
   core_reasoning:        # 核心推理：意图理解、规划、解读、代码生成
-    primary: deepseek-v3
-    fallback: [deepseek-r1]
+    primary: deepseek-v4-pro
+    fallback: [deepseek-v4-flash]
     temperature: 0.3
   complex_reasoning:     # v2.4 Planner/Verifier spike 候选；启用前先过行为评测
-    primary: deepseek-r1
-    fallback: [deepseek-v3]
+    primary: deepseek-v4-pro
+    fallback: [deepseek-v4-flash]
+    temperature: 0.0
   vision:                # 多模态识图，结果回推理模型
     primary: qwen-vl
     fallback: []
   lightweight:           # 轻量：query 改写、意图分类、指代消解
-    primary: deepseek-v3
+    primary: deepseek-v4-flash
     fallback: []
     temperature: 0.0
   agent:                 # 当前 v2.3 function-calling 循环；v2.4 继续要求工具能力
-    # 决策10：本场景降级链不得含不支持 function calling 的模型（如 deepseek-r1）；
-    # 网关对带 tools 的请求会跳过 supports_tools=false 的候选做兜底。
-    primary: deepseek-v3
-    fallback: []
+    primary: deepseek-v4-pro
+    fallback: [deepseek-v4-flash]
     temperature: 0.3
 
 # 统一调用策略（重试 / 超时 / 降级）

@@ -37,4 +37,4 @@ class MCPServer:
             from mcp_servers.common.sdk_adapter import run_adapter
         except ImportError as exc:  # pragma: no cover - packaging failure path
             raise RuntimeError("启动 MCP Server 需要安装项目的 mcp 可选依赖") from exc
-        run_adapter(self.as_mcp_adapter())
+        run_adapter(self.as_mcp_adapter(), default_port=self.port)

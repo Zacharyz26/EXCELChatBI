@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import random
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -37,7 +39,8 @@ from packages.models.gateway import ModelGateway  # noqa: E402
 from packages.models.registry import ModelRegistry  # noqa: E402
 from packages.models.types import Scenario  # noqa: E402
 
-DEFAULT_CASES = Path(__file__).parent / "semantic_verifier_eval_set.jsonl"
+DEFAULT_CASES = Path(__file__).parent / "semantic_verifier_v3_eval_set.jsonl"
+LEGACY_V2_CASES = Path(__file__).parent / "semantic_verifier_eval_set.jsonl"
 _EXPECTED_VERDICTS = {"PASS", "NEEDS_ACTION", "WAITING_USER"}
 
 
@@ -86,72 +89,32 @@ async def run_evaluation(
     model_names: list[str],
     repetitions: int,
 ) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
+    concurrency = 4
+    semaphore = asyncio.Semaphore(concurrency)
+    pending: list[Any] = []
+
+    async def bounded(
+        verifier: SemanticVerifier,
+        case: dict[str, Any],
+        model_name: str,
+        repetition: int,
+    ) -> dict[str, Any]:
+        async with semaphore:
+            return await _evaluate_case(verifier, case, model_name, repetition)
+
     for model_name in model_names:
         isolated = registry.isolated_route(
             Scenario.COMPLEX_REASONING,
             model_name,
             temperature=0.0,
+            timeout_seconds=30,
+            max_retries=0,
         )
         verifier = SemanticVerifier(ModelGateway(isolated))
         for repetition in range(1, repetitions + 1):
             for case in cases:
-                request = cast(SemanticVerificationRequest, case["request"])
-                base: dict[str, Any] = {
-                    "case_id": case["id"],
-                    "split": case["split"],
-                    "category": case["category"],
-                    "repetition": repetition,
-                    "configured_model": model_name,
-                    "expected_verdict": case["expected_verdict"],
-                    "request_hash": request.content_hash,
-                }
-                try:
-                    evaluation = await verifier.evaluate(
-                        request,
-                        hard_result=VerificationResult(verdict="PASS"),
-                    )
-                except SemanticVerifierProtocolError as exc:
-                    rows.append(
-                        {
-                            **base,
-                            "predicted_verdict": "PROTOCOL_ERROR",
-                            "matched": False,
-                            "actual_model": exc.model,
-                            "response_hash": exc.response_hash,
-                            "prompt_tokens": exc.prompt_tokens,
-                            "completion_tokens": exc.completion_tokens,
-                            "latency_ms": round(exc.latency_ms, 3),
-                            "cost": exc.cost,
-                            "next_action": None,
-                            "issue_codes": [],
-                            "criterion_statuses": {},
-                            "error_type": "protocol_error",
-                            "error": str(exc),
-                        }
-                    )
-                    continue
-                except (RuntimeError, ValueError) as exc:
-                    rows.append(
-                        {
-                            **base,
-                            "predicted_verdict": "MODEL_ERROR",
-                            "matched": False,
-                            "actual_model": None,
-                            "response_hash": None,
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "latency_ms": 0.0,
-                            "cost": None,
-                            "next_action": None,
-                            "issue_codes": [],
-                            "criterion_statuses": {},
-                            "error_type": "model_error",
-                            "error": str(exc),
-                        }
-                    )
-                    continue
-                rows.append(_evaluation_row(base, evaluation))
+                pending.append(bounded(verifier, case, model_name, repetition))
+    rows = list(await asyncio.gather(*pending))
 
     by_model = {
         model_name: _score_rows(
@@ -169,8 +132,10 @@ async def run_evaluation(
         "schema_version": 1,
         "evaluation": "semantic_verifier",
         "prompt_version": PROMPT_VERSION,
+        "scenario_set_hash": hashlib.sha256(DEFAULT_CASES.read_bytes()).hexdigest(),
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "repetitions": repetitions,
+        "concurrency": concurrency,
         "models": model_names,
         "case_count": len(cases),
         "metrics": by_model,
@@ -181,6 +146,80 @@ async def run_evaluation(
             else "硬性 no-go 条件未触发；仍需按评测设计完成人工盲评并冻结数值门槛。"
         ),
         "rows": rows,
+        "deterministic_precheck_short_circuit": True,
+    }
+
+
+async def _evaluate_case(
+    verifier: SemanticVerifier,
+    case: dict[str, Any],
+    model_name: str,
+    repetition: int,
+) -> dict[str, Any]:
+    request = cast(SemanticVerificationRequest, case["request"])
+    base: dict[str, Any] = {
+        "case_id": case["id"],
+        "split": case["split"],
+        "category": case["category"],
+        "repetition": repetition,
+        "configured_model": model_name,
+        "expected_verdict": case["expected_verdict"],
+        "request_hash": request.content_hash,
+    }
+    try:
+        async with asyncio.timeout(45):
+            evaluation = await verifier.evaluate(
+                request,
+                hard_result=VerificationResult(verdict="PASS"),
+            )
+    except TimeoutError:
+        return _model_error_row(
+            base, "Verifier 模型调用超过 45 秒总时限", latency_ms=45_000.0
+        )
+    except SemanticVerifierProtocolError as exc:
+        return {
+            **base,
+            "predicted_verdict": "PROTOCOL_ERROR",
+            "matched": False,
+            "actual_model": exc.model,
+            "response_hash": exc.response_hash,
+            "prompt_tokens": exc.prompt_tokens,
+            "completion_tokens": exc.completion_tokens,
+            "latency_ms": round(exc.latency_ms, 3),
+            "cost": exc.cost,
+            "cost_currency": exc.cost_currency,
+            "pricing_effective_date": exc.pricing_effective_date,
+            "next_action": None,
+            "issue_codes": [],
+            "criterion_statuses": {},
+            "error_type": "protocol_error",
+            "error": str(exc),
+        }
+    except (RuntimeError, ValueError) as exc:
+        return _model_error_row(base, str(exc))
+    return _evaluation_row(base, evaluation)
+
+
+def _model_error_row(
+    base: dict[str, Any], error: str, *, latency_ms: float = 0.0
+) -> dict[str, Any]:
+    return {
+        **base,
+        "predicted_verdict": "MODEL_ERROR",
+        "matched": False,
+        "actual_model": None,
+        "response_hash": None,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": latency_ms,
+        "cost": None,
+        "cost_currency": None,
+        "pricing_effective_date": None,
+        "next_action": None,
+        "issue_codes": [],
+        "criterion_statuses": {},
+        "error_type": "model_error",
+        "error": error,
     }
 
 
@@ -235,6 +274,8 @@ def _evaluation_row(base: dict[str, Any], evaluation: SemanticEvaluation) -> dic
         "completion_tokens": evaluation.completion_tokens,
         "latency_ms": round(evaluation.latency_ms, 3),
         "cost": evaluation.cost,
+        "cost_currency": evaluation.cost_currency,
+        "pricing_effective_date": evaluation.pricing_effective_date,
         "next_action": evaluation.next_action,
         "issue_codes": [
             issue.code for issue in evaluation.verification.issues
@@ -247,9 +288,17 @@ def _evaluation_row(base: dict[str, Any], evaluation: SemanticEvaluation) -> dic
     }
 
 
-def _score_rows(rows: list[dict[str, Any]]) -> dict[str, int | float]:
+def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     matched = sum(bool(row["matched"]) for row in rows)
+    available_costs = [
+        float(row["cost"]) for row in rows if row.get("cost") is not None
+    ]
+    currencies = {
+        str(row["cost_currency"])
+        for row in rows
+        if row.get("cost_currency") is not None
+    }
     return {
         "runs": total,
         "matched": matched,
@@ -266,7 +315,73 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, int | float]:
         ),
         "protocol_errors": sum(row["error_type"] == "protocol_error" for row in rows),
         "model_errors": sum(row["error_type"] == "model_error" for row in rows),
+        "prompt_tokens": sum(int(row.get("prompt_tokens", 0)) for row in rows),
+        "completion_tokens": sum(
+            int(row.get("completion_tokens", 0)) for row in rows
+        ),
+        "latency_ms": round(
+            sum(float(row.get("latency_ms", 0.0)) for row in rows), 3
+        ),
+        "cost": round(sum(available_costs), 9) if available_costs else None,
+        "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
+        "cost_availability": (
+            "available"
+            if available_costs and len(available_costs) == total
+            else "unavailable"
+        ),
     }
+
+
+def build_blind_review(
+    report: dict[str, Any],
+    cases: list[dict[str, Any]],
+    *,
+    seed: int = 24,
+) -> list[dict[str, Any]]:
+    """Build an anonymized review sheet with no model/configured route labels."""
+    requests = {
+        str(case["id"]): cast(SemanticVerificationRequest, case["request"])
+        for case in cases
+    }
+    items: list[dict[str, Any]] = []
+    for row in cast(list[dict[str, Any]], report["rows"]):
+        if row.get("error_type") is not None:
+            continue
+        request = requests[str(row["case_id"])]
+        candidate_id = hashlib.sha256(
+            (
+                f"{row['case_id']}:{row['repetition']}:{row['configured_model']}:"
+                f"{row['response_hash']}"
+            ).encode()
+        ).hexdigest()[:16]
+        items.append(
+            {
+                "candidate_id": candidate_id,
+                "case_id": row["case_id"],
+                "goal": request.goal,
+                "criteria": [
+                    {
+                        "criterion_id": item.criterion_id,
+                        "description": item.description,
+                    }
+                    for item in request.criteria
+                ],
+                "claims": [
+                    {
+                        "claim_id": item.claim_id,
+                        "text": item.text,
+                        "limitations": list(item.limitations),
+                    }
+                    for item in request.claims
+                ],
+                "predicted_verdict": row["predicted_verdict"],
+                "coverage_rating": None,
+                "overclaim_rating": None,
+                "review_note": None,
+            }
+        )
+    random.Random(seed).shuffle(items)
+    return items
 
 
 def _print_report(report: dict[str, Any]) -> None:
@@ -372,7 +487,17 @@ def main() -> int:
             json.dumps(report, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        blind_path = output.parent / "blind_review.jsonl"
+        blind_path.write_text(
+            "\n".join(
+                json.dumps(item, ensure_ascii=False)
+                for item in build_blind_review(report, cases)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         print(f"Report: {output}")
+        print(f"Blind review: {blind_path}")
     return 1 if args.enforce_hard and report["decision"] == "NO_GO" else 0
 
 

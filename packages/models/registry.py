@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,17 @@ from dotenv import dotenv_values
 from packages.models.types import Scenario
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPricing:
+    """Registry-owned estimated token pricing, expressed per 1,000 tokens."""
+
+    input_per_1k: float
+    output_per_1k: float
+    currency: str
+    effective_date: str
 
 
 @dataclass
@@ -41,6 +54,8 @@ class ModelSpec:
     api_key: str
     drop_params: list[str] = field(default_factory=list)
     supports_tools: bool = True
+    pricing: ModelPricing | None = None
+    request_params: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -93,6 +108,10 @@ class ModelRegistry:
                 api_key=pcfg["api_key"],
                 drop_params=[str(p) for p in (cfg.get("drop_params") or [])],
                 supports_tools=bool(cfg.get("supports_tools", True)),
+                pricing=self._parse_pricing(name, cfg.get("pricing")),
+                request_params=self._parse_request_params(
+                    name, cfg.get("request_params")
+                ),
             )
 
         for scenario, cfg in (raw.get("routes") or {}).items():
@@ -142,6 +161,8 @@ class ModelRegistry:
         model_name: str,
         *,
         temperature: float = 0.0,
+        timeout_seconds: int | None = None,
+        max_retries: int | None = None,
     ) -> ModelRegistry:
         """Build an evaluation registry with exactly one model and no fallback."""
         model = self.get_model(model_name)
@@ -154,7 +175,15 @@ class ModelRegistry:
                 temperature=temperature,
             )
         }
-        isolated._defaults = self.defaults
+        defaults = self.defaults
+        isolated._defaults = Defaults(
+            timeout_seconds=(
+                defaults.timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            ),
+            max_retries=defaults.max_retries if max_retries is None else max_retries,
+        )
         isolated._loaded = True
         return isolated
 
@@ -174,3 +203,63 @@ class ModelRegistry:
     def _expand(value: str, env: dict[str, str]) -> str:
         """展开字符串中的 ${VAR} 占位，缺失则替换为空串。"""
         return _ENV_PATTERN.sub(lambda m: env.get(m.group(1), ""), value)
+
+    @staticmethod
+    def _parse_pricing(model_name: str, raw: Any) -> ModelPricing | None:
+        """Parse optional pricing without treating a missing price as zero."""
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"模型 {model_name} 的 pricing 必须是对象")
+        required = ("input_per_1k", "output_per_1k", "currency", "effective_date")
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise ValueError(
+                f"模型 {model_name} 的 pricing 缺少字段: {', '.join(missing)}"
+            )
+        try:
+            input_price = float(raw["input_per_1k"])
+            output_price = float(raw["output_per_1k"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"模型 {model_name} 的 token 单价必须是数字") from exc
+        if (
+            isinstance(raw["input_per_1k"], bool)
+            or isinstance(raw["output_per_1k"], bool)
+            or not isfinite(input_price)
+            or not isfinite(output_price)
+            or input_price < 0
+            or output_price < 0
+        ):
+            raise ValueError(f"模型 {model_name} 的 token 单价必须是非负有限数")
+        currency = str(raw["currency"]).strip().upper()
+        if _CURRENCY_PATTERN.fullmatch(currency) is None:
+            raise ValueError(f"模型 {model_name} 的 pricing.currency 必须是三位币种代码")
+        effective_date = str(raw["effective_date"]).strip()
+        try:
+            date.fromisoformat(effective_date)
+        except ValueError as exc:
+            raise ValueError(
+                f"模型 {model_name} 的 pricing.effective_date 必须是 ISO 日期"
+            ) from exc
+        return ModelPricing(
+            input_per_1k=input_price,
+            output_per_1k=output_price,
+            currency=currency,
+            effective_date=effective_date,
+        )
+
+    @staticmethod
+    def _parse_request_params(model_name: str, raw: Any) -> dict[str, object]:
+        """Parse provider-specific defaults without moving them into business code."""
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"模型 {model_name} 的 request_params 必须是对象")
+        forbidden = {"model", "messages", "tools", "stream"}
+        overlap = forbidden.intersection(raw)
+        if overlap:
+            raise ValueError(
+                f"模型 {model_name} 的 request_params 不得覆盖保留参数: "
+                f"{', '.join(sorted(overlap))}"
+            )
+        return {str(key): value for key, value in raw.items()}
