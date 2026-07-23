@@ -11,7 +11,7 @@ class Scenario(str, Enum):
     """模型路由场景（对应 config/models.yaml 的 routes）。"""
 
     CORE_REASONING = "core_reasoning"        # 核心推理：意图/规划/解读/代码生成
-    COMPLEX_REASONING = "complex_reasoning"  # 复杂多步（B轨，MVP 暂不启用）
+    COMPLEX_REASONING = "complex_reasoning"  # v2.4 Planner/Verifier spike 可评测使用
     VISION = "vision"                        # 多模态识图
     LIGHTWEIGHT = "lightweight"              # 轻量：改写/分类/指代消解
     AGENT = "agent"                          # 对话式 Agent（function-calling，14 章；决策10）

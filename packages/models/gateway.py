@@ -12,6 +12,7 @@ from typing import Any
 from openai import OpenAIError
 
 from packages.common.logging import get_logger
+from packages.governance.observability import TraceSpan, trace_span
 from packages.models.adapters.base import ModelAdapter
 from packages.models.adapters.openai_compatible import OpenAICompatibleAdapter
 from packages.models.registry import ModelRegistry, ModelSpec
@@ -90,8 +91,25 @@ class ModelGateway:
             call_params: dict[str, object] = {"temperature": route.temperature, **extra}
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
             try:
-                adapter = self._get_adapter(spec)
-                resp = await adapter.complete(messages, tools=tools, **call_params)
+                with trace_span(
+                    "model.complete",
+                    scenario=scenario.value,
+                    configured_model=name,
+                    with_tools=tools is not None,
+                ) as span:
+                    adapter = self._get_adapter(spec)
+                    resp = await adapter.complete(messages, tools=tools, **call_params)
+                    span.set_attributes(
+                        actual_model=resp.model,
+                        prompt_tokens=resp.prompt_tokens,
+                        completion_tokens=resp.completion_tokens,
+                        token_usage_available=bool(
+                            resp.prompt_tokens or resp.completion_tokens
+                        ),
+                        model_latency_ms=round(resp.latency_ms, 3),
+                        cost=resp.cost if resp.cost != 0 else "unavailable",
+                        tool_call_count=len(resp.tool_calls),
+                    )
                 _log.info(
                     "model.response",
                     model=resp.model,
@@ -156,19 +174,34 @@ class ModelGateway:
                 continue
             call_params: dict[str, object] = {"temperature": route.temperature, **extra}
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
+            stream_started = False
             try:
-                adapter = self._get_adapter(spec)
-                chunks = aiter(adapter.stream_turn(messages, tools=tools, **call_params))
-                first = await anext(chunks, None)
+                with trace_span(
+                    "model.stream_turn",
+                    scenario=scenario.value,
+                    configured_model=name,
+                    with_tools=tools is not None,
+                ) as span:
+                    adapter = self._get_adapter(spec)
+                    chunks = aiter(
+                        adapter.stream_turn(messages, tools=tools, **call_params)
+                    )
+                    first = await anext(chunks, None)
+                    stream_started = True
+                    if first is not None:
+                        if isinstance(first, ModelResponse):
+                            _set_response_trace(span, first)
+                        yield first
+                        async for piece in chunks:
+                            if isinstance(piece, ModelResponse):
+                                _set_response_trace(span, piece)
+                            yield piece
             except (OpenAIError, ValueError) as exc:
+                if stream_started:
+                    raise
                 last_error = exc
                 _log.warning("model.stream_turn.fallback", model=name, error=str(exc))
                 continue
-            # 已成功开流：之后的错误如实上抛，不再降级
-            if first is not None:
-                yield first
-                async for piece in chunks:
-                    yield piece
             _log.info("model.stream_turn.done", model=spec.model)
             return
 
@@ -212,20 +245,43 @@ class ModelGateway:
             spec = self._registry.get_model(name)
             call_params: dict[str, object] = {"temperature": route.temperature, **extra}
             call_params = {k: v for k, v in call_params.items() if k not in spec.drop_params}
+            stream_started = False
             try:
-                adapter = self._get_adapter(spec)
-                chunks = aiter(adapter.stream(messages, **call_params))
-                first = await anext(chunks, None)
+                with trace_span(
+                    "model.stream",
+                    scenario=scenario.value,
+                    configured_model=name,
+                ):
+                    adapter = self._get_adapter(spec)
+                    chunks = aiter(adapter.stream(messages, **call_params))
+                    first = await anext(chunks, None)
+                    stream_started = True
+                    if first is not None:
+                        yield first
+                        async for piece in chunks:
+                            yield piece
             except (OpenAIError, ValueError) as exc:
+                if stream_started:
+                    raise
                 last_error = exc
                 _log.warning("model.stream.fallback", model=name, error=str(exc))
                 continue
-            # 已成功开流（含空流）：之后的错误如实上抛，不再降级
-            if first is not None:
-                yield first
-                async for piece in chunks:
-                    yield piece
             _log.info("model.stream.done", model=spec.model)
             return
 
         raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
+
+
+def _set_response_trace(span: TraceSpan, response: ModelResponse) -> None:
+    """Attach response accounting without coupling trace internals to adapters."""
+    span.set_attributes(
+        actual_model=response.model,
+        prompt_tokens=response.prompt_tokens,
+        completion_tokens=response.completion_tokens,
+        token_usage_available=bool(
+            response.prompt_tokens or response.completion_tokens
+        ),
+        model_latency_ms=round(response.latency_ms, 3),
+        cost=response.cost if response.cost != 0 else "unavailable",
+        tool_call_count=len(response.tool_calls),
+    )

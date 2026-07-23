@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     upload_dir: str = ".data/uploads"
     max_upload_mb: int = 50              # 上传文件大小上限（超限 413，防内存 DoS）
     report_dir: str = ".data/reports"   # 报告与图表截图落盘目录
+    report_temp_grace_seconds: int = Field(default=3600, ge=0)
 
     # 图表服务端截图（Playwright 无头 chromium）；留空则自动探测已安装的 chromium
     chromium_executable_path: str = ""

@@ -1,8 +1,8 @@
-"""旧运行态结构，保留供迁移期兼容。
+"""旧运行态结构，保留供历史兼容，不是 v2.4 AgentState。
 
-阶段 1 起，项目、对话、消息和工件以 SQLite 为真相源；完整持久化模型见
-``packages.session.models``。本模块暂不参与新对话工作区，等阶段 3 Agent 上下文
-装配时再移除兼容结构。
+当前项目、对话、消息和工件以 SQLite 为真相源；v2.4 将另行设计持久化的
+TaskContract/AgentState/TaskEvent/Checkpoint/Claim/Evidence。v2.5 的 compaction
+与 coref 不应继续扩展本兼容结构后直接充当新控制面。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ChartEntry:
 
 @dataclass
 class SessionState:
-    """会话状态。"""
+    """历史会话状态结构；不得与 v2.4 目标驱动 AgentState 混用。"""
 
     session_id: str
     history: list[Turn] = field(default_factory=list)          # 按需压缩

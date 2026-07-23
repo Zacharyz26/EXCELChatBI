@@ -1,7 +1,8 @@
 """FastAPI 依赖注入：配置、模型网关、MCP 工具服务（进程内）。
 
-本切片 MCP 工具走进程内 `Tool.invoke`（仍经 schema 校验挂载点，红线3），
-不起独立 HTTP 进程；真·MCP-over-HTTP 留后续切片。
+生产工具仍走进程内 `Tool.invoke`（仍经 schema 校验挂载点，红线3）。标准 MCP
+Tool Contract、stdio Server adapter、Client Gateway 和影子比对已落地；双传输
+探针和阶段 2 执行切换前，本模块仍不得把协议路径当成生产依赖。
 """
 
 from __future__ import annotations

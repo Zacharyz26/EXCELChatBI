@@ -1,6 +1,7 @@
-"""上下文压缩：超 token 阈值时对早期轮次做 LLM 滚动摘要。
+"""v2.5 阶段 3 上下文压缩占位：超阈值时对早期轮次做滚动摘要。
 
-保留最近 N 轮原文 + 全局摘要 + 活跃数据引用（设计文档 5.2.2）。
+保留最近 N 轮原文 + 全局摘要 + 活跃数据引用。摘要只能用于上下文导航，
+不能替代工具 Evidence 或作为数值 Claim 来源。
 """
 
 from __future__ import annotations
@@ -18,4 +19,4 @@ def compact_if_needed(
         token_threshold: 触发压缩的 token 阈值。
         keep_recent: 保留原文的最近轮数。
     """
-    raise NotImplementedError("TODO: 估算 token；超阈值则 LLM 摘要早期轮次写入 global_summary")
+    raise NotImplementedError("v2.5 阶段 3：实现 token 预算、滚动摘要及 Evidence 隔离")

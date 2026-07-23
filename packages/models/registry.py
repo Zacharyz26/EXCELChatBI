@@ -131,6 +131,33 @@ class ModelRegistry:
         self._ensure_loaded()
         return self._defaults
 
+    def route_candidates(self, scenario: Scenario) -> tuple[str, ...]:
+        """Return the configured primary/fallback names in stable unique order."""
+        route = self.resolve(scenario)
+        return tuple(dict.fromkeys((route.primary, *route.fallback)))
+
+    def isolated_route(
+        self,
+        scenario: Scenario,
+        model_name: str,
+        *,
+        temperature: float = 0.0,
+    ) -> ModelRegistry:
+        """Build an evaluation registry with exactly one model and no fallback."""
+        model = self.get_model(model_name)
+        isolated = ModelRegistry(self._registry_path)
+        isolated._models = {model_name: model}
+        isolated._routes = {
+            scenario.value: RouteSpec(
+                primary=model_name,
+                fallback=[],
+                temperature=temperature,
+            )
+        }
+        isolated._defaults = self.defaults
+        isolated._loaded = True
+        return isolated
+
     # ── 内部 ──
 
     def _ensure_loaded(self) -> None:

@@ -1,11 +1,11 @@
 """Agent 工具注册表（阶段2，设计文档 14.7）。
 
-把现有 MCP 工具 + 新增 dataset_ops 工具统一封装为 DeepSeek function calling
-可消费的工具集：
+把现有确定性工具（生产仍为进程内 ``Tool.invoke``）统一封装为 DeepSeek function
+calling 可消费的工具集；同一份定义也生成 v2.4 MCP 契约与影子校验：
 
 - **schema 同源**（红线3）：发给模型的 function parameters 与 Tool.invoke 校验
   用的是同一份 JSON Schema，模型看到什么约束、执行时就校验什么约束。
-- **执行必经 Tool.invoke**：注册表的 runner 一律调 MCP Tool.invoke，无旁路。
+- **执行必经 Tool.invoke**：注册表的 runner 一律调当前工具校验入口，无旁路。
 - **零 LLM**（5.3 正式条款）：本模块只做封装、组装与血缘登记，不调模型；
   中文解读在编排层（阶段3 循环 / stats_interpreter）。
 - 本模块由阶段 3 的 Agent 循环消费；阶段 2 内每个工具可独立测试（14.8 验收）。
@@ -15,10 +15,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding
 from mcp_servers.common.base_server import MCPServer
+from mcp_servers.common.catalog import tool_metadata, tool_output_schema
+from mcp_servers.common.client_gateway import MCPShadowComparator, ShadowComparison
+from mcp_servers.common.contracts import (
+    GENERIC_OBJECT_OUTPUT_SCHEMA,
+    MCPToolDescriptor,
+    ToolCapabilityMetadata,
+)
 from mcp_servers.common.tool import Tool
 from mcp_servers.dataset_ops.schemas import (
     AGGREGATE_PREVIEW_SCHEMA,
@@ -27,7 +36,7 @@ from mcp_servers.dataset_ops.schemas import (
 from packages.common.dataset_store import duplicate_row_count
 from packages.common.logging import get_logger
 from packages.rag.retriever import HybridRetriever
-from packages.session.models import Artifact, JsonObject
+from packages.session.models import Artifact, ArtifactDraft, JsonObject
 from packages.session.store import SessionStore
 
 _log = get_logger("orchestrator.agent_tools")
@@ -89,6 +98,12 @@ class AgentToolSpec:
     description: str
     parameters: dict[str, Any]
     runner: Callable[[dict[str, Any]], Any]
+    output_schema: dict[str, Any] = field(
+        default_factory=lambda: dict(GENERIC_OBJECT_OUTPUT_SCHEMA)
+    )
+    metadata: ToolCapabilityMetadata = field(
+        default_factory=lambda: ToolCapabilityMetadata(capabilities=("analysis.unknown",))
+    )
 
     def openai_tool(self) -> dict[str, Any]:
         """转为 OpenAI 兼容 tools 条目。"""
@@ -101,12 +116,29 @@ class AgentToolSpec:
             },
         }
 
+    def mcp_descriptor(self) -> MCPToolDescriptor:
+        """Export the exact model-facing schema as the canonical MCP schema."""
+        return MCPToolDescriptor(
+            name=self.name,
+            description=self.description,
+            input_schema=self.parameters,
+            output_schema=self.output_schema,
+            metadata=self.metadata,
+        )
+
+    def mcp_binding(self) -> MCPToolBinding:
+        return MCPToolBinding(descriptor=self.mcp_descriptor(), handler=self.runner)
+
 
 class AgentToolRegistry:
     """Agent 工具集：定义导出 + 按名执行（入参 JSON 解析在此完成）。"""
 
     def __init__(self, specs: list[AgentToolSpec]) -> None:
         self._specs = {s.name: s for s in specs}
+        self._mcp_adapter = MCPServerAdapter(
+            "agent-tools", (spec.mcp_binding() for spec in self._specs.values())
+        )
+        self._mcp_shadow = MCPShadowComparator(self._mcp_adapter.list_tools())
 
     @property
     def names(self) -> list[str]:
@@ -116,6 +148,37 @@ class AgentToolRegistry:
     def openai_tools(self) -> list[dict[str, Any]]:
         """全部工具的 OpenAI 兼容定义（喂给网关 tools 参数）。"""
         return [s.openai_tool() for s in self._specs.values()]
+
+    def mcp_descriptors(self) -> tuple[MCPToolDescriptor, ...]:
+        """Canonical tools/list expectation used by discovery and CI."""
+        return self._mcp_adapter.list_tools()
+
+    def mcp_adapter(self) -> MCPServerAdapter:
+        """Return the in-process adapter used only for migration contract tests."""
+        return self._mcp_adapter
+
+    def artifact_types(self, tool_name: str) -> tuple[str, ...]:
+        """Return Host postconditions from the same metadata exported over MCP."""
+        spec = self._specs.get(tool_name)
+        return spec.metadata.artifact_types if spec is not None else ()
+
+    def compare_mcp_success(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        artifact: ArtifactDraft | None,
+    ) -> ShadowComparison:
+        return self._mcp_shadow.compare_success(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            artifact=artifact,
+        )
+
+    def compare_mcp_error(self, tool_name: str, error_code: str) -> ShadowComparison:
+        return self._mcp_shadow.compare_error(tool_name, error_code)
 
     def execute(self, name: str, arguments_json: str) -> Any:
         """执行一次模型发起的工具调用。
@@ -154,7 +217,8 @@ def build_registry(
     """装配 Agent 工具注册表（14.7 清单）。
 
     Args:
-        excel/stats/chart/dataset_ops/report: 进程内 MCP 服务（Tool.invoke 挂载点）。
+        excel/stats/chart/dataset_ops/report: 进程内工具服务（Tool.invoke 挂载点；
+            MCPServer 为迁移期兼容命名）。
         retriever: 知识库混合检索器（替身或真 bge 均可，接口同）。
         context: 会话上下文；提供时 transform_dataset 自动登记血缘、
             generate_report 可按 analysis_ids 组装。阶段 3 循环按请求构造传入。
@@ -165,34 +229,47 @@ def build_registry(
             description="获取数据集画像与质量概况：行列数、每列类型/空值率/统计摘要、整行重复数。回答字段含义、数据规模、质量问题时先调用本工具。",
             parameters=excel._tools["infer_schema"].input_schema,
             handler=lambda args: _profile_with_quality(excel, args),
+            output_schema=tool_output_schema("get_data_profile"),
+            metadata=tool_metadata("data.profile", "profile"),
         ),
         _wrap_mcp(
             stats, "trend_analysis",
             "趋势分析（STL 分解/移动平均/预测）。需要时间列与数值列。",
+            metadata=tool_metadata("stats.trend", "stats"),
         ),
         _wrap_mcp(
             stats, "anomaly_detect",
             "异常检测（3sigma/IQR/孤立森林/STL 残差）。返回异常点行号(index)与数值，"
             "可配合 transform_dataset 的 exclude_row_indices 排除异常后重算。",
+            metadata=tool_metadata("stats.anomaly", "stats"),
         ),
         _wrap_mcp(
             stats, "regression",
             "回归分析（OLS/Logit）：目标列 target 与自变量 features，输出系数、p 值、R²。",
+            metadata=tool_metadata("stats.regression", "stats"),
         ),
         _wrap_mcp(
             stats, "correlation",
             "相关性分析（Pearson/Spearman）：给定 ≥2 个数值列，输出相关矩阵与强相关对"
             "（含 p_value/significant）。结果仅支持共变关系结论，不支持因果推断。",
+            metadata=tool_metadata("stats.correlation", "stats"),
         ),
         _wrap_mcp(
             chart, "gen_chart",
             "生成 ECharts 图表：选择图型(line/bar/pie/scatter)与列映射(encoding.x/y/agg)，"
             "工具内部会对原始数据真实聚合，**无需先用 aggregate_preview 预聚合**，"
             "直接在原数据集上出图即可。用户要看图/可视化时调用。",
+            metadata=tool_metadata("visualization.chart", "chart"),
         ),
         _wrap_mcp(
             chart, "chart_screenshot",
             "把 ECharts option 渲染为 PNG 截图（主要供报告使用）。",
+            metadata=tool_metadata(
+                "visualization.screenshot",
+                read_only=False,
+                idempotent=False,
+                risk_level="medium",
+            ),
         ),
         AgentToolSpec(
             name="transform_dataset",
@@ -204,12 +281,20 @@ def build_registry(
             ),
             parameters=TRANSFORM_DATASET_SCHEMA,
             runner=lambda args: _transform_with_lineage(dataset_ops, excel, context, args),
+            output_schema=tool_output_schema("transform_dataset"),
+            metadata=tool_metadata(
+                "dataset.transform",
+                read_only=False,
+                idempotent=False,
+                risk_level="medium",
+            ),
         ),
         _wrap_mcp(
             dataset_ops, "aggregate_preview",
             "分组聚合出表：按 group_col 分组对 value_col 求 sum/mean/count，"
             '回答"各X的Y是多少"类取数问题。',
             override_schema=AGGREGATE_PREVIEW_SCHEMA,
+            metadata=tool_metadata("data.aggregate", "table"),
         ),
         _wrap_handler(
             name="kb_search",
@@ -219,6 +304,8 @@ def build_registry(
             ),
             parameters=KB_SEARCH_SCHEMA,
             handler=lambda args: _kb_search(retriever, args),
+            output_schema=tool_output_schema("kb_search"),
+            metadata=tool_metadata("knowledge.search", "citations"),
         ),
         _wrap_handler(
             name="generate_report",
@@ -228,6 +315,14 @@ def build_registry(
             ),
             parameters=GENERATE_REPORT_SCHEMA,
             handler=lambda args: _generate_report(report, chart, context, args),
+            output_schema=tool_output_schema("generate_report"),
+            metadata=tool_metadata(
+                "report.generate",
+                "report",
+                read_only=False,
+                idempotent=False,
+                risk_level="medium",
+            ),
         ),
     ]
     return AgentToolRegistry(specs)
@@ -242,14 +337,17 @@ def _wrap_mcp(
     description: str,
     *,
     override_schema: dict[str, Any] | None = None,
+    metadata: ToolCapabilityMetadata,
 ) -> AgentToolSpec:
-    """把一个 MCP 工具原样暴露给模型：schema 同源，执行走 Tool.invoke。"""
+    """把一个进程内工具暴露给模型：schema 同源，执行走 Tool.invoke。"""
     tool = server._tools[tool_name]
     return AgentToolSpec(
         name=tool_name,
         description=description,
         parameters=override_schema or tool.input_schema,
         runner=tool.invoke,
+        output_schema=tool.output_schema,
+        metadata=metadata,
     )
 
 
@@ -259,14 +357,25 @@ def _wrap_handler(
     description: str,
     parameters: dict[str, Any],
     handler: Callable[[dict[str, Any]], Any],
+    output_schema: dict[str, Any],
+    metadata: ToolCapabilityMetadata,
 ) -> AgentToolSpec:
     """把编排层封装能力也变成 Tool，确保模型入参必经同源 schema 校验。"""
-    tool = Tool(name, description, parameters, handler)
+    tool = Tool(
+        name,
+        description,
+        parameters,
+        handler,
+        output_schema=output_schema,
+        metadata=metadata,
+    )
     return AgentToolSpec(
         name=tool.name,
         description=tool.description,
         parameters=tool.input_schema,
         runner=tool.invoke,
+        output_schema=tool.output_schema,
+        metadata=metadata,
     )
 
 
@@ -383,7 +492,24 @@ def _generate_report(
 
     result: dict[str, Any] = report._tools["gen_report_md"].invoke(md_args)
     if args.get("include_pdf"):
-        pdf = report._tools["export_pdf"].invoke({"report_id": result["report_id"]})
+        try:
+            pdf = report._tools["export_pdf"].invoke(
+                {"report_id": result["report_id"]}
+            )
+        except Exception:
+            # Markdown belongs to this attempted compound operation. If PDF export
+            # fails, do not leave an unreferenced half-report behind.
+            md_path = result.get("md_path")
+            if isinstance(md_path, str):
+                try:
+                    Path(md_path).unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    _log.warning(
+                        "agent.report_partial_cleanup_failed",
+                        path=md_path,
+                        error=str(cleanup_error),
+                    )
+            raise
         result["pdf_path"] = pdf["pdf_path"]
     result["skipped_charts"] = skipped_charts
     result["analysis_ids"] = wanted

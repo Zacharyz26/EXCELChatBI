@@ -275,6 +275,26 @@ routes:
     assert reg.get_model("reasoner").supports_tools is False
 
 
+def test_evaluation_route_is_isolated_from_fallback() -> None:
+    """独立评测只保留指定模型，不能把 fallback 成功记到候选模型头上。"""
+    reg = _registry()
+
+    assert reg.route_candidates(Scenario.CORE_REASONING) == ("primary", "backup")
+
+    isolated = reg.isolated_route(
+        Scenario.CORE_REASONING,
+        "backup",
+        temperature=0.0,
+    )
+    route = isolated.resolve(Scenario.CORE_REASONING)
+    assert route.primary == "backup"
+    assert route.fallback == []
+    assert route.temperature == 0.0
+    assert isolated.route_candidates(Scenario.CORE_REASONING) == ("backup",)
+    with pytest.raises(KeyError, match="registry 未配置模型"):
+        isolated.get_model("primary")
+
+
 # ── 阶段0：stream 降级语义 ──
 
 

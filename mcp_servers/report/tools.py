@@ -72,7 +72,7 @@ def gen_report_md(args: dict[str, Any]) -> dict[str, Any]:
     markdown = "\n".join(lines)
     report_id = uuid.uuid4().hex
     md_path = _reports_dir() / f"{report_id}.md"
-    md_path.write_text(markdown, encoding="utf-8")
+    _atomic_write_text(md_path, markdown)
     return {"report_id": report_id, "md_path": str(md_path), "markdown": markdown}
 
 
@@ -120,8 +120,22 @@ def export_pdf(args: dict[str, Any]) -> dict[str, Any]:
     html = _HTML_TEMPLATE.format(body=html_body)
     pdf_bytes = weasyprint.HTML(string=html).write_pdf()
     pdf_path = _reports_dir() / f"{report_id}.pdf"
-    pdf_path.write_bytes(pdf_bytes)
+    _atomic_write_bytes(pdf_path, pdf_bytes)
     return {"report_id": report_id, "pdf_path": str(pdf_path), "bytes": len(pdf_bytes)}
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    _atomic_write_bytes(path, content.encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Publish a complete report file with a same-directory atomic rename."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # ── 内部：Markdown 片段（纯格式化，数字来自入参的工具结果）──

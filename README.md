@@ -1,124 +1,242 @@
 # ChatBI 智能体
 
-中文优先的对话式 ChatBI 智能体：自然语言完成知识库问答、Excel 自动分析出可视化报告、多轮多模态追问、高级统计分析，并通过 MCP 协议调用工具。
+中文优先的对话式数据分析 Agent：通过自然语言完成知识问答、Excel 数据分析、可视化和报告生成。
 
-> 开发约束以 [`CLAUDE.md`](./CLAUDE.md) 为准；完整设计见 [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)。
+> 开发约束见 [`CLAUDE.md`](./CLAUDE.md)，完整架构见
+> [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)，当前开发路线见
+> [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
 
-## 进度
+## 当前进度
 
-**对话式 Agent 产品重构已完成**（设计文档第 14 章，v2.3）——五阶段全部交付，自然语言对话是唯一产品入口：上传 Excel 后直接提需求，Agent 自动规划并调用画像/统计/图表/变换/检索/报告工具，全过程以透明度卡片展示。经典五页已按能力清单核对后下线（旧后端端点保留为兼容 API）。知识库升级第一至第四阶段代码与运维基线已完成（2026-07-20）。
+当前可运行基线为 **v2.3 反应式工具调用 Agent**，该版本的五阶段迁移已经完成：自然语言对话是唯一前端入口，模型可以自主选择并循环调用画像、统计、图表、数据变换、知识检索和报告工具，执行过程与 Artifact 通过 SSE 卡片实时展示。
 
-**已实现**
-- **Excel 自动分析出图**：上传 → 数据画像（脱敏）→ DeepSeek 规划 → 真实数据聚合出 ECharts 图（含带错重规划）。
-- **统计分析四件套 + 中文解读**：趋势（STL/移动平均/预测）、异常（IQR/3σ/孤立森林/STL）、回归（OLS/Logit）、相关性（Pearson/Spearman）；结果经**摘要门控**后交模型生成中文洞察。
-- **报告导出**：Markdown + PDF（WeasyPrint），由真实工具结果组装，report 工具零 LLM。
-- **图表截图**：Playwright 无头浏览器服务端渲染。
-- **知识库问答**：中文混合检索（稠密 + 稀疏双路，RRF 融合）+ 重排，答案带可回放引用卡、无结果如实告知。默认 hashing/词面替身后端；**bge-m3（稠密+稀疏）/bge-reranker/Milvus Lite/Standalone 已实现**。文档具备稳定 ID、内容哈希与版本，可增量更新、按来源删除及全量原子重建；另有 CI 质量门禁、分段耗时诊断、readiness、代际状态/回滚/清理和备份工具。部署与运维见 `docs/知识库部署与运维.md`，质量验收见 `docs/知识库升级验收基线.md`。
-- **前端**：React 18 + ECharts 5 + Zustand；对话工作区为唯一入口，覆盖项目/历史对话、上传画像、SSE 透明度卡片流（理解/执行/图表/表格/报告卡）、快捷指令条与执行卡"调整参数"；知识库文档状态、同步、删除与全量重建在上下文面板。
-- **安全红线**：数据与推理分离（原有端点门控不变；/chat 助手通道例外已拍板，见 CLAUDE.md 红线1）、数值必来自工具、工具入参 schema 校验、脱敏与小分组保护、防注入、问答带引用；上传/摄入做了路径与大小硬化。
+下一版本是 **v2.4 Agent 控制面**。阶段 1 本地实现已完成：SQLite schema v2、TaskRun/TaskContract、
+任务事件与快照、工具调用幂等记录、Evidence、最小确定性 Verifier 和只读任务恢复接口已落地，
+任务启动已原子化，候选答复中的数值 Claim 已能绑定当前 run 的 Evidence；无依据数字会触发
+纠正而不是直接交付。工具成功时 Artifact、Evidence、Invocation、事件、快照和 Checkpoint
+也已原子提交。现有循环只有在 Verifier 通过后才会标记 `completed`。受约束语义 Verifier
+协议和 14 场景评测入口已落地，但 DeepSeek V3/R1 首轮均因 false PASS 判定 `NO_GO`，因此未
+接入生产。中央策略、结构化审计/trace、原子 `step.started` 和失败/未知 Observation 也已
+接入现有循环。知识 source、空检索诚实回答、显式局限和同值多路径 Claim 已补齐，报告目录
+具备启动对账和安全运维入口，图表/报告意图与通用后置条件固定影子集达到 9/9。阶段 0 的
+Planner/行为基线、MCP 双传输探针和设计评审仍是未关闭的前置债务；MCP 双传输与规范执行切换
+按路线图属于阶段 2。MCP 单源契约、官方 SDK Server adapter、Client Gateway 影子校验，以及
+API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交推送后首次运行。逐项状态见
+[`docs/v2.4/阶段1实施记录.md`](./docs/v2.4/阶段1实施记录.md)。
 
-**重构记录（对话式 Agent，五阶段，设计文档 14.8，已全部完成）**
-- ✅ 阶段 0 网关地基：function-calling + 流式 + `Scenario.AGENT`。
-- ✅ 阶段 1 对话工作区：SQLite 持久层（项目/数据集/对话/消息/工件）+ LRU 热缓存 + CRUD API + Excel 画像卡 + 纯 LLM SSE 对话 + Zustand 前端工作区。
-- ✅ 阶段 2 工具封装：Agent 工具注册表（11 个工具，喂模型的 parameters 与 Tool.invoke 校验 schema 同源）+ 新增 `mcp_servers/dataset_ops`（transform_dataset 结构化白名单变换 / aggregate_preview 聚合出表，无自由 SQL）+ 衍生数据集血缘自动登记（含父级补登记）+ generate_report 按 `analysis_ids` 从对话工件组装（旧 /analyze/report 端点不动）。
-- ✅ 阶段 3 Agent 循环：`/chat/stream` 切换为 function-calling 循环（`stream_turn` 全程真流式：文本增量即时推送、tool_calls 增量聚合）+ SSE 透明度协议（meta/understanding/plan/tool_start/tool_end/artifact/text.delta/error/done）+ 分析登记表（analysis_id 落工件 params，追问改参数/组装报告引用）+ 护栏（调用数上限、连续同参熔断、带错回传重试）+ 前端理解卡/执行卡/图表卡/表格卡/报告卡 + 快捷指令条 + 执行卡"调整参数"（结构化追问回流对话）。
-- ✅ 阶段 4 迁移收尾：旧五页能力清单逐项核对（知识库摄入/概览迁入上下文面板补齐缺口）后，经典模式前端下线；**旧后端端点（/analyze、/analyze/stats、/analyze/report、/kb/*）保留为兼容 API**，红线1 原有端点门控不动；历史执行卡按每步真实成败精确回放（role=tool 结果消息）；文档升版 v2.3。
+### 已实现
 
-**并行轨：bge-m3 + Milvus Lite 语义检索升级（已验收通过，2026-07-20）**
-- ✅ `BGEEmbedder`（bge-m3 稠密+稀疏单次编码）、`BGEReranker`（sigmoid 归一分数）、`MilvusKnowledgeStore`（Milvus Lite 稀疏向量已实机验证；换 standalone 只改 `MILVUS_URI`）。
-- ✅ device 配置项（`EMBEDDING_DEVICE=auto/cpu/cuda`）、相关性阈值按 top1 判定拒答并配置化（`RAG_MIN_RELEVANCE`，标定方法见基线文档）、替身链路回归保持全绿。
-- ✅ 验收实测（RTX 5070，`scripts/kb_eval.py --enforce`）：语义 hit@1 90% / hit@3 100%、负例拒答 100%、GPU 单查询 avg 143ms，标定阈值 `RAG_MIN_RELEVANCE=0.02`。完整基线见 `docs/知识库升级验收基线.md`。
-- ⚠️ 启用 `RAG_STORE=milvus` 后，Milvus Lite 对本地 `.db` 用独占文件锁：常驻后端与 `pytest` 不能同时占用同一 `MILVUS_URI`，跑测试前先停后端（或给测试单独配 URI）。
-- ✅ 知识库稳定性与生命周期：已有 Milvus 集合重连自动加载、本地代理自动豁免；增量同步、版本清单、按来源删除，以及“新集合构建完成后再切换”的全量重建均已实现。
-- ✅ 质量与产品闭环：确定性/语义双阈值评测、CI JSON 报告、检索分段诊断日志、`/health/ready`，以及 Agent 引用 Artifact 的浏览器渲染/刷新回放均已覆盖。
-- ✅ Standalone 运维基线：固定版本 Compose、鉴权与业务账号初始化、active/previous 代际状态、alias 原子回滚、历史清理、Local/Lite 校验备份恢复、只读并发负载报告和上线/回滚手册均已提供；首次真实部署需在有 Docker 的目标机完成演练。
+- Excel 上传、数据画像、质量概况和数据集血缘；
+- 趋势、异常、回归、相关性分析及中文解读；
+- 结构化筛选、排序、清洗和分组聚合；
+- ECharts 图表、Playwright 截图、Markdown/PDF 报告；
+- DeepSeek function-calling 循环、工具 schema 校验、带错重试、调用预算和同参熔断；
+- SQLite 项目、数据集、对话、消息和 Artifact 持久化；
+- SQLite v1→v2 迁移/校验/受保护回滚，TaskRun、TaskContract、TaskEvent、快照、
+  ToolInvocation、Evidence 和 Checkpoint 数据结构；
+- 最小确定性 Verifier：最终正文先验证后发送，图表/报告必须有当前 run 的真实 Artifact，
+  报告文件必须真实存在且非空，预算耗尽进入 `blocked`；
+- 原子创建用户消息、TaskRun、TaskContract、goal 与初始快照；数值 Claim 绑定 Evidence 路径，
+  无依据数字在交付前被拦截并纠正；
+- 原子提交工具成功记录、Artifact、Evidence、`step.completed` 和 Checkpoint；报告文件原子发布，
+  提交失败时清理未引用文件，并保护已被 Evidence 引用的 Artifact；
+- 工具执行前经过静态准入、项目范围和预算策略；开始、失败和未知结果持久化为 v2 步骤事件与
+  Observation，unknown 结果禁止完成；模型和工具调用输出有界 trace 与审计元数据；
+- 15 个底层工具及 Agent 的 11 个模型工具共用 MCP schema/能力元数据；官方 SDK
+  `tools/list`/`tools/call`、Client Gateway 发现校验和无副作用影子比对已落地；
+- API/Web 多阶段基础镜像、非 root 健康检查、SSE/报告下载代理和镜像构建 CI 已加入；
+- v2 生命周期 SSE 双发以及 `GET /agent/runs/{run_id}` 和事件游标读取接口；
+- React 对话工作区、SSE 理解/执行/图表/表格/报告/引用卡；
+- bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
+- 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
-**未实现（后续阶段）**
-- 自由 SQL 取数（已拍板不做）、复杂多步分析（LangGraph 或自研状态机）、内部数据接入、应用层用户鉴权/多租户审计、沙箱、大表 DuckDB 下推、MCP-over-HTTP、独立业务 MinIO/Redis/PostgreSQL 接入、多模态识图。
+### 当前缺口
 
-## 架构（五层）
+- 计划仍是工具调用列表，没有持久化的目标、依赖、预期证据和完成条件；
+- 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
+  未通过，生产保持禁用；
+- 非数值 Claim、同值路径语义消歧、真实计划版本、Checkpoint 恢复和可恢复任务尚未完成；
+- 上下文压缩、指代消解和长期项目记忆尚未实现；
+- 基础策略、审计和 trace 已落地；应用层真实用户/租户鉴权、审批和企业审计后端尚未实现；
+- 生产 Executor 仍走进程内 `Tool.invoke`；MCP stdio 子进程/Streamable HTTP 双传输探针、
+  服务认证和规范执行切换尚未完成；
+- API/Web 基础镜像已提供但尚未经过首次远端 build；工具服务镜像与统一 Compose 尚未完成；
+- 前端尚不支持澄清、真实计划编辑、暂停、恢复和自主等级。
 
+### 已规划但未实现
+
+- **v2.4**：混合 Planner、TaskContract、AgentState、Verifier、动态重规划、澄清、任务事件、Checkpoint 和恢复；同时完成全项目 MCP 规范接口、客户端网关、基础镜像和单机 Compose；
+- **v2.5**：完整记忆、可干预前端、业务指标语义层、自主探索和多数据集分析；同步扩展 MCP 的记忆/Evidence 引用、知识 Resource、审批与能力目录，并补齐状态恢复和重型工具 Docker profile；
+- **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
+- **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
+
+这些能力已进入路线图，但不得在代码和交付说明中提前标记为完成。
+
+## Agent 演进路线
+
+```text
+v2.3 当前基线
+  模型选择工具 → 工具执行 → 结果回填 → 模型回答
+
+v2.4 目标控制面
+  理解目标 → 必要澄清 → 结构化计划 → 受控执行
+      ↑                                  ↓
+  持久状态 ← 最终交付 ← Verifier ← Evidence
+                        ↖ 重规划
+
+v2.5
+  记忆 + 业务语义 + 自主分析 + 人机协作
+
+横向交付轨
+  MCP：阶段 0 设计 → 阶段 1 全量接口 → 阶段 2 规范执行路径
+  Docker：阶段 0 拓扑 → 阶段 1 基础镜像 → 阶段 2 完整单机 Compose
+
+v2.5 延伸
+  MCP：记忆/Evidence 引用 → 前端审批 → 知识 Resource → 自主分析能力目录
+  Docker：状态恢复 → 代理 E2E → RAG 生命周期 → 重型工具资源 profile
+
+v3.0
+  数据连接器 + 主动任务 + 外部 MCP 治理/OAuth
+  外置状态 + 镜像供应链/多实例 + 多 Agent/租户隔离
 ```
-前端(React) → 自研编排(FastAPI直调 + function-calling循环) + 模型路由 → MCP工具层(进程内Tool.invoke) → 治理安全层 → 存储层(当前本地落盘)
+
+完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
+v2.4 详细设计与阶段 1 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
+v2.4 之后各阶段的 MCP/Docker 演进见
+[`docs/MCP与Docker全阶段演进设计.md`](./docs/MCP与Docker全阶段演进设计.md)。
+
+## 安全原则
+
+- 数值和统计结论必须来自确定性工具 Evidence，不能由模型计算或编造；
+- 工具入参必须经过同源 JSON Schema 和中央策略检查；
+- 文件、文档、网页和工具结果中的指令不执行；
+- 知识回答必须带来源；
+- `/chat` 保留已拍板的局域网助手数据例外，列级 `EXCLUDE` 仍生效；兼容端点原有门控不变；
+- SQL 和 Code Interpreter 必须通过独立安全评审后才能进入 Agent；
+- TaskContract 未通过完成验证时，Agent 不得声称任务成功。
+
+## 架构（当前与 v2.4 目标）
+
+```text
+当前 v2.3：
+React + Zustand
+      ↓ HTTP/SSE
+FastAPI + 自研 Agent 编排 + ModelGateway
+      ↓
+进程内 Tool.invoke + Governance
+      ↓
+parquet/文件 + SQLite + Milvus
+
+v2.4 目标：
+React + Zustand
+      ↓ HTTP/SSE
+FastAPI + Agent 控制面 + ModelGateway
+      ↓
+MCP Client Gateway → MCP 工具层 + Governance
+      ↓
+parquet/文件 + SQLite + Milvus
 ```
 
-> Dify 已放弃（2026-07 拍板），编排全部自研；理由与记录见设计文档 5.2。
+Dify 已放弃。生产执行仍以进程内 `Tool.invoke` 挂载，但 MCP 单源契约、SDK Server adapter、
+Client Gateway 和影子校验已经落地；完成 stdio/Streamable HTTP 探针后，阶段 2 才切换规范执行
+路径。v3.0 继续完成外部 MCP 的动态发现、授权与准入治理。
 
 ## 目录速览
 
 | 路径 | 职责 |
-|------|------|
-| `apps/api` | FastAPI 网关 / BFF，对外 HTTP + SSE |
-| `apps/orchestrator` | 自研编排：分析/统计/问答编排函数 + 对话式 Agent 循环（重构中） |
-| `apps/web` | React 18 + ECharts 5 前端（Vite + TS） |
-| `mcp_servers/*` | 各 MCP 工具，独立可部署 |
-| `packages/common` | 共享配置加载 + 结构化日志 |
-| `packages/models` | 模型路由网关 + registry |
-| `packages/governance` | schema 校验 / 权限 / 沙箱 / 审计（红线落点） |
-| `packages/rag` | 中文检索：embedding / rerank / 分词 / 分块 |
-| `packages/session` | SQLite 项目/对话/消息/工件持久层 + LRU 热缓存；上下文压缩/指代消解待后续阶段 |
+|---|---|
+| `apps/api` | FastAPI HTTP/SSE 边界 |
+| `apps/orchestrator` | 当前 Agent 循环；v2.4 控制面组件落点 |
+| `apps/web` | React 18 + ECharts 5 + Zustand 对话工作区 |
+| `mcp_servers` | Excel、统计、图表、报告和数据变换等确定性工具 |
+| `packages/models` | 模型网关与 registry |
+| `packages/governance` | schema、数据边界；权限、审计、沙箱和 trace 待按路线图落地 |
+| `packages/rag` | embedding、稀疏检索、rerank、Milvus |
+| `packages/session` | SQLite 工作区、schema 迁移、Task/Event/Evidence；后续长期记忆 |
+| `docs` | 总设计、现行路线图、安全、验收和运维文档 |
+| `docs/v2.4` | Agent 控制面、SSE、评测、MCP 与 Docker 阶段 0 设计包 |
+| `docs/MCP与Docker全阶段演进设计.md` | v2.5、独立安全项目和 v3.0 的 MCP/容器逐阶段设计 |
+| `tests` | 后端单元/集成测试；后续增加 Agent 行为评测 |
+| `apps/web/e2e` | Playwright 浏览器 E2E |
 
 ## 快速开始
 
-```bash
-# 1. 安装 uv（若未安装）：https://docs.astral.sh/uv/
-# 2. 配置环境变量
-cp .env.example .env
-cp config/models.example.yaml config/models.yaml   # 按需填写
-cp config/data_policy.example.yaml config/data_policy.yaml  # 可选，不拷用内置宽松默认
+以下仍是当前有效的本机开发方式。全项目 Dockerfile、根目录 Compose 和容器化 MCP
+服务属于 v2.4 阶段 1/2，尚未交付；当前只有 Milvus Standalone 的独立 Compose，详见
+[`docs/知识库部署与运维.md`](./docs/知识库部署与运维.md)。
 
-# 3. 安装依赖（核心）
+```bash
+# 1. 配置
+cp .env.example .env
+cp config/models.example.yaml config/models.yaml
+cp config/data_policy.example.yaml config/data_policy.yaml  # 可选
+
+# 2. 安装后端依赖
 uv sync
 
-# 4. 启动后端
+# 3. 启动后端
 uv run uvicorn apps.api.main:app --reload
 
-# 5. 前端
-cd apps/web && pnpm install && pnpm dev
+# 4. 启动前端
+cd apps/web
+pnpm install
+pnpm dev
+```
 
-# 6. 测试 / 检查
+默认地址：后端 `http://127.0.0.1:8000`，前端 `http://127.0.0.1:5173`。
+
+## 测试与检查
+
+```bash
+# 后端
 uv run pytest
 uv run ruff check .
 uv run mypy .
 
-# 7. 浏览器 E2E（首次运行先安装 Chromium）
+# 前端
 cd apps/web
+pnpm lint
+pnpm build
+
+# 浏览器 E2E；首次运行先安装 Chromium
 pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-> 未装 uv/pytest 时，骨架冒烟测试也可用标准库直接跑：`python3 -m unittest discover -s tests`
-
-## 环境准备（按功能启用的系统级依赖）
-
-各重依赖按域拆在 optional-dependencies，按需安装；以下坑都踩过/预判过，别跳过。
+## 可选能力依赖
 
 ```bash
-# 统计分析（趋势/异常/回归/相关）
+# 统计
 uv sync --extra stats
 
-# 图表截图：Playwright chromium + 系统依赖 + 中文字体（缺字体则截图中文变豆腐块）
+# 图表截图
 uv sync --extra chart-screenshot
 uv run playwright install --with-deps chromium
-sudo apt install fonts-noto-cjk
 
-# 报告 PDF：WeasyPrint 需系统库；中文字体同上
+# PDF 报告
 uv sync --extra report
-sudo apt install libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0
 
-# 语义检索（并行轨·检索升级时启用；FlagEmbedding 含 torch≈2GB，pymilvus 自带 Milvus Lite）
+# bge-m3、reranker、Milvus
 uv sync --extra rag
-# 模型权重离线侧载（局域网无外网）：在有网机器预下载
-#   BAAI/bge-m3（≈2.3GB）与 BAAI/bge-reranker-v2-m3（≈2.3GB），
-# 拷入服务器本地目录，配 HF_HUB_OFFLINE=1 与模型路径；
-# 推理 device 走配置（auto/cpu/cuda），本地开发与 GPU 服务器切换不改代码。
+```
 
-# 知识库增量同步 / 全量原子重建
+离线环境需提前侧载模型权重。`EMBEDDING_DEVICE=auto/cpu/cuda` 可切换推理设备而不改代码。
+
+## 知识库运维入口
+
+```bash
+# 增量/全量重建
 uv run python scripts/kb_rebuild.py --mode incremental
 uv run python scripts/kb_rebuild.py --mode full
 
-# 质量门禁 / 状态 / 并发检索冒烟
+# 质量门禁、状态和负载测试
 uv run python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
 uv run python scripts/kb_admin.py status
 uv run python scripts/kb_load_test.py --requests 50 --concurrency 2
 ```
+
+详细说明：
+
+- [`docs/知识库升级验收基线.md`](./docs/知识库升级验收基线.md)
+- [`docs/知识库部署与运维.md`](./docs/知识库部署与运维.md)
+- [`docs/数据画像安全策略.md`](./docs/数据画像安全策略.md)

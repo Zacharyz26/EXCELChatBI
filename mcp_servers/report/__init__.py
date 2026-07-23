@@ -1,1 +1,1 @@
-"""报告生成 MCP 服务：gen_report_md / insight_summary / export_pdf（需求 F2）。"""
+"""报告生成确定性工具组；当前进程内运行，v2.4 迁移到 report-tools MCP Server。"""

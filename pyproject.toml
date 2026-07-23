@@ -4,7 +4,7 @@
 [project]
 name = "excel-chatbi"
 version = "0.1.0"
-description = "中文优先的对话式 ChatBI 智能体（MVP 脚手架）"
+description = "中文优先的目标驱动、受约束自主分析 ChatBI Agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"        # CLAUDE 第4节锁定 Python 3.11
 license = { text = "Proprietary" }
@@ -67,8 +67,8 @@ report = [
     "pydyf==0.10.0",                    # weasyprint 62 需此版；0.11+ 改了 Stream API 会崩
     "markdown>=3.6,<4",                 # Markdown → HTML
 ]
-# 真·MCP-over-HTTP 服务
-mcp = ["mcp>=1.0,<2"]
+# v2.4 标准 MCP Client/Server 与双传输（当前基线运行不需要）
+mcp = ["mcp==1.28.0"]
 # 生产存储客户端（本地切片用本地落盘，无需启用）
 storage = [
     "redis>=5.0,<6",

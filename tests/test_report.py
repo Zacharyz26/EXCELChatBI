@@ -1,4 +1,4 @@
-"""报告切片测试：组装正确 + report 工具零 LLM + LLM 出口恒为 3 + 端点出非空 PDF。"""
+"""报告切片测试：组装正确 + report 工具零 LLM + 已知 LLM 出口 + 端点出非空 PDF。"""
 
 from __future__ import annotations
 
@@ -59,15 +59,21 @@ def test_report_tools_import_no_llm() -> None:
         assert bad not in joined, f"report 工具不应 import 任何 LLM 相关模块: {bad}"
 
 
-def test_llm_exit_points_remain_exactly_three() -> None:
-    # 全库调用 gateway.complete( 的文件必须恰好是 3 个已知 LLM 出口
+def test_llm_exit_points_remain_explicitly_allowlisted() -> None:
+    # 全库调用 gateway.complete( 的文件必须恰好是已评审的 LLM 出口。
+    # semantic_verifier 当前仅供隔离评测，生产接入仍受 go/no-go 门禁约束。
     roots = [ROOT / "apps", ROOT / "packages", ROOT / "mcp_servers"]
     callers = set()
     for root in roots:
         for py in root.rglob("*.py"):
             if "gateway.complete(" in py.read_text(encoding="utf-8"):
                 callers.add(py.name)
-    assert callers == {"chart_planner.py", "stats_interpreter.py", "kb_qa.py"}, callers
+    assert callers == {
+        "chart_planner.py",
+        "stats_interpreter.py",
+        "kb_qa.py",
+        "semantic_verifier.py",
+    }, callers
 
 
 # ── 组装正确（免渲染，用 1x1 PNG）──
@@ -99,6 +105,19 @@ def test_gen_report_md_assembles_all_sections(tmp_path: Path) -> None:
     assert "125.1" in md and "订单数" in md                   # 数字来自工具结果
     assert "订单数是销售额的主要驱动因素。" in md              # 解读来自入参(stats_interpreter)
     assert Path(res["md_path"]).exists()
+
+
+def test_report_file_is_atomically_published_without_temporary_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(report_tools, "_reports_dir", lambda: tmp_path)
+
+    result = _report_tool("gen_report_md").invoke(
+        {"title": "原子报告", "profile": {"row_count": 1, "columns": []}}
+    )
+
+    assert Path(result["md_path"]).read_text(encoding="utf-8").startswith("# 原子报告")
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_insight_summary_is_pure_concat() -> None:

@@ -8,16 +8,32 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from packages.common.config import get_settings
-from packages.common.logging import configure_logging
+from packages.common.logging import configure_logging, get_logger
+from packages.session.artifact_reconcile import reconcile_report_files
 
-from apps.api.deps import embedder_dep, kb_store_dep, reranker_dep, retriever_dep
-from apps.api.routers import analyze, chat, health, kb, report, stats, upload, workspace
+from apps.api.deps import (
+    embedder_dep,
+    kb_store_dep,
+    reranker_dep,
+    retriever_dep,
+    session_store_dep,
+)
+from apps.api.routers import agent_runs, analyze, chat, health, kb, report, stats, upload, workspace
+
+_log = get_logger("api.lifecycle")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """启动时初始化结构化日志，并对 RAG 后端配置做 fail-fast 自检。"""
-    configure_logging(get_settings().log_level)
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    reconciliation = reconcile_report_files(
+        session_store_dep(),
+        settings.report_dir,
+        stale_after_seconds=settings.report_temp_grace_seconds,
+    )
+    _log.info("artifact.report_reconciliation", **reconciliation.log_fields())
     # fail-fast：依赖、模型权重、Milvus 连接或现有集合加载失败时启动即报错，
     # 而不是服务看似正常、首次检索请求才 500。
     embedder_dep()
@@ -48,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(report.router)
     app.include_router(kb.router)
     app.include_router(chat.router)
+    app.include_router(agent_runs.router)
     app.include_router(workspace.router)
     return app
 

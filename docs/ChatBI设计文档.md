@@ -1,21 +1,30 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.3 · 状态：对话式 Agent 重构完成（14.8 五阶段全部交付）· 语言场景：中文优先
+> 版本：v2.4-stage1 · 状态：v2.3 基线已完成，v2.4 阶段 1 本地实现完成、远端镜像门禁待运行 · 语言场景：中文优先
+> 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
 ---
 
 ## 0. 文档修订说明
+
+**v2.4-planning（2026-07-22，目标驱动 Agent 路线更新）**：
+
+- v2.3 的 function-calling 循环定性为“反应式工具调用 Agent”基线；已有能力继续维护，不重复开发。
+- 新增第 15 章，并以 `docs/Agent自主化开发规划.md` 作为现行阶段、依赖和验收依据：v2.4 建立 TaskContract、AgentState、Claim/Evidence、Verifier、结构化计划、动态重规划、澄清和恢复；v2.5 建立记忆、业务语义、自主分析和可干预前端；v3.0 扩展数据接入、主动任务、多 Agent 与企业治理。
+- 原“复杂多步、完整上下文、内部数据、远程 MCP、多租户明确不做”的限制废止，改为分版本实施；原“自由 SQL 永久不做”改为独立受限 SQL 安全项目。所有能力在完成阶段验收前仍视为未实现。
+- 新增两条横向交付轨：v2.4 完成项目内标准 MCP Client/Server、stdio/Streamable HTTP、基础镜像与单机 Compose；v2.5 继续补齐记忆/Evidence、前端审批、知识 Resource、能力目录、状态恢复和资源 profile；v3.0 再扩展外部 MCP 治理、外置状态、镜像供应链和多实例运维。
+- 七条安全红线升级为任何执行路径都必须成立的不变量；新增完成验证、Evidence、预算取消、记忆治理和外部副作用审批约束。
 
 **v2.3（2026-07-16，重构收尾升版：14.8 五阶段全部完成）**：
 
 - **阶段 0-4 全部交付**：模型网关地基（tools/stream/`Scenario.AGENT`）、SQLite 对话工作区、Agent 工具注册表（11 个工具，schema 同源）、Agent 循环（`/chat/stream`，`stream_turn` 全程真流式 + 14.5.3 SSE 透明度协议 + 分析登记表 + 护栏）、迁移收尾。
 - **经典五页已按能力清单核对后下线**：知识库摄入/概览迁入对话工作区上下文面板；问答、统计、出图、报告全部经对话链路提供。**旧后端端点（/analyze、/stats、/analyze/report、/kb/*）保留为兼容 API**，红线1 的原有端点门控条款继续生效、不动。
 - **历史执行卡精确回放**：Agent 循环把每步工具执行结果落为 role=tool 消息（{tool_call_id, status, 摘要/错误}），历史对话执行卡按真实成败渲染。
-- 待办移交：Agent 循环护栏阈值按真实使用调优（14.5.1 初值）；bge-m3/Milvus 检索升级仍为独立并行轨；B 轨复杂多步、多租户、MCP-over-HTTP 等维持"不做"边界（第 12 章）。
+- 后续状态：该版本现作为当前代码基线；复杂多步、多租户和远程 MCP 的新范围由第 15 章接管。
 
 **v2.2（2026-07-15，产品级重构定案：菜单式工具 → 对话式数据分析 Agent）**：
 
-- **新增第 14 章**：对话式 Agent 产品重构——目标架构、页面结构、Agent 工作流（SSE 透明度协议）、SQLite 持久层、工具清单、五阶段迁移计划与执行纪律。第 14 章为当前阶段的**唯一开发依据**。
+- **新增第 14 章**：对话式 Agent 产品重构——目标架构、页面结构、Agent 工作流（SSE 透明度协议）、SQLite 持久层、工具清单、五阶段迁移计划与执行纪律。该章已于 v2.3 完成交付，现作为历史基线。
 - **修订 13.2 决策 3**：自由 SQL 仍不做；**结构化参数的 transform / aggregate 工具（枚举白名单）要做**（14.7）。
 - **修订 13.2 决策 6**：session 升级为 **SQLite 持久 + 内存热层**（侧边栏历史对话是硬需求，纯内存撑不住产品形态）；Redis 触发条件不变。
 - **5.1 前端层**改为对话式工作区设计（菜单五页转为灰度过渡后下线）。
@@ -25,7 +34,7 @@
 **v2.1（2026-07，对齐实现现状 + 记录聊天助手决策）**：
 
 - **放弃 Dify**：编排全部自研，"A/B 双轨"概念退役（理由见 5.2）。
-- **MCP 形态如实化**：当前为进程内 `Tool.invoke` + schema 校验；MCP-over-HTTP 是可选的未来演进，不是现状（见 5.3）。
+- **MCP 形态如实化（历史决策）**：当时仅有进程内 `Tool.invoke` + schema 校验；该边界已被 2026-07-22 路线更新取代，现按 v2.4 的 stdio/Streamable HTTP 规范接口推进（见 5.3）。
 - **存储层如实化**：当前全部本地落盘（parquet/JSON/文件系统），MinIO/Redis/PostgreSQL 未接；向量库按新决策上 Milvus Lite（见 5.5）。
 - **图表追问整体后置**：chart_registry / chart_id 持久化未实现，6.2 为目标设计而非现状。
 - **解读唯一出口升格为正式条款**：MCP 工具零 LLM，report 的 `insight_summary` 已改为纯拼接（见 5.3）。
@@ -60,7 +69,7 @@
 ### 1.2 关键设计原则
 
 1. **数据与推理分离**：LLM 负责理解意图、选择方法、解读结果；所有数值计算交由工具执行，杜绝幻觉数字。
-2. **能力工具化**：分析能力以标准 MCP 工具暴露，可独立部署、扩缩容、复用。
+2. **能力工具化**：v2.4 目标是把分析能力以标准 MCP 工具暴露，使其可独立部署、扩缩容和复用；当前已落地单源契约、SDK adapter 与 Client Gateway 影子层，生产执行仍是进程内 `Tool.invoke`。
 3. **编排分层**：标准流程用简单直调编排，复杂流程用状态机/循环编排保证控制力（v2.1：全部自研代码，低代码路线已放弃，见 5.2）。
 4. **模型可插拔**：模型层与业务逻辑解耦，按场景路由到不同模型，便于替换与成本控制。
 5. **中文优先**：所有涉及语义理解的组件（embedding/rerank/分词/解析）按中文场景选型。
@@ -80,28 +89,28 @@
                     │ API / SSE（流式）
 ┌──────────────────────────────────────────────────────┐
 │  编排层（自研；v2.1 起放弃 Dify）                        │
-│  主入口：Agent 循环（/chat/stream，第 14 章，重构中）    │
-│  过渡期：FastAPI 直调编排函数（旧端点，灰度后收敛）      │
+│  主入口：v2.3 Agent 循环；v2.4 演进为状态机（第15章）    │
+│  兼容 API：FastAPI 直调编排函数（保留原有安全门控）       │
 │                         │                              │
 │                  ┌──────┴──────┐                       │
 │                  │  模型路由网关  │（核心推理/视觉/轻量） │
 │                  └─────────────┘                       │
 └──────────────────────────────────────────────────────┘
-                    │ MCP 协议（HTTP / SSE）
+                    │ 当前 Tool.invoke；v2.4 迁移标准 MCP Gateway
 ┌──────────────────────────────────────────────────────┐
-│  MCP 工具层                                             │
+│  工具层（当前进程内；v2.4 标准 MCP）                     │
 │  Excel解析 · 统计分析 · 图表配置 · 报告生成              │
-│  + Code Interpreter（兜底）+ 内部数据接入                │
+│  + 受限 SQL/Code Interpreter（独立安全项目，当前未启用）  │
 └──────────────────────────────────────────────────────┘
                     │
 ┌──────────────────────────────────────────────────────┐
-│  治理与安全层（所有 MCP 调用必经）                       │
+│  治理与安全层（当前工具与未来 MCP 调用均必经）            │
 │  入参 schema 校验 · 权限白名单 · 沙箱 · 可观测 · 审计     │
 └──────────────────────────────────────────────────────┘
                     │
 ┌──────────────────────────────────────────────────────┐
-│  数据存储层                                             │
-│  MinIO · Redis · Milvus · PostgreSQL                   │
+│  当前：parquet/文件 · SQLite · Milvus                   │
+│  目标：按连接器、多实例与租户需求扩展对象/关系存储       │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -127,8 +136,8 @@
 ```
 请求 → 判断任务类型
   ├─ 含图像输入 → 视觉模型（识图）→ 结构化结果 → 核心推理模型
-  ├─ 复杂多步（B 轨）→ DeepSeek-R1
-  ├─ 标准推理 → DeepSeek-V3
+  ├─ 开放多步规划/验证 → 经阶段 0 评测选定的结构化输出模型
+  ├─ 标准 Agent 轮次 → Scenario.AGENT 配置的工具调用模型
   └─ 轻量分类/改写 → 低成本模型
 ```
 
@@ -159,13 +168,13 @@
 
 ### 5.1 前端层（React；v2.2 重构为对话式工作区）
 
-> **v2.2 修订**：前端从"5 个菜单功能页"重构为**对话式工作区**（详见 14.4）。旧菜单页在迁移完成前保留（"经典模式"灰度过渡，拍板决策），之后下线。状态管理引入 **zustand**（技术栈微调，已拍板）。
+> **当前状态**：v2.3 已将前端从五个菜单功能页重构为对话式工作区并下线经典页面。v2.5 阶段 4 将在现有工作区上增加真实目标/计划、澄清、暂停恢复、证据与自主等级交互。
 
 | 模块 | 职责 | 关键点 |
 |------|------|--------|
 | 侧边栏 | 项目 / 数据集 / 历史对话管理 | 新建、重命名、删除、切换；项目下挂数据集与对话 |
 | 对话工作区 | 消息流（主区） | SSE 流式渲染；消息卡片：理解卡/计划卡/工具执行卡/表格卡/图表卡/报告卡 |
-| 固定输入框 | 唯一主入口 | "+"上传 Excel；快捷指令条（自动分析/统计/图表/报告）注入提示词模板，**仍走对话链路，不退化成表单** |
+| 固定输入框 | 唯一主入口 | 当前快捷指令仍注入提示词模板；v2.5 改为目标建议，避免把固定工作流伪装成规划 |
 | ECharts 渲染器 | 交互图表（复用现有） | Artifact 存 option JSON，可重渲染、可追问 |
 | 上下文面板（可收起） | 当前数据集画像、字段、本对话产物清单 | 衍生数据集展示血缘链 |
 | 参数确认 | 工具执行卡内嵌"调整参数"小表单 | 提交后作为**结构化追问消息**回到对话流，真相源仍是对话 |
@@ -184,13 +193,13 @@
 
 | 流程 | 实现 | 状态 |
 |------|------|------|
-| 简单流程（分析出图 / 统计 / 报告 / KB 问答） | FastAPI 路由直调编排函数（`apps/orchestrator/*`），带"错误回传重规划"兜底 | 已实现；迁移完成前保留，灰度后收敛 |
-| **对话式 Agent（主入口，第 14 章）** | DeepSeek function-calling 循环（`Scenario.AGENT`），模型自主规划并调用全部分析工具，SSE 逐步吐透明度事件 | **重构中（当前阶段）**；吸收并取代第 13 章"聊天助手"编排设计 |
-| 复杂多步分析 | 暂不实现；引入时再评估 LangGraph vs 自研状态机 | 后续 |
+| 兼容直调流程（分析 / 统计 / 报告 / KB） | FastAPI 路由直调编排函数（`apps/orchestrator/*`） | 已实现并保留兼容；原端点安全门控不变 |
+| **v2.3 Agent 基线（主入口，第 14 章）** | DeepSeek function-calling 循环（`Scenario.AGENT`），模型选工具并观察结果，SSE 逐步吐事件 | 已完成；属于反应式工具调用 Agent |
+| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 本地实现完成、远端镜像门禁待运行；Planner/Replanner 等属于阶段 2 |
 
 #### 5.2.1 双轨判定规则（v2.1 作废，留档）
 
-> 以下规则随 Dify 放弃而作废，留档供未来"简单/复杂流程分流"设计参考。
+> 以下 A/B 规则随 Dify 放弃而作废，只作历史留档；v2.4 使用统一 TaskPlan schema 下的快速路径、模板路径和开放规划路径，不实现本路由。
 
 1. **意图分类**（轻量模型）：纯知识问答 / 简单单图分析 → A 轨。
 2. **多步信号**：请求含"先…再…然后""对比多个维度""分析后预测"等组合诉求 → B 轨。
@@ -198,7 +207,7 @@
 4. **追问上下文**：若追问依赖对已有分析的重新规划（非简单取数）→ B 轨。
 5. 默认 → A 轨。
 
-#### 5.2.2 多轮上下文管理
+#### 5.2.2 多轮上下文管理（v2.5 阶段 3 目标）
 
 会话状态对象（**v2.2 修订：SQLite 持久 + 内存热层**——对话/消息/工件持久化在 SQLite，运行态上下文从持久层重建并做内存 LRU 热缓存；上 Redis 的触发条件不变，见 13.2 决策 6 修订）：
 
@@ -213,14 +222,19 @@ SessionState {
 }
 ```
 
-- **上下文压缩**：超出 token 阈值时，对早期轮次做摘要（LLM 滚动摘要），保留最近 N 轮原文 + 全局摘要 + 活跃数据引用。
+- **当前状态**：v2.3 只使用最近 N 轮原文与 Artifact 登记表；以下能力尚未实现。
+- **上下文压缩**：超出 token 阈值时，对早期轮次做摘要（LLM 滚动摘要），保留最近 N 轮原文 + 全局摘要 + 活跃数据引用；摘要只用于导航，不得作为数值 Evidence。
 - **指代消解**：双策略并用——
   1. 维护 `entity_map`，把"这个图""上面的结果""刚才那张表"映射到具体 `chart_id` / `dataset_ref`；
   2. 对模糊指代用轻量模型做 query 改写，把指代替换为明确实体后再进入主流程。
 
 ### 5.3 MCP 工具层
 
-> **v2.1 形态说明（现状如实记录）**：MCP 工具当前以**进程内 `Tool.invoke`** 挂载进 API 进程，入参仍强制过 JSON Schema 校验（红线3 不变）；各工具的独立 server 进程可选启动。**MCP-over-HTTP 是可选的未来演进，不是现状**——是否演进取决于真实的独立扩缩容需求。
+> **当前形态**：生产工具仍以**进程内 `Tool.invoke`** 挂载进 API；Tool Capability Contract、
+> 15 个底层工具的官方 SDK Server adapter、stdio 入口、Client Gateway 和 Agent 影子比对已
+> 实现。影子校验不执行第二次工具调用。stdio 子进程与 Streamable HTTP 探针、上下文签名/
+> 服务认证和生产切换尚未完成；所有路径必须继续共用同一 schema 与中央策略网关。v3.0 负责
+> 第三方/跨网络服务的动态发现、企业授权和管理员准入。
 >
 > **解读唯一出口（正式条款，v2.1 升格）**：MCP 工具本身**零 LLM**——report 的 `insight_summary` 已改为**纯拼接**（不调模型）；统计结果的 LLM 中文解读只发生在编排层（`stats_interpreter`，以及第 13 章助手通道）。**新增工具不得内嵌 LLM 调用。**
 
@@ -230,8 +244,10 @@ SessionState {
 | 统计分析 | trend_analysis / anomaly_detect / regression | statsmodels · sklearn · Prophet | F4 |
 | 图表配置 | gen_chart / chart_screenshot / multi_layout | ECharts JSON 输出 | F2 F3 |
 | 报告生成 | gen_report_md / insight_summary / export_pdf | Markdown · WeasyPrint | F2 |
-| Code Interpreter | 通用代码执行（兜底） | pandas + 沙箱 | F2 F4 |
-| 内部数据接入 | query_db / call_api | MCP Server | F5 |
+| Code Interpreter | 通用代码执行（独立安全项目，当前未启用） | pandas + 沙箱 | F2 F4 |
+| 内部数据接入 | query_db / call_api（v3.0） | MCP Server | F5 |
+
+MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有确定性工具必须支持 `tools/list`、`tools/call`、初始化/能力协商、结构化结果、错误映射、超时、取消和优雅关闭。Dataset、Artifact 与知识条目只在通过数据边界评审后选择性暴露为 Resource；工具 Server 保持零 LLM，不使用 sampling 绕过编排层。Streamable HTTP 入口必须校验 Origin、执行认证并默认只暴露必要网络边界。
 
 **高级统计方法落地：**
 
@@ -242,7 +258,7 @@ SessionState {
 | 回归分析 | statsmodels OLS/Logit，输出系数、p 值、R²、显著性，LLM 解读 |
 | 相关性 | Pearson/Spearman + 热力图 |
 
-**chart_screenshot 实现说明（补全）**：前端 ECharts 是浏览器渲染，后端截图需服务端渲染。方案：用 **Playwright 无头浏览器**加载 ECharts 配置渲染并截图，或用 echarts 的 SSR（node-canvas）服务端出图。该组件需独立部署、池化复用浏览器实例，避免每次冷启动。
+**chart_screenshot 实现说明（补全）**：前端 ECharts 是浏览器渲染，后端截图需服务端渲染。当前用 **Playwright 无头浏览器**加载 ECharts 配置并截图；v2.4 容器化时纳入 `chart-tools` 服务，并池化复用浏览器实例，避免每次冷启动。echarts SSR（node-canvas）保留为后续替代方案。
 
 ### 5.4 治理与安全层
 
@@ -256,12 +272,12 @@ SessionState {
 
 ### 5.5 数据存储层
 
-> **v2.1 现状（如实记录）**：下表为目标态。当前实际：Excel/数据集用**本地 parquet + sidecar JSON**（`.data/datasets`），报告/截图落本地文件系统（`.data/reports`），KB 索引为本地 JSON（升级中），session 为 **SQLite 持久 + 内存热层**（v2.2 修订，14.6）；**MinIO / Redis / PostgreSQL 均未接**。向量库按第 13 章决策上 **Milvus Lite**（pymilvus 内嵌，规模不够换 standalone 不改代码）。接入生产存储的触发条件见 13.2。
+> **当前实际**：Excel/数据集使用本地 parquet + sidecar JSON（`.data/datasets`），报告/截图使用本地文件系统（`.data/reports`），项目/对话/消息/Artifact 使用 SQLite，知识库可使用本地替身或 Milvus Lite/Standalone；MinIO、Redis 和业务 PostgreSQL 尚未接入。v2.4 先在 SQLite 中增加迁移器、任务事件、计划、Evidence 和 Checkpoint；生产存储演进由 v3.0 的连接器、多实例和租户需求驱动。
 
 | 存储 | 目标选型 | 用途 | 当前实际 |
 |------|------|------|------|
 | 文件存储 | MinIO | Excel 原始文件、导出 PDF | 本地文件系统 |
-| 会话缓存 | Redis | 会话状态、活跃数据引用、短期上下文 | **SQLite 持久 + 内存热层**（v2.2 修订，14.6） |
+| 会话/任务 | Redis/关系存储（按规模评估） | 会话、Task、Checkpoint、短期上下文 | 当前 SQLite 持久 + 内存热层；v2.4 继续用 SQLite 扩展 |
 | 向量库 | Milvus | RAG 中文向量 | **Milvus Lite**（决策 2） |
 | 结果存储 | PostgreSQL | 分析结果、图表元数据、报告 | 本地落盘 |
 
@@ -274,8 +290,8 @@ SessionState {
 ```
 上传 → parse_excel + infer_schema 生成"数据画像"
      → 仅把画像（列名/类型/空值率/统计摘要/样本行）喂给推理模型
-     → DeepSeek 规划分析步骤 + 生成代码
-     → 调用统计工具 / Code Interpreter（沙箱）执行计算
+     → v2.3 由 DeepSeek 选择工具；v2.4 由 TaskContract/Planner 形成受控计划
+     → 调用确定性分析工具执行计算；Code Interpreter 仅在独立安全项目通过后作为补充
      → gen_chart 产出 ECharts JSON + insight_summary 生成中文解读
      → 报告组装并持久化（图表绑定底层 data_ref）
 ```
@@ -298,7 +314,7 @@ SessionState {
 ```
 离线：中文文档解析（PyMuPDF/OCR）→ 按标题层级+滑窗语义分块
      → bge-m3 embedding（稠密+稀疏）→ 入 Milvus Lite
-在线：Query 改写（指代消解）→ 混合检索（bge 向量 + 中文 BM25）
+在线：当前直接混合检索；v2.5 加入经记忆约束的 Query 改写/指代消解
      → bge-reranker 重排 → 带引用生成（标注 source 防幻觉）
 ```
 
@@ -309,14 +325,14 @@ SessionState {
 | 失败场景 | 处理策略 |
 |----------|----------|
 | 模型不可用/超时 | 路由网关切备选模型；仍失败则返回友好提示并保留会话 |
-| LLM 返回非法 JSON | schema 校验拦截 → 带错误回退重试（最多 N 次）→ 仍失败降级为文本回答 |
+| LLM 返回非法 JSON | schema 校验拦截 → 带错误重试；关键 Task/工具失败则进入 blocked/failed，不得降级为无证据的成功文本 |
 | 工具调用失败 | 捕获异常，向模型回传错误供其重规划；关键工具失败则中止并提示 |
-| 代码执行超时/异常 | 沙箱强制超时 kill，错误回传，LLM 修正代码或换预定义工具 |
-| MCP Server 不可用 | 熔断 + 降级；非核心工具失败不阻断主流程 |
+| 代码执行超时/异常 | 独立安全项目通过后由沙箱强制取消并审计；当前 Code Interpreter 不注册到 Agent |
+| 工具/MCP 不可用 | 熔断并由 Replanner 选择备选；成功标准无法满足时明确 blocked/failed |
 | 大表 OOM | 超阈值自动切 DuckDB 分块；仍超限则提示用户缩小范围 |
 | 检索无结果（F1） | 明确告知"知识库无相关内容"，不强行编造 |
 
-**流式与多步协同**：B 轨多步分析时，每完成一个节点（规划→执行→出图）即通过 SSE 推送状态，前端实时展示进度，降低等待感。
+**流式与多步协同**：v2.4 每完成 Goal、Plan、Step、Verification 或 Replan 节点即通过 SSE 推送状态；旧事件在兼容期继续保留。
 
 ---
 
@@ -325,9 +341,9 @@ SessionState {
 | 层 | 选型 |
 |----|------|
 | 前端 | React + ECharts + SSE + **zustand**（v2.2 拍板，状态管理） |
-| 编排 | **自研 Agent 循环**（DeepSeek function-calling，`Scenario.AGENT` 独立场景）+ 过渡期直调编排函数；Dify 已放弃（5.2） |
-| 持久层 | **SQLite**（标准库 sqlite3，单文件 `.data/chatbi.db`，v2.2 拍板）：项目/对话/消息/工件 |
-| 复杂多步 | 暂不实现；届时评估 LangGraph vs 自研状态机 |
+| 编排 | 当前为自研 function-calling 循环；v2.4 演进为统一类型化状态机和混合 Planner；Dify 已放弃 |
+| 持久层 | 当前 SQLite：项目/对话/消息/工件；v2.4 增加 schema 迁移、Task/Event/Plan/Evidence/Checkpoint |
+| 复杂多步 | 纳入 v2.4 阶段 2；先扩展自研状态机，是否采用 LangGraph 由阶段 0 后的复杂度和评测决定 |
 | 核心推理 | DeepSeek-V3 / DeepSeek-R1 |
 | 多模态 | Qwen2.5-VL / GLM-4V |
 | Embedding | **bge-m3**（已拍板，稠密+稀疏双路；device 配置项 auto/cpu/cuda） |
@@ -335,10 +351,10 @@ SessionState {
 | 数据处理 | pandas · openpyxl · DuckDB |
 | 统计算法 | statsmodels · scikit-learn · Prophet |
 | 图表截图 | Playwright 无头浏览器（已实现） |
-| 工具协议 | 进程内 Tool.invoke + schema 校验；MCP-over-HTTP 为可选演进 |
+| 工具协议 | 当前进程内 Tool.invoke + schema；v2.4 迁移标准 MCP Client/Server，支持 stdio 与 Streamable HTTP；v3.0 增加外部准入和企业授权 |
 | 报告导出 | Markdown · WeasyPrint（已实现） |
 | 向量库 | **Milvus Lite** 起步（已拍板，换 standalone 不改代码） |
-| 其余存储 | 当前本地落盘 + 内存 session；MinIO/Redis/PostgreSQL 未接（触发条件见 13.2） |
+| 其余存储 | 当前本地落盘 + SQLite/LRU；MinIO/Redis/业务 PostgreSQL 未接，按 v3.0 需求演进 |
 
 ---
 
@@ -356,41 +372,48 @@ SessionState {
 
 ## 10. 安全与数据合规（新增）
 
-- **数据隔离**：多租户场景下 Excel 文件、会话、分析结果按租户隔离；向量库与结果库带租户维度。
+- **当前基线与演进**：v2.3 已有 schema、数据边界和助手通道例外；权限、审计和完整 trace 尚未落地。v2.4 先实现中央策略、主体权限和审计骨架，v3.0 再扩展完整多租户治理。
+- **数据隔离**：多租户场景下 Excel 文件、会话、记忆、任务、Evidence 和结果按租户隔离；向量库与结果库带租户维度。
 - **敏感数据**：上传 Excel 可能含敏感业务数据，约定留存周期与到期清理；按需脱敏。
-- **沙箱**：Code Interpreter 禁网络、限文件系统、限资源、强超时。
+- **沙箱**：Code Interpreter 属独立安全项目；禁网络、限文件系统/资源/输出、强超时并可取消，验收前不进入 Agent 工具集。
 - **权限**：内部数据接入工具按用户数据权限过滤，调用留审计。
 - **防注入**：工具入参与外部内容（检索结果、文件内容）视为数据而非指令，不执行其中夹带的指令。
 - **防幻觉**：所有数值来自工具执行；问答带引用来源。
+- **防虚假完成**：TaskContract 未通过确定性后置条件和 Evidence 校验时不得标记任务成功。
 
 ---
 
-## 11. 演进路线（v2.1 更新）
+## 11. 演进路线（2026-07-22 更新）
 
-1. **阶段一（MVP）— 已完成**：跑通中文知识库问答 + Excel 简单分析出图（自研编排，原计划的 Dify 已放弃，见 5.2）。
-2. **阶段二 — 部分完成**：统计工具四件套（趋势/异常/回归/相关）✅、chart_screenshot ✅、PDF 导出 ✅；Code Interpreter 与图表追问**后置**。
-3. **当前阶段：对话式 Agent 产品重构（第 14 章，v2.2 定案）**：五阶段迁移（网关地基 → 对话工作区 → 工具封装 → Agent 循环 → 旧页面灰度迁移）。吸收原第 13 章助手计划的步骤 2/3。
-4. **并行轨（独立推进，互不阻塞）**：bge-m3 + Milvus Lite 检索升级（13.6 步骤 0/1）；Agent 重构期间用替身检索开发。
-5. **阶段三（后续）**：复杂多步分析（LangGraph 或自研状态机）、内部数据接入、治理审计与多租户隔离。
+1. **v2.3 基线 — 已完成**：知识库、Excel/统计/图表/报告工具、对话工作区、function-calling 循环和五阶段迁移；第 14 章记录其设计与交付历史。
+2. **v2.4 Agent 控制面 — 当前进行中**：阶段 1 本地实现已收尾，已具备 SQLite v2、TaskRun/TaskContract、事件/快照、Invocation/Evidence、数值与知识 Claim、确定性 Verifier、策略/审计/trace、MCP 单源 adapter/Gateway、API/Web 基础镜像和报告文件对账；本批远端镜像 CI 尚待提交推送后运行。阶段 0 的真实 Planner/行为基线、语义候选、MCP 双传输探针和评审债务未关闭；阶段 2 负责结构化计划、动态重规划、澄清、任务控制、MCP 规范执行和完整 Compose。
+3. **v2.5 记忆、自主性与协作**：阶段 3 记忆；阶段 4 可干预前端；阶段 5 业务语义层；阶段 6 自主分析和统计护栏。
+4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
+5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
+6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。
 
----
-
-## 12. 待确认事项（v2.1 更新）
-
-- ~~双轨路由判定阈值~~（随 Dify 放弃而作废）→ 复杂多步分析的引入方式（LangGraph vs 自研状态机）与触发时机。
-- Code Interpreter 沙箱实现（Docker / gVisor / 限权进程）的最终选型。
-- 内部数据接入工具的数据源清单与权限模型。
-- 知识库文档类型范围、更新频率与重建索引机制。
-- 多租户隔离的粒度与数据留存合规要求。
-- bge-reranker 接入后，检索相关性阈值（`_MIN_RELEVANCE`）需按真实分数分布重新标定。
-- ~~query_dataset 是否补做~~（v2.2 已决：自由 SQL 不做；结构化 transform/aggregate 工具做，见 13.2 决策 3 修订与 14.7）。
-- Agent 循环护栏阈值（最大工具调用次数、同参熔断判定）需按真实使用调优（初值见 14.5）。
+详细交付、依赖与验收以 `docs/Agent自主化开发规划.md` 为准；v2.5/v3.0 每阶段的 MCP、
+容器、外部授权、发布供应链和多实例设计见 `docs/MCP与Docker全阶段演进设计.md`。
 
 ---
 
-## 13. 聊天助手（层次2 自由问答）— 方案与已定决策（v2.1 新增）
+## 12. 待确认事项（2026-07-21 更新）
 
-> **v2.2 归属说明**：本章的编排设计（13.3）与实现路径步骤 2/3（13.6）已被**第 14 章对话式 Agent 重构吸收放大**，实现以第 14 章为准；本章仍然有效的部分：**13.2 六项决策（含 v2.2 对决策 3/6 的修订）**、**13.5 红线1 助手通道例外（/chat 通道，含 Agent 循环）**、检索升级并行轨（13.6 步骤 0/1）。
+- 阶段 0 后是否需要引入 LangGraph；默认先扩展自研类型化状态机。
+- Planner/Verifier 主模型、fallback、结构化输出修复和评测门槛。
+- Code Interpreter 的隔离实现与部署边界。
+- 受限 SQL 的数据源、方言、权限和小群体保护标准。
+- 内部数据源清单、身份体系、行列级权限和数据留存规则。
+- 无人值守任务允许的动作、通知范围、预算和审批策略。
+- 多实例时任务队列、协调存储和完整多租户方案。
+- 对外 MCP 的企业身份、授权范围、可信服务目录和证书管理。
+- 生产容器仓库、SBOM/签名/漏洞门禁与 CPU/GPU 镜像拆分。
+
+---
+
+## 13. 聊天助手（层次2 自由问答）— 历史方案与仍有效边界
+
+> 本章记录 v2.1/v2.2 决策形成过程。编排实现已由第 14 章交付；后续路线由第 15 章接管。13.5 的 `/chat` 助手通道例外继续有效。13.2 的“自由 SQL 不做”已被 2026-07-21 范围变更替代为独立受限 SQL 安全项目，其余已实现决策继续有效。
 
 ### 13.1 需求定位
 
@@ -404,7 +427,7 @@ SessionState {
 |---|--------|------|
 | 1 | Embedding | **bge-m3**：一个模型同时出稠密+稀疏向量，稀疏路取代自实现 BM25 扛规模（现 BM25 为纯 Python 逐文档循环，知识库大了自身就是瓶颈） |
 | 2 | 向量库 | **Milvus Lite 起步**（`pip install pymilvus` 内嵌、零部署，约百万向量内够用）；不够时换 Milvus standalone，同一 pymilvus API 换 URI 即迁移，**代码不动** |
-| 3 | query_dataset（自由聚合取数工具） | ~~v1 不做~~ **v2.2 修订（2026-07-15 拍板）**：**自由 SQL 仍不做**（安全顾虑保留）；改做**结构化参数的 transform / aggregate 工具**（filter/sort/groupby/agg 枚举白名单，schema 校验），满足筛选/分组/清洗需求，见 14.7 |
+| 3 | query_dataset（历史决策） | v2.3 已完成结构化 transform/aggregate；“自由 SQL 永久不做”已由第 15 章替代为独立受限 SQL 安全项目，安全评审前仍禁止进入生产 Agent |
 | 4 | 推理 device | **必须是配置项（auto / cpu / cuda）**：本地开发用 CPU 或本地 GPU，部署到公司 GPU 服务器自动用 GPU，**切换不改代码** |
 | 5 | 红线1 修订 | **助手通道例外（保守版）**：仅 `/chat` 助手通道免除白名单门控——允许把数据画像、统计工具完整结果、较多样本行直接给模型；列级 `EXCLUDE` 规则仍生效；**原有端点（analyze/stats/report）的门控行为完全不变**。详见 13.5 |
 | 6 | session | ~~内存版 v1~~ **v2.2 修订（2026-07-15 拍板）**：**SQLite 持久 + 内存热层**——侧边栏历史对话是产品硬需求，纯内存撑不住；对话/消息/工件持久化在 SQLite（14.6），运行态上下文从持久层重建 + 内存 LRU 热缓存。**上 Redis 的触发条件不变**：多 worker / 多实例部署 |
@@ -435,10 +458,10 @@ SessionState {
 | 现有物 | 处置 |
 |--------|------|
 | `kb_qa` + `/kb/query` | **保留共存**：纯文档问答轻端点；检索升级后自动受益（同一 `HybridRetriever`）；助手稳定后再评估是否下线 |
-| `packages/rag` 骨架 | **全部复用**：填 `BGEEmbedder` / `BGEReranker` 存根 + 新增 `MilvusKnowledgeStore`（`KnowledgeStore` ABC 已定）；唯一要改的既有逻辑是 `_MIN_RELEVANCE` 阈值重标定 |
-| `/chat` 路由 + 前端 `ChatPanel.tsx` | 就是助手落点：新模块 `apps/orchestrator/assistant` + 实现 chat 路由（SSE） |
+| `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入业务语义层 |
+| `/chat` 路由 + 前端 `ChatPanel.tsx` | v2.3 主入口已落地；v2.4 扩展任务事件，v2.5 增加完整干预交互 |
 | `stats_interpreter` 门控 | **原统计端点链路不动**；助手通道走自己的上下文组装（13.5）。门控代码保留，供未来敏感部署复用 |
-| `packages/session` 存根 | ~~内存版 `SessionStore`~~ → **v2.2：由第 14 章阶段 1 的 SQLite 持久层 + 内存热层取代**；`coref` / `compaction` 继续留空（靠"最近 N 轮原文"顶住） |
+| `packages/session` | SQLite 工作区与 LRU 已落地；`coref` / `compaction` 仍为空，按 v2.5 阶段 3 实现；v2.4 先增加 Task/Event/Evidence/Checkpoint |
 
 ### 13.5 红线1 修订：助手通道例外（保守版，已拍板）
 
@@ -464,7 +487,9 @@ SessionState {
 
 ---
 
-## 14. 对话式 Agent 产品重构（v2.2 定案，当前阶段唯一开发依据）
+## 14. v2.3 对话式 Agent 基线（已完成，历史开发依据）
+
+> 本章记录 2026-07-15 至 2026-07-16 的五阶段迁移及当前代码基线，不再是后续开发路线。现行路线见第 15 章和 `docs/Agent自主化开发规划.md`。
 
 ### 14.1 定位与目标
 
@@ -472,7 +497,7 @@ SessionState {
 
 红线不变：数字必来自工具真实执行（红线2）、入参必过 schema 校验（红线3）、数据物料走 13.5 助手通道例外并留审计日志。
 
-### 14.2 现状盘点结论（重构起点，2026-07-15）
+### 14.2 重构起点盘点（历史快照，2026-07-15）
 
 | 层 | 现状 | 结论 |
 |---|---|---|
@@ -482,7 +507,7 @@ SessionState {
 | 工具层 | 全部已是 `Tool.invoke` + schema 校验的独立工具；`dataset_store.aggregate` 已下推 DuckDB | **地基良好，Agent 化是封装不是重写** |
 | 报告 | 按固定清单重跑分析后组装 | 需改为"按 analysis_ids 从对话工件组装" |
 
-### 14.3 目标架构
+### 14.3 v2.3 已交付架构
 
 ```
 ┌─ 前端（对话工作区，zustand 状态管理）───────────────┐
@@ -522,7 +547,7 @@ SessionState {
 ```
 
 - **消息卡片类型**（与 14.5.3 SSE 事件一一对应）：理解卡（当前理解的需求）、计划卡（步骤+进度，随执行打勾）、工具执行卡（调用了什么能力、用了哪些字段/筛选条件、✓成功摘要或✗失败原因+可修改建议）、表格卡（截断展示+注明总行数）、图表卡（ECharts 交互渲染）、报告卡（预览+下载）、流式正文。
-- **快捷指令条**：点击=向输入框注入结构化提示词模板，**仍走对话链路**——快捷但不退化成菜单表单。
+- **快捷指令条**：v2.3 通过提示词模板走对话链路；该做法是当前基线，v2.5 将改为不绑定固定流程的目标建议。
 - **"+"上传即对话开场**：上传后 Agent 自动产出画像卡（字段/类型/空值率/质量概况）并主动建议可做的分析。
 - **参数确认**：执行卡内嵌"调整参数"小表单，提交后作为结构化追问消息重回对话流；复杂参数放侧边面板/卡片确认，**真相源始终是对话**。
 
@@ -548,7 +573,7 @@ SessionState {
 - **分析登记表**：每次工具成功执行登记 `{analysis_id, tool, params, dataset_ref, 结果摘要, artifact_id}` 并随上下文注入。"换成按地区分析"→ 模型改上一条的 `group_col` 重调；"把刚才的结果生成报告"→ `generate_report(analysis_ids=[...])`。
 - **衍生数据集血缘**："排除异常值后重新计算"→ `transform_dataset` 产出新 dataset_ref（记录 parent_ref + 变换参数），后续分析在新 ref 上做；上下文面板展示血缘链。
 - 切换历史对话即从 SQLite 重建全部登记表与消息（决策 6 修订的意义所在）。
-- **登记表瘦身**：长对话中登记表设条数上限，旧条目摘要化（全量上下文压缩 compaction 仍不做）。
+- **登记表瘦身**：v2.3 设条数上限并摘要旧条目；完整 compaction/coref 尚未实现，已纳入 v2.5 阶段 3。
 
 #### 14.5.3 SSE 事件协议（透明度落点）
 
@@ -586,43 +611,128 @@ Artifact     {id, conversation_id, message_id, type, payload_json|file_ref,
 | 工具 | 来源 | 说明 |
 |------|------|------|
 | `get_data_profile` | 现有 infer_schema 封装 | 画像 + 质量概况（空值/重复/类型异常汇总） |
-| `trend` / `anomaly` / `regression` / `correlation` | 现有 stats 四件套直接注册 | 零改动 |
+| `trend_analysis` / `anomaly_detect` / `regression` / `correlation` | stats 四件套直接注册 | 已实现 |
 | `gen_chart` | 现有 | Agent 选图型+列映射，数据真实聚合 |
 | `chart_screenshot` | 现有 | 报告用 |
 | `kb_search` | 现有 HybridRetriever 封装 | 带引用；检索升级为并行轨，替身可用 |
-| `generate_report` | 现有 report **重构** | 从"重跑固定清单"改为"按 analysis_ids 从对话工件组装"，支持追问式修改报告 |
-| `transform_dataset` | **新增**（决策 3 修订落点） | 结构化参数：filter 条件列表 / sort / 去空 / 去重 / 排除指定行集，**枚举白名单 + schema 校验，非自由 SQL**；产出衍生 dataset_ref（带血缘） |
-| `aggregate_preview` | **新增**，封装现有 `dataset_store.aggregate` | 分组聚合出表格卡，回答"各地区销售额是多少"类取数问题 |
+| `generate_report` | report 工具 | 已按 analysis_ids 从对话工件组装，支持 Markdown/PDF Artifact |
+| `transform_dataset` | dataset_ops | 结构化 filter/sort/去空/去重/排除行，schema 校验并产出带血缘的 dataset_ref |
+| `aggregate_preview` | dataset_ops | 分组聚合出表格卡，回答“各地区销售额是多少”类取数问题 |
 
-### 14.8 五阶段迁移计划与执行纪律
+### 14.8 五阶段迁移记录（全部完成）
 
-> **执行纪律（用户明确要求，不可违反）**：
-> 1. **严格按阶段顺序走（0→1→2→3→4），不跳阶段、不一口气冲到底**——这既是依赖顺序也是风险顺序。**每个阶段完成后停下，交用户独立验证 + 提交，确认无误后才进入下一阶段。**
-> 2. **旧分析能力（Excel 分析/统计/报告/知识库页面与端点）在迁移完成前一律保留**，不丢功能。
-> 3. **bge 检索升级本重构不管**（并行轨），用替身检索开发 Agent。
+> 本表是已执行完成的历史记录。v2.4 起继续采用“按阶段评审、验证、提交”的纪律，但内容以第 15 章为准。
 
 | 阶段 | 内容 | 交付验收 | 风险 |
 |------|------|----------|------|
-| **0. 网关地基** | `Message` 加 tool_calls、adapter 传 tools/tool 消息、实现 `stream()`、新增 `Scenario.AGENT`（**降级链剔除不支持 function-calling 的模型**，规避"降级后静默丢工具能力"） | 现有全部测试绿 + 网关 tools/stream 新测试 | 中：动全系统共用件 |
-| **1. 对话工作区 + 项目/对话结构** | SQLite 持久层 + projects/conversations CRUD API + 前端新骨架（侧边栏/消息流/输入框+上传，zustand）+ 最小链路：上传→画像卡、纯 LLM 流式对话。**旧五页入口不动** | 浏览器能建项目、传文件、流式对话、切历史对话 | 高（工作量）：前端约占 60% |
-| **2. 工具封装** | Agent 工具注册表 + 14.7 全部工具接入 + transform/aggregate 新工具 + 衍生数据集血缘 + report 组装式重构 | 每个工具有单测/集成测试可独立验证 | 低-中：transform 的 schema 设计需评审 |
-| **3. Agent 循环** | 14.5 循环 + SSE 协议 + 分析登记表 + 追问关联 + 快捷指令条 + 执行卡"调整参数" | 端到端：上传→"分析各地区趋势"→追问"换成按月"→"生成报告"全程对话完成 | 中：幻参数/循环失控靠护栏兜 |
-| **4. 迁移收尾** | 旧页面"经典模式"开关灰度 → 确认能力清单全覆盖后下线；报告修改流打磨；历史/错误处理完善；文档升版 | 旧入口移除，新链路覆盖旧页面全部能力（逐项核对清单） | 低：防能力遗漏 |
+| **0. 网关地基** | tools/stream/`Scenario.AGENT` | 已完成 | 历史风险已关闭 |
+| **1. 对话工作区** | SQLite、CRUD、Zustand、上传和 SSE | 已完成 | 历史风险已关闭 |
+| **2. 工具封装** | 11 工具、dataset_ops、血缘、报告组装 | 已完成 | 历史风险已关闭 |
+| **3. Agent 循环** | function-calling、透明度事件、登记表和护栏 | 已完成 | v2.4 将升级控制面 |
+| **4. 迁移收尾** | 经典页面下线、兼容 API 保留、历史卡回放 | 已完成 | 兼容端点继续维护 |
 
-### 14.9 风险清单（诚实记录）
+### 14.9 历史风险与当前遗留
 
-1. **前端体量**：从五个表单页到流式对话工作区是重写不是改造，阶段 1 是工期大头。
+1. **前端迁移体量**：已完成；v2.5 的新风险是计划干预与任务状态一致性。
 2. **网关 fallback × tools 组合坑**：`drop_params` 若把 `tools` 从降级模型剥掉，Agent 会静默变成"不会用工具的聊天"——比报错更糟。`Scenario.AGENT` 独立场景 + 降级链准入约束是针对性解法（阶段 0 落实）。
 3. **DeepSeek function-calling 现实**：幻列名/幻参数/偶发循环。护栏阈值（≤6 次、同参熔断）需真实数据调优。
-4. **report 重构是隐形大活**：动的是"重跑固定清单"这一核心假设。
+4. **report 重构**：已完成；Artifact 后置条件仍需纳入通用 Verifier。
 5. **token 预算**：画像+登记表+历史常驻，长对话顶上下文——登记表瘦身（14.5.2）应对。
-6. **迁移期双轨维护**：同一能力两个入口，bug 修两遍——灰度期要短。
+6. **兼容 API 维护**：旧前端已下线，但旧端点仍需保持安全和回归。
 
-### 14.10 本章拍板决策（2026-07-15，不要重新讨论）
+### 14.10 本章历史决策与 2026-07-21 修订
 
-1. 决策 3 修订：**自由 SQL 不做；结构化 transform/aggregate 工具做**（枚举白名单）。
+1. 结构化 transform/aggregate 已完成；“自由 SQL 永久不做”被第 15 章修订为独立受限 SQL 安全项目，未通过评审前仍禁止启用。
 2. 决策 6 修订：session = **SQLite 持久 + 内存热层**；Redis 触发条件不变。
 3. 持久层选 **SQLite**（标准库、单文件、零部署）。
 4. 前端引入 **zustand**（技术栈微调）。
 5. 旧页面**灰度过渡再下线**（"经典模式"开关，不因新 Agent 的 bug 失去可用产品）。
 6. 新增 **`Scenario.AGENT`** 独立模型路由场景（独立配置模型/温度/降级链）。
+
+---
+
+## 15. 目标驱动的受约束自主分析 Agent（现行路线）
+
+> 本章给出总体架构和版本边界。逐项交付、验收、安全项目与优先级以
+> `docs/Agent自主化开发规划.md` 为准。阶段 0 详细草案见 `docs/v2.4/README.md`；
+> 阶段 1 本地实现已经收尾，正式验收还需本批代码的远端镜像 CI；真实 Planner/行为基线、
+> MCP 双传输探针和评审仍是阶段 0 未关闭债务。
+
+### 15.1 目标
+
+将 v2.3 的反应式工具循环升级为目标驱动控制面：Agent 理解目标、必要时澄清、形成可修订计划、执行受控工具、记录 Observation/Evidence，并由 Verifier 而不是“模型停止调用工具”决定任务是否完成。
+
+```text
+Goal Interpreter → TaskContract → Planner → Executor → Observation
+        ↑                                           ↓
+Memory/Context ← Finalizer ← Verifier ← Claim/Evidence
+                       ↑          │
+                       └ Replanner┘
+```
+
+### 15.2 核心对象
+
+- **TaskContract**：goal、success criteria、required artifacts/evidence、constraints、assumptions、clarification；
+- **AgentState/TaskRun**：任务状态、计划版本、当前步骤、观察、Evidence、预算和 Checkpoint；
+- **TaskPlan/TaskStep**：目的、能力、依赖、预期证据、完成条件和备选方案；
+- **Claim/Evidence**：最终结论到工具结果、数据集版本和 Artifact 的可验证引用；
+- **Tool Capability Contract**：能力、前置条件、输入输出、风险、权限、成本、幂等性和后置条件；
+- **TaskEvent + Snapshot**：追加审计事件负责回放，快照负责恢复性能。
+
+### 15.3 v2.4 — Agent 控制面
+
+| 阶段 | 内容 | 关键门禁 |
+|---|---|---|
+| 0. 前置验证与协议 | 混合 Planner/Verifier spike、TaskContract/数据模型、SSE、schema 迁移、不变量责任矩阵、行为基线 | 主模型/fallback/隐藏集可重复评测；技术路线和责任边界评审通过 |
+| 1. 验证驱动结束 | 最小 AgentState、Claim/Evidence、确定性 Verifier、TaskEvent/Checkpoint、幂等、策略/审计骨架 | 固定回归集无虚假 Artifact 完成和无依据数值 Claim；旧接口无回归 |
+| 2. 结构化计划与重规划 | Goal/Planner/Executor/Verifier/Replanner/Finalizer、工具能力契约、澄清、暂停/恢复/取消 | 多步骤任务能按 Observation 改计划；恢复不重复步骤；终态可追溯 |
+
+Planner 采用三条统一输出路径：简单任务确定性快速路径、已知任务族模板路径、开放多步骤 LLM 路径。Verifier 以确定性后置条件为主，语义模型只判断覆盖性等软条件，并返回 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
+
+图表和报告正则在阶段 1 先与通用后置条件影子运行；回归等价后才能降级和删除。暂停/恢复必须同时具备 run_id、Checkpoint、取消令牌和工具幂等性。
+
+MCP 与 Docker 是 v2.4 的横向交付轨，不另起一个脱离控制面的版本：阶段 0 固定协议、SDK、双传输和容器拓扑；阶段 1 完成全部项目内工具的标准 MCP Server 接口、Client Gateway 与 API/Web 基础镜像；阶段 2 切换为规范 MCP 执行路径并交付包含工具服务和可选 RAG profile 的单机 Compose。当前单源 adapter/Gateway 影子层和 API/Web 基础镜像代码已经落地，阶段 1 本地契约与回归已通过；但生产仍是进程内 `Tool.invoke`，本批远端镜像 CI 尚未运行，运行中容器基线仍是独立 Milvus Compose，因此不能把 v2.4 目标架构标记为已实现。详细边界、服务分组、卷、网络和验收见 `docs/v2.4/MCP与Docker架构决策.md`。
+
+### 15.4 v2.5 — 记忆、自主性与协作
+
+| 阶段 | Agent 能力 | MCP 演进 | Docker/部署演进 | 关键门禁 |
+|---|---|---|---|---|
+| 3. 记忆 | 工作/对话/项目记忆、compaction/coref、来源与删除 | Observation 以 server/tool/version/hash/reference 进入 Evidence；记忆由 Host 管理，不开放通用写工具 | SQLite/Task/Memory/Dataset/Artifact 卷一致备份、迁移和恢复；保持单写入者 | 容器重建后任务/记忆可恢复且不重复调用；跨项目引用不可读 |
+| 4. 前端协作 | 真实计划、澄清、修改、暂停恢复、证据/局限、自主等级 | 前端显示工具来源/版本/风险/权限/健康；ApprovalRecord 绑定调用，浏览器不直连 MCP | Web 代理覆盖 API/SSE/Artifact 下载；Compose E2E 验证重连、审批、取消和重启 | UI 与审计一致；未批准调用被服务端拒绝；`/mcp` 不公开 |
+| 5. 业务语义 | 版本化指标、公式、粒度、生效期、字段映射与冲突 | `knowledge-tools` 提供受控 Tool 和选择性只读 Resource；Claim 同时引用语义版本与数据调用 | RAG profile 分离原文、索引和模型缓存；CPU/GPU 共用契约 | 旧报告可追溯旧口径；冲突澄清；索引切代不破坏 Resource 引用 |
+| 6. 自主分析 | 数据角色、质量、假设、结果驱动分析、多数据集与统计护栏 | capability 先于工具名；目录变更经 Gateway 复核并冻结到 TaskRun；并行共享预算/版本/取消树 | stats/forecast/browser/gpu profile 隔离资源；阶段 6 仍以单机 Compose 为交付边界 | 能力缺失不心算；并行不重复 Artifact；重型服务故障不拖垮控制面 |
+
+业务语义层先于大规模自主探索。MCP Server 不读取完整记忆、不递归调用其他 Server，也不
+自行扩张目标；Docker 拆分只在依赖、安全或扩缩容收益明确时进行。
+
+### 15.5 独立安全项目
+
+- **受限 SQL**：独立 `sql-tools` MCP Server；只读事务、低权限服务端凭据、AST/成本检查、表列行权限、扫描/结果/时间限制、小群体与敏感 Join 防护；专用非 root/只读镜像只访问 allowlist 数据源，不挂载完整业务数据目录。
+- **受限 Code Interpreter**：MCP Server 仅作为 façade，把受控引用提交到独立一次性 sandbox runner；禁网、只读输入、临时目录、固定依赖、capabilities 清零、资源/输出限额、强制取消、沙箱逃逸测试和全审计。API/Server 不挂 Docker Socket，普通容器不充当沙箱。
+
+两项能力未通过独立安全评审前不得进入生产 MCP allowlist/Compose profile，也不得作为功能阶段
+的临时捷径。Tool annotations 只提供提示，不能代替服务端强制策略。
+
+### 15.6 v3.0 — 企业自主 Agent
+
+| 阶段 | Agent/数据能力 | MCP 演进 | Docker/生产部署 | 关键门禁 |
+|---|---|---|---|---|
+| 7. 数据接入与主动任务 | 企业数据连接器、队列、定时/事件触发、监控、报告和通知 | 受信 Server Catalog；发现后管理员准入；远程 TLS + OAuth 2.1/PKCE/Resource Indicators/audience；无人值守机器身份；connector 持有上游凭据，禁止 token passthrough | scheduler/worker/connector/notifier 镜像；状态/对象/队列外置；SBOM、provenance、扫描、签名、digest 部署与滚动升级；Compose 只保留开发/单机入口 | 外部服务全生命周期可审计；未准入/错误 audience 被拒；任务不扩大预授权；升级回滚不丢状态 |
+| 8. 多 Agent 与企业治理 | 按收益拆 Supervisor/Data/Statistics/Knowledge/Visualization/Report/Reviewer；多租户、审批、配额、复现 | 所有 Agent 共享 Gateway/Catalog；子 Agent 仅获步骤级 capability、引用、预算和短期凭据；Agent 间传 Evidence reference，不默认伪装为 MCP Tool | API/Worker/Gateway 无状态多副本；外置任务/锁/审计；网络策略、secret manager、节点池、HA、扩缩容和租户资源隔离 | 跨租户/越权/网络分区/取消传播通过；副本重启不重复 Artifact；版本和权限足以复现结论 |
+
+生产编排平台、任务存储、队列、对象存储、企业 IdP 和租户隔离模型在阶段 7/8 分别通过 ADR
+拍板，本文不提前锁定具体云或调度产品。
+
+### 15.7 范围与执行纪律
+
+- 复杂多步和重规划不再是“明确不做”，归 v2.4；
+- 完整上下文和指代消解归 v2.5；
+- 项目内 MCP 标准接口、stdio/Streamable HTTP 和规范执行路径归 v2.4；外部 MCP 动态发现、企业授权与准入归 v3.0；
+- API、Web、MCP 工具基础镜像和单机 Compose 归 v2.4；镜像供应链与多实例生产运维归 v3.0；
+- v2.5 必须继续演进 MCP/Docker：阶段 3 贯通记忆引用与状态恢复，阶段 4 补齐前端可见/审批和代理 E2E，阶段 5 落地知识 Resource/RAG 生命周期，阶段 6 落地能力目录快照和重型工具 profile；
+- 内部数据、多租户和多 Agent 归 v3.0；
+- 自由 SQL 从永久禁止改为独立受限 SQL 安全项目；安全验收前的运行边界仍是禁止；
+- 七条安全红线在所有版本继续有效，并增加完成验证、Evidence、预算取消、记忆治理和外部副作用审批不变量；
+- 严格按阶段顺序推进，每阶段独立评审、测试、浏览器验证和提交，不提前宣称未验收能力完成。
+
+逐阶段详细设计、兼容矩阵和待拍板 ADR 见 `docs/MCP与Docker全阶段演进设计.md`。

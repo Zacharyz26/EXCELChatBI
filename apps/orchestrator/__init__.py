@@ -1,5 +1,6 @@
-"""编排层：统一意图路由 + 模型路由封装。
+"""自研编排层。
 
-A 轨（Dify）承接 MVP；B 轨（LangGraph）占位，MVP 暂不实现（CLAUDE 第7节）。
-两轨共享同一套 MCP 工具。
+当前主入口是 v2.3 function-calling Agent 循环；v2.4 将演进为统一的类型化
+Goal/Planner/Executor/Verifier/Replanner/Finalizer 控制面。早期 Dify/LangGraph
+A/B 双轨已经废止，历史占位模块不参与运行。
 """

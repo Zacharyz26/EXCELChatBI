@@ -1,1 +1,1 @@
-"""MCP 服务共享骨架：服务基类 + 工具注册（含治理层校验挂载点）。"""
+"""共享 MCP 契约、官方 SDK adapter 与迁移期 Client Gateway。"""

@@ -3,6 +3,7 @@
 from packages.session.cache import ConversationCache
 from packages.session.models import (
     Artifact,
+    ArtifactDraft,
     Conversation,
     ConversationContext,
     Dataset,
@@ -13,6 +14,7 @@ from packages.session.store import SessionStore
 
 __all__ = [
     "Artifact",
+    "ArtifactDraft",
     "Conversation",
     "ConversationCache",
     "ConversationContext",

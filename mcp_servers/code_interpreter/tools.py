@@ -1,4 +1,4 @@
-"""Code Interpreter 工具实现：所有代码经 governance.sandbox 执行（红线5）。"""
+"""独立 Code Interpreter 安全项目占位；所有代码必须经 sandbox（红线5）。"""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ def run_code(args: dict[str, Any], sandbox: Sandbox) -> SandboxResult:
 
     Args:
         args: 含 code 与可选 dataset_ref。
-        sandbox: 注入的沙箱实现（实现选型待确认）。
+        sandbox: 经独立安全评审的沙箱实现。
     """
-    raise NotImplementedError("TODO: 经 schema 校验后调用 sandbox.run，捕获异常回传")
+    raise NotImplementedError("Code Interpreter 安全项目尚未验收，run_code 不可用")
 
 
 def default_limits() -> SandboxLimits:
     """从配置构造默认沙箱限制（超时 / 内存 / 禁网）。"""
-    raise NotImplementedError("TODO: 读 Settings 构造 SandboxLimits")
+    raise NotImplementedError("Code Interpreter 安全项目尚未验收，限制配置未启用")

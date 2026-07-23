@@ -74,6 +74,18 @@ class Artifact:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactDraft:
+    """An Artifact prepared by the orchestrator but not yet committed."""
+
+    type: str
+    payload: JsonObject | None
+    file_ref: str | None
+    source_tool: str
+    params: JsonObject | None
+    dataset_ref: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationContext:
     """可由 SQLite 重建并放入内存热缓存的对话上下文快照。"""
 

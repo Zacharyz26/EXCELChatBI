@@ -36,7 +36,7 @@ routes:
     primary: deepseek-v3
     fallback: [deepseek-r1]
     temperature: 0.3
-  complex_reasoning:     # 复杂多步（B轨，MVP 暂不启用）
+  complex_reasoning:     # v2.4 Planner/Verifier spike 候选；启用前先过行为评测
     primary: deepseek-r1
     fallback: [deepseek-v3]
   vision:                # 多模态识图，结果回推理模型
@@ -46,7 +46,7 @@ routes:
     primary: deepseek-v3
     fallback: []
     temperature: 0.0
-  agent:                 # 对话式 Agent（第 14 章）：function-calling 循环
+  agent:                 # 当前 v2.3 function-calling 循环；v2.4 继续要求工具能力
     # 决策10：本场景降级链不得含不支持 function calling 的模型（如 deepseek-r1）；
     # 网关对带 tools 的请求会跳过 supports_tools=false 的候选做兜底。
     primary: deepseek-v3

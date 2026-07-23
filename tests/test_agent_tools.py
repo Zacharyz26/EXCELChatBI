@@ -32,6 +32,7 @@ from mcp_servers.report.server import build_server as build_report  # noqa: E402
 from mcp_servers.stats.schemas import REGRESSION_SCHEMA  # noqa: E402
 from mcp_servers.stats.server import build_server as build_stats  # noqa: E402
 from packages.common.dataset_store import save_dataframe  # noqa: E402
+from packages.governance.policy import DEFAULT_AGENT_TOOL_ALLOWLIST  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
 from packages.rag.retriever import HybridRetriever, RetrievalResult  # noqa: E402
 from packages.rag.store import SearchHit  # noqa: E402
@@ -105,6 +106,7 @@ def workspace(tmp_path: Path) -> tuple[SessionStore, AgentContext]:
 def test_registry_exports_all_tools() -> None:
     reg = _registry()
     assert reg.names == _EXPECTED_TOOLS
+    assert set(reg.names) == DEFAULT_AGENT_TOOL_ALLOWLIST
     defs = reg.openai_tools()
     assert all(d["type"] == "function" for d in defs)
     assert all(d["function"]["description"] for d in defs)
@@ -116,6 +118,15 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     assert defs["regression"] is REGRESSION_SCHEMA
     assert defs["kb_search"] is KB_SEARCH_SCHEMA
     assert defs["generate_report"] is GENERATE_REPORT_SCHEMA
+    descriptors = {item.name: item for item in _registry().mcp_descriptors()}
+    assert descriptors["regression"].input_schema is REGRESSION_SCHEMA
+    assert descriptors["gen_chart"].metadata.artifact_types == ("chart",)
+    assert descriptors["generate_report"].output_schema["required"] == [
+        "report_id",
+        "md_path",
+        "analysis_ids",
+        "skipped_charts",
+    ]
 
 
 # ── execute 入口 ──

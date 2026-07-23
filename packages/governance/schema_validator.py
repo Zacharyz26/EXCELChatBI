@@ -1,6 +1,6 @@
 """入参 JSON Schema 校验（红线3）。
 
-LLM 生成的 MCP 工具入参，进入执行前强制 JSON Schema 校验，拦截非法 / 越权参数。
+LLM 生成的工具入参，进入执行前强制 JSON Schema 校验，拦截非法 / 越权参数。
 校验失败抛 `SchemaValidationError`，由调用方走"带错误回退重试"（设计文档第7节）。
 """
 
@@ -19,8 +19,8 @@ class SchemaValidationError(Exception):
 def validate_tool_args(args: dict[str, Any], schema: dict[str, Any]) -> None:
     """对工具入参做 JSON Schema 校验（红线3）。
 
-    所有 MCP 工具入参在执行前都必须经过本函数（经 Tool.invoke 挂载），
-    拦截非法 / 越权参数。
+    当前所有进程内工具入参都必须经过本函数（经 Tool.invoke 挂载）；v2.4
+    标准 MCP Client/Server 两侧继续复用同一 schema，拦截非法 / 越权参数。
 
     Args:
         args: LLM 生成的工具入参。

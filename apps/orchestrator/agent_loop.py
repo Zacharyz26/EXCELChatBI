@@ -22,18 +22,32 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Protocol, cast
 
 from fastapi.concurrency import run_in_threadpool
+from mcp_servers.common.client_gateway import ShadowComparison
 from openai import OpenAIError
+from packages.common.config import get_settings
 from packages.common.logging import get_logger
+from packages.governance.observability import trace_span
+from packages.governance.permissions import Principal
+from packages.governance.policy import ToolPolicyGateway, ToolPolicyRequest
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
-from packages.session.models import Artifact, Dataset, JsonObject
+from packages.session.models import Artifact, ArtifactDraft, Dataset, JsonObject
 from packages.session.store import SessionStore
+from packages.session.task_models import ObservationSource, RunStatus, TaskEvent, TaskRun
+from packages.session.task_store import TaskStore, invocation_idempotency_key
 
 from apps.orchestrator.agent_tools import AgentToolError, AgentToolRegistry
+from apps.orchestrator.control.claims import (
+    build_evidence_summary,
+    extract_claims,
+)
+from apps.orchestrator.control.contracts import build_minimal_contract
+from apps.orchestrator.control.verifier import VerificationResult, verify_completion
 
 _log = get_logger("orchestrator.agent_loop")
 
@@ -112,6 +126,15 @@ _MISSING_PDF_REPORT_INSTRUCTION = (
     "上一步没有生成用户要求的 PDF 报告下载工件。请调用 generate_report，"
     "将 include_pdf 设为 true；确认工具成功后再给最终答复，不要再次只返回文字。"
 )
+_UNSUPPORTED_CLAIM_RETRY_LIMIT = 1
+_UNSUPPORTED_CLAIM_INSTRUCTION = (
+    "候选答复里有数字无法在当前工具 Evidence 中定位。请调用合适的确定性工具取得依据，"
+    "或删除没有依据的数字后重新回答；不得心算、估算或编造数字。"
+)
+_UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION = (
+    "候选答复中的知识结论没有引用本次 kb_search 返回的真实来源。请明确标注已返回的来源；"
+    "如果检索没有命中，请如实说明无法回答。不得编造来源或知识结论。"
+)
 
 # 工具的中文人话标签（tool_start/plan 事件展示用）
 _TOOL_LABELS = {
@@ -129,7 +152,7 @@ _TOOL_LABELS = {
 }
 
 # 工具 → 工件类型（14.5.3 artifact 事件；不在表内的工具不落工件）
-_ARTIFACT_TYPES = {
+_LEGACY_ARTIFACT_TYPES = {
     "get_data_profile": "profile",
     "trend_analysis": "stats",
     "anomaly_detect": "stats",
@@ -254,22 +277,21 @@ async def stream_agent_chat(
     registry: AgentToolRegistry,
     locks: ConversationLockPool,
     config: AgentLoopConfig,
+    principal: Principal | None = None,
+    policy: ToolPolicyGateway | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """执行一轮 Agent 对话：持久化用户消息 → 循环调模型/工具 → SSE 事件流。"""
     async with locks.hold(conversation_id):
+        active_principal = principal or Principal(user_id="local-user")
+        active_policy = policy or ToolPolicyGateway()
         final_message_id = uuid.uuid4().hex
+        run_id = uuid.uuid4().hex
+        task_store = TaskStore(store.db_path)
         try:
-            conversation, user_message = await run_in_threadpool(
-                store.start_user_turn,
-                conversation_id=conversation_id,
-                content=user_text,
-                suggested_title=_title_from_message(user_text),
-            )
-            context = await run_in_threadpool(store.load_conversation_context, conversation_id)
             datasets = await run_in_threadpool(store.list_datasets, project_id)
         except (sqlite3.Error, ValueError) as exc:
             _log.warning(
-                "agent.persist_user_failed", conversation_id=conversation_id, error=str(exc)
+                "agent.load_datasets_failed", conversation_id=conversation_id, error=str(exc)
             )
             yield _event(
                 "error",
@@ -281,7 +303,64 @@ async def stream_agent_chat(
             )
             return
 
-        if context is None:  # 防御性分支：正常情况下 start_user_turn 后一定存在
+        chart_required = bool(datasets) and _requests_chart(user_text)
+        report_required = _requests_report(user_text)
+        pdf_required = report_required and _requests_pdf(user_text)
+        contract = build_minimal_contract(
+            run_id=run_id,
+            user_text=user_text,
+            chart_required=chart_required,
+            report_required=report_required,
+            pdf_required=pdf_required,
+        )
+        try:
+            conversation, user_message, run, goal_event = await run_in_threadpool(
+                task_store.start_run_with_user_turn,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                content=user_text,
+                suggested_title=_title_from_message(user_text),
+                contract=contract,
+                budget={"max_tool_calls": config.max_tool_calls},
+            )
+            store.invalidate_conversation(conversation_id)
+            context = await run_in_threadpool(
+                store.load_conversation_context, conversation_id
+            )
+            run, started_event = await run_in_threadpool(
+                task_store.transition,
+                run_id,
+                expected_version=run.state_version,
+                status="running",
+                event_type="run.started",
+                payload={"reason": "task_contract_created"},
+            )
+        except (sqlite3.Error, RuntimeError, ValueError) as exc:
+            _log.error(
+                "agent.create_run_failed",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=str(exc),
+            )
+            yield _event(
+                "error",
+                {
+                    "code": "persistence_failed",
+                    "message": "任务状态创建失败，请刷新后重试。",
+                    "retryable": True,
+                },
+            )
+            return
+
+        if context is None:  # 防御性分支：原子创建后正常情况下必然存在
+            run, failed_event = await _transition_after_failure(
+                task_store,
+                run,
+                event_type="run.failed",
+                reason="conversation_unavailable_after_start",
+                tool_calls=0,
+            )
+            yield _task_event(failed_event, conversation_id)
             yield _event(
                 "error",
                 {
@@ -299,8 +378,11 @@ async def stream_agent_chat(
                 "message_id": final_message_id,
                 "user_message_id": user_message.id,
                 "title": conversation.title,
+                "run_id": run_id,
             },
         )
+        yield _task_event(goal_event, conversation_id)
+        yield _task_event(started_event, conversation_id)
 
         system_content = _build_system_content(datasets, list(context.artifacts), config)
         # 13.5：发往模型的数据物料留结构化审计日志
@@ -320,36 +402,62 @@ async def stream_agent_chat(
         last_signature: str | None = None
         tools_enabled = True
         final_text = ""
+        final_parts: list[str] = []
+        passed_verification: VerificationResult | None = None
         characters_streamed = 0
-        chart_required = bool(datasets) and _requests_chart(user_text)
-        chart_completed = False
         missing_chart_retries = 0
-        report_required = _requests_report(user_text)
-        pdf_required = report_required and _requests_pdf(user_text)
-        report_completed = False
         missing_report_retries = 0
+        unsupported_claim_retries = 0
+        budget_exhausted = False
 
         for _round in range(config.max_tool_calls + 2):
             tools = registry.openai_tools() if tools_enabled else None
             turn_parts: list[str] = []
             response: ModelResponse | None = None
-            defer_text = (
-                (chart_required and not chart_completed)
-                or (report_required and not report_completed)
-            )
             try:
-                async for item in gateway.stream_turn(Scenario.AGENT, working, tools=tools):
-                    if isinstance(item, ModelResponse):
-                        response = item
-                    elif item:
-                        turn_parts.append(item)
-                        if not defer_text:
-                            characters_streamed += len(item)
-                            yield _event("text.delta", {"delta": item})
+                with trace_span(
+                    "agent.model_turn",
+                    trace_id=run_id,
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    agent_round=_round + 1,
+                    with_tools=tools is not None,
+                ) as model_span:
+                    async for item in gateway.stream_turn(
+                        Scenario.AGENT, working, tools=tools
+                    ):
+                        if isinstance(item, ModelResponse):
+                            response = item
+                        elif item:
+                            turn_parts.append(item)
+                    if response is not None:
+                        model_span.set_attributes(
+                            actual_model=response.model,
+                            prompt_tokens=response.prompt_tokens,
+                            completion_tokens=response.completion_tokens,
+                            token_usage_available=bool(
+                                response.prompt_tokens or response.completion_tokens
+                            ),
+                            model_latency_ms=round(response.latency_ms, 3),
+                            cost=(
+                                response.cost
+                                if response.cost != 0
+                                else "unavailable"
+                            ),
+                            tool_call_count=len(response.tool_calls),
+                        )
             except (OpenAIError, RuntimeError, ValueError) as exc:
                 _log.warning(
                     "agent.model_failed", conversation_id=conversation_id, error=str(exc)
                 )
+                run, failed_event = await _transition_after_failure(
+                    task_store,
+                    run,
+                    event_type="run.failed",
+                    reason="model_unavailable",
+                    tool_calls=calls_used,
+                )
+                yield _task_event(failed_event, conversation_id)
                 yield _event(
                     "error",
                     {
@@ -362,96 +470,225 @@ async def stream_agent_chat(
 
             turn_text = (response.content if response else "") or "".join(turn_parts)
             tool_calls = list(response.tool_calls) if response is not None else []
+            strengthened = contract
             if any(call.name == "gen_chart" for call in tool_calls):
                 # 模型既然承诺出图，就不能在工具失败后仅以文字收尾。
-                chart_required = True
+                strengthened = strengthened.require_artifact("chart")
             report_calls = [call for call in tool_calls if call.name == "generate_report"]
             if report_calls:
                 # 模型既然承诺生成报告，就必须真正产出可下发给前端的报告工件。
-                report_required = True
                 pdf_required = pdf_required or any(
                     _parse_args(call.arguments).get("include_pdf") is True
                     for call in report_calls
                 )
+                strengthened = strengthened.require_artifact(
+                    "report", "pdf" if pdf_required else None
+                )
+            if strengthened.content_hash != contract.content_hash:
+                contract = strengthened
+                run, contract_event = await run_in_threadpool(
+                    task_store.update_contract,
+                    contract,
+                    expected_version=run.state_version,
+                )
+                yield _task_event(contract_event, conversation_id)
 
             if not tool_calls:
-                if chart_required and not chart_completed:
-                    if tools_enabled and missing_chart_retries < _MISSING_CHART_RETRY_LIMIT:
-                        missing_chart_retries += 1
-                        if turn_text.strip():
-                            working.append(ModelMessage(role="assistant", content=turn_text))
-                        working.append(
-                            ModelMessage(role="user", content=_MISSING_CHART_INSTRUCTION)
-                        )
-                        _log.warning(
-                            "agent.missing_chart_retry",
-                            conversation_id=conversation_id,
-                            retry=missing_chart_retries,
-                        )
-                        continue
-                    _log.warning(
-                        "agent.missing_chart_unresolved",
-                        conversation_id=conversation_id,
-                        tools_enabled=tools_enabled,
+                run, _verification_started = await run_in_threadpool(
+                    task_store.transition,
+                    run_id,
+                    expected_version=run.state_version,
+                    status="verifying",
+                    event_type="verification.started",
+                    payload={"candidate_characters": len(turn_text)},
+                    usage={"tool_calls": calls_used},
+                )
+                yield _task_event(_verification_started, conversation_id)
+                invocations = await run_in_threadpool(task_store.list_invocations, run_id)
+                evidence = await run_in_threadpool(task_store.list_evidence, run_id)
+                claims = extract_claims(
+                    final_text=turn_text,
+                    goal=contract.goal,
+                    evidence=evidence,
+                )
+                try:
+                    await run_in_threadpool(
+                        task_store.replace_claims, run_id, claims
                     )
+                except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                    _log.error(
+                        "agent.persist_claims_failed",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        error=str(exc),
+                    )
+                    run, failed_event = await _transition_after_failure(
+                        task_store,
+                        run,
+                        event_type="run.failed",
+                        reason="claim_persistence_failed",
+                        tool_calls=calls_used,
+                    )
+                    yield _task_event(failed_event, conversation_id)
                     yield _event(
                         "error",
                         {
-                            "code": "chart_not_generated",
-                            "message": "分析过程已完成，但图表未成功生成，请重试。",
+                            "code": "persistence_failed",
+                            "message": "结论证据保存失败，请刷新后重试。",
                             "retryable": True,
+                            "run_id": run_id,
                         },
                     )
                     return
-                if report_required and not report_completed:
-                    if tools_enabled and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT:
-                        missing_report_retries += 1
-                        if turn_text.strip():
-                            working.append(ModelMessage(role="assistant", content=turn_text))
-                        working.append(
-                            ModelMessage(
-                                role="user",
-                                content=(
-                                    _MISSING_PDF_REPORT_INSTRUCTION
-                                    if pdf_required
-                                    else _MISSING_REPORT_INSTRUCTION
-                                ),
-                            )
-                        )
-                        _log.warning(
-                            "agent.missing_report_retry",
-                            conversation_id=conversation_id,
-                            pdf_required=pdf_required,
-                            retry=missing_report_retries,
-                        )
-                        continue
-                    _log.warning(
-                        "agent.missing_report_unresolved",
-                        conversation_id=conversation_id,
-                        pdf_required=pdf_required,
-                        tools_enabled=tools_enabled,
+                all_artifacts = await run_in_threadpool(
+                    store.list_artifacts, conversation_id
+                )
+                run_artifact_ids = {
+                    item.artifact_id
+                    for item in invocations
+                    if item.artifact_id is not None
+                }
+                run_artifacts = [
+                    item for item in all_artifacts if item.id in run_artifact_ids
+                ]
+                verification = verify_completion(
+                    contract=contract,
+                    final_text=turn_text,
+                    artifacts=run_artifacts,
+                    invocations=invocations,
+                    evidence=evidence,
+                    claims=claims,
+                    budget_exhausted=budget_exhausted,
+                )
+
+                retry_instruction: str | None = None
+                issue_codes = {item.code for item in verification.issues}
+                if (
+                    "missing_chart_artifact" in issue_codes
+                    and tools_enabled
+                    and missing_chart_retries < _MISSING_CHART_RETRY_LIMIT
+                ):
+                    missing_chart_retries += 1
+                    retry_instruction = _MISSING_CHART_INSTRUCTION
+                elif (
+                    "missing_report_artifact" in issue_codes
+                    and tools_enabled
+                    and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT
+                ):
+                    missing_report_retries += 1
+                    retry_instruction = (
+                        _MISSING_PDF_REPORT_INSTRUCTION
+                        if pdf_required
+                        else _MISSING_REPORT_INSTRUCTION
                     )
+                elif (
+                    "unsupported_numeric_claim" in issue_codes
+                    and tools_enabled
+                    and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
+                ):
+                    unsupported_claim_retries += 1
+                    retry_instruction = _UNSUPPORTED_CLAIM_INSTRUCTION
+                elif (
+                    "unsupported_knowledge_claim" in issue_codes
+                    and tools_enabled
+                    and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
+                ):
+                    unsupported_claim_retries += 1
+                    retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
+
+                verification_payload = _verification_payload(verification)
+                if retry_instruction is not None:
+                    verification_payload["next_action"] = "retry"
+                    run, verification_event = await run_in_threadpool(
+                        task_store.transition,
+                        run_id,
+                        expected_version=run.state_version,
+                        status="running",
+                        event_type="verification",
+                        payload=verification_payload,
+                    )
+                    yield _task_event(verification_event, conversation_id)
+                    if turn_text.strip():
+                        working.append(ModelMessage(role="assistant", content=turn_text))
+                    working.append(ModelMessage(role="user", content=retry_instruction))
+                    _log.warning(
+                        "agent.verification_retry",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        issues=sorted(issue_codes),
+                    )
+                    continue
+
+                if not verification.passed:
+                    reason = (
+                        verification.issues[0].code
+                        if verification.issues
+                        else "verification_failed"
+                    )
+                    terminal_status: RunStatus = (
+                        "blocked"
+                        if verification.verdict in {"BLOCKED", "NEEDS_ACTION"}
+                        else "failed"
+                    )
+                    run, verification_event = await run_in_threadpool(
+                        task_store.transition,
+                        run_id,
+                        expected_version=run.state_version,
+                        status=terminal_status,
+                        event_type="verification",
+                        payload=verification_payload,
+                        terminal_reason=reason,
+                    )
+                    yield _task_event(verification_event, conversation_id)
+                    if budget_exhausted:
+                        final_text = (
+                            "任务未完成：工具调用预算已耗尽，尚有成功标准未通过验证。"
+                            "请缩小分析范围或重试。"
+                        )
+                        await run_in_threadpool(
+                            store.append_message,
+                            conversation_id=conversation_id,
+                            role="assistant",
+                            content=final_text,
+                            message_id=final_message_id,
+                        )
+                        characters_streamed = len(final_text)
+                        yield _event("text.delta", {"delta": final_text})
+                        yield _event(
+                            "done",
+                            {
+                                "conversation_id": conversation_id,
+                                "message_id": final_message_id,
+                                "run_id": run_id,
+                                "run_status": run.status,
+                                "last_sequence": verification_event.sequence,
+                                "characters": characters_streamed,
+                                "tool_calls": calls_used,
+                            },
+                        )
+                        return
+                    error_code, error_message = _verification_error(verification)
                     yield _event(
                         "error",
                         {
-                            "code": "report_not_generated",
-                            "message": "报告未成功生成下载工件，请重试。",
+                            "code": error_code,
+                            "message": error_message,
                             "retryable": True,
+                            "run_id": run_id,
+                            "run_status": run.status,
                         },
                     )
                     return
-                if defer_text:
-                    for part in turn_parts:
-                        characters_streamed += len(part)
-                        yield _event("text.delta", {"delta": part})
+
                 final_text = turn_text
+                final_parts = turn_parts or [turn_text]
+                passed_verification = verification
                 break
 
             # ── 工具轮：开场白成“理解卡”，随后逐个执行 ──
-            if defer_text:
-                for part in turn_parts:
-                    characters_streamed += len(part)
-                    yield _event("text.delta", {"delta": part})
+            for part in turn_parts:
+                characters_streamed += len(part)
+                yield _event("text.delta", {"delta": part})
             if turn_text.strip():
                 yield _event("understanding", {"text": turn_text.strip()})
             try:
@@ -504,6 +741,70 @@ async def stream_agent_chat(
             for call in tool_calls:
                 call_args = _parse_args(call.arguments)
                 fields = _humanize_args(call.name, call_args)
+                resource_project_id: str | None = None
+                dataset_ref = call_args.get("dataset_ref")
+                if isinstance(dataset_ref, str) and dataset_ref:
+                    referenced_dataset = await run_in_threadpool(
+                        store.get_dataset, dataset_ref
+                    )
+                    if referenced_dataset is not None:
+                        resource_project_id = referenced_dataset.project_id
+                policy_decision = active_policy.authorize(
+                    ToolPolicyRequest(
+                        principal=active_principal,
+                        project_id=project_id,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        tool_name=call.name,
+                        arguments=call_args,
+                        calls_used=calls_used,
+                        max_tool_calls=config.max_tool_calls,
+                        resource_project_id=resource_project_id,
+                    )
+                )
+                idempotency_key = invocation_idempotency_key(
+                    run_id, call.id, call.name, call_args
+                )
+                try:
+                    start_result = await run_in_threadpool(
+                        task_store.start_invocation_with_event,
+                        run_id=run_id,
+                        expected_version=run.state_version,
+                        tool_call_id=call.id,
+                        tool_name=call.name,
+                        arguments=call_args,
+                        idempotency_key=idempotency_key,
+                        policy_decision=policy_decision.to_event_payload(),
+                    )
+                    run, invocation, step_started_event, _created = start_result
+                except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                    _log.error(
+                        "agent.persist_invocation_failed",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        tool=call.name,
+                        error=str(exc),
+                    )
+                    run, failed_event = await _transition_after_failure(
+                        task_store,
+                        run,
+                        event_type="run.failed",
+                        reason="invocation_persistence_failed",
+                        tool_calls=calls_used,
+                    )
+                    yield _task_event(failed_event, conversation_id)
+                    yield _event(
+                        "error",
+                        {
+                            "code": "persistence_failed",
+                            "message": "工具调用状态保存失败，请刷新后重试。",
+                            "retryable": True,
+                            "run_id": run_id,
+                        },
+                    )
+                    return
+                if step_started_event is not None:
+                    yield _task_event(step_started_event, conversation_id)
                 yield _event(
                     "tool_start",
                     {
@@ -518,17 +819,30 @@ async def stream_agent_chat(
                 )
 
                 signature = f"{call.name}:{_normalized_arguments(call.arguments)}"
-                if calls_used >= config.max_tool_calls:
+                failure_code: str | None = None
+                failure_source: ObservationSource = "system"
+                if not policy_decision.allowed:
+                    feedback = f"未执行：{policy_decision.reason}"
+                    failure_code = policy_decision.code
+                    failure_source = "policy"
+                    if policy_decision.code == "tool_budget_exhausted":
+                        tools_enabled = False
+                        budget_exhausted = True
+                elif calls_used >= config.max_tool_calls:
                     feedback = (
                         f"未执行：本轮工具调用已达上限（{config.max_tool_calls} 次）。"
                         "请基于已有结果直接回答。"
                     )
+                    failure_code = "tool_budget_exhausted"
+                    failure_source = "policy"
                     tools_enabled = False
+                    budget_exhausted = True
                 elif signature == last_signature:
                     feedback = (
                         f"熔断：连续两次以相同参数调用工具 {call.name}，已停止执行。"
                         "请调整参数，或基于已有结果直接回答，并向用户说明情况。"
                     )
+                    failure_code = "duplicate_invocation_circuit_break"
                     tools_enabled = False
                     _log.warning(
                         "agent.circuit_break",
@@ -540,6 +854,18 @@ async def stream_agent_chat(
                 last_signature = signature
 
                 if feedback is not None:
+                    run, _failed_invocation, failure_event = await run_in_threadpool(
+                        task_store.commit_tool_failure,
+                        invocation.invocation_id,
+                        status="failed",
+                        expected_version=run.state_version,
+                        error_code=failure_code or "tool_not_executed",
+                        error_text=feedback,
+                        source=failure_source,
+                        retryable=not budget_exhausted,
+                    )
+                    if failure_event is not None:
+                        yield _task_event(failure_event, conversation_id)
                     yield _event(
                         "tool_end",
                         {"id": call.id, "tool": call.name, "status": "error", "message": feedback},
@@ -561,8 +887,26 @@ async def stream_agent_chat(
                     continue
 
                 calls_used += 1
-                result, error_text = await _execute_tool(registry, call)
+                result, error_text = await _execute_tool(
+                    registry,
+                    call,
+                    trace_id=run_id,
+                    invocation_id=invocation.invocation_id,
+                )
                 if error_text is not None:
+                    _compare_mcp_error(registry, call.name, "tool_execution_failed")
+                    run, _failed_invocation, failure_event = await run_in_threadpool(
+                        task_store.commit_tool_failure,
+                        invocation.invocation_id,
+                        status="failed",
+                        expected_version=run.state_version,
+                        error_code="tool_execution_failed",
+                        error_text=error_text,
+                        source="tool",
+                        retryable=True,
+                    )
+                    if failure_event is not None:
+                        yield _task_event(failure_event, conversation_id)
                     yield _event(
                         "tool_end",
                         {
@@ -593,19 +937,131 @@ async def stream_agent_chat(
                     )
                     continue
 
-                artifact = await _persist_artifact(
-                    store, conversation_id, assistant_message.id, call, result
+                artifact_draft = _prepare_artifact(
+                    call,
+                    result,
+                    artifact_type=_artifact_type_for(registry, call.name),
                 )
+                shadow_comparison = _compare_mcp_success(
+                    registry,
+                    tool_name=call.name,
+                    arguments=call_args,
+                    result=result,
+                    artifact=artifact_draft,
+                )
+                if call.name in {"gen_chart", "generate_report"} and artifact_draft is None:
+                    postcondition_error = (
+                        "工具执行结束，但没有产生可验证的图表工件。"
+                        if call.name == "gen_chart"
+                        else "工具执行结束，但没有产生可下载的真实报告文件。"
+                    )
+                    _cleanup_uncommitted_report_files(call, result)
+                    run, _failed_invocation, failure_event = await run_in_threadpool(
+                        task_store.commit_tool_failure,
+                        invocation.invocation_id,
+                        status="failed",
+                        expected_version=run.state_version,
+                        error_code="tool_postcondition_failed",
+                        error_text=postcondition_error,
+                        source="system",
+                        retryable=True,
+                    )
+                    if failure_event is not None:
+                        yield _task_event(failure_event, conversation_id)
+                    yield _event(
+                        "tool_end",
+                        {
+                            "id": call.id,
+                            "tool": call.name,
+                            "status": "error",
+                            "message": postcondition_error,
+                            "suggestion": "请修正参数或生成流程后重试。",
+                        },
+                    )
+                    working.append(
+                        ModelMessage(
+                            role="tool",
+                            content=f"工具后置条件失败：{postcondition_error}",
+                            tool_call_id=call.id,
+                        )
+                    )
+                    await _persist_tool_outcome(
+                        store,
+                        conversation_id,
+                        {
+                            "tool_call_id": call.id,
+                            "tool": call.name,
+                            "status": "error",
+                            "message": postcondition_error,
+                            "fields": fields,
+                        },
+                    )
+                    continue
+                summary = _summarize_result(call.name, result)
+                try:
+                    (
+                        run,
+                        _completed_invocation,
+                        _evidence,
+                        artifact,
+                        step_event,
+                        _checkpoint,
+                    ) = await run_in_threadpool(
+                        task_store.commit_tool_success,
+                        invocation.invocation_id,
+                        expected_version=run.state_version,
+                        assistant_message_id=assistant_message.id,
+                        result=result,
+                        evidence_kind="tool_result",
+                        evidence_source={
+                            "transport": "in_process",
+                            "tool": call.name,
+                            "tool_call_id": call.id,
+                            "dataset_ref": call_args.get("dataset_ref"),
+                            **(
+                                shadow_comparison.evidence_fields()
+                                if shadow_comparison is not None
+                                else {"mcp_shadow": "unavailable"}
+                            ),
+                        },
+                        evidence_summary=build_evidence_summary(
+                            summary=summary,
+                            result=result,
+                            artifact_id=None,
+                        ),
+                        artifact_draft=artifact_draft,
+                    )
+                except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                    _cleanup_uncommitted_report_files(call, result)
+                    _log.error(
+                        "agent.commit_tool_success_failed",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        tool=call.name,
+                        error=str(exc),
+                    )
+                    run, failed_event = await _transition_after_failure(
+                        task_store,
+                        run,
+                        event_type="run.failed",
+                        reason="tool_success_persistence_failed",
+                        tool_calls=calls_used,
+                    )
+                    yield _task_event(failed_event, conversation_id)
+                    yield _event(
+                        "error",
+                        {
+                            "code": "persistence_failed",
+                            "message": "工具结果保存失败，请刷新后重试。",
+                            "retryable": True,
+                            "run_id": run_id,
+                        },
+                    )
+                    return
+                store.invalidate_conversation(conversation_id)
                 if artifact is not None:
                     yield _event("artifact", _artifact_payload(artifact))
-                if call.name == "gen_chart" and artifact is not None:
-                    chart_completed = True
-                if call.name == "generate_report" and artifact is not None:
-                    payload = artifact.payload or {}
-                    if not pdf_required or bool(payload.get("pdf_url")):
-                        report_completed = True
-
-                summary = _summarize_result(call.name, result)
+                yield _task_event(step_event, conversation_id)
                 yield _event(
                     "tool_end",
                     {"id": call.id, "tool": call.name, "status": "ok", "summary": summary},
@@ -633,7 +1089,15 @@ async def stream_agent_chat(
                     ModelMessage(role="tool", content=model_view, tool_call_id=call.id)
                 )
 
-        if not final_text.strip():
+        if not final_text.strip() or passed_verification is None:
+            run, failed_event = await _transition_after_failure(
+                task_store,
+                run,
+                event_type="run.failed",
+                reason="empty_or_unverified_response",
+                tool_calls=calls_used,
+            )
+            yield _task_event(failed_event, conversation_id)
             yield _event(
                 "error",
                 {
@@ -659,6 +1123,14 @@ async def stream_agent_chat(
                 message_id=final_message_id,
                 error=str(exc),
             )
+            run, failed_event = await _transition_after_failure(
+                task_store,
+                run,
+                event_type="run.failed",
+                reason="assistant_persistence_failed",
+                tool_calls=calls_used,
+            )
+            yield _task_event(failed_event, conversation_id)
             yield _event(
                 "error",
                 {
@@ -669,15 +1141,98 @@ async def stream_agent_chat(
             )
             return
 
+        run, verification_event = await run_in_threadpool(
+            task_store.transition,
+            run_id,
+            expected_version=run.state_version,
+            status="completed",
+            event_type="verification",
+            payload=_verification_payload(passed_verification),
+            usage={"tool_calls": calls_used},
+        )
+        yield _task_event(verification_event, conversation_id)
+        for part in final_parts:
+            characters_streamed += len(part)
+            yield _event("text.delta", {"delta": part})
+
         yield _event(
             "done",
             {
                 "conversation_id": conversation_id,
                 "message_id": final_message_id,
+                "run_id": run_id,
+                "run_status": run.status,
+                "last_sequence": verification_event.sequence,
                 "characters": characters_streamed,
                 "tool_calls": calls_used,
             },
         )
+
+
+async def _transition_after_failure(
+    task_store: TaskStore,
+    run: TaskRun,
+    *,
+    event_type: str,
+    reason: str,
+    tool_calls: int,
+) -> tuple[TaskRun, TaskEvent]:
+    """Persist an operational failure before exposing it to the SSE client."""
+    return await run_in_threadpool(
+        task_store.transition,
+        run.run_id,
+        expected_version=run.state_version,
+        status="failed",
+        event_type=event_type,
+        payload={"reason": reason},
+        terminal_reason=reason,
+        usage={"tool_calls": tool_calls},
+    )
+
+
+def _verification_payload(result: VerificationResult) -> JsonObject:
+    return {
+        "verdict": result.verdict,
+        "checks": [
+            {
+                "code": issue.code,
+                "message": issue.message,
+                "criterion_id": issue.criterion_id,
+            }
+            for issue in result.issues
+        ],
+    }
+
+
+def _verification_error(result: VerificationResult) -> tuple[str, str]:
+    codes = {issue.code for issue in result.issues}
+    if "missing_chart_artifact" in codes:
+        return "chart_not_generated", "分析过程已完成，但图表未成功生成，请重试。"
+    if "missing_report_artifact" in codes:
+        return "report_not_generated", "报告未成功生成下载工件，请重试。"
+    if "empty_response" in codes:
+        return "empty_response", "模型没有返回有效内容，请重试。"
+    if "unsupported_numeric_claim" in codes:
+        return "unsupported_numeric_claim", "最终答复包含没有工具 Evidence 支持的数字。"
+    if "unsupported_knowledge_claim" in codes:
+        return "unsupported_knowledge_claim", "最终答复中的知识结论缺少本次检索来源。"
+    return "verification_failed", "任务结果未通过完成验证，请重试。"
+
+
+def _task_event(event: TaskEvent, conversation_id: str) -> dict[str, str]:
+    """Map a committed lifecycle event to the additive v2 SSE envelope."""
+    return _event(
+        event.event_type,
+        {
+            "schema_version": "2.0",
+            "event_id": event.event_id,
+            "run_id": event.run_id,
+            "conversation_id": conversation_id,
+            "sequence": event.sequence,
+            "occurred_at": event.occurred_at,
+            "payload": event.payload,
+        },
+    )
 
 
 # ── 上下文装配 ──
@@ -817,62 +1372,133 @@ async def _persist_tool_outcome(
 
 
 async def _execute_tool(
-    registry: AgentToolRegistry, call: ToolCall
+    registry: AgentToolRegistry,
+    call: ToolCall,
+    *,
+    trace_id: str,
+    invocation_id: str,
 ) -> tuple[Any, str | None]:
     """线程池中执行一次工具调用；业务失败返回错误文本（回传模型重试）。"""
     try:
-        result = await run_in_threadpool(registry.execute, call.name, call.arguments)
+        with trace_span(
+            "tool.execute",
+            trace_id=trace_id,
+            tool=call.name,
+            invocation_id=invocation_id,
+            transport="in_process",
+        ) as span:
+            result = await run_in_threadpool(
+                registry.execute, call.name, call.arguments
+            )
+            span.set_attributes(result_type=type(result).__name__)
     except _TOOL_BUSINESS_ERRORS as exc:
         _log.warning("agent.tool_failed", tool=call.name, error=str(exc))
         return None, str(exc) or exc.__class__.__name__
     return result, None
 
 
-async def _persist_artifact(
-    store: SessionStore,
-    conversation_id: str,
-    message_id: str,
-    call: ToolCall,
+def _compare_mcp_success(
+    registry: AgentToolRegistry,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
     result: Any,
-) -> Artifact | None:
-    """按工具类型落工件；数据集未登记等归属校验失败时降级为无 dataset_ref。"""
-    artifact_type = _ARTIFACT_TYPES.get(call.name)
+    artifact: ArtifactDraft | None,
+) -> ShadowComparison | None:
+    """Run the non-executing MCP shadow validator when the real registry supports it."""
+    compare = getattr(registry, "compare_mcp_success", None)
+    if not callable(compare):
+        return None
+    return cast(
+        ShadowComparison,
+        compare(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result,
+            artifact=artifact,
+        ),
+    )
+
+
+def _compare_mcp_error(
+    registry: AgentToolRegistry, tool_name: str, error_code: str
+) -> ShadowComparison | None:
+    """Record stable error mapping without exposing tool exception details."""
+    compare = getattr(registry, "compare_mcp_error", None)
+    if not callable(compare):
+        return None
+    return cast(ShadowComparison, compare(tool_name, error_code))
+
+
+def _prepare_artifact(
+    call: ToolCall, result: Any, *, artifact_type: str | None
+) -> ArtifactDraft | None:
+    """Validate and prepare an Artifact for the TaskStore success transaction."""
     if artifact_type is None or not isinstance(result, dict):
         return None
     args = _parse_args(call.arguments)
     # 14.5.2：每次成功分析铸造 analysis_id，登记表与 generate_report 以它引用
     params: JsonObject = {**args, "analysis_id": uuid.uuid4().hex[:12]}
     payload = _artifact_payload_for(call.name, result)
-    dataset_ref = args.get("dataset_ref") if isinstance(args.get("dataset_ref"), str) else None
-    try:
-        return await run_in_threadpool(
-            store.create_artifact,
-            conversation_id=conversation_id,
-            message_id=message_id,
-            type=artifact_type,
-            payload=payload,
-            source_tool=call.name,
-            params=params,
-            dataset_ref=dataset_ref,
-        )
-    except ValueError:
-        # dataset_ref 未在项目登记（如经典页上传）：不带引用重试，工件仍保留
-        try:
-            return await run_in_threadpool(
-                store.create_artifact,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                type=artifact_type,
-                payload=payload,
-                source_tool=call.name,
-                params=params,
-            )
-        except (ValueError, sqlite3.Error) as exc:
-            _log.error("agent.artifact_failed", tool=call.name, error=str(exc))
+    file_ref = _artifact_file_ref(call.name, result)
+    if artifact_type == "chart":
+        option = payload.get("option")
+        if not isinstance(option, dict) or not option:
+            _log.error("agent.chart_payload_invalid", tool=call.name)
             return None
-    except sqlite3.Error as exc:
-        _log.error("agent.artifact_failed", tool=call.name, error=str(exc))
+    if artifact_type == "report" and not _generated_file_exists(file_ref):
+        _log.error(
+            "agent.report_file_missing",
+            tool=call.name,
+            report_id=result.get("report_id"),
+        )
         return None
+    dataset_ref = args.get("dataset_ref") if isinstance(args.get("dataset_ref"), str) else None
+    return ArtifactDraft(
+        type=artifact_type,
+        payload=payload,
+        file_ref=file_ref,
+        source_tool=call.name,
+        params=params,
+        dataset_ref=dataset_ref,
+    )
+
+
+def _artifact_type_for(registry: AgentToolRegistry, tool_name: str) -> str | None:
+    """Use MCP metadata as truth; legacy fake registries retain the test fallback."""
+    resolver = getattr(registry, "artifact_types", None)
+    if callable(resolver):
+        values = resolver(tool_name)
+        if isinstance(values, tuple) and values:
+            first = values[0]
+            return first if isinstance(first, str) else None
+        return None
+    return _LEGACY_ARTIFACT_TYPES.get(tool_name)
+
+
+def _cleanup_uncommitted_report_files(call: ToolCall, result: Any) -> None:
+    """Remove only files created under the configured report directory for this result."""
+    if call.name != "generate_report" or not isinstance(result, dict):
+        return
+    report_id = result.get("report_id")
+    if not isinstance(report_id, str) or not report_id.strip():
+        return
+    report_root = Path(get_settings().report_dir).resolve()
+    for key, suffix in (("md_path", ".md"), ("pdf_path", ".pdf")):
+        raw_path = result.get(key)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        path = Path(raw_path).resolve()
+        if path.parent != report_root or path.name != f"{report_id}{suffix}":
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning(
+                "agent.cleanup_uncommitted_report_failed",
+                path=str(path),
+                error=str(exc),
+            )
 
 
 def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
@@ -890,6 +1516,29 @@ def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
     if tool in {"trend_analysis", "anomaly_detect", "regression", "correlation"}:
         return {"kind": tool, "result": result}
     return dict(result)
+
+
+def _artifact_file_ref(tool: str, result: dict[str, Any]) -> str | None:
+    """Return the concrete generated file used by deterministic verification."""
+    if tool != "generate_report":
+        return None
+    pdf_path = result.get("pdf_path")
+    if isinstance(pdf_path, str) and pdf_path.strip():
+        return pdf_path
+    markdown_path = result.get("md_path")
+    if isinstance(markdown_path, str) and markdown_path.strip():
+        return markdown_path
+    return None
+
+
+def _generated_file_exists(file_ref: str | None) -> bool:
+    if not file_ref:
+        return False
+    try:
+        path = Path(file_ref)
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _artifact_payload(artifact: Artifact) -> dict[str, Any]:

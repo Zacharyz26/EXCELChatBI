@@ -1,4 +1,4 @@
-"""指代消解：把"这个图""刚才那张表"等映射到具体实体（设计文档 5.2.2）。
+"""v2.5 阶段 3 指代消解占位。
 
 双策略并用：
 1. 维护 entity_map，把别名映射到 chart_id / dataset_ref；
@@ -17,4 +17,4 @@ def resolve_reference(query: str, state: SessionState) -> str:
         query: 用户原始输入（可能含"这个""上面那个"等指代）。
         state: 会话状态，提供 entity_map / chart_registry。
     """
-    raise NotImplementedError("TODO: 先查 entity_map 命中；未命中再用轻量模型改写")
+    raise NotImplementedError("v2.5 阶段 3：先查实体图，未命中再做受约束 query 改写")

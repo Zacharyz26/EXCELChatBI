@@ -29,7 +29,7 @@ jobs:
           enable-cache: true
 
       - name: Install backend dependencies
-        run: uv sync --frozen --extra stats --extra report --extra rag-store
+        run: uv sync --frozen --extra stats --extra report --extra rag-store --extra mcp
 
       - name: Run backend tests
         run: uv run --frozen pytest -q
@@ -111,3 +111,61 @@ jobs:
             apps/web/test-results/
           if-no-files-found: ignore
           retention-days: 14
+
+  containers:
+    name: Build and smoke-test API/Web images
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [backend, frontend]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          load: true
+          tags: chatbi-api:ci
+          cache-from: type=gha,scope=chatbi-api
+          cache-to: type=gha,mode=max,scope=chatbi-api
+
+      - name: Build Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          target: web
+          load: true
+          tags: chatbi-web:ci
+          cache-from: type=gha,scope=chatbi-web
+          cache-to: type=gha,mode=max,scope=chatbi-web
+
+      - name: Smoke-test API image as non-root
+        run: |
+          docker run -d --name chatbi-api-ci -p 18000:8000 chatbi-api:ci
+          trap 'docker rm -f chatbi-api-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/health >/dev/null; then break; fi
+            if [ "$attempt" = 30 ]; then docker logs chatbi-api-ci; exit 1; fi
+            sleep 1
+          done
+          test "$(docker exec chatbi-api-ci id -u)" != "0"
+
+      - name: Smoke-test Web image as non-root
+        run: |
+          docker network create chatbi-ci
+          docker run -d --name chatbi-api-for-web --network chatbi-ci --network-alias api chatbi-api:ci
+          docker run -d --name chatbi-web-ci --network chatbi-ci -p 18080:8080 chatbi-web:ci
+          trap 'docker rm -f chatbi-web-ci chatbi-api-for-web; docker network rm chatbi-ci' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/dev/null; then break; fi
+            if [ "$attempt" = 20 ]; then docker logs chatbi-web-ci; exit 1; fi
+            sleep 1
+          done
+          test "$(docker exec chatbi-web-ci id -u)" != "0"

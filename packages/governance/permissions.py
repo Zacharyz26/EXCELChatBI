@@ -1,30 +1,31 @@
-"""权限与白名单（红线7）。
-
-工具走白名单；内部数据接入按用户 / 租户权限过滤。MVP 仅预留接口，
-多租户隔离的完整实现属阶段三（CLAUDE 第7节）。
-"""
+"""Principal and deterministic tool permission checks."""
 
 from __future__ import annotations
 
+from collections.abc import Set
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Principal:
-    """调用主体：用户与租户身份，用于权限过滤。"""
+    """Authenticated subject snapshot used by the policy gateway."""
 
     user_id: str
     tenant_id: str | None = None
 
 
 class PermissionError_(Exception):
-    """权限校验未通过（避免遮蔽内建 PermissionError，故加下划线）。"""
+    """Permission check failed (named to avoid shadowing the builtin)."""
 
 
-def check_tool_allowed(principal: Principal, tool_name: str) -> None:
-    """校验主体是否被允许调用某工具（白名单）。
-
-    Raises:
-        PermissionError_: 不在白名单或无权限。
-    """
-    raise NotImplementedError("TODO: 校验工具白名单 + 主体权限")
+def check_tool_allowed(
+    principal: Principal,
+    tool_name: str,
+    *,
+    allowed_tools: Set[str],
+) -> None:
+    """Fail closed unless both the subject and tool allowlist are valid."""
+    if not principal.user_id.strip():
+        raise PermissionError_("调用主体不能为空")
+    if not tool_name.strip() or tool_name not in allowed_tools:
+        raise PermissionError_(f"工具未进入静态 allowlist: {tool_name or '<empty>'}")

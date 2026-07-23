@@ -1,8 +1,7 @@
-"""意图路由 + 双轨判定（设计文档 5.2.1）。
+"""已废弃的 Dify/LangGraph 双轨路由骨架。
 
-判定顺序：意图分类 → 多步信号 → 工具数量预估 → 追问上下文 → 默认 A 轨。
-**判定阈值（步骤数/工具数）属 CLAUDE 第9节"待确认"。** MVP 阶段先全部走 A 轨，
-B 轨随阶段二/三引入；此处仅留判定骨架，不写死阈值。
+v2.4 使用统一 TaskPlan schema 下的简单快速路径、模板路径和开放规划路径，
+不会实现本模块。保留枚举只为识别历史引用。
 """
 
 from __future__ import annotations
@@ -13,16 +12,14 @@ from enum import Enum
 class Track(str, Enum):
     """编排轨道。"""
 
-    A = "dify"          # 低代码：RAG 问答 / 单步分析
-    B = "langgraph"     # 复杂多步（MVP 暂不启用）
+    A = "dify"          # 已废弃的历史值
+    B = "langgraph"     # 已废弃的历史值
 
 
 def route(query: str) -> Track:
-    """判定 query 应走的轨道。MVP 默认返回 A 轨。
+    """拒绝使用已废弃的双轨路由。
 
     Args:
         query: 用户输入（已做指代消解）。
     """
-    raise NotImplementedError(
-        "TODO: 实现 5.2.1 判定规则；阈值待确认前 MVP 固定返回 Track.A"
-    )
+    raise NotImplementedError("A/B 双轨已废弃；请使用 v2.4 统一 Planner 路径")

@@ -23,7 +23,7 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
     second = SessionStore(str(db_path))
 
     assert db_path.exists()
-    assert second.schema_version == 1
+    assert second.schema_version == 2
     assert second.get_project(project.id) == project
     with sqlite3.connect(db_path) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
@@ -34,7 +34,21 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
             ).fetchall()
         }
     assert journal_mode is not None and journal_mode[0] == "wal"
-    assert {"projects", "datasets", "conversations", "messages", "artifacts"} <= tables
+    assert {
+        "projects",
+        "datasets",
+        "conversations",
+        "messages",
+        "artifacts",
+        "schema_migrations",
+        "task_runs",
+        "task_contracts",
+        "task_events",
+        "task_snapshots",
+        "tool_invocations",
+        "evidence",
+        "checkpoints",
+    } <= tables
 
 
 def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:

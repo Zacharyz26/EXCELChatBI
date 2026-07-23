@@ -17,6 +17,7 @@ from threading import Lock
 from typing import Any, cast
 
 from packages.session.cache import ConversationCache
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, migrate_database
 from packages.session.models import (
     Artifact,
     Conversation,
@@ -27,7 +28,7 @@ from packages.session.models import (
     Project,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _SCHEMA_LOCK = Lock()
 _MESSAGE_ROLES = {"system", "user", "assistant", "tool"}
 
@@ -165,6 +166,10 @@ class SessionStore:
     def delete_project(self, project_id: str) -> bool:
         """删除项目，并由外键级联清理其数据库记录。"""
         with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            # Evidence 对单个 Artifact 使用 RESTRICT；删除整个项目时先删除 TaskRun，
+            # 让 Evidence/Claim 完整级联后再删除项目及其 Artifact。
+            connection.execute("DELETE FROM task_runs WHERE project_id = ?", (project_id,))
             cursor = connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         if cursor.rowcount:
             self._cache.clear()
@@ -494,6 +499,10 @@ class SessionStore:
     def delete_conversation(self, conversation_id: str) -> bool:
         """删除对话，并级联清理消息和工件。"""
         with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM task_runs WHERE conversation_id = ?", (conversation_id,)
+            )
             cursor = connection.execute(
                 "DELETE FROM conversations WHERE id = ?", (conversation_id,)
             )
@@ -727,6 +736,45 @@ class SessionStore:
             ).fetchall()
         return [_artifact_from_row(row) for row in rows]
 
+    def list_report_artifacts(self) -> list[Artifact]:
+        """List every persisted report Artifact for filesystem reconciliation."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, conversation_id, message_id, type, payload_json, file_ref,
+                       source_tool, params_json, dataset_ref, created_at
+                FROM artifacts
+                WHERE type = 'report'
+                ORDER BY created_at, rowid
+                """
+            ).fetchall()
+        return [_artifact_from_row(row) for row in rows]
+
+    def delete_artifact(self, artifact_id: str) -> bool:
+        """Delete one unreferenced Artifact; Evidence-linked records are immutable."""
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT conversation_id FROM artifacts WHERE id = ?", (artifact_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            referenced = connection.execute(
+                """
+                SELECT 1 FROM evidence WHERE artifact_id = ?
+                UNION ALL
+                SELECT 1 FROM tool_invocations WHERE artifact_id = ?
+                LIMIT 1
+                """,
+                (artifact_id, artifact_id),
+            ).fetchone()
+            if referenced is not None:
+                raise ValueError("Artifact 已被 Evidence 引用，不能单独删除")
+            connection.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+            conversation_id = _row_text(row, "conversation_id")
+        self._cache.invalidate(conversation_id)
+        return True
+
     # ── 热上下文 ──
 
     def load_conversation_context(self, conversation_id: str) -> ConversationContext | None:
@@ -772,20 +820,17 @@ class SessionStore:
         self._cache.put(context)
         return context
 
+    def invalidate_conversation(self, conversation_id: str) -> None:
+        """Invalidate a snapshot after a coordinated transaction outside this repository."""
+        self._cache.invalidate(conversation_id)
+
     # ── SQLite 生命周期 ──
 
     def _initialize(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _SCHEMA_LOCK, self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            row = connection.execute("PRAGMA user_version").fetchone()
-            version = int(row[0]) if row is not None else 0
-            if version == 0:
-                connection.executescript(_SCHEMA_V1)
-            elif version != _SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"不支持的 ChatBI 数据库版本 {version}，当前代码仅支持 {_SCHEMA_VERSION}"
-                )
+            migrate_database(connection, self._path, create_v1=_SCHEMA_V1)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

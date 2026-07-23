@@ -1,6 +1,7 @@
-"""Code Interpreter MCP 服务入口：`python -m mcp_servers.code_interpreter.server`。
+"""独立 Code Interpreter 安全项目的服务占位。
 
-MVP 仅搭骨架；沙箱实现选型确认后再接入具体 Sandbox 子类。
+当前不注册 run_code，也不属于可用 Agent 工具。只有沙箱威胁建模、隔离实现、
+资源/输出限制、取消、审计和对抗测试全部通过后才能启用。
 """
 
 from __future__ import annotations
@@ -9,9 +10,9 @@ from mcp_servers.common.base_server import MCPServer
 
 
 def build_server() -> MCPServer:
-    """构建 Code Interpreter 服务（沙箱实现待选型后注入）。"""
+    """构建空服务；安全项目验收前不得注册 run_code。"""
     server = MCPServer(name="code_interpreter", port=8105)
-    # TODO: 选定沙箱实现后注册 run_code 工具（需注入 Sandbox 实例）
+    # 独立安全项目验收后才可注入 Sandbox 并注册 run_code。
     return server
 
 

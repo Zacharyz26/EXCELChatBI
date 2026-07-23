@@ -2,6 +2,10 @@ name: chatbi-milvus
 
 # 基于 Milvus v2.6.20 官方 standalone Compose，增加固定版本、鉴权配置、
 # 仅本机默认监听、健康依赖和持久化目录参数。
+# 这是当前独立 Milvus 运维入口，不代表全项目已容器化。v2.4 阶段 2 计划将其
+# 并入根 Compose 的 rag profile，同时保留此入口兼容现有备份/回滚流程；设计见
+# docs/v2.4/MCP与Docker架构决策.md。v2.5/v3.0 的知识 Resource、外部连接器和
+# 租户隔离演进见 docs/MCP与Docker全阶段演进设计.md。
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.25
