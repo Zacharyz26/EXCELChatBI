@@ -56,7 +56,7 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
 
 def _aggregate(
     dataset_ref: str, x_col: str, y_col: str, agg: str, chart_type: str, top_n: int | None
-) -> tuple[list, list]:
+) -> tuple[list[Any], list[Any]]:
     """按 x 分组聚合 y（DuckDB 下推）+ 小分组保护，返回 (类目, 数值)。"""
     if agg == "none":
         # none：不聚合（每个 x 取其 y），退化情形走整表读回，不做小分组保护。
@@ -91,7 +91,11 @@ def _aggregate(
 
 
 def _categorical_option(
-    chart_type: str, x_col: str, y_col: str, cats: list, values: list
+    chart_type: str,
+    x_col: str,
+    y_col: str,
+    cats: list[Any],
+    values: list[Any],
 ) -> dict[str, Any]:
     """组装类目型图表（line/bar/pie）的 ECharts option。
 

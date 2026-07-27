@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from packages.common.identifiers import InvalidDatasetRefError, validate_dataset_ref
 from packages.governance.audit import AuditEvent, record
 from packages.governance.permissions import (
     PermissionError_,
@@ -96,17 +97,27 @@ class ToolPolicyGateway:
                 request.tool_name,
                 allowed_tools=self._allowed_tools,
             )
-            if request.calls_used >= request.max_tool_calls:
+            dataset_ref = request.arguments.get("dataset_ref")
+            if dataset_ref is not None:
+                try:
+                    validate_dataset_ref(dataset_ref)
+                except InvalidDatasetRefError:
+                    allowed = False
+                    code = "invalid_dataset_ref"
+                    reason = "工具参数包含非法的数据集引用。"
+                else:
+                    if request.resource_project_id is None:
+                        allowed = False
+                        code = "unregistered_resource_denied"
+                        reason = "数据集未登记到当前工作区，拒绝执行。"
+                    elif request.resource_project_id != request.project_id:
+                        allowed = False
+                        code = "cross_project_resource_denied"
+                        reason = "工具参数引用了其他项目的资源。"
+            if allowed and request.calls_used >= request.max_tool_calls:
                 allowed = False
                 code = "tool_budget_exhausted"
                 reason = f"工具调用已达到上限（{request.max_tool_calls} 次）。"
-            elif (
-                request.resource_project_id is not None
-                and request.resource_project_id != request.project_id
-            ):
-                allowed = False
-                code = "cross_project_resource_denied"
-                reason = "工具参数引用了其他项目的资源。"
         except (PermissionError_, ValueError) as exc:
             allowed = False
             code = (

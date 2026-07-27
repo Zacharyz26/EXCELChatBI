@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.common.identifiers import DATASET_REF_PATTERN
+
+_DATASET_REF = {"type": "string", "pattern": DATASET_REF_PATTERN}
+
 PARSE_EXCEL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -27,7 +31,7 @@ PARSE_EXCEL_SCHEMA: dict[str, Any] = {
 INFER_SCHEMA_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dataset_ref": {"type": "string"},
+        "dataset_ref": _DATASET_REF,
     },
     "required": ["dataset_ref"],
     "additionalProperties": False,
@@ -36,7 +40,7 @@ INFER_SCHEMA_SCHEMA: dict[str, Any] = {
 DATA_PREVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dataset_ref": {"type": "string"},
+        "dataset_ref": _DATASET_REF,
         "rows": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
     },
     "required": ["dataset_ref"],

@@ -12,6 +12,46 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
+function apiToken(): string {
+  if (typeof window === "undefined") return "";
+  return window.sessionStorage.getItem("chatbi.apiToken") ?? "";
+}
+
+/** Bearer token 只保存在当前浏览器会话；生产环境应由登录流程调用。 */
+export function setApiToken(token: string): void {
+  if (typeof window === "undefined") return;
+  if (token.trim()) {
+    window.sessionStorage.setItem("chatbi.apiToken", token.trim());
+  } else {
+    window.sessionStorage.removeItem("chatbi.apiToken");
+  }
+}
+
+export function hasApiToken(): boolean {
+  return apiToken().length > 0;
+}
+
+export async function getAuthMode(): Promise<"disabled" | "bearer"> {
+  const resp = await fetch(`${API_BASE}/auth/config`);
+  if (!resp.ok) return asError(resp);
+  const body: unknown = await resp.json();
+  if (
+    !body
+    || typeof body !== "object"
+    || !["disabled", "bearer"].includes(String((body as { mode?: unknown }).mode))
+  ) {
+    throw new Error("服务端返回了未知认证模式");
+  }
+  return (body as { mode: "disabled" | "bearer" }).mode;
+}
+
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  const token = apiToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(input, { ...init, headers });
+}
+
 async function asError(resp: Response): Promise<never> {
   let detail = `${resp.status} ${resp.statusText}`;
   try {
@@ -40,21 +80,21 @@ export async function uploadExcel(
     form.append("project_id", workspace.projectId);
     form.append("conversation_id", workspace.conversationId);
   }
-  const resp = await fetch(`${API_BASE}/upload/excel`, { method: "POST", body: form });
+  const resp = await apiFetch(`${API_BASE}/upload/excel`, { method: "POST", body: form });
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
 
 /** 读取全部项目。 */
 export async function listProjects(): Promise<WorkspaceProject[]> {
-  const resp = await fetch(`${API_BASE}/projects`);
+  const resp = await apiFetch(`${API_BASE}/projects`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
 
 /** 创建一个项目。 */
 export async function createProject(name: string): Promise<WorkspaceProject> {
-  const resp = await fetch(`${API_BASE}/projects`, {
+  const resp = await apiFetch(`${API_BASE}/projects`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -67,7 +107,7 @@ export async function createProject(name: string): Promise<WorkspaceProject> {
 export async function listConversations(
   projectId: string,
 ): Promise<WorkspaceConversation[]> {
-  const resp = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/conversations`);
+  const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/conversations`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
@@ -77,7 +117,7 @@ export async function createConversation(
   projectId: string,
   title = "新对话",
 ): Promise<WorkspaceConversation> {
-  const resp = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/conversations`, {
+  const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -91,7 +131,7 @@ export async function updateConversation(
   conversationId: string,
   title: string,
 ): Promise<WorkspaceConversation> {
-  const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
+  const resp = await apiFetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -102,7 +142,7 @@ export async function updateConversation(
 
 /** 删除历史对话（级联删除其消息与工件）。 */
 export async function deleteConversation(conversationId: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
+  const resp = await apiFetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`, {
     method: "DELETE",
   });
   if (!resp.ok) return asError(resp);
@@ -110,7 +150,7 @@ export async function deleteConversation(conversationId: string): Promise<void> 
 
 /** 读取一个对话的消息和工件快照。 */
 export async function getConversation(conversationId: string): Promise<ConversationDetail> {
-  const resp = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`);
+  const resp = await apiFetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
@@ -120,7 +160,7 @@ export async function updateDataset(
   datasetRef: string,
   filename: string,
 ): Promise<WorkspaceDataset> {
-  const resp = await fetch(`${API_BASE}/datasets/${encodeURIComponent(datasetRef)}`, {
+  const resp = await apiFetch(`${API_BASE}/datasets/${encodeURIComponent(datasetRef)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ filename }),
@@ -135,7 +175,7 @@ export async function deleteDataset(
   force = false,
 ): Promise<{ deleted: boolean; warning?: string }> {
   const url = `${API_BASE}/datasets/${encodeURIComponent(datasetRef)}${force ? "?force=true" : ""}`;
-  const resp = await fetch(url, { method: "DELETE" });
+  const resp = await apiFetch(url, { method: "DELETE" });
   if (resp.status === 409) {
     const body = await resp.json().catch(() => null);
     return {
@@ -149,7 +189,7 @@ export async function deleteDataset(
 
 /** 读取项目内登记的数据集。 */
 export async function listDatasets(projectId: string): Promise<WorkspaceDataset[]> {
-  const resp = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/datasets`);
+  const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/datasets`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
@@ -163,7 +203,7 @@ export async function streamChat(
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  const resp = await fetch(`${API_BASE}/chat/stream`, {
+  const resp = await apiFetch(`${API_BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify({ conversation_id: conversationId, message }),
@@ -215,14 +255,23 @@ function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void):
   onEvent({ event: eventName, data });
 }
 
-/** 把后端相对下载路径拼成经代理可访问的完整 URL。 */
-export function fileUrl(path: string): string {
-  return `${API_BASE}${path}`;
+/** 通过带认证的 fetch 下载工件，避免普通链接丢失 Authorization header。 */
+export async function downloadFile(path: string): Promise<void> {
+  const resp = await apiFetch(`${API_BASE}${path}`);
+  if (!resp.ok) return asError(resp);
+  const blobUrl = URL.createObjectURL(await resp.blob());
+  const anchor = document.createElement("a");
+  anchor.href = blobUrl;
+  anchor.download = path.split("/").pop() || "download";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(blobUrl);
 }
 
 /** 摄入样例知识库（服务端目录 docs/kb_samples）。 */
 export async function ingestSamples(): Promise<IngestResponse> {
-  const resp = await fetch(`${API_BASE}/kb/ingest`, {
+  const resp = await apiFetch(`${API_BASE}/kb/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: "docs/kb_samples" }),
@@ -233,14 +282,14 @@ export async function ingestSamples(): Promise<IngestResponse> {
 
 /** 知识库概览：片段数、来源文件、主题（供展示与派生示例问题）。 */
 export async function kbOverview(): Promise<KBOverview> {
-  const resp = await fetch(`${API_BASE}/kb/overview`);
+  const resp = await apiFetch(`${API_BASE}/kb/overview`);
   if (!resp.ok) return asError(resp);
   return resp.json();
 }
 
 /** 从默认文档目录完整构建新索引并原子切换。 */
 export async function rebuildKnowledgeBase(): Promise<IngestResponse> {
-  const resp = await fetch(`${API_BASE}/kb/rebuild`, {
+  const resp = await apiFetch(`${API_BASE}/kb/rebuild`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -251,7 +300,7 @@ export async function rebuildKnowledgeBase(): Promise<IngestResponse> {
 
 /** 删除一个来源文档及其全部片段。 */
 export async function deleteKnowledgeDocument(documentId: string): Promise<void> {
-  const resp = await fetch(
+  const resp = await apiFetch(
     `${API_BASE}/kb/documents/${encodeURIComponent(documentId)}`,
     { method: "DELETE" },
   );

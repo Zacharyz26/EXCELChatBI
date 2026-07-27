@@ -11,6 +11,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,9 @@ from packages.session.store import SessionStore  # noqa: E402
 from packages.session.task_store import TaskStore  # noqa: E402
 from sse_starlette.sse import AppStatus  # noqa: E402
 
+_DATASET_REF = "d" * 32
+_REPORT_ID = "e" * 32
+
 
 class ScriptedGateway:
     """按脚本逐轮返回的假网关：记录每轮的消息与 tools。
@@ -69,6 +73,9 @@ class ScriptedGateway:
         error = turn.get("error")
         if error is not None and not turn.get("fail_after_deltas"):
             raise error
+        delay = turn.get("delay")
+        if isinstance(delay, int | float) and delay > 0:
+            await asyncio.sleep(delay)
         deltas: list[str] = turn.get("deltas", [])
         for piece in deltas:
             yield piece
@@ -140,7 +147,11 @@ def conversation(store: SessionStore) -> Conversation:
     return store.create_conversation(project.id)
 
 
-def _register_dataset(store: SessionStore, conversation: Conversation, ref: str = "d1") -> None:
+def _register_dataset(
+    store: SessionStore,
+    conversation: Conversation,
+    ref: str = _DATASET_REF,
+) -> None:
     store.register_dataset(
         ref=ref,
         project_id=conversation.project_id,
@@ -171,7 +182,11 @@ async def test_tool_round_emits_transparency_events_and_persists(
             {
                 "deltas": ["我先获取数据画像"],
                 "tool_calls": [
-                    ToolCall(id="c1", name="get_data_profile", arguments='{"dataset_ref":"d1"}')
+                    ToolCall(
+                        id="c1",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
                 ],
             },
             {"deltas": ["结论：", "共 3 行。"]},
@@ -205,8 +220,10 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert by_name["understanding"]["text"] == "我先获取数据画像"
     assert by_name["plan"]["steps"][0]["tool"] == "get_data_profile"
     # 执行卡默认展示人话参数摘要，原始 JSON 仅供调参表单
-    assert by_name["tool_start"]["fields"] == "数据集: d1"
-    assert by_name["tool_start"]["args_preview"] == '{"dataset_ref":"d1"}'
+    assert by_name["tool_start"]["fields"] == f"数据集: {_DATASET_REF[:8]}"
+    assert by_name["tool_start"]["args_preview"] == (
+        f'{{"dataset_ref":"{_DATASET_REF}"}}'
+    )
     assert by_name["tool_end"]["status"] == "ok"
     assert "3 行" in by_name["tool_end"]["summary"]
     assert by_name["done"]["tool_calls"] == 1
@@ -242,7 +259,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
     artifact = artifacts[0]
     assert artifact.type == "profile"
     assert artifact.source_tool == "get_data_profile"
-    assert artifact.dataset_ref == "d1"
+    assert artifact.dataset_ref == _DATASET_REF
     assert artifact.params is not None and artifact.params["analysis_id"]
     assert by_name["artifact"]["id"] == artifact.id
 
@@ -251,13 +268,17 @@ async def test_tool_round_emits_transparency_events_and_persists(
     messages = store.list_messages(conversation.id)
     assert [m.role for m in messages] == ["user", "assistant", "tool", "assistant"]
     assert messages[1].tool_calls == [
-        {"id": "c1", "name": "get_data_profile", "arguments": '{"dataset_ref":"d1"}'}
+        {
+            "id": "c1",
+            "name": "get_data_profile",
+            "arguments": f'{{"dataset_ref":"{_DATASET_REF}"}}',
+        }
     ]
     outcome = json.loads(messages[2].content)
     assert outcome["tool_call_id"] == "c1"
     assert outcome["status"] == "ok"
     assert "3 行" in outcome["summary"]
-    assert outcome["fields"] == "数据集: d1"  # 历史执行卡直接复用人话摘要
+    assert outcome["fields"] == f"数据集: {_DATASET_REF[:8]}"  # 历史执行卡直接复用人话摘要
     assert messages[3].content == "结论：共 3 行。"
 
     # 第二轮模型请求里回填了 tool 结果
@@ -266,6 +287,153 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "c1"
     assert '"duplicate_rows":0' in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_model_timeout_persists_failed_terminal_state(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    gateway = ScriptedGateway([{"delay": 0.2, "deltas": ["太晚了"]}])
+    config = AgentLoopConfig(
+        model_timeout_seconds=0.01,  # type: ignore[arg-type]
+        run_timeout_seconds=1,
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        config=config,
+    )
+
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "model_timeout"
+    run_id = cast(str, events[-1][1]["run_id"])
+    run = TaskStore(store.db_path).get_run(run_id)
+    assert run is not None
+    assert run.status == "failed"
+    assert run.terminal_reason == "model_timeout"
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_is_unknown_and_blocks_automatic_retry(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    def slow_search(_args: dict[str, Any]) -> dict[str, Any]:
+        time.sleep(0.2)
+        return {"is_empty": True, "hits": []}
+
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="slow-search",
+                        name="kb_search",
+                        arguments='{"query":"测试"}',
+                    )
+                ]
+            }
+        ]
+    )
+    config = AgentLoopConfig(
+        tool_timeout_seconds=0.01,  # type: ignore[arg-type]
+        run_timeout_seconds=1,
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({"kb_search": slow_search}),
+        config=config,
+    )
+
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "tool_timeout"
+    run_id = cast(str, events[-1][1]["run_id"])
+    tasks = TaskStore(store.db_path)
+    run = tasks.get_run(run_id)
+    assert run is not None and run.status == "blocked"
+    assert run.terminal_reason == "tool_timeout"
+    assert tasks.list_invocations(run_id)[0].status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_metric_waits_for_user_without_calling_model(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    store.register_dataset(
+        ref=_DATASET_REF,
+        project_id=conversation.project_id,
+        filename="销售.xlsx",
+        profile={
+            "row_count": 12,
+            "column_count": 4,
+            "columns": [
+                {"name": "日期"},
+                {"name": "地区"},
+                {"name": "销售额"},
+                {"name": "销量"},
+            ],
+        },
+    )
+    gateway = ScriptedGateway([{"deltas": ["不应调用模型"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="比较各地区的销售趋势。",
+    )
+
+    assert gateway.calls == []
+    assert [name for name, _ in events] == [
+        "meta",
+        "goal",
+        "run.started",
+        "waiting_user",
+        "text.delta",
+        "done",
+    ]
+    waiting = dict(events)["waiting_user"]
+    assert waiting["payload"]["about"] == "metric"
+    assert "销售额、销量" in dict(events)["text.delta"]["delta"]
+    done = dict(events)["done"]
+    assert done["run_status"] == "waiting_user"
+    run = TaskStore(store.db_path).get_run(cast(str, done["run_id"]))
+    assert run is not None and run.status == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_cancels_active_run(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    stream = stream_agent_chat(
+        conversation_id=conversation.id,
+        project_id=conversation.project_id,
+        user_text="分析一下",
+        store=store,
+        gateway=cast(Any, ScriptedGateway([{"delay": 0.2, "deltas": ["晚"]}])),
+        registry=cast(AgentToolRegistry, FakeRegistry({})),
+        locks=ConversationLockPool(),
+        config=AgentLoopConfig(run_timeout_seconds=2),
+    )
+
+    meta = await anext(stream)
+    run_id = cast(str, json.loads(meta["data"])["run_id"])
+    await stream.aclose()
+
+    run = TaskStore(store.db_path).get_run(run_id)
+    assert run is not None
+    assert run.status == "cancelled"
+    assert run.terminal_reason in {"stream_disconnected", "stream_closed"}
 
 
 @pytest.mark.asyncio
@@ -287,7 +455,7 @@ async def test_unsupported_numeric_claim_is_corrected_before_delivery(
                     ToolCall(
                         id="profile-call",
                         name="get_data_profile",
-                        arguments='{"dataset_ref":"d1"}',
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
                     )
                 ]
             },
@@ -321,7 +489,7 @@ async def test_unsupported_numeric_claim_is_corrected_before_delivery(
 
 
 @pytest.mark.asyncio
-async def test_unsupported_numeric_claim_cannot_complete_after_retry(
+async def test_unsupported_numeric_claim_is_removed_after_retry_is_exhausted(
     store: SessionStore, conversation: Conversation
 ) -> None:
     _register_dataset(store, conversation)
@@ -335,7 +503,7 @@ async def test_unsupported_numeric_claim_cannot_complete_after_retry(
                     ToolCall(
                         id="profile-call",
                         name="get_data_profile",
-                        arguments='{"dataset_ref":"d1"}',
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
                     )
                 ]
             },
@@ -346,18 +514,22 @@ async def test_unsupported_numeric_claim_cannot_complete_after_retry(
 
     events = await _run_loop(store, conversation, gateway, registry)
 
-    assert events[-1][0] == "error"
-    assert events[-1][1]["code"] == "unsupported_numeric_claim"
-    assert not any(name == "done" for name, _ in events)
-    assert not any(name == "text.delta" for name, _ in events)
+    assert events[-1][0] == "done"
+    assert events[-1][1]["run_status"] == "completed"
+    streamed = "".join(
+        payload["delta"] for name, payload in events if name == "text.delta"
+    )
+    assert "5 行" not in streamed
+    assert "3 行" in streamed
+    assert "已省略无法由当前工具证据直接支持的派生数字" in streamed
     run_id = cast(str, events[-1][1]["run_id"])
     run = TaskStore(store.db_path).get_run(run_id)
-    assert run is not None and run.status == "blocked"
-    assert run.terminal_reason == "unsupported_numeric_claim"
+    assert run is not None and run.status == "completed"
     assert [message.role for message in store.list_messages(conversation.id)] == [
         "user",
         "assistant",
         "tool",
+        "assistant",
     ]
 
 
@@ -480,7 +652,7 @@ async def test_explicit_chart_request_cannot_finish_before_chart_artifact(
                         id="chart-call",
                         name="gen_chart",
                         arguments=(
-                            '{"dataset_ref":"d1","chart_type":"line",'
+                            f'{{"dataset_ref":"{_DATASET_REF}","chart_type":"line",'
                             '"encoding":{"x":"月份","y":"销售额","agg":"sum"}}'
                         ),
                     )
@@ -550,12 +722,12 @@ async def test_explicit_pdf_report_cannot_finish_before_report_artifact(
     store: SessionStore, conversation: Conversation, tmp_path: Path
 ) -> None:
     """明确要 PDF 报告时，必须落库并发送带 pdf_url 的 report Artifact。"""
-    markdown_path = tmp_path / "report-1.md"
-    pdf_path = tmp_path / "report-1.pdf"
+    markdown_path = tmp_path / f"{_REPORT_ID}.md"
+    pdf_path = tmp_path / f"{_REPORT_ID}.pdf"
     markdown_path.write_text("# 销售分析报告", encoding="utf-8")
     pdf_path.write_bytes(b"%PDF-1.7\n")
     report_result = {
-        "report_id": "report-1",
+        "report_id": _REPORT_ID,
         "md_path": str(markdown_path),
         "pdf_path": str(pdf_path),
         "skipped_charts": 0,
@@ -592,11 +764,14 @@ async def test_explicit_pdf_report_cannot_finish_before_report_artifact(
 
     artifact_event = next(payload for name, payload in events if name == "artifact")
     assert artifact_event["type"] == "report"
-    assert artifact_event["payload"]["report_id"] == "report-1"
-    assert artifact_event["payload"]["pdf_url"] == "/analyze/report/report-1.pdf"
+    assert artifact_event["payload"]["report_id"] == _REPORT_ID
+    assert artifact_event["payload"]["pdf_url"] == (
+        f"/analyze/report/{_REPORT_ID}.pdf"
+    )
     artifacts = store.list_artifacts(conversation.id)
     assert len(artifacts) == 1 and artifacts[0].id == artifact_event["id"]
     assert artifacts[0].file_ref == str(pdf_path)
+    assert store.report_project_id(_REPORT_ID) == conversation.project_id
     streamed = "".join(payload["delta"] for name, payload in events if name == "text.delta")
     assert "PDF 已生成，可下载" not in streamed
     assert "报告和 PDF 已生成" in streamed
@@ -945,7 +1120,13 @@ async def test_system_context_lists_datasets_and_analysis_registry(
     del artifact
     gateway = ScriptedGateway([{"deltas": ["好的"]}])
 
-    await _run_loop(store, conversation, gateway, FakeRegistry({}), user_text="继续")
+    await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="继续使用 d2",
+    )
 
     system = gateway.calls[0]["messages"][0]
     assert system.role == "system"

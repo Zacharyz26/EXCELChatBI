@@ -8,21 +8,16 @@
 
 ## 当前进度
 
-当前可运行基线为 **v2.3 反应式工具调用 Agent**，该版本的五阶段迁移已经完成：自然语言对话是唯一前端入口，模型可以自主选择并循环调用画像、统计、图表、数据变换、知识检索和报告工具，执行过程与 Artifact 通过 SSE 卡片实时展示。
+当前可运行基线是带 **v2.4 控制面骨架** 的对话式 Agent。自然语言对话是唯一前端入口；
+模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
+SSE 展示。SQLite schema v3 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+Evidence、Claim、Checkpoint、项目成员和报告所有权。
 
-下一版本是 **v2.4 Agent 控制面**。阶段 1 本地实现已完成：SQLite schema v2、TaskRun/TaskContract、
-任务事件与快照、工具调用幂等记录、Evidence、最小确定性 Verifier 和只读任务恢复接口已落地，
-任务启动已原子化，候选答复中的数值 Claim 已能绑定当前 run 的 Evidence；无依据数字会触发
-纠正而不是直接交付。工具成功时 Artifact、Evidence、Invocation、事件、快照和 Checkpoint
-也已原子提交。现有循环只有在 Verifier 通过后才会标记 `completed`。受约束语义 Verifier
-协议和 14 场景评测入口已落地，但 DeepSeek V3/R1 首轮均因 false PASS 判定 `NO_GO`，因此未
-接入生产。中央策略、结构化审计/trace、原子 `step.started` 和失败/未知 Observation 也已
-接入现有循环。知识 source、空检索诚实回答、显式局限和同值多路径 Claim 已补齐，报告目录
-具备启动对账和安全运维入口，图表/报告意图与通用后置条件固定影子集达到 9/9。阶段 0 的
-Planner/行为基线、MCP 双传输探针和设计评审仍是未关闭的前置债务；MCP 双传输与规范执行切换
-按路线图属于阶段 2。MCP 单源契约、官方 SDK Server adapter、Client Gateway 影子校验，以及
-API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交推送后首次运行。逐项状态见
-[`docs/v2.4/阶段1实施记录.md`](./docs/v2.4/阶段1实施记录.md)。
+本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
+Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
+工具和整轮任务有独立超时，断连及启动恢复不会遗留运行态；歧义需求会进入
+`waiting_user`，无依据数字和知识来源会在交付前重验或确定性修复；上传源文件、临时截图、
+孤儿数据和项目报告均有清理路径。根 Compose、生产认证登录页和无 Mock 全栈 E2E 也已落地。
 
 ### 已实现
 
@@ -32,7 +27,7 @@ API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交�
 - ECharts 图表、Playwright 截图、Markdown/PDF 报告；
 - DeepSeek function-calling 循环、工具 schema 校验、带错重试、调用预算和同参熔断；
 - SQLite 项目、数据集、对话、消息和 Artifact 持久化；
-- SQLite v1→v2 迁移/校验/受保护回滚，TaskRun、TaskContract、TaskEvent、快照、
+- SQLite v1→v3 迁移/校验/受保护回滚，TaskRun、TaskContract、TaskEvent、快照、
   ToolInvocation、Evidence 和 Checkpoint 数据结构；
 - 最小确定性 Verifier：最终正文先验证后发送，图表/报告必须有当前 run 的真实 Artifact，
   报告文件必须真实存在且非空，预算耗尽进入 `blocked`；
@@ -44,7 +39,11 @@ API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交�
   Observation，unknown 结果禁止完成；模型和工具调用输出有界 trace 与审计元数据；
 - 15 个底层工具及 Agent 的 11 个模型工具共用 MCP schema/能力元数据；官方 SDK
   `tools/list`/`tools/call`、Client Gateway 发现校验和无副作用影子比对已落地；
-- API/Web 多阶段基础镜像、非 root 健康检查、SSE/报告下载代理和镜像构建 CI 已加入；
+- API/Web 多阶段镜像、非 root 健康检查、SSE/鉴权下载代理、根 Compose 和镜像构建 CI；
+- Bearer 认证、租户/项目成员隔离，以及浏览器会话级令牌录入；
+- 模型/工具/整轮超时，断连终态，启动时运行态恢复与未知调用保护；
+- 上传、parquet、报告和临时截图的受限生命周期清理；
+- 不使用网络 mock 的 Web→API→Excel→SQLite/parquet Playwright 全栈 E2E；
 - v2 生命周期 SSE 双发以及 `GET /agent/runs/{run_id}` 和事件游标读取接口；
 - React 对话工作区、SSE 理解/执行/图表/表格/报告/引用卡；
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
@@ -52,16 +51,18 @@ API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交�
 
 ### 当前缺口
 
-- 计划仍是工具调用列表，没有持久化的目标、依赖、预期证据和完成条件；
+- 计划仍主要依赖模型工具调用，没有完整的持久化依赖图与可编辑计划；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
-- 非数值 Claim、同值路径语义消歧、真实计划版本、Checkpoint 恢复和可恢复任务尚未完成；
+- 更广泛的非数值 Claim、同值路径语义消歧、Checkpoint 自动续跑尚未完成；
 - 上下文压缩、指代消解和长期项目记忆尚未实现；
-- 基础策略、审计和 trace 已落地；应用层真实用户/租户鉴权、审批和企业审计后端尚未实现；
+- 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、审批和企业审计后端尚未实现；
 - 生产 Executor 仍走进程内 `Tool.invoke`；MCP stdio 子进程/Streamable HTTP 双传输探针、
   服务认证和规范执行切换尚未完成；
-- API/Web 基础镜像已提供但尚未经过首次远端 build；工具服务镜像与统一 Compose 尚未完成；
-- 前端尚不支持澄清、真实计划编辑、暂停、恢复和自主等级。
+- 单机 API/Web Compose 已提供；多实例外置状态、对象存储和独立工具服务编排尚未完成；
+- 前端能展示阻塞澄清文本，但尚无结构化澄清控件、计划编辑、暂停/续跑和自主等级；
+- 知识库仍是实例级共享资源，尚未做租户级索引隔离；
+- 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
 ### 已规划但未实现
 
@@ -75,10 +76,7 @@ API/Web 基础镜像和远端构建 CI 已落地；本批镜像 CI 尚待提交�
 ## Agent 演进路线
 
 ```text
-v2.3 当前基线
-  模型选择工具 → 工具执行 → 结果回填 → 模型回答
-
-v2.4 目标控制面
+当前 v2.4 控制面骨架
   理解目标 → 必要澄清 → 结构化计划 → 受控执行
       ↑                                  ↓
   持久状态 ← 最终交付 ← Verifier ← Evidence
@@ -88,8 +86,8 @@ v2.5
   记忆 + 业务语义 + 自主分析 + 人机协作
 
 横向交付轨
-  MCP：阶段 0 设计 → 阶段 1 全量接口 → 阶段 2 规范执行路径
-  Docker：阶段 0 拓扑 → 阶段 1 基础镜像 → 阶段 2 完整单机 Compose
+  MCP：单源契约/影子校验已完成 → 规范执行路径待切换
+  Docker：API/Web 单机 Compose 与真实 E2E 已完成 → 重型工具 profile 待扩展
 
 v2.5 延伸
   MCP：记忆/Evidence 引用 → 前端审批 → 知识 Resource → 自主分析能力目录
@@ -115,26 +113,17 @@ v2.4 之后各阶段的 MCP/Docker 演进见
 - SQL 和 Code Interpreter 必须通过独立安全评审后才能进入 Agent；
 - TaskContract 未通过完成验证时，Agent 不得声称任务成功。
 
-## 架构（当前与 v2.4 目标）
+## 当前架构
 
 ```text
-当前 v2.3：
 React + Zustand
       ↓ HTTP/SSE
-FastAPI + 自研 Agent 编排 + ModelGateway
+FastAPI + Bearer/项目隔离 + Agent 控制面 + ModelGateway
       ↓
-进程内 Tool.invoke + Governance
+Governance → 进程内 Tool.invoke
+             ↘ MCP 同源契约/影子校验
       ↓
-parquet/文件 + SQLite + Milvus
-
-v2.4 目标：
-React + Zustand
-      ↓ HTTP/SSE
-FastAPI + Agent 控制面 + ModelGateway
-      ↓
-MCP Client Gateway → MCP 工具层 + Governance
-      ↓
-parquet/文件 + SQLite + Milvus
+parquet/报告文件 + SQLite v3 + Local/Milvus 知识库
 ```
 
 Dify 已放弃。生产执行仍以进程内 `Tool.invoke` 挂载，但 MCP 单源契约、SDK Server adapter、
@@ -150,20 +139,18 @@ Client Gateway 和影子校验已经落地；完成 stdio/Streamable HTTP 探针
 | `apps/web` | React 18 + ECharts 5 + Zustand 对话工作区 |
 | `mcp_servers` | Excel、统计、图表、报告和数据变换等确定性工具 |
 | `packages/models` | 模型网关与 registry |
-| `packages/governance` | schema、数据边界；权限、审计、沙箱和 trace 待按路线图落地 |
+| `packages/governance` | schema、数据边界、项目权限、策略、审计与 trace |
 | `packages/rag` | embedding、稀疏检索、rerank、Milvus |
 | `packages/session` | SQLite 工作区、schema 迁移、Task/Event/Evidence；后续长期记忆 |
 | `docs` | 总设计、现行路线图、安全、验收和运维文档 |
 | `docs/v2.4` | Agent 控制面、SSE、评测、MCP 与 Docker 阶段 0 设计包 |
 | `docs/MCP与Docker全阶段演进设计.md` | v2.5、独立安全项目和 v3.0 的 MCP/容器逐阶段设计 |
-| `tests` | 后端单元/集成测试；后续增加 Agent 行为评测 |
+| `tests` | 后端单元/集成、Agent 控制面与安全回归 |
 | `apps/web/e2e` | Playwright 浏览器 E2E |
 
 ## 快速开始
 
-以下仍是当前有效的本机开发方式。全项目 Dockerfile、根目录 Compose 和容器化 MCP
-服务属于 v2.4 阶段 1/2，尚未交付；当前只有 Milvus Standalone 的独立 Compose，详见
-[`docs/知识库部署与运维.md`](./docs/知识库部署与运维.md)。
+本机开发：
 
 ```bash
 # 1. 配置
@@ -185,6 +172,15 @@ pnpm dev
 
 默认地址：后端 `http://127.0.0.1:8000`，前端 `http://127.0.0.1:5173`。
 
+单机容器部署：
+
+```bash
+docker compose up --build
+```
+
+默认入口为 `http://127.0.0.1:8080`。生产认证、数据卷和真实 E2E 说明见
+[`docs/全栈部署与E2E.md`](./docs/全栈部署与E2E.md)。
+
 ## 测试与检查
 
 ```bash
@@ -201,6 +197,7 @@ pnpm build
 # 浏览器 E2E；首次运行先安装 Chromium
 pnpm exec playwright install chromium
 pnpm test:e2e
+pnpm test:e2e:fullstack
 ```
 
 ## 可选能力依赖

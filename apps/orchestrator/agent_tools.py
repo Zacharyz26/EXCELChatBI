@@ -33,9 +33,11 @@ from mcp_servers.dataset_ops.schemas import (
     AGGREGATE_PREVIEW_SCHEMA,
     TRANSFORM_DATASET_SCHEMA,
 )
+from packages.common.config import get_settings
 from packages.common.dataset_store import duplicate_row_count
 from packages.common.logging import get_logger
 from packages.rag.retriever import HybridRetriever
+from packages.session.file_lifecycle import delete_chart_file
 from packages.session.models import Artifact, ArtifactDraft, JsonObject
 from packages.session.store import SessionStore
 
@@ -405,20 +407,18 @@ def _transform_with_lineage(
     args: dict[str, Any],
 ) -> dict[str, Any]:
     """执行变换；有会话上下文时把衍生数据集登记进项目（血缘落库）。"""
+    parent = None
+    if context is not None:
+        parent = context.store.get_dataset(str(args["dataset_ref"]))
+        if parent is None:
+            # 未登记资源不能被当前项目“认领”；策略网关正常会在执行前拦截，
+            # 此处保留纵深防御，覆盖直接调用 registry 的路径。
+            raise AgentToolError("源数据集未登记到当前工作区")
+        if parent.project_id != context.project_id:
+            raise AgentToolError("源数据集不属于当前项目")
     result: dict[str, Any] = dataset_ops._tools["transform_dataset"].invoke(args)
     if context is not None:
-        parent = context.store.get_dataset(result["parent_ref"])
-        if parent is None:
-            # 源数据集未登记（如上传时未绑项目）：先补登记父级，保证血缘链完整
-            parent_profile: JsonObject = excel._tools["infer_schema"].invoke(
-                {"dataset_ref": result["parent_ref"]}
-            ).to_dict()
-            parent = context.store.register_dataset(
-                ref=result["parent_ref"],
-                project_id=context.project_id,
-                filename=f"数据集 {result['parent_ref'][:8]}",
-                profile=parent_profile,
-            )
+        assert parent is not None  # 上方已完成当前项目的登记与归属检查。
         filename = f"{parent.filename}（衍生）"
         profile: JsonObject = excel._tools["infer_schema"].invoke(
             {"dataset_ref": result["dataset_ref"]}
@@ -490,7 +490,14 @@ def _generate_report(
     if args.get("insights"):
         md_args["insights"] = args["insights"]
 
-    result: dict[str, Any] = report._tools["gen_report_md"].invoke(md_args)
+    try:
+        result: dict[str, Any] = report._tools["gen_report_md"].invoke(md_args)
+    finally:
+        for chart_section in md_args.get("charts", []):
+            delete_chart_file(
+                chart_section.get("image_path"),
+                get_settings().report_dir,
+            )
     if args.get("include_pdf"):
         try:
             pdf = report._tools["export_pdf"].invoke(

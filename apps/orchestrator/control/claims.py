@@ -265,6 +265,53 @@ def extract_limitation_claims(*, final_text: str) -> list[ClaimDraft]:
     return claims
 
 
+def repair_candidate_with_evidence(
+    *,
+    final_text: str,
+    claims: list[ClaimDraft],
+    evidence: list[EvidenceRecord],
+) -> tuple[str, tuple[str, ...]]:
+    """确定性移除无依据数字，并为知识回答补上真实来源标签。
+
+    该修复不会换算或生成新结论：数字句只能保留原文中已被 Evidence 支持的部分；
+    来源只能取当前 run 的 ``source_index``。修复后仍必须重新抽取 Claim 并过 Verifier。
+    """
+    repaired = final_text.strip()
+    actions: list[str] = []
+    unsupported_numeric = {
+        claim.statement
+        for claim in claims
+        if claim.claim_kind == "numeric"
+        and any(ref.get("supported") is not True for ref in claim.value_refs)
+    }
+    if unsupported_numeric:
+        kept = [
+            raw
+            for raw in _split_statements(repaired)
+            if _LEADING_LIST_MARKER.sub("", raw).strip() not in unsupported_numeric
+        ]
+        repaired = "".join(kept).strip()
+        actions.append("removed_unsupported_numeric_statements")
+        if not repaired:
+            repaired = _evidence_summary_fallback(evidence)
+        limitation = "已省略无法由当前工具证据直接支持的派生数字。"
+        if limitation not in repaired:
+            repaired = f"{repaired}\n\n{limitation}".strip()
+
+    unsupported_knowledge = any(
+        claim.claim_kind == "knowledge"
+        and any(ref.get("supported") is not True for ref in claim.value_refs)
+        for claim in claims
+    )
+    if unsupported_knowledge:
+        sources = _evidence_source_labels(evidence)
+        if sources and not any(source.casefold() in repaired.casefold() for source in sources):
+            repaired = f"{repaired}\n\n来源：{'；'.join(sources)}".strip()
+            actions.append("appended_evidence_sources")
+
+    return repaired, tuple(actions)
+
+
 def _collect_values(
     value: Any, path: str, output: list[JsonObject], *, depth: int
 ) -> None:
@@ -313,7 +360,10 @@ def _collect_sources(
         return
     if isinstance(value, dict):
         source = value.get("source")
-        if isinstance(source, str) and source.strip() and isinstance(value.get("text"), str):
+        content = value.get("text")
+        if not isinstance(content, str):
+            content = value.get("snippet")
+        if isinstance(source, str) and source.strip() and isinstance(content, str):
             item: JsonObject = {"path": path, "source": source.strip()}
             section = value.get("section")
             if isinstance(section, str) and section.strip():
@@ -334,6 +384,32 @@ def _knowledge_result_is_empty(result: Any) -> bool | None:
     if not isinstance(result, dict) or not isinstance(result.get("is_empty"), bool):
         return None
     return bool(result["is_empty"])
+
+
+def _evidence_source_labels(evidence: list[EvidenceRecord]) -> list[str]:
+    sources: list[str] = []
+    for record in evidence:
+        raw_index = record.summary.get("source_index")
+        if not isinstance(raw_index, list):
+            continue
+        for raw in raw_index:
+            source = raw.get("source") if isinstance(raw, dict) else None
+            if isinstance(source, str) and source.strip() and source.strip() not in sources:
+                sources.append(source.strip())
+    return sources[:8]
+
+
+def _evidence_summary_fallback(evidence: list[EvidenceRecord]) -> str:
+    summaries: list[str] = []
+    for record in evidence:
+        if record.source.get("tool") == "kb_search":
+            continue
+        summary = record.summary.get("summary")
+        if isinstance(summary, str) and summary.strip() and summary.strip() not in summaries:
+            summaries.append(summary.strip())
+    if summaries:
+        return "；".join(summaries) + "。"
+    return "已完成可验证步骤，请查看本轮生成的结构化工件。"
 
 
 def _evidence_values(

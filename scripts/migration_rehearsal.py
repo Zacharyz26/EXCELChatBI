@@ -1,4 +1,4 @@
-"""Run the isolated v2.4 SQLite v1 -> v2 -> v1 migration rehearsal."""
+"""Run the isolated SQLite v1 -> current -> v1 migration rehearsal."""
 
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from packages.session.migrations import downgrade_v2_to_v1, migrate_database, v2
+from packages.session.migrations import (
+    CURRENT_SCHEMA_VERSION,
+    downgrade_v2_to_v1,
+    migrate_database,
+    v2,
+    v3,
+)
 from packages.session.store import _SCHEMA_V1
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -251,7 +257,7 @@ def run_rehearsal(
     empty = workspace / "empty.sqlite3"
     _migrate(empty)
 
-    migrated = workspace / "migrated-v2.sqlite3"
+    migrated = workspace / "migrated-current.sqlite3"
     _backup_database(source, migrated)
     _migrate(migrated)
     with sqlite3.connect(migrated) as connection:
@@ -266,11 +272,11 @@ def run_rehearsal(
     backup_path = Path(str(migration_row[0]))
     recorded_backup_hash = str(migration_row[1])
     initial_backup_count = len(
-        list(workspace.glob("migrated-v2.sqlite3.v1-backup.*.sqlite3"))
+        list(workspace.glob("migrated-current.sqlite3.v1-backup.*.sqlite3"))
     )
     _migrate(migrated)
     repeated_backup_count = len(
-        list(workspace.glob("migrated-v2.sqlite3.v1-backup.*.sqlite3"))
+        list(workspace.glob("migrated-current.sqlite3.v1-backup.*.sqlite3"))
     )
 
     interrupted = workspace / "interrupted.sqlite3"
@@ -347,15 +353,21 @@ def run_rehearsal(
     restored = workspace / "restored-v1.sqlite3"
     shutil.copy2(backup_path, restored)
 
-    added_after_interrupt = _table_names(interrupted) & set(v2.ADDED_TABLES)
+    current_tables = set(v2.ADDED_TABLES) | set(v3.ADDED_TABLES)
+    added_after_interrupt = _table_names(interrupted) & current_tables
     checks = {
-        "empty_to_v2": _version(empty) == 2 and _integrity_ok(empty),
+        "empty_to_current": (
+            _version(empty) == CURRENT_SCHEMA_VERSION and _integrity_ok(empty)
+        ),
         "source_copy_is_v1": _version(source) == 1,
         "source_copy_untouched": _sha256_file(source) == source_file_hash,
         "provided_source_untouched": (
             source_v1 is None or _sha256_file(source_v1) == external_hash_before
         ),
-        "v1_to_v2": _version(migrated) == 2 and _integrity_ok(migrated),
+        "v1_to_current": (
+            _version(migrated) == CURRENT_SCHEMA_VERSION
+            and _integrity_ok(migrated)
+        ),
         "legacy_bytes_unchanged_after_upgrade": (
             _legacy_hash(migrated) == source_legacy_hash
         ),
@@ -376,9 +388,9 @@ def run_rehearsal(
         "unknown_version_rejected": unknown_rejected,
         "checksum_tamper_rejected": checksum_rejected,
         "active_run_blocks_rollback": active_run_rejected,
-        "v2_to_v1": (
+        "current_to_v1": (
             _version(rollback) == 1
-            and not (_table_names(rollback) & set(v2.ADDED_TABLES))
+            and not (_table_names(rollback) & current_tables)
             and _integrity_ok(rollback)
         ),
         "legacy_bytes_unchanged_after_rollback": (
@@ -407,7 +419,10 @@ def run_rehearsal(
         "source_kind": source_kind,
         "source_v1_file_sha256": source_file_hash,
         "legacy_row_bytes_sha256": source_legacy_hash,
-        "migration_checksum": v2.CHECKSUM,
+        "migration_checksums": {
+            str(v2.VERSION): v2.CHECKSUM,
+            str(v3.VERSION): v3.CHECKSUM,
+        },
         "backup_sha256": recorded_backup_hash,
         "versions": {
             "empty_after": _version(empty),

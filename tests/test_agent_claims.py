@@ -7,6 +7,7 @@ from apps.orchestrator.control.claims import (
     extract_claims,
     extract_knowledge_claims,
     extract_numeric_claims,
+    repair_candidate_with_evidence,
 )
 from apps.orchestrator.control.contracts import build_minimal_contract
 from apps.orchestrator.control.verifier import verify_completion
@@ -251,3 +252,80 @@ def test_explicit_limitation_is_persistable_claim_metadata() -> None:
 
     assert claims[0].claim_kind == "limitation"
     assert claims[0].value_refs[0]["confidence"] == "explicitly_qualified"
+
+
+def test_source_index_accepts_mcp_snippet_shape_and_can_repair_citation() -> None:
+    evidence = EvidenceRecord(
+        evidence_id="knowledge-snippet",
+        run_id="run-1",
+        invocation_id="invocation-1",
+        artifact_id=None,
+        kind="tool_result",
+        source={"tool": "kb_search"},
+        result_hash="hash",
+        summary=build_evidence_summary(
+            summary="知识库命中",
+            result={
+                "hits": [
+                    {
+                        "source": "metrics/active-user.md",
+                        "title": "活跃用户",
+                        "snippet": "统计周期内至少完成一次有效访问的去重用户。",
+                    }
+                ]
+            },
+            artifact_id=None,
+        ),
+        created_at="now",
+    )
+    claims = extract_claims(
+        final_text="活跃用户是完成有效访问的去重用户。",
+        goal="查询活跃用户定义",
+        evidence=[evidence],
+    )
+
+    repaired, actions = repair_candidate_with_evidence(
+        final_text="活跃用户是完成有效访问的去重用户。",
+        claims=claims,
+        evidence=[evidence],
+    )
+    repaired_claims = extract_claims(
+        final_text=repaired,
+        goal="查询活跃用户定义",
+        evidence=[evidence],
+    )
+
+    assert actions == ("appended_evidence_sources",)
+    assert "metrics/active-user.md" in repaired
+    assert repaired_claims[0].value_refs[0]["supported"] is True
+
+
+def test_repair_removes_unsupported_numeric_statement_without_computing() -> None:
+    evidence = _evidence({"profile": {"row_count": 120, "column_count": 5}})
+    text = "数据共 120 行、5 列。重复率约为 1.67%。"
+    claims = extract_claims(
+        final_text=text,
+        goal="介绍数据规模和质量",
+        evidence=[evidence],
+    )
+
+    repaired, actions = repair_candidate_with_evidence(
+        final_text=text,
+        claims=claims,
+        evidence=[evidence],
+    )
+    repaired_claims = extract_claims(
+        final_text=repaired,
+        goal="介绍数据规模和质量",
+        evidence=[evidence],
+    )
+
+    assert actions == ("removed_unsupported_numeric_statements",)
+    assert "120 行、5 列" in repaired
+    assert "1.67%" not in repaired
+    assert all(
+        ref["supported"] is True
+        for claim in repaired_claims
+        if claim.claim_kind == "numeric"
+        for ref in claim.value_refs
+    )

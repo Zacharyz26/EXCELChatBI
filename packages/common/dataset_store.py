@@ -16,6 +16,7 @@ import duckdb
 import pandas as pd
 
 from packages.common.config import get_settings
+from packages.common.identifiers import validate_dataset_ref
 
 
 def _base_dir() -> Path:
@@ -27,12 +28,22 @@ def _base_dir() -> Path:
 
 def _path_of(dataset_ref: str) -> Path:
     """由 dataset_ref 解析落盘路径。"""
-    return _base_dir() / f"{dataset_ref}.parquet"
+    clean_ref = validate_dataset_ref(dataset_ref)
+    base = _base_dir().resolve()
+    path = (base / f"{clean_ref}.parquet").resolve()
+    if path.parent != base:  # 纵深防御：即使标识符规则将来变化也不能越界。
+        raise ValueError("数据集路径超出存储目录")
+    return path
 
 
 def _meta_path_of(dataset_ref: str) -> Path:
     """数据集 sidecar 元数据路径（存数据集级安全策略等）。"""
-    return _base_dir() / f"{dataset_ref}.meta.json"
+    clean_ref = validate_dataset_ref(dataset_ref)
+    base = _base_dir().resolve()
+    path = (base / f"{clean_ref}.meta.json").resolve()
+    if path.parent != base:
+        raise ValueError("数据集元数据路径超出存储目录")
+    return path
 
 
 def _quote_ident(name: str) -> str:

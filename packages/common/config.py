@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    # API 身份边界。开发环境可显式关闭；staging/production 必须使用 Bearer。
+    auth_mode: Literal["disabled", "bearer"] = "disabled"
+    auth_tokens_json: str = ""
+    auth_default_user_id: str = "local-user"
+    auth_default_tenant_id: str = "local"
+
     # 模型路由
     model_registry_path: str = "config/models.yaml"
     deepseek_api_base: str = ""
@@ -40,6 +46,10 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = 12         # 单轮对话工具调用总数上限
     agent_tool_result_max_chars: int = 6_000  # 工具结果回填模型前的截断上限
     agent_registry_max_entries: int = 12   # 分析登记表全量条目上限，更旧的摘要化
+    agent_run_timeout_seconds: int = Field(default=300, ge=10, le=3600)
+    agent_model_timeout_seconds: int = Field(default=90, ge=5, le=600)
+    agent_tool_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    agent_recovery_stale_seconds: int = Field(default=0, ge=0, le=86400)
 
     # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
     redis_host: str = "127.0.0.1"
@@ -95,7 +105,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_rag_profile(self) -> Settings:
-        """拒绝会静默丢失稀疏召回能力的 RAG 后端组合。"""
+        """拒绝不安全身份配置及会静默丢能力的 RAG 后端组合。"""
+        if self.app_env.lower() in {"staging", "production"} and self.auth_mode != "bearer":
+            raise ValueError("staging/production 必须启用 AUTH_MODE=bearer")
+        if self.auth_mode == "bearer" and not self.auth_tokens_json.strip():
+            raise ValueError("AUTH_MODE=bearer 时 AUTH_TOKENS_JSON 不能为空")
+        if not self.auth_default_user_id.strip() or not self.auth_default_tenant_id.strip():
+            raise ValueError("默认认证主体和租户不能为空")
         if (self.rag_embedder == "bge") != (self.rag_store == "milvus"):
             raise ValueError("RAG_EMBEDDER=bge 必须与 RAG_STORE=milvus 配对")
         if self.rag_embedder == "bge" and not self.embedding_model.strip():

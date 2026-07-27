@@ -260,7 +260,7 @@ def test_route_missing_dataset_returns_404() -> None:
     client = TestClient(app)
     resp = client.post(
         "/analyze/stats",
-        json={"dataset_ref": "nope", "kind": "anomaly", "params": {"value_col": "v"}},
+        json={"dataset_ref": "f" * 32, "kind": "anomaly", "params": {"value_col": "v"}},
     )
     assert resp.status_code == 404
 

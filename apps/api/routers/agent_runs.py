@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
+from packages.governance.permissions import Principal
 from packages.session.store import SessionStore
 from packages.session.task_models import TaskEvent, TaskRun
 from packages.session.task_store import TaskStore
 
+from apps.api.auth import current_principal_dep
+from apps.api.authz import require_run_access
 from apps.api.deps import session_store_dep
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
@@ -17,11 +20,13 @@ router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 async def get_agent_run(
     run_id: str,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> dict[str, object]:
     tasks = TaskStore(store.db_path)
     run = await run_in_threadpool(tasks.get_run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    require_run_access(store, run, principal)
     contract = await run_in_threadpool(tasks.get_contract, run_id)
     snapshot = await run_in_threadpool(tasks.get_snapshot, run_id)
     return {
@@ -37,11 +42,13 @@ async def get_agent_run_events(
     after_sequence: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=1000),
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> dict[str, object]:
     tasks = TaskStore(store.db_path)
     run = await run_in_threadpool(tasks.get_run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务不存在")
+    require_run_access(store, run, principal)
     events = await run_in_threadpool(
         tasks.list_events,
         run_id,

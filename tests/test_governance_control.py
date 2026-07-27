@@ -10,6 +10,8 @@ from packages.governance.observability import trace_span
 from packages.governance.permissions import Principal
 from packages.governance.policy import ToolPolicyGateway, ToolPolicyRequest
 
+_DATASET_REF = "a" * 32
+
 
 def _request(**overrides: Any) -> ToolPolicyRequest:
     values: dict[str, Any] = {
@@ -18,7 +20,7 @@ def _request(**overrides: Any) -> ToolPolicyRequest:
         "conversation_id": "conversation-1",
         "run_id": "run-1",
         "tool_name": "aggregate_preview",
-        "arguments": {"dataset_ref": "dataset-1", "group_col": "地区"},
+        "arguments": {"dataset_ref": _DATASET_REF, "group_col": "地区"},
         "calls_used": 0,
         "max_tool_calls": 4,
         "resource_project_id": "project-1",
@@ -40,7 +42,7 @@ def test_policy_allows_static_tool_and_audits_only_argument_hash() -> None:
     serialized = events[0].to_dict()
     assert serialized["detail"]["arguments_hash"] == decision.arguments_hash
     assert "arguments" not in serialized["detail"]
-    assert "dataset-1" not in str(serialized)
+    assert _DATASET_REF not in str(serialized)
 
 
 @pytest.mark.parametrize(

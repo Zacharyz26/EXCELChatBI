@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.common.identifiers import DATASET_REF_PATTERN
+
 GEN_CHART_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dataset_ref": {"type": "string"},
+        "dataset_ref": {"type": "string", "pattern": DATASET_REF_PATTERN},
         "chart_type": {"type": "string", "enum": ["line", "bar", "pie", "scatter"]},
         "encoding": {
             "type": "object",

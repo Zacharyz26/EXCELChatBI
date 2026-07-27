@@ -225,18 +225,17 @@ def test_transform_registers_lineage(
     assert derived.profile["row_count"] == 3  # 去重后画像是真实重算的
 
 
-def test_transform_auto_registers_unlisted_parent(
+def test_transform_rejects_unlisted_parent(
     sales_ref: str, workspace: tuple[SessionStore, AgentContext]
 ) -> None:
-    """源数据集未登记时自动补登记父级，血缘链不断（冒烟发现的缺口回归）。"""
+    """源数据集未登记时默认拒绝，不能把任意本地文件收编到当前项目。"""
     store, context = workspace
-    out = _registry(context=context).execute(
-        "transform_dataset", f'{{"dataset_ref": "{sales_ref}", "drop_duplicates": []}}'
-    )
-    parent = store.get_dataset(sales_ref)
-    assert parent is not None and parent.parent_ref is None  # 父级被补登记
-    derived = store.get_dataset(out["dataset_ref"])
-    assert derived is not None and derived.parent_ref == sales_ref
+    with pytest.raises(AgentToolError, match="未登记"):
+        _registry(context=context).execute(
+            "transform_dataset",
+            f'{{"dataset_ref": "{sales_ref}", "drop_duplicates": []}}',
+        )
+    assert store.get_dataset(sales_ref) is None
 
 
 def test_transform_without_context_skips_registration(sales_ref: str) -> None:

@@ -18,6 +18,10 @@ ConversationId = Annotated[
 ChatMessageText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
 ]
+DatasetRef = Annotated[
+    str,
+    StringConstraints(pattern=r"^[0-9a-f]{32}$"),
+]
 
 
 class ProjectCreate(BaseModel):
@@ -146,7 +150,7 @@ class UploadResponse(BaseModel):
 class AnalyzeRequest(BaseModel):
     """分析请求：基于已上传数据集出图。"""
 
-    dataset_ref: str
+    dataset_ref: DatasetRef
 
 
 class ChartResponse(BaseModel):
@@ -164,7 +168,7 @@ class StatsRequest(BaseModel):
     与 dataset_ref 合并后经 Tool.invoke 做 JSON Schema 校验（红线3）。
     """
 
-    dataset_ref: str
+    dataset_ref: DatasetRef
     kind: str                      # trend | anomaly | regression
     params: dict[str, Any] = {}
     interpret: bool = False        # 是否附带 LLM 中文解读（默认关，不平白付模型成本）
@@ -206,7 +210,7 @@ class ReportRequest(BaseModel):
     唯一 LLM 出口）生成后传给 report 工具；report 工具本身不调 LLM（红线1/铁律）。
     """
 
-    dataset_ref: str
+    dataset_ref: DatasetRef
     title: str = "分析报告"
     charts: list[ReportChartSpec] = []
     stats: list[ReportStatSpec] = []

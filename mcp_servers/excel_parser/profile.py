@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -25,7 +26,7 @@ class ColumnProfile:
     median: float | None = None
     sample_values: list[str] = field(default_factory=list)  # 脱敏样本值
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """转可 JSON 序列化字典（用于喂给 LLM 的 payload）。"""
         return {
             "name": self.name,
@@ -52,9 +53,9 @@ class DataProfile:
     row_count: int
     column_count: int
     columns: list[ColumnProfile]
-    sample_rows: list[dict] = field(default_factory=list)   # 少量样本行（默认前5，可脱敏）
+    sample_rows: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """转可 JSON 序列化字典（喂给 LLM 的唯一数据视图）。"""
         return {
             "dataset_ref": self.dataset_ref,

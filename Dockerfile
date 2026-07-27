@@ -17,14 +17,14 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --no-editable \
-      --extra stats --extra report --extra rag-store --extra mcp
+      --extra stats --extra report --extra rag-store --extra chart-screenshot --extra mcp
 
 COPY apps ./apps
 COPY mcp_servers ./mcp_servers
 COPY packages ./packages
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable \
-      --extra stats --extra report --extra rag-store --extra mcp
+      --extra stats --extra report --extra rag-store --extra chart-screenshot --extra mcp
 
 
 FROM ${PYTHON_IMAGE} AS api
@@ -45,6 +45,7 @@ RUN apt-get update \
       libopenjp2-7 \
       libpango-1.0-0 \
       libpangoft2-1.0-0 \
+      fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid "${APP_GID}" chatbi \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --no-create-home chatbi \
@@ -63,9 +64,14 @@ COPY --from=python-builder /app/.venv /app/.venv
 COPY config ./config
 COPY docs/kb_samples ./docs/kb_samples
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN /app/.venv/bin/python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
+
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp/chatbi-home \
     APP_ENV=production \
     MODEL_REGISTRY_PATH=config/models.example.yaml \
     RAG_EMBEDDER=hashing \

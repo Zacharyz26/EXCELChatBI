@@ -2084,3 +2084,60 @@ select {
   background: #eef1f6;
   border-radius: 999px;
 }
+/* ── Bearer 模式登录 ── */
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--color-bg, #f4f7f5);
+  color: #1f2924;
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 32px;
+  border: 1px solid #dce6df;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 18px 50px rgb(24 48 34 / 10%);
+}
+
+.auth-card h1,
+.auth-card p {
+  margin: 0;
+}
+
+.auth-card label {
+  font-weight: 600;
+}
+
+.auth-card input {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #b9c9bf;
+  border-radius: 9px;
+  font: inherit;
+}
+
+.auth-card button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  background: #176b45;
+  color: white;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.auth-card button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.auth-card [role="alert"] {
+  color: #a12a2a;
+}

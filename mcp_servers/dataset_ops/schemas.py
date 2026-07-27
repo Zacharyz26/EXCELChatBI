@@ -8,13 +8,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.common.identifiers import DATASET_REF_PATTERN
+
 # 过滤算子白名单：比较 / 集合 / 文本包含 / 空值判断
 _FILTER_OPS = ["==", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains", "is_null", "not_null"]
 
 TRANSFORM_DATASET_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dataset_ref": {"type": "string", "description": "源数据集引用"},
+        "dataset_ref": {
+            "type": "string",
+            "pattern": DATASET_REF_PATTERN,
+            "description": "源数据集引用",
+        },
         "filters": {
             "type": "array",
             "description": "行过滤条件列表（AND 连接）",
@@ -72,7 +78,11 @@ TRANSFORM_DATASET_SCHEMA: dict[str, Any] = {
 AGGREGATE_PREVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "dataset_ref": {"type": "string", "description": "数据集引用"},
+        "dataset_ref": {
+            "type": "string",
+            "pattern": DATASET_REF_PATTERN,
+            "description": "数据集引用",
+        },
         "group_col": {"type": "string", "description": "分组维度列"},
         "value_col": {"type": "string", "description": "度量列；agg=count 时可省略"},
         "agg": {"type": "string", "enum": ["sum", "mean", "count"]},

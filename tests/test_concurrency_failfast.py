@@ -50,7 +50,10 @@ def test_stats_tool_runs_off_event_loop() -> None:
     app.dependency_overrides[stats_tools_dep] = lambda: fake
     try:
         client = TestClient(app)
-        resp = client.post("/analyze/stats", json={"dataset_ref": "x", "kind": "trend"})
+        resp = client.post(
+            "/analyze/stats",
+            json={"dataset_ref": "a" * 32, "kind": "trend"},
+        )
         assert resp.status_code == 200, resp.text
         assert seen["in_loop"] is False
     finally:

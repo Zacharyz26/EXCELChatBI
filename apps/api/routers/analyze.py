@@ -7,14 +7,27 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
+from packages.common.config import Settings
 from packages.common.logging import get_logger
+from packages.governance.permissions import Principal
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.gateway import ModelGateway
+from packages.session.store import SessionStore
 
-from apps.api.deps import chart_tools_dep, excel_tools_dep, model_gateway_dep
+from apps.api.auth import current_principal_dep
+from apps.api.authz import require_dataset_access
+from apps.api.deps import (
+    chart_tools_dep,
+    excel_tools_dep,
+    model_gateway_dep,
+    session_store_dep,
+    settings_dep,
+)
 from apps.api.schemas import AnalyzeRequest, ChartResponse
 from apps.orchestrator.chart_planner import plan_chart
 
@@ -34,8 +47,17 @@ async def analyze(
     excel: MCPServer = Depends(excel_tools_dep),
     chart: MCPServer = Depends(chart_tools_dep),
     gateway: ModelGateway = Depends(model_gateway_dep),
+    settings: Settings = Depends(settings_dep),
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ChartResponse:
     """基于已上传数据集，自动规划并生成一张 ECharts 图。"""
+    require_dataset_access(
+        store,
+        req.dataset_ref,
+        principal,
+        allow_unregistered=settings.auth_mode == "disabled",
+    )
     try:
         # 阻塞的读盘/画像计算 → 线程池，不卡事件循环
         profile = await run_in_threadpool(
@@ -65,7 +87,7 @@ async def analyze(
 
 async def _plan_and_generate(
     profile: object, chart: MCPServer, gateway: ModelGateway, feedback: str | None
-) -> dict:
+) -> dict[str, Any]:
     """规划一次并出图；规划/入参无效抛 _PlanFailure（可重试）。"""
     try:
         gen_args = await plan_chart(profile, gateway, feedback=feedback)  # type: ignore[arg-type]
@@ -74,7 +96,8 @@ async def _plan_and_generate(
 
     # 红线2/3：经 Tool.invoke 校验入参后，用真实数据聚合出图（DuckDB 聚合阻塞 → 线程池）
     try:
-        return await run_in_threadpool(chart._tools["gen_chart"].invoke, gen_args)
+        result = await run_in_threadpool(chart._tools["gen_chart"].invoke, gen_args)
+        return cast(dict[str, Any], result)
     except (SchemaValidationError, ValueError) as exc:
         enc = gen_args.get("encoding", {})
         raise _PlanFailure(

@@ -41,7 +41,7 @@ def test_real_v1_database_is_backed_up_and_migrated(tmp_path: Path) -> None:
 
     store = SessionStore(str(db_path))
 
-    assert store.schema_version == 2
+    assert store.schema_version == 3
     assert store.get_project("p1") is not None
     backups = list(tmp_path.glob("legacy.db.v1-backup.*.sqlite3"))
     assert len(backups) == 1
@@ -716,3 +716,78 @@ def test_downgrade_requires_terminal_runs_and_preserves_export(tmp_path: Path) -
         ).fetchone()[0] == 0
     with sqlite3.connect(export_path) as connection:
         assert connection.execute("SELECT status FROM task_runs").fetchone()[0] == "failed"
+
+
+def test_startup_recovery_marks_active_invocations_unknown(tmp_path: Path) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="recovery-run",
+        user_text="执行长任务",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="slow-call",
+        tool_name="kb_search",
+        arguments={"query": "测试"},
+        idempotency_key="recovery-key",
+        policy_decision={"allowed": True},
+    )
+
+    recovered = tasks.recover_stale_runs(stale_after_seconds=0)
+
+    assert len(recovered) == 1
+    recovered_run, event = recovered[0]
+    assert recovered_run.status == "failed"
+    assert recovered_run.terminal_reason == "process_recovery"
+    assert event.event_type == "run.failed"
+    assert event.payload["unknown_invocations"] == 1
+    saved_invocation = tasks.list_invocations(run.run_id)[0]
+    assert saved_invocation.invocation_id == invocation.invocation_id
+    assert saved_invocation.status == "unknown"
+
+
+def test_startup_recovery_preserves_waiting_user_runs(tmp_path: Path) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="waiting-run",
+        user_text="比较趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="waiting_user",
+        event_type="waiting_user",
+        payload={"question": "请选择指标"},
+    )
+
+    assert tasks.recover_stale_runs(stale_after_seconds=0) == []
+    saved = tasks.get_run(run.run_id)
+    assert saved is not None and saved.status == "waiting_user"

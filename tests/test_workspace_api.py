@@ -14,8 +14,10 @@ from packages.common.config import Settings
 from packages.session.store import SessionStore
 
 _XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_FAKE_DATASET_REF = "f" * 32
+_CHILD_DATASET_REF = "c" * 32
 _PROFILE = {
-    "dataset_ref": "fake-dataset",
+    "dataset_ref": _FAKE_DATASET_REF,
     "row_count": 3,
     "column_count": 2,
     "columns": [
@@ -42,7 +44,7 @@ class _Profile:
 class _FakeExcelServer:
     def __init__(self) -> None:
         self._tools = {
-            "parse_excel": _StaticTool({"dataset_ref": "fake-dataset"}),
+            "parse_excel": _StaticTool({"dataset_ref": _FAKE_DATASET_REF}),
             "infer_schema": _StaticTool(_Profile()),
         }
 
@@ -54,6 +56,7 @@ def workspace_client(tmp_path: Path) -> Iterator[tuple[TestClient, SessionStore,
     app.dependency_overrides[session_store_dep] = lambda: store
     app.dependency_overrides[settings_dep] = lambda: Settings(
         upload_dir=str(upload_dir),
+        report_dir=str(tmp_path / "reports"),
         chat_db_path=str(tmp_path / "chatbi.db"),
     )
     app.dependency_overrides[excel_tools_dep] = _FakeExcelServer
@@ -127,6 +130,31 @@ def test_project_and_conversation_crud(
     assert client.get(f"/conversations/{second['id']}").status_code == 404
 
 
+def test_project_delete_removes_owned_report_files(
+    workspace_client: tuple[TestClient, SessionStore, Path],
+) -> None:
+    client, store, upload_dir = workspace_client
+    project = _create_project(client)
+    report_id = "a" * 32
+    report_dir = upload_dir.parent / "reports"
+    report_dir.mkdir()
+    markdown = report_dir / f"{report_id}.md"
+    pdf = report_dir / f"{report_id}.pdf"
+    markdown.write_text("# report", encoding="utf-8")
+    pdf.write_bytes(b"%PDF-1.7\n")
+    store.register_report_publication(
+        report_id=report_id,
+        project_id=project["id"],
+    )
+
+    response = client.delete(f"/projects/{project['id']}")
+
+    assert response.status_code == 204
+    assert not markdown.exists()
+    assert not pdf.exists()
+    assert store.report_project_id(report_id) is None
+
+
 def test_workspace_crud_validation_and_missing_resources(
     workspace_client: tuple[TestClient, SessionStore, Path],
 ) -> None:
@@ -162,13 +190,13 @@ def test_linked_upload_persists_dataset_messages_and_profile_artifact(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["dataset_ref"] == "fake-dataset"
+    assert body["dataset_ref"] == _FAKE_DATASET_REF
     assert [message["role"] for message in body["messages"]] == ["user", "assistant"]
     assert body["messages"][0]["content"] == "上传了文件：销售.xlsx"
     assert "3 行、2 列" in body["messages"][1]["content"]
     assert body["artifact"]["type"] == "profile"
     assert body["artifact"]["payload"] == _PROFILE
-    assert list(upload_dir.glob("*_销售.xlsx"))
+    assert list(upload_dir.glob("*_销售.xlsx")) == []
 
     datasets = client.get(f"/projects/{project['id']}/datasets")
     assert datasets.status_code == 200
@@ -179,7 +207,7 @@ def test_linked_upload_persists_dataset_messages_and_profile_artifact(
     assert detail.status_code == 200
     assert detail.json()["messages"] == body["messages"]
     assert detail.json()["artifacts"] == [body["artifact"]]
-    assert store.get_dataset("fake-dataset") is not None
+    assert store.get_dataset(_FAKE_DATASET_REF) is not None
 
 
 def test_legacy_upload_keeps_original_response_shape(
@@ -194,7 +222,7 @@ def test_legacy_upload_keeps_original_response_shape(
 
     assert response.status_code == 200, response.text
     assert set(response.json()) == {"dataset_ref", "profile"}
-    assert store.get_dataset("fake-dataset") is None
+    assert store.get_dataset(_FAKE_DATASET_REF) is None
 
 
 def test_upload_link_requires_matching_project_and_conversation(
@@ -224,7 +252,7 @@ def test_upload_link_requires_matching_project_and_conversation(
     assert mismatch.status_code == 422
     assert mismatch.json()["detail"] == "对话不属于指定项目"
     assert not upload_dir.exists()
-    assert store.get_dataset("fake-dataset") is None
+    assert store.get_dataset(_FAKE_DATASET_REF) is None
 
 
 def test_delete_dataset_removes_registry_and_files_keeps_derived(
@@ -242,7 +270,7 @@ def test_delete_dataset_removes_registry_and_files_keeps_derived(
         profile={"row_count": 2, "column_count": 1, "columns": []},
     )
     store.register_dataset(
-        ref="child-ref", project_id=project["id"], filename="test.xlsx（衍生）",
+        ref=_CHILD_DATASET_REF, project_id=project["id"], filename="test.xlsx（衍生）",
         profile={"row_count": 1, "column_count": 1, "columns": []},
         parent_ref=parent_ref, transform={"drop_nulls": []},
     )
@@ -259,12 +287,12 @@ def test_delete_dataset_removes_registry_and_files_keeps_derived(
     assert response.status_code == 204
     assert store.get_dataset(parent_ref) is None
     assert not _path_of(parent_ref).exists()
-    child = store.get_dataset("child-ref")
+    child = store.get_dataset(_CHILD_DATASET_REF)
     assert child is not None and child.parent_ref is None
     # 再删返回 404；删不存在的也是 404；无引用的数据集不需要 force
     assert client.delete(f"/datasets/{parent_ref}").status_code == 404
     assert client.delete("/datasets/nonexistent").status_code == 404
-    assert client.delete("/datasets/child-ref").status_code == 204
+    assert client.delete(f"/datasets/{_CHILD_DATASET_REF}").status_code == 204
 
 
 def test_rename_dataset(workspace_client: tuple[TestClient, SessionStore, Path]) -> None:

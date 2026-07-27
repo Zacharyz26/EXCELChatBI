@@ -198,16 +198,19 @@ def _scalar_to_str(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _json_safe_records(df: pd.DataFrame) -> list[dict]:
+def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """DataFrame → JSON 安全的记录列表（NaN→None，时间→iso 字符串）。"""
     safe = df.copy()
     for col in safe.columns:
         if pd.api.types.is_datetime64_any_dtype(safe[col]):
             safe[col] = safe[col].astype(str)
     records = safe.to_dict(orient="records")
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for rec in records:
         out.append(
-            {k: (None if (isinstance(v, float) and math.isnan(v)) else v) for k, v in rec.items()}
+            {
+                str(k): (None if (isinstance(v, float) and math.isnan(v)) else v)
+                for k, v in rec.items()
+            }
         )
     return out

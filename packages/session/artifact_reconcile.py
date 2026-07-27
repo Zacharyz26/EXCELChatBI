@@ -1,10 +1,4 @@
-"""Read-only reconciliation between persisted report Artifacts and report files.
-
-The legacy ``/analyze/report`` endpoint intentionally creates downloadable files
-without a conversation Artifact.  Therefore an untracked published report is a
-cleanup *candidate*, not proof of an orphan, and this module never deletes one.
-Only exact atomic-write temporary names can be removed when an operator opts in.
-"""
+"""Read-only reconciliation between persisted report ownership and report files."""
 
 from __future__ import annotations
 
@@ -73,6 +67,9 @@ def reconcile_report_files(
     unsafe_refs: set[str] = set()
     for artifact in store.list_report_artifacts():
         _collect_artifact_refs(artifact, root, referenced, unsafe_refs)
+    for report_id in store.list_standalone_report_ids():
+        referenced.add(f"{report_id}.md")
+        referenced.add(f"{report_id}.pdf")
 
     published: set[str] = set()
     stale: set[str] = set()

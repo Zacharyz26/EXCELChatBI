@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-_DATASET = {"dataset_ref": {"type": "string"}}
+from packages.common.identifiers import DATASET_REF_PATTERN
+
+_DATASET = {
+    "dataset_ref": {"type": "string", "pattern": DATASET_REF_PATTERN}
+}
 
 TREND_ANALYSIS_SCHEMA: dict[str, Any] = {
     "type": "object",

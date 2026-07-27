@@ -40,9 +40,9 @@ def test_upload_filename_traversal_is_basenamed(tmp_path: Path) -> None:
             files={"file": ("../../evil.xlsx", _xlsx_bytes(), _XLSX_CT)},
         )
         assert resp.status_code == 200, resp.text
-        # 落盘文件在 upload_dir 内、以 basename 结尾；父目录未被写入 evil.xlsx（未穿越）
+        # 源文件仅作临时解析输入，完成后删除；父目录也未被路径穿越写入。
         saved = list(up.glob("*_evil.xlsx"))
-        assert len(saved) == 1
+        assert saved == []
         assert not (tmp_path / "evil.xlsx").exists()
         assert not (up.parent / "evil.xlsx").exists()
     finally:

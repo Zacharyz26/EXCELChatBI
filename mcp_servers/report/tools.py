@@ -9,6 +9,7 @@ Markdown 与 PDF 的纯格式化工作。报告里所有数字来自工具真实
 from __future__ import annotations
 
 import base64
+import importlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -106,9 +107,9 @@ def export_pdf(args: dict[str, Any]) -> dict[str, Any]:
     Raises:
         FileNotFoundError: report_id 对应的 .md 不存在。
     """
-    import markdown as md_lib  # type: ignore[import-untyped]
     import weasyprint
 
+    md_lib = importlib.import_module("markdown")
     report_id: str = args["report_id"]
     md_path = _reports_dir() / f"{report_id}.md"
     if not md_path.exists():

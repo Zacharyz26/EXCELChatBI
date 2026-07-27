@@ -16,6 +16,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, cast
 
+from packages.common.identifiers import validate_report_id
 from packages.session.cache import ConversationCache
 from packages.session.migrations import CURRENT_SCHEMA_VERSION, migrate_database
 from packages.session.models import (
@@ -127,14 +128,31 @@ class SessionStore:
 
     # ── Project ──
 
-    def create_project(self, name: str) -> Project:
+    def create_project(
+        self,
+        name: str,
+        *,
+        owner_user_id: str = "local-user",
+        tenant_id: str = "local",
+    ) -> Project:
         """创建项目。"""
         clean_name = _required_text(name, "项目名称")
+        clean_user_id = _required_text(owner_user_id, "项目所有者")
+        clean_tenant_id = _required_text(tenant_id, "租户")
         project = Project(id=_new_id(), name=clean_name, created_at=_utc_now())
         with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "INSERT INTO projects(id, name, created_at) VALUES (?, ?, ?)",
                 (project.id, project.name, project.created_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO project_memberships(
+                    project_id, user_id, tenant_id, role, created_at
+                ) VALUES (?, ?, ?, 'owner', ?)
+                """,
+                (project.id, clean_user_id, clean_tenant_id, project.created_at),
             )
         return project
 
@@ -146,13 +164,50 @@ class SessionStore:
             ).fetchone()
         return _project_from_row(row) if row is not None else None
 
-    def list_projects(self) -> list[Project]:
+    def list_projects(
+        self,
+        *,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> list[Project]:
         """按创建顺序列出项目。"""
         with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT id, name, created_at FROM projects ORDER BY created_at, rowid"
-            ).fetchall()
+            if user_id is None and tenant_id is None:
+                rows = connection.execute(
+                    "SELECT id, name, created_at FROM projects ORDER BY created_at, rowid"
+                ).fetchall()
+            elif user_id is None or tenant_id is None:
+                raise ValueError("项目列表必须同时提供 user_id 和 tenant_id")
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT p.id, p.name, p.created_at
+                    FROM projects AS p
+                    JOIN project_memberships AS m ON m.project_id = p.id
+                    WHERE m.user_id = ? AND m.tenant_id = ?
+                    ORDER BY p.created_at, p.rowid
+                    """,
+                    (user_id, tenant_id),
+                ).fetchall()
         return [_project_from_row(row) for row in rows]
+
+    def project_role(
+        self,
+        project_id: str,
+        *,
+        user_id: str,
+        tenant_id: str,
+    ) -> str | None:
+        """返回主体在项目中的角色；没有成员关系时返回 None。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT role FROM project_memberships
+                WHERE project_id = ? AND user_id = ? AND tenant_id = ?
+                """,
+                (project_id, user_id, tenant_id),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
 
     def update_project(self, project_id: str, name: str) -> Project | None:
         """重命名项目；不存在返回 None。"""
@@ -175,6 +230,82 @@ class SessionStore:
             self._cache.clear()
             return True
         return False
+
+    # ── Published report ownership ──
+
+    def register_report_publication(
+        self,
+        *,
+        report_id: str,
+        project_id: str,
+        conversation_id: str | None = None,
+    ) -> None:
+        """Bind downloadable report files to a project authorization boundary."""
+        clean_report_id = validate_report_id(report_id)
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            if conversation_id is not None:
+                row = connection.execute(
+                    "SELECT project_id FROM conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"对话不存在: {conversation_id}")
+                if _row_text(row, "project_id") != project_id:
+                    raise ValueError("报告对话不属于指定项目")
+            connection.execute(
+                """
+                INSERT INTO report_publications(
+                    report_id, project_id, conversation_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (clean_report_id, project_id, conversation_id, now),
+            )
+
+    def report_project_id(self, report_id: str) -> str | None:
+        """Return the owning project for a published report."""
+        clean_report_id = validate_report_id(report_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT project_id FROM report_publications WHERE report_id = ?",
+                (clean_report_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def list_project_report_ids(self, project_id: str) -> list[str]:
+        """List report files that must be removed with a project."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_id FROM report_publications
+                WHERE project_id = ? ORDER BY created_at, rowid
+                """,
+                (project_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def list_conversation_report_ids(self, conversation_id: str) -> list[str]:
+        """List report files that must be removed with a conversation."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_id FROM report_publications
+                WHERE conversation_id = ? ORDER BY created_at, rowid
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def list_standalone_report_ids(self) -> list[str]:
+        """List legacy-compatible reports created outside a conversation."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_id FROM report_publications
+                WHERE conversation_id IS NULL ORDER BY created_at, rowid
+                """
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     # ── Dataset ──
 

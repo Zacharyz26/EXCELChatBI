@@ -14,13 +14,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.api.deps import model_gateway_dep  # noqa: E402
+from apps.api.deps import model_gateway_dep, session_store_dep  # noqa: E402
 from apps.api.main import app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.report import tools as report_tools  # noqa: E402
 from mcp_servers.report.server import build_server as build_report_server  # noqa: E402
 from packages.common.dataset_store import save_dataframe  # noqa: E402
 from packages.models.types import Message, ModelResponse, Scenario  # noqa: E402
+from packages.session.store import SessionStore  # noqa: E402
 
 # 1x1 PNG，用于免渲染的组装测试
 _TINY_PNG = base64.b64decode(
@@ -155,8 +156,17 @@ def dataset_ref() -> str:
     return save_dataframe(df)
 
 
-def test_report_endpoint_e2e(dataset_ref: str) -> None:
+def test_report_endpoint_e2e(dataset_ref: str, tmp_path: Path) -> None:
+    store = SessionStore(str(tmp_path / "chatbi.db"))
+    project = store.create_project("报告测试")
+    store.register_dataset(
+        ref=dataset_ref,
+        project_id=project.id,
+        filename="sales.xlsx",
+        profile={"row_count": 48, "column_count": 3, "columns": []},
+    )
     app.dependency_overrides[model_gateway_dep] = lambda: FakeGateway()
+    app.dependency_overrides[session_store_dep] = lambda: store
     try:
         client = TestClient(app)
         payload = {

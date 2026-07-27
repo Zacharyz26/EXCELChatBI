@@ -105,7 +105,9 @@ def _parse_plan(content: str) -> dict[str, Any]:
     if start == -1 or end == -1:
         raise ValueError(f"模型未返回有效 JSON 规划: {content!r}")
     plan = json.loads(text[start : end + 1])
+    if not isinstance(plan, dict):
+        raise ValueError(f"图表规划必须是 JSON 对象: {plan!r}")
     for key in ("chart_type", "x", "y"):
         if key not in plan:
             raise ValueError(f"图表规划缺少字段 {key}: {plan}")
-    return plan
+    return {str(key): value for key, value in plan.items()}

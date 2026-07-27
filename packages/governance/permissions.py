@@ -12,6 +12,16 @@ class Principal:
 
     user_id: str
     tenant_id: str | None = None
+    roles: frozenset[str] = frozenset()
+
+    @property
+    def tenant_scope(self) -> str:
+        """项目成员关系使用的非空租户作用域。"""
+        return self.tenant_id or "local"
+
+    def has_role(self, role: str) -> bool:
+        """判断认证快照是否包含全局角色。"""
+        return role in self.roles
 
 
 class PermissionError_(Exception):

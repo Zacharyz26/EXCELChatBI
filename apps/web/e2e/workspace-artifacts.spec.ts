@@ -386,6 +386,10 @@ async function installMockApi(
     const method = request.method();
     const path = new URL(request.url()).pathname.replace(/^\/api/, "");
 
+    if (method === "GET" && path === "/auth/config") {
+      await json(route, { mode: "disabled" });
+      return;
+    }
     if (method === "GET" && path === "/projects") {
       await json(route, [state.project]);
       return;
@@ -563,22 +567,20 @@ test("Report Artifact 渲染 PDF 下载入口并可在刷新后恢复", async ({
 
   const report = page.locator(".report-artifact");
   await expect(report).toContainText("分析报告");
-  const pdfLink = report.getByRole("link", { name: "下载 PDF" });
-  await expect(pdfLink).toHaveAttribute("href", "/api/analyze/report/report-1.pdf");
-  await expect(pdfLink).toHaveAttribute("target", "_blank");
-  const pdfResponse = await page.evaluate(async (href) => {
-    const response = await fetch(href);
-    return {
-      contentType: response.headers.get("content-type"),
-      disposition: response.headers.get("content-disposition"),
-    };
-  }, await pdfLink.getAttribute("href"));
-  expect(pdfResponse.contentType).toContain("application/pdf");
-  expect(pdfResponse.disposition).toContain('filename="report-1.pdf"');
+  const pdfButton = report.getByRole("button", { name: "下载 PDF" });
+  const responsePromise = page.waitForResponse(
+    (response) => response.url().endsWith("/api/analyze/report/report-1.pdf"),
+  );
+  await pdfButton.click();
+  const pdfResponse = await responsePromise;
+  expect(pdfResponse.headers()["content-type"]).toContain("application/pdf");
+  expect(pdfResponse.headers()["content-disposition"]).toContain(
+    'filename="report-1.pdf"',
+  );
 
   await page.reload();
   await expect(page.locator(".report-artifact")).toBeVisible();
-  await expect(page.getByRole("link", { name: "下载 PDF" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "下载 PDF" })).toBeVisible();
 });
 
 test("知识库支持同步、全量重建和按来源删除", async ({ page }) => {

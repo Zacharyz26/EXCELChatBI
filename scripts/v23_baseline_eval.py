@@ -128,9 +128,18 @@ class _ObservingGateway:
 class _FixtureRegistry:
     """Schema-guided deterministic tools used only by the behavior baseline."""
 
-    def __init__(self, case_id: str, workspace: Path) -> None:
+    def __init__(
+        self,
+        case_id: str,
+        workspace: Path,
+        *,
+        store: SessionStore | None = None,
+        project_id: str | None = None,
+    ) -> None:
         self.case_id = case_id
         self.workspace = workspace
+        self.store = store
+        self.project_id = project_id
         self.executed: list[tuple[str, dict[str, Any]]] = []
 
     def openai_tools(self) -> list[dict[str, Any]]:
@@ -242,11 +251,26 @@ class _FixtureRegistry:
             path.write_bytes(b"fixture-png")
             return {"png_path": str(path)}
         if name == "transform_dataset":
+            parent_ref = str(arguments.get("dataset_ref", ""))
+            derived_ref = _fixture_dataset_ref(
+                self.case_id,
+                f"derived:{len(self.executed)}:{parent_ref}",
+            )
+            if self.store is not None and self.project_id is not None:
+                parent = self.store.get_dataset(parent_ref)
+                self.store.register_dataset(
+                    ref=derived_ref,
+                    project_id=self.project_id,
+                    filename="derived-fixture.xlsx",
+                    profile=parent.profile if parent is not None else {},
+                    parent_ref=parent_ref or None,
+                    transform={"fixture": True},
+                )
             return {
-                "dataset_ref": "derived-fixture",
+                "dataset_ref": derived_ref,
                 "rows_before": 120,
                 "rows_after": 116,
-                "parent_ref": arguments.get("dataset_ref"),
+                "parent_ref": parent_ref,
             }
         if name == "aggregate_preview":
             return {
@@ -267,7 +291,7 @@ class _FixtureRegistry:
                 ]
             }
         if name == "generate_report":
-            report_id = f"eval-{uuid.uuid4().hex[:8]}"
+            report_id = uuid.uuid4().hex
             md_path = self.workspace / f"{report_id}.md"
             md_path.write_text("# Fixture report\n", encoding="utf-8")
             result: JsonObject = {
@@ -370,7 +394,12 @@ async def _run_case(
         conversation = store.create_conversation(project.id)
         _seed_context(store, conversation, case, workspace)
         observing = _ObservingGateway(gateway)
-        fixture_registry = _FixtureRegistry(str(case["id"]), workspace)
+        fixture_registry = _FixtureRegistry(
+            str(case["id"]),
+            workspace,
+            store=store,
+            project_id=project.id,
+        )
         raw_events = [
             item
             async for item in stream_agent_chat(
@@ -507,7 +536,10 @@ def _observable_row(
         and terminal_truthful
         and not forbidden_violations
     )
-    costs = [response.cost for response in responses if response.cost is not None]
+    costs: list[float] = []
+    for response in responses:
+        if response.cost is not None:
+            costs.append(float(response.cost))
     currencies = {
         response.cost_currency
         for response in responses
@@ -565,7 +597,7 @@ def _observable_row(
         if responses
         else False,
         "latency_ms": round(sum(response.latency_ms for response in responses), 3),
-        "cost": round(sum(cast(list[float], costs)), 9) if costs else None,
+        "cost": round(sum(costs), 9) if costs else None,
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
         "cost_availability": (
             "available"
@@ -635,10 +667,11 @@ def _seed_context(
     context = cast(dict[str, Any], case["context"])
     for dataset in cast(list[dict[str, Any]], context.get("datasets") or []):
         columns = [str(item) for item in cast(list[object], dataset.get("columns") or [])]
+        source_ref = str(dataset["ref"])
         store.register_dataset(
-            ref=str(dataset["ref"]),
+            ref=_fixture_dataset_ref(str(case["id"]), source_ref),
             project_id=conversation.project_id,
-            filename=f"{dataset['ref']}.xlsx",
+            filename=f"{source_ref}.xlsx",
             profile={
                 "row_count": int(dataset.get("row_count", 120)),
                 "column_count": len(columns),
@@ -690,6 +723,11 @@ def _seed_context(
             role="assistant",
             content="\n".join(notes),
         )
+
+
+def _fixture_dataset_ref(case_id: str, alias: str) -> str:
+    """Map readable fixture aliases to production-valid opaque references."""
+    return hashlib.sha256(f"{case_id}:{alias}".encode()).hexdigest()[:32]
 
 
 def _artifact_satisfied(

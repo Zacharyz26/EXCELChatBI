@@ -13,14 +13,19 @@ from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
 from mcp_servers.excel_parser.tools import TableTooLargeError
 from packages.common.config import Settings
-from packages.common.dataset_store import save_metadata
+from packages.common.dataset_store import delete_dataset, save_metadata
+from packages.common.logging import get_logger
 from packages.governance.data_boundary import parse_policy_override
+from packages.governance.permissions import Principal
 from packages.session.store import SessionStore
 
+from apps.api.auth import current_principal_dep
+from apps.api.authz import require_conversation_access, require_project_access
 from apps.api.deps import excel_tools_dep, session_store_dep, settings_dep
 from apps.api.schemas import ArtifactResponse, MessageResponse, UploadResponse
 
 router = APIRouter(prefix="/upload", tags=["upload"])
+_log = get_logger("api.upload")
 
 
 @router.post("/excel", response_model=UploadResponse, response_model_exclude_unset=True)
@@ -29,6 +34,7 @@ async def upload_excel(
     settings: Settings = Depends(settings_dep),
     excel: MCPServer = Depends(excel_tools_dep),
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
     policy: str | None = Form(default=None),
     project_id: str | None = Form(default=None),
     conversation_id: str | None = Form(default=None),
@@ -49,6 +55,8 @@ async def upload_excel(
         store,
         project_id,
         conversation_id,
+        principal,
+        settings.auth_mode == "bearer",
     )
 
     upload_dir = Path(settings.upload_dir)
@@ -58,53 +66,70 @@ async def upload_excel(
     saved = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
     await _save_within_limit(file, saved, settings.max_upload_mb)
 
-    # 经 Tool.invoke 走 schema 校验（红线3）；解析是阻塞重活 → 线程池，不卡事件循环
+    dataset_ref: str | None = None
+    completed = False
     try:
-        parsed = await run_in_threadpool(
-            excel._tools["parse_excel"].invoke, {"file_ref": str(saved)}
+        # 经 Tool.invoke 走 schema 校验（红线3）；解析是阻塞重活 → 线程池。
+        try:
+            parsed = await run_in_threadpool(
+                excel._tools["parse_excel"].invoke, {"file_ref": str(saved)}
+            )
+        except TableTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Excel 解析失败：{exc}") from exc
+        dataset_ref = parsed["dataset_ref"]
+        if override is not None:
+            save_metadata(dataset_ref, {"policy": override})
+
+        profile = await run_in_threadpool(
+            excel._tools["infer_schema"].invoke, {"dataset_ref": dataset_ref}
         )
-    except TableTooLargeError as exc:
-        saved.unlink(missing_ok=True)  # 拒绝的文件不留盘
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
-    except ValueError as exc:  # 格式无法解析/工作表不存在等 → 可读 422 而非 500
-        saved.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Excel 解析失败：{exc}") from exc
-    dataset_ref = parsed["dataset_ref"]
-    if override is not None:
-        # 落数据集级安全策略，infer_schema 脱敏时读取
-        save_metadata(dataset_ref, {"policy": override})
+        profile_data = profile.to_dict()
 
-    profile = await run_in_threadpool(
-        excel._tools["infer_schema"].invoke, {"dataset_ref": dataset_ref}
-    )
-    profile_data = profile.to_dict()
+        if workspace_link is None:
+            # 经典模式仍返回 dataset_ref，但上传源文件已不再保留。
+            completed = True
+            return UploadResponse(dataset_ref=dataset_ref, profile=profile_data)
 
-    if workspace_link is None:
-        # 经典模式兼容：不传项目/对话时保持原响应结构与行为。
-        return UploadResponse(dataset_ref=dataset_ref, profile=profile_data)
+        linked_project_id, linked_conversation_id = workspace_link
+        try:
+            _, messages, artifact = await run_in_threadpool(
+                store.record_profile_upload,
+                ref=dataset_ref,
+                project_id=linked_project_id,
+                conversation_id=linked_conversation_id,
+                filename=safe_name,
+                profile=profile_data,
+                user_content=f"上传了文件：{safe_name}",
+                assistant_content=_profile_message(safe_name, profile_data),
+            )
+        except (sqlite3.IntegrityError, ValueError) as exc:
+            # 关联目标可能被并发删除；数据库回滚后同时清理已生成的数据文件。
+            raise HTTPException(status_code=409, detail=f"数据集关联失败：{exc}") from exc
 
-    linked_project_id, linked_conversation_id = workspace_link
-    try:
-        _, messages, artifact = await run_in_threadpool(
-            store.record_profile_upload,
-            ref=dataset_ref,
-            project_id=linked_project_id,
-            conversation_id=linked_conversation_id,
-            filename=safe_name,
+        completed = True
+        return UploadResponse(
+            dataset_ref=dataset_ref,
             profile=profile_data,
-            user_content=f"上传了文件：{safe_name}",
-            assistant_content=_profile_message(safe_name, profile_data),
+            messages=[MessageResponse.model_validate(message) for message in messages],
+            artifact=ArtifactResponse.model_validate(artifact),
         )
-    except (sqlite3.IntegrityError, ValueError) as exc:
-        # 文件解析已成功，但关联目标可能被并发删除；数据库事务会完整回滚。
-        raise HTTPException(status_code=409, detail=f"数据集关联失败：{exc}") from exc
-
-    return UploadResponse(
-        dataset_ref=dataset_ref,
-        profile=profile_data,
-        messages=[MessageResponse.model_validate(message) for message in messages],
-        artifact=ArtifactResponse.model_validate(artifact),
-    )
+    finally:
+        # Excel 只作为解析输入；成功后的系统真相是 parquet + 画像。
+        try:
+            saved.unlink(missing_ok=True)
+        except OSError as exc:
+            _log.error("upload.source_cleanup_failed", path=saved.name, error=str(exc))
+        if dataset_ref is not None and not completed:
+            try:
+                delete_dataset(dataset_ref)
+            except (OSError, ValueError) as exc:
+                _log.error(
+                    "upload.orphan_dataset_cleanup_failed",
+                    dataset_ref=dataset_ref,
+                    error=str(exc),
+                )
 
 
 async def _save_within_limit(file: UploadFile, dest: Path, max_mb: int) -> None:
@@ -122,7 +147,7 @@ async def _save_within_limit(file: UploadFile, dest: Path, max_mb: int) -> None:
                 if written > max_bytes:
                     raise HTTPException(status_code=413, detail=f"文件过大（上限 {max_mb} MB）")
                 out.write(chunk)
-    except HTTPException:
+    except (HTTPException, OSError):
         dest.unlink(missing_ok=True)  # 清理半成品，避免残留超大文件
         raise
 
@@ -145,6 +170,8 @@ def _validate_workspace_link(
     store: SessionStore,
     project_id: str | None,
     conversation_id: str | None,
+    principal: Principal,
+    authenticated_mode: bool,
 ) -> tuple[str, str] | None:
     """校验上传关联；两个 ID 必须同时提供，均不提供则走经典模式。"""
     clean_project_id = project_id.strip() if project_id and project_id.strip() else None
@@ -152,17 +179,24 @@ def _validate_workspace_link(
         conversation_id.strip() if conversation_id and conversation_id.strip() else None
     )
     if clean_project_id is None and clean_conversation_id is None:
+        if authenticated_mode:
+            raise HTTPException(
+                status_code=422,
+                detail="Bearer 模式下上传必须关联 project_id 和 conversation_id",
+            )
         return None
     if clean_project_id is None or clean_conversation_id is None:
         raise HTTPException(
             status_code=422,
             detail="project_id 和 conversation_id 必须同时提供",
         )
-    if store.get_project(clean_project_id) is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    conversation = store.get_conversation(clean_conversation_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    require_project_access(store, clean_project_id, principal, write=True)
+    conversation = require_conversation_access(
+        store,
+        clean_conversation_id,
+        principal,
+        write=True,
+    )
     if conversation.project_id != clean_project_id:
         raise HTTPException(status_code=422, detail="对话不属于指定项目")
     return clean_project_id, clean_conversation_id

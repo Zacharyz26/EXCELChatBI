@@ -176,3 +176,79 @@ def test_unknown_tool_outcome_cannot_be_declared_complete() -> None:
 
     assert result.verdict == "BLOCKED"
     assert result.issues[0].code == "unknown_tool_outcome"
+
+
+def test_failed_tool_requires_a_later_success_before_completion() -> None:
+    contract = build_minimal_contract(
+        run_id="run-failed",
+        user_text="预测未来销售",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    def invocation(
+        invocation_id: str,
+        *,
+        status: str,
+        error_text: str | None,
+        started_at: str,
+    ) -> ToolInvocation:
+        return ToolInvocation(
+            invocation_id=invocation_id,
+            run_id="run-failed",
+            step_id=None,
+            tool_call_id=invocation_id,
+            tool_name="forecast" if status == "failed" else "trend_analysis",
+            idempotency_key=invocation_id,
+            args_hash=invocation_id,
+            args={},
+            status=status,  # type: ignore[arg-type]
+            result_hash="result" if status == "succeeded" else None,
+            error_text=error_text,
+            artifact_id=None,
+            started_at=started_at,
+            completed_at=started_at,
+        )
+
+    failed = invocation(
+        "failed",
+        status="failed",
+        error_text="至少需要 8 个时间点",
+        started_at="1",
+    )
+    result = verify_completion(
+        contract=contract,
+        final_text="预测已完成。",
+        artifacts=[],
+        invocations=[failed],
+        evidence=[],
+    )
+    assert result.verdict == "FAILED"
+    assert {issue.code for issue in result.issues} == {"unrecovered_tool_failure"}
+
+    succeeded = invocation(
+        "succeeded",
+        status="succeeded",
+        error_text=None,
+        started_at="2",
+    )
+    evidence = EvidenceRecord(
+        evidence_id="evidence-success",
+        run_id="run-failed",
+        invocation_id="succeeded",
+        artifact_id=None,
+        kind="tool_result",
+        source={"tool": "trend_analysis"},
+        result_hash="result",
+        summary={},
+        created_at="2",
+    )
+    recovered = verify_completion(
+        contract=contract,
+        final_text="已改用趋势分析。",
+        artifacts=[],
+        invocations=[failed, succeeded],
+        evidence=[evidence],
+    )
+    assert recovered.verdict == "PASS"

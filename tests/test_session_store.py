@@ -23,7 +23,7 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
     second = SessionStore(str(db_path))
 
     assert db_path.exists()
-    assert second.schema_version == 2
+    assert second.schema_version == 3
     assert second.get_project(project.id) == project
     with sqlite3.connect(db_path) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
@@ -48,6 +48,8 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "tool_invocations",
         "evidence",
         "checkpoints",
+        "project_memberships",
+        "report_publications",
     } <= tables
 
 

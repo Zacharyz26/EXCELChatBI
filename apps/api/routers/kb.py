@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from packages.common.config import Settings
+from packages.governance.permissions import Principal
 from packages.models.gateway import ModelGateway
 from packages.rag.embedding import Embedder
 from packages.rag.lifecycle import (
@@ -19,6 +20,7 @@ from packages.rag.lifecycle import (
 from packages.rag.retriever import HybridRetriever
 from packages.rag.store import KnowledgeStore
 
+from apps.api.auth import current_principal_dep, require_kb_admin
 from apps.api.deps import (
     embedder_dep,
     kb_store_dep,
@@ -48,6 +50,7 @@ async def ingest(
     embedder: Embedder = Depends(embedder_dep),
     store: KnowledgeStore = Depends(kb_store_dep),
     settings: Settings = Depends(settings_dep),
+    _principal: Principal = Depends(require_kb_admin),
 ) -> IngestResponse:
     """增量同步文档：内容未变时跳过，内容变化时按 source 替换并递增版本。"""
     documents = await run_in_threadpool(_collect_docs, req, settings)
@@ -63,6 +66,7 @@ async def rebuild(
     embedder: Embedder = Depends(embedder_dep),
     store: KnowledgeStore = Depends(kb_store_dep),
     settings: Settings = Depends(settings_dep),
+    _principal: Principal = Depends(require_kb_admin),
 ) -> IngestResponse:
     """从目录完整构建新索引，准备成功后原子替换活动索引。"""
     ingest_req = IngestRequest(path=req.path or settings.kb_docs_dir)
@@ -77,6 +81,7 @@ async def rebuild(
 async def delete_document(
     document_id: str,
     store: KnowledgeStore = Depends(kb_store_dep),
+    _principal: Principal = Depends(require_kb_admin),
 ) -> DeleteDocumentResponse:
     """按稳定文档 ID 删除来源及其所有片段。"""
     removed = await run_in_threadpool(store.delete_document, document_id)
@@ -88,6 +93,7 @@ async def delete_document(
 @router.get("/overview", response_model=KBOverviewResponse)
 async def overview(
     store: KnowledgeStore = Depends(kb_store_dep),
+    _principal: Principal = Depends(current_principal_dep),
 ) -> KBOverviewResponse:
     """知识库概览与可管理文档清单。"""
     count, sources, topics, documents = await run_in_threadpool(
@@ -106,6 +112,7 @@ async def query(
     req: KBQueryRequest,
     retriever: HybridRetriever = Depends(retriever_dep),
     gateway: ModelGateway = Depends(model_gateway_dep),
+    _principal: Principal = Depends(current_principal_dep),
 ) -> KBQueryResponse:
     """中文提问 → 检索 → 带引用生成 / 诚实无答。"""
     if not req.question.strip():

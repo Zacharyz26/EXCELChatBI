@@ -8,13 +8,14 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 from apps.orchestrator.control.contracts import TaskContract
 from apps.orchestrator.control.state import AgentState, ensure_transition
 
+from packages.common.identifiers import validate_report_id
 from packages.session.models import Artifact, ArtifactDraft, Conversation, JsonObject, Message
 from packages.session.task_models import (
     Checkpoint,
@@ -154,6 +155,144 @@ class TaskStore:
                 "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
         return _run_from_row(row) if row is not None else None
+
+    def terminate_active_run(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        reason: str,
+        event_type: str,
+        expected_version: int | None = None,
+    ) -> tuple[TaskRun, TaskEvent] | None:
+        """原子收敛活动任务，并把仍在 running 的调用标记为 unknown。
+
+        线程池工作无法被 Python 安全强杀，因此超时/断线后不能把调用记作 failed；
+        unknown 会阻止 Verifier 把任务误判为成功，也避免自动重试潜在副作用。
+        """
+        if status not in {"failed", "cancelled", "blocked"}:
+            raise ValueError("强制终止只接受 failed/cancelled/blocked")
+        clean_reason = _required_text(reason, "终止原因")[:200]
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            current = _run_from_row(row)
+            if current.status in {"completed", "blocked", "failed", "cancelled"}:
+                return None
+            if expected_version is not None and current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            ensure_transition(current.status, status)
+            running_invocations = connection.execute(
+                """
+                SELECT invocation_id FROM tool_invocations
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (run_id,),
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE tool_invocations
+                SET status = 'unknown', error_text = ?, completed_at = ?
+                WHERE run_id = ? AND status = 'running'
+                """,
+                (clean_reason, now, run_id),
+            )
+            next_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = ?, state_version = ?, terminal_reason = ?,
+                    updated_at = ?, finished_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    status,
+                    next_version,
+                    clean_reason,
+                    now,
+                    now,
+                    run_id,
+                    current.state_version,
+                ),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type=event_type,
+                payload={
+                    "reason": clean_reason,
+                    "unknown_invocations": len(running_invocations),
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = AgentState.from_run(updated).to_dict()
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "active_invocation_id": None,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated, event
+
+    def recover_stale_runs(
+        self,
+        *,
+        stale_after_seconds: int,
+        limit: int = 1000,
+    ) -> list[tuple[TaskRun, TaskEvent]]:
+        """启动时把失去执行宿主的旧执行中任务收敛为 failed。
+
+        ``waiting_user`` 和 ``paused`` 不依赖旧进程中的执行协程，必须跨重启保留，
+        以便用户稍后继续，而不是被启动恢复错误地判成失败。
+        """
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=max(stale_after_seconds, 0))
+        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT run_id FROM task_runs
+                WHERE status IN ('planning', 'running', 'verifying')
+                  AND updated_at <= ?
+                ORDER BY updated_at
+                LIMIT ?
+                """,
+                (cutoff, min(max(limit, 1), 10_000)),
+            ).fetchall()
+        recovered: list[tuple[TaskRun, TaskEvent]] = []
+        for row in rows:
+            result = self.terminate_active_run(
+                str(row[0]),
+                status="failed",
+                reason="process_recovery",
+                event_type="run.failed",
+            )
+            if result is not None:
+                recovered.append(result)
+        return recovered
 
     def get_contract(self, run_id: str) -> JsonObject | None:
         with self._connection() as connection:
@@ -787,6 +926,25 @@ class TaskStore:
                         artifact.created_at,
                     ),
                 )
+                if artifact.type == "report":
+                    payload = artifact.payload or {}
+                    raw_report_id = payload.get("report_id")
+                    if not isinstance(raw_report_id, str):
+                        raise ValueError("报告 Artifact 缺少 report_id")
+                    report_id = validate_report_id(raw_report_id)
+                    connection.execute(
+                        """
+                        INSERT INTO report_publications(
+                            report_id, project_id, conversation_id, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            report_id,
+                            current_run.project_id,
+                            current_run.conversation_id,
+                            now,
+                        ),
+                    )
                 connection.execute(
                     "UPDATE conversations SET updated_at = ? WHERE id = ?",
                     (now, current_run.conversation_id),

@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from packages.common.config import Settings
 from packages.common.dataset_store import delete_dataset as delete_dataset_files
-from packages.session.models import Project
+from packages.common.logging import get_logger
+from packages.governance.permissions import Principal
+from packages.session.file_lifecycle import delete_report_files
 from packages.session.store import SessionStore
 
-from apps.api.deps import session_store_dep
+from apps.api.auth import current_principal_dep
+from apps.api.authz import (
+    require_conversation_access,
+    require_dataset_access,
+    require_project_access,
+)
+from apps.api.deps import session_store_dep, settings_dep
 from apps.api.schemas import (
     ArtifactResponse,
     ConversationCreate,
@@ -23,30 +32,50 @@ from apps.api.schemas import (
 )
 
 router = APIRouter(tags=["workspace"])
+_log = get_logger("api.workspace")
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(
     req: ProjectCreate,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ProjectResponse:
     """创建一个对话工作区项目。"""
-    return ProjectResponse.model_validate(store.create_project(req.name))
+    return ProjectResponse.model_validate(
+        store.create_project(
+            req.name,
+            owner_user_id=principal.user_id,
+            tenant_id=principal.tenant_scope,
+        )
+    )
 
 
 @router.get("/projects", response_model=list[ProjectResponse])
-def list_projects(store: SessionStore = Depends(session_store_dep)) -> list[ProjectResponse]:
+def list_projects(
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> list[ProjectResponse]:
     """列出全部项目。"""
-    return [ProjectResponse.model_validate(item) for item in store.list_projects()]
+    return [
+        ProjectResponse.model_validate(item)
+        for item in store.list_projects(
+            user_id=principal.user_id,
+            tenant_id=principal.tenant_scope,
+        )
+    ]
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(
     project_id: str,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ProjectResponse:
     """读取一个项目。"""
-    return ProjectResponse.model_validate(_require_project(store, project_id))
+    return ProjectResponse.model_validate(
+        require_project_access(store, project_id, principal)
+    )
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectResponse)
@@ -54,8 +83,10 @@ def update_project(
     project_id: str,
     req: ProjectUpdate,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ProjectResponse:
     """重命名项目。"""
+    require_project_access(store, project_id, principal, write=True)
     project = store.update_project(project_id, req.name)
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -66,10 +97,19 @@ def update_project(
 def delete_project(
     project_id: str,
     store: SessionStore = Depends(session_store_dep),
+    settings: Settings = Depends(settings_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> Response:
-    """删除项目及其数据库内的对话记录；不删除 parquet 文件。"""
+    """删除项目、数据库记录及其数据集/报告文件。"""
+    require_project_access(store, project_id, principal, write=True)
+    dataset_refs = [item.ref for item in store.list_datasets(project_id)]
+    report_ids = store.list_project_report_ids(project_id)
     if not store.delete_project(project_id):
         raise HTTPException(status_code=404, detail="项目不存在")
+    for dataset_ref in dataset_refs:
+        _delete_dataset_files_safely(dataset_ref)
+    for report_id in report_ids:
+        _delete_report_files_safely(report_id, settings.report_dir)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -77,9 +117,10 @@ def delete_project(
 def list_project_datasets(
     project_id: str,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> list[DatasetResponse]:
     """列出项目登记的数据集。"""
-    _require_project(store, project_id)
+    require_project_access(store, project_id, principal)
     return [DatasetResponse.model_validate(item) for item in store.list_datasets(project_id)]
 
 
@@ -88,8 +129,10 @@ def rename_dataset(
     dataset_ref: str,
     req: DatasetUpdate,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> DatasetResponse:
     """重命名数据集显示名（不动数据文件与血缘）。"""
+    require_dataset_access(store, dataset_ref, principal, write=True)
     dataset = store.update_dataset_filename(dataset_ref, req.filename)
     if dataset is None:
         raise HTTPException(status_code=404, detail="数据集不存在")
@@ -101,14 +144,14 @@ def delete_dataset(
     dataset_ref: str,
     force: bool = False,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> Response:
     """删除数据集登记与落盘文件。
 
     误删保护：数据集仍被对话引用或有衍生子集时返回 409，需 force=true 确认；
     删除后衍生数据集与历史工件按外键置空保留，但相关对话无法再对该数据集分析。
     """
-    if store.get_dataset(dataset_ref) is None:
-        raise HTTPException(status_code=404, detail="数据集不存在")
+    require_dataset_access(store, dataset_ref, principal, write=True)
     conversations_used, derived_count = store.dataset_usage(dataset_ref)
     if not force and (conversations_used or derived_count):
         parts = []
@@ -122,7 +165,7 @@ def delete_dataset(
         )
     if not store.delete_dataset(dataset_ref):
         raise HTTPException(status_code=404, detail="数据集不存在")
-    delete_dataset_files(dataset_ref)
+    _delete_dataset_files_safely(dataset_ref)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -135,9 +178,10 @@ def create_conversation(
     project_id: str,
     req: ConversationCreate,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ConversationResponse:
     """在指定项目中新建对话。"""
-    _require_project(store, project_id)
+    require_project_access(store, project_id, principal, write=True)
     conversation = store.create_conversation(project_id, req.title)
     return ConversationResponse.model_validate(conversation)
 
@@ -149,9 +193,10 @@ def create_conversation(
 def list_project_conversations(
     project_id: str,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> list[ConversationResponse]:
     """按最近更新时间列出项目历史对话。"""
-    _require_project(store, project_id)
+    require_project_access(store, project_id, principal)
     return [
         ConversationResponse.model_validate(item)
         for item in store.list_conversations(project_id)
@@ -162,8 +207,10 @@ def list_project_conversations(
 def get_conversation(
     conversation_id: str,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ConversationDetailResponse:
     """读取对话及其持久化消息和工件。"""
+    require_conversation_access(store, conversation_id, principal)
     context = store.load_conversation_context(conversation_id)
     if context is None:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -179,8 +226,10 @@ def update_conversation(
     conversation_id: str,
     req: ConversationUpdate,
     store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> ConversationResponse:
     """修改历史对话标题。"""
+    require_conversation_access(store, conversation_id, principal, write=True)
     conversation = store.update_conversation(conversation_id, req.title)
     if conversation is None:
         raise HTTPException(status_code=404, detail="对话不存在")
@@ -194,15 +243,36 @@ def update_conversation(
 def delete_conversation(
     conversation_id: str,
     store: SessionStore = Depends(session_store_dep),
+    settings: Settings = Depends(settings_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> Response:
     """删除对话及其消息、工件。"""
+    require_conversation_access(store, conversation_id, principal, write=True)
+    report_ids = store.list_conversation_report_ids(conversation_id)
     if not store.delete_conversation(conversation_id):
         raise HTTPException(status_code=404, detail="对话不存在")
+    for report_id in report_ids:
+        _delete_report_files_safely(report_id, settings.report_dir)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _require_project(store: SessionStore, project_id: str) -> Project:
-    project = store.get_project(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    return project
+def _delete_dataset_files_safely(dataset_ref: str) -> None:
+    try:
+        delete_dataset_files(dataset_ref)
+    except (OSError, ValueError) as exc:
+        _log.error(
+            "workspace.dataset_file_cleanup_failed",
+            dataset_ref=dataset_ref,
+            error=str(exc),
+        )
+
+
+def _delete_report_files_safely(report_id: str, report_dir: str) -> None:
+    try:
+        delete_report_files(report_id, report_dir)
+    except (OSError, ValueError) as exc:
+        _log.error(
+            "workspace.report_file_cleanup_failed",
+            report_id=report_id,
+            error=str(exc),
+        )

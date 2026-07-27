@@ -7,15 +7,18 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
 from packages.common.config import Settings
+from packages.governance.permissions import Principal
 from packages.models.gateway import ModelGateway
 from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
 from sse_starlette.sse import EventSourceResponse
 
+from apps.api.auth import current_principal_dep
+from apps.api.authz import require_conversation_access
 from apps.api.deps import (
     chart_tools_dep,
     dataset_ops_tools_dep,
@@ -51,11 +54,16 @@ async def chat_stream(
     dataset_ops: MCPServer = Depends(dataset_ops_tools_dep),
     report: MCPServer = Depends(report_tools_dep),
     retriever: HybridRetriever = Depends(retriever_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> EventSourceResponse:
     """对话式 Agent 一轮对话：规划 → 工具调用 → 流式回答（SSE）。"""
-    conversation = await run_in_threadpool(store.get_conversation, req.conversation_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="对话不存在")
+    conversation = await run_in_threadpool(
+        require_conversation_access,
+        store,
+        req.conversation_id,
+        principal,
+        write=True,
+    )
 
     registry = build_registry(
         excel=excel,
@@ -76,6 +84,9 @@ async def chat_stream(
         max_tool_calls=settings.agent_max_tool_calls,
         tool_result_max_chars=settings.agent_tool_result_max_chars,
         registry_max_entries=settings.agent_registry_max_entries,
+        run_timeout_seconds=settings.agent_run_timeout_seconds,
+        model_timeout_seconds=settings.agent_model_timeout_seconds,
+        tool_timeout_seconds=settings.agent_tool_timeout_seconds,
     )
     return EventSourceResponse(
         stream_agent_chat(
@@ -87,6 +98,7 @@ async def chat_stream(
             registry=registry,
             locks=_conversation_locks,
             config=config,
+            principal=principal,
         ),
         ping=15,
     )

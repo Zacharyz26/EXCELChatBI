@@ -24,7 +24,7 @@ class SchemaValidatorTest(unittest.TestCase):
     def test_legal_args_pass(self) -> None:
         validate_tool_args(
             {
-                "dataset_ref": "abc",
+                "dataset_ref": "a" * 32,
                 "chart_type": "bar",
                 "encoding": {"x": "区域", "y": "销售额", "agg": "sum"},
             },

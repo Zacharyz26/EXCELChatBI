@@ -11,11 +11,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
+from packages.common.config import Settings
 from packages.common.logging import get_logger
+from packages.governance.permissions import Principal
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.gateway import ModelGateway
+from packages.session.store import SessionStore
 
-from apps.api.deps import model_gateway_dep, stats_tools_dep
+from apps.api.auth import current_principal_dep
+from apps.api.authz import require_dataset_access
+from apps.api.deps import model_gateway_dep, session_store_dep, settings_dep, stats_tools_dep
 from apps.api.schemas import StatsRequest, StatsResponse
 from apps.orchestrator.stats_interpreter import interpret_stats
 
@@ -37,8 +42,17 @@ async def analyze_stats(
     req: StatsRequest,
     stats: MCPServer = Depends(stats_tools_dep),
     gateway: ModelGateway = Depends(model_gateway_dep),
+    settings: Settings = Depends(settings_dep),
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
 ) -> StatsResponse:
     """基于已上传数据集，跑趋势/异常/回归，返回结构化结果（可选中文解读）。"""
+    require_dataset_access(
+        store,
+        req.dataset_ref,
+        principal,
+        allow_unregistered=settings.auth_mode == "disabled",
+    )
     tool_name = _TOOLS.get(req.kind)
     if tool_name is None:
         raise HTTPException(

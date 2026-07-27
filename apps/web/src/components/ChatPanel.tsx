@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { fileUrl } from "@/api/client";
+import { downloadFile } from "@/api/client";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -638,10 +638,14 @@ function ReportArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
       </div>
       <div className="report-artifact__actions">
         {mdUrl && (
-          <a href={fileUrl(mdUrl)} target="_blank" rel="noreferrer">下载 Markdown</a>
+          <button type="button" onClick={() => void downloadFile(mdUrl)}>
+            下载 Markdown
+          </button>
         )}
         {pdfUrl && (
-          <a href={fileUrl(pdfUrl)} target="_blank" rel="noreferrer">下载 PDF</a>
+          <button type="button" onClick={() => void downloadFile(pdfUrl)}>
+            下载 PDF
+          </button>
         )}
       </div>
       {skipped !== null && skipped > 0 && (

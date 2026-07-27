@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from packages.common.config import get_settings
 from packages.common.logging import configure_logging, get_logger
 from packages.session.artifact_reconcile import reconcile_report_files
+from packages.session.file_lifecycle import cleanup_stale_chart_files
+from packages.session.task_store import TaskStore
 
 from apps.api.deps import (
     embedder_dep,
@@ -18,7 +20,18 @@ from apps.api.deps import (
     retriever_dep,
     session_store_dep,
 )
-from apps.api.routers import agent_runs, analyze, chat, health, kb, report, stats, upload, workspace
+from apps.api.routers import (
+    agent_runs,
+    analyze,
+    auth_config,
+    chat,
+    health,
+    kb,
+    report,
+    stats,
+    upload,
+    workspace,
+)
 
 _log = get_logger("api.lifecycle")
 
@@ -28,12 +41,27 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """启动时初始化结构化日志，并对 RAG 后端配置做 fail-fast 自检。"""
     settings = get_settings()
     configure_logging(settings.log_level)
+    recovered = TaskStore(session_store_dep().db_path).recover_stale_runs(
+        stale_after_seconds=settings.agent_recovery_stale_seconds
+    )
+    _log.info("agent.run_recovery", recovered_runs=len(recovered))
     reconciliation = reconcile_report_files(
         session_store_dep(),
         settings.report_dir,
         stale_after_seconds=settings.report_temp_grace_seconds,
     )
     _log.info("artifact.report_reconciliation", **reconciliation.log_fields())
+    removed_charts, chart_cleanup_failures = cleanup_stale_chart_files(
+        settings.report_dir,
+        stale_after_seconds=settings.report_temp_grace_seconds,
+    )
+    _log.info(
+        "artifact.chart_temp_cleanup",
+        removed_count=len(removed_charts),
+        failure_count=len(chart_cleanup_failures),
+        removed=list(removed_charts[:20]),
+        failures=list(chart_cleanup_failures[:20]),
+    )
     # fail-fast：依赖、模型权重、Milvus 连接或现有集合加载失败时启动即报错，
     # 而不是服务看似正常、首次检索请求才 500。
     embedder_dep()
@@ -58,6 +86,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(health.router)
+    app.include_router(auth_config.router)
     app.include_router(upload.router)
     app.include_router(analyze.router)
     app.include_router(stats.router)

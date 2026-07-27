@@ -45,6 +45,7 @@ from apps.orchestrator.agent_tools import AgentToolError, AgentToolRegistry
 from apps.orchestrator.control.claims import (
     build_evidence_summary,
     extract_claims,
+    repair_candidate_with_evidence,
 )
 from apps.orchestrator.control.contracts import build_minimal_contract
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
@@ -75,7 +76,11 @@ _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助�
 12. 用户明确要求图表、画图或可视化时，必须成功调用 gen_chart 后才能给最终答复；\
 不得用文字声称“已生成图表”来代替真实图表工具结果。
 13. 用户明确要求生成或导出报告时，必须成功调用 generate_report 并生成报告工件后才能给最终答复；\
-用户要求 PDF 时 include_pdf 必须为 true，不得用文字声称“PDF 已生成”来代替真实下载工件。"""
+用户要求 PDF 时 include_pdf 必须为 true，不得用文字声称“PDF 已生成”来代替真实下载工件。
+14. 若多个数据集、指标、时间列或知识口径的选择会改变结论，先提出一个明确的阻塞问题，\
+不要静默替用户选择，也不要在澄清前调用分析工具。
+15. 最终答复不得自行计算比例、百分比或派生统计量；工具没有直接返回的数字应省略。
+16. 知识库回答必须逐字包含 kb_search 返回的 source 标签，例如“来源：指标口径.md”。"""
 
 _CHART_REQUEST_PATTERN = re.compile(
     r"(?:图表|图像|可视化|画图|绘图|出图|折线图|柱状图|条形图|饼图|散点图|趋势图|"
@@ -135,6 +140,15 @@ _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION = (
     "候选答复中的知识结论没有引用本次 kb_search 返回的真实来源。请明确标注已返回的来源；"
     "如果检索没有命中，请如实说明无法回答。不得编造来源或知识结论。"
 )
+_OPEN_ANALYSIS_PATTERN = re.compile(
+    r"^(?:请)?(?:深入|全面|详细)?(?:分析|看看|看一下|研究)(?:一下)?(?:这份|这个)?数据[。！!？?]?$"
+)
+_TREND_PATTERN = re.compile(r"(?:趋势|随时间|变化|预测)")
+_METRIC_HINT_PATTERN = re.compile(
+    r"(?:销售额|销量|利润|收入|金额|订单量|订单数|转化率|复购率|用户数|访问量|成本)"
+)
+_TIME_COLUMN_PATTERN = re.compile(r"(?:时间|日期|月份|月|年|周|季度)")
+_CONFLICT_HISTORY_PATTERN = re.compile(r"(?:存在冲突口径|口径冲突|冲突定义)")
 
 # 工具的中文人话标签（tool_start/plan 事件展示用）
 _TOOL_LABELS = {
@@ -182,6 +196,9 @@ class AgentLoopConfig:
     max_tool_calls: int = 12
     tool_result_max_chars: int = 6_000
     registry_max_entries: int = 12
+    run_timeout_seconds: int = 300
+    model_timeout_seconds: int = 90
+    tool_timeout_seconds: int = 120
 
 
 def _requests_chart(user_text: str) -> bool:
@@ -215,6 +232,76 @@ def _requests_pdf(user_text: str) -> bool:
         _PDF_NEGATION_PATTERN.search(user_text) is None
         and _PDF_REQUEST_PATTERN.search(user_text) is not None
     )
+
+
+def _blocking_clarification(
+    user_text: str,
+    datasets: list[Dataset],
+    history: tuple[Any, ...] | list[Any],
+) -> JsonObject | None:
+    """识别会实质改变分析结论的阻塞歧义，只生成一个确定性问题。"""
+    clean = user_text.strip()
+    recent_history = "\n".join(
+        str(getattr(item, "content", "")) for item in history[-6:]
+    )
+    if _CONFLICT_HISTORY_PATTERN.search(recent_history):
+        return {
+            "question_id": "metric_definition",
+            "about": "metric_definition",
+            "question": "知识库中存在多个冲突口径。请确认本次应采用哪一个具体定义？",
+            "reason": "不同口径会改变计算结果。",
+        }
+    if _OPEN_ANALYSIS_PATTERN.search(clean):
+        return {
+            "question_id": "analysis_goal",
+            "about": "analysis_goal",
+            "question": "你希望优先分析哪类问题，例如趋势、异常、分组对比还是生成报告？",
+            "reason": "开放探索范围尚未确定。",
+        }
+    if len(datasets) > 1 and not any(
+        dataset.ref in clean or dataset.filename in clean for dataset in datasets
+    ):
+        choices = "、".join(dataset.filename for dataset in datasets[:5])
+        return {
+            "question_id": "dataset",
+            "about": "dataset",
+            "question": f"当前项目有多个数据集（{choices}）。请确认本次使用哪一个？",
+            "reason": "跨数据集静默选择可能产生错误结论。",
+        }
+    if not datasets or _TREND_PATTERN.search(clean) is None:
+        return None
+
+    columns = _dataset_column_names(datasets[-1])
+    time_columns = [name for name in columns if _TIME_COLUMN_PATTERN.search(name)]
+    if len(time_columns) > 1 and not any(name in clean for name in time_columns):
+        return {
+            "question_id": "time_column",
+            "about": "time_column",
+            "question": f"请选择本次趋势使用的时间列：{'、'.join(time_columns[:8])}。",
+            "reason": "不同时间口径会改变趋势范围和排序。",
+        }
+
+    metric_columns = [name for name in columns if _METRIC_HINT_PATTERN.search(name)]
+    if len(metric_columns) > 1 and not any(name in clean for name in metric_columns):
+        return {
+            "question_id": "metric",
+            "about": "metric",
+            "question": f"请选择本次分析指标：{'、'.join(metric_columns[:8])}。",
+            "reason": "存在多个符合描述的数值指标。",
+        }
+    return None
+
+
+def _dataset_column_names(dataset: Dataset) -> list[str]:
+    raw_columns = dataset.profile.get("columns")
+    if not isinstance(raw_columns, list):
+        return []
+    names: list[str] = []
+    for item in raw_columns:
+        value = item.get("name") if isinstance(item, dict) else item
+        if isinstance(value, str) and value.strip():
+            names.append(value.strip())
+    return names
 
 
 class AgentStreamingGateway(Protocol):
@@ -280,12 +367,113 @@ async def stream_agent_chat(
     principal: Principal | None = None,
     policy: ToolPolicyGateway | None = None,
 ) -> AsyncIterator[dict[str, str]]:
+    """以总超时和终态收敛包裹一轮 Agent 流。"""
+    run_id = uuid.uuid4().hex
+    tasks = TaskStore(store.db_path)
+    inner_completed = False
+    try:
+        async with asyncio.timeout(config.run_timeout_seconds):
+            async for item in _stream_agent_chat_inner(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                user_text=user_text,
+                store=store,
+                gateway=gateway,
+                registry=registry,
+                locks=locks,
+                config=config,
+                principal=principal,
+                policy=policy,
+                run_id=run_id,
+            ):
+                yield item
+        inner_completed = True
+    except TimeoutError:
+        terminated = tasks.terminate_active_run(
+            run_id,
+            status="failed",
+            reason="run_timeout",
+            event_type="run.failed",
+        )
+        if terminated is not None:
+            run, event = terminated
+            yield _task_event(event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": "run_timeout",
+                    "message": "任务执行超过总时限，已安全终止。",
+                    "retryable": True,
+                    "run_id": run_id,
+                    "run_status": run.status,
+                },
+            )
+    except asyncio.CancelledError:
+        tasks.terminate_active_run(
+            run_id,
+            status="cancelled",
+            reason="stream_cancelled",
+            event_type="run.cancelled",
+        )
+        raise
+    except GeneratorExit:
+        tasks.terminate_active_run(
+            run_id,
+            status="cancelled",
+            reason="stream_disconnected",
+            event_type="run.cancelled",
+        )
+        raise
+    except Exception:
+        tasks.terminate_active_run(
+            run_id,
+            status="failed",
+            reason="unhandled_agent_error",
+            event_type="run.failed",
+        )
+        raise
+    finally:
+        # 防御性终态检查：任何新增 return/异常分支都不能遗留活动 TaskRun。
+        current = tasks.get_run(run_id)
+        if current is not None and current.status not in {
+            "completed",
+            "blocked",
+            "failed",
+            "cancelled",
+            "waiting_user",
+            "paused",
+        }:
+            tasks.terminate_active_run(
+                run_id,
+                status="failed" if inner_completed else "cancelled",
+                reason=(
+                    "agent_generator_exited_without_terminal_state"
+                    if inner_completed
+                    else "stream_closed"
+                ),
+                event_type="run.failed" if inner_completed else "run.cancelled",
+            )
+
+
+async def _stream_agent_chat_inner(
+    *,
+    conversation_id: str,
+    project_id: str,
+    user_text: str,
+    store: SessionStore,
+    gateway: AgentStreamingGateway,
+    registry: AgentToolRegistry,
+    locks: ConversationLockPool,
+    config: AgentLoopConfig,
+    principal: Principal | None,
+    policy: ToolPolicyGateway | None,
+    run_id: str,
+) -> AsyncIterator[dict[str, str]]:
     """执行一轮 Agent 对话：持久化用户消息 → 循环调模型/工具 → SSE 事件流。"""
     async with locks.hold(conversation_id):
         active_principal = principal or Principal(user_id="local-user")
         active_policy = policy or ToolPolicyGateway()
         final_message_id = uuid.uuid4().hex
-        run_id = uuid.uuid4().hex
         task_store = TaskStore(store.db_path)
         try:
             datasets = await run_in_threadpool(store.list_datasets, project_id)
@@ -398,6 +586,72 @@ async def stream_agent_chat(
             *_history_messages(context.messages, config.history_limit),
         ]
 
+        clarification = _blocking_clarification(
+            user_text,
+            datasets,
+            context.messages,
+        )
+        if clarification is not None:
+            question = str(clarification["question"])
+            try:
+                await run_in_threadpool(
+                    store.append_message,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=question,
+                    message_id=final_message_id,
+                )
+                run, waiting_event = await run_in_threadpool(
+                    task_store.transition,
+                    run_id,
+                    expected_version=run.state_version,
+                    status="waiting_user",
+                    event_type="waiting_user",
+                    payload=clarification,
+                    usage={"tool_calls": 0},
+                )
+            except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                _log.error(
+                    "agent.persist_clarification_failed",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    error=str(exc),
+                )
+                run, failed_event = await _transition_after_failure(
+                    task_store,
+                    run,
+                    event_type="run.failed",
+                    reason="clarification_persistence_failed",
+                    tool_calls=0,
+                )
+                yield _task_event(failed_event, conversation_id)
+                yield _event(
+                    "error",
+                    {
+                        "code": "persistence_failed",
+                        "message": "澄清问题保存失败，请刷新后重试。",
+                        "retryable": True,
+                        "run_id": run_id,
+                    },
+                )
+                return
+            store.invalidate_conversation(conversation_id)
+            yield _task_event(waiting_event, conversation_id)
+            yield _event("text.delta", {"delta": question})
+            yield _event(
+                "done",
+                {
+                    "conversation_id": conversation_id,
+                    "message_id": final_message_id,
+                    "run_id": run_id,
+                    "run_status": run.status,
+                    "last_sequence": waiting_event.sequence,
+                    "characters": len(question),
+                    "tool_calls": 0,
+                },
+            )
+            return
+
         calls_used = 0
         last_signature: str | None = None
         tools_enabled = True
@@ -415,37 +669,62 @@ async def stream_agent_chat(
             turn_parts: list[str] = []
             response: ModelResponse | None = None
             try:
-                with trace_span(
-                    "agent.model_turn",
-                    trace_id=run_id,
-                    run_id=run_id,
+                async with asyncio.timeout(config.model_timeout_seconds):
+                    with trace_span(
+                        "agent.model_turn",
+                        trace_id=run_id,
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        agent_round=_round + 1,
+                        with_tools=tools is not None,
+                    ) as model_span:
+                        async for item in gateway.stream_turn(
+                            Scenario.AGENT, working, tools=tools
+                        ):
+                            if isinstance(item, ModelResponse):
+                                response = item
+                            elif item:
+                                turn_parts.append(item)
+                        if response is not None:
+                            model_span.set_attributes(
+                                actual_model=response.model,
+                                prompt_tokens=response.prompt_tokens,
+                                completion_tokens=response.completion_tokens,
+                                token_usage_available=bool(
+                                    response.prompt_tokens or response.completion_tokens
+                                ),
+                                model_latency_ms=round(response.latency_ms, 3),
+                                cost=(
+                                    response.cost
+                                    if response.cost != 0
+                                    else "unavailable"
+                                ),
+                                tool_call_count=len(response.tool_calls),
+                            )
+            except TimeoutError:
+                _log.warning(
+                    "agent.model_timeout",
                     conversation_id=conversation_id,
-                    agent_round=_round + 1,
-                    with_tools=tools is not None,
-                ) as model_span:
-                    async for item in gateway.stream_turn(
-                        Scenario.AGENT, working, tools=tools
-                    ):
-                        if isinstance(item, ModelResponse):
-                            response = item
-                        elif item:
-                            turn_parts.append(item)
-                    if response is not None:
-                        model_span.set_attributes(
-                            actual_model=response.model,
-                            prompt_tokens=response.prompt_tokens,
-                            completion_tokens=response.completion_tokens,
-                            token_usage_available=bool(
-                                response.prompt_tokens or response.completion_tokens
-                            ),
-                            model_latency_ms=round(response.latency_ms, 3),
-                            cost=(
-                                response.cost
-                                if response.cost != 0
-                                else "unavailable"
-                            ),
-                            tool_call_count=len(response.tool_calls),
-                        )
+                    timeout_seconds=config.model_timeout_seconds,
+                )
+                run, failed_event = await _transition_after_failure(
+                    task_store,
+                    run,
+                    event_type="run.failed",
+                    reason="model_timeout",
+                    tool_calls=calls_used,
+                )
+                yield _task_event(failed_event, conversation_id)
+                yield _event(
+                    "error",
+                    {
+                        "code": "model_timeout",
+                        "message": "模型响应超时，请稍后重试。",
+                        "retryable": True,
+                        "run_id": run_id,
+                    },
+                )
+                return
             except (OpenAIError, RuntimeError, ValueError) as exc:
                 _log.warning(
                     "agent.model_failed", conversation_id=conversation_id, error=str(exc)
@@ -494,6 +773,7 @@ async def stream_agent_chat(
                 yield _task_event(contract_event, conversation_id)
 
             if not tool_calls:
+                original_turn_text = turn_text
                 run, _verification_started = await run_in_threadpool(
                     task_store.transition,
                     run_id,
@@ -596,7 +876,47 @@ async def stream_agent_chat(
                     unsupported_claim_retries += 1
                     retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
 
+                auto_repair_actions: tuple[str, ...] = ()
+                if (
+                    not verification.passed
+                    and retry_instruction is None
+                    and issue_codes.intersection(
+                        {"unsupported_numeric_claim", "unsupported_knowledge_claim"}
+                    )
+                ):
+                    repaired_text, auto_repair_actions = repair_candidate_with_evidence(
+                        final_text=turn_text,
+                        claims=claims,
+                        evidence=evidence,
+                    )
+                    if auto_repair_actions and repaired_text != turn_text:
+                        turn_text = repaired_text
+                        claims = extract_claims(
+                            final_text=turn_text,
+                            goal=contract.goal,
+                            evidence=evidence,
+                        )
+                        await run_in_threadpool(
+                            task_store.replace_claims,
+                            run_id,
+                            claims,
+                        )
+                        verification = verify_completion(
+                            contract=contract,
+                            final_text=turn_text,
+                            artifacts=run_artifacts,
+                            invocations=invocations,
+                            evidence=evidence,
+                            claims=claims,
+                            budget_exhausted=budget_exhausted,
+                        )
+                        issue_codes = {item.code for item in verification.issues}
+
                 verification_payload = _verification_payload(verification)
+                if auto_repair_actions:
+                    verification_payload["deterministic_repairs"] = list(
+                        auto_repair_actions
+                    )
                 if retry_instruction is not None:
                     verification_payload["next_action"] = "retry"
                     run, verification_event = await run_in_threadpool(
@@ -681,7 +1001,11 @@ async def stream_agent_chat(
                     return
 
                 final_text = turn_text
-                final_parts = turn_parts or [turn_text]
+                final_parts = (
+                    turn_parts
+                    if turn_text == original_turn_text and turn_parts
+                    else [turn_text]
+                )
                 passed_verification = verification
                 break
 
@@ -708,12 +1032,21 @@ async def stream_agent_chat(
                     conversation_id=conversation_id,
                     error=str(exc),
                 )
+                run, failed_event = await _transition_after_failure(
+                    task_store,
+                    run,
+                    event_type="run.failed",
+                    reason="tool_call_message_persistence_failed",
+                    tool_calls=calls_used,
+                )
+                yield _task_event(failed_event, conversation_id)
                 yield _event(
                     "error",
                     {
                         "code": "persistence_failed",
                         "message": "对话保存失败，请刷新后重试。",
                         "retryable": True,
+                        "run_id": run_id,
                     },
                 )
                 return
@@ -887,23 +1220,25 @@ async def stream_agent_chat(
                     continue
 
                 calls_used += 1
-                result, error_text = await _execute_tool(
+                result, error_text, timed_out = await _execute_tool(
                     registry,
                     call,
                     trace_id=run_id,
                     invocation_id=invocation.invocation_id,
+                    timeout_seconds=config.tool_timeout_seconds,
                 )
                 if error_text is not None:
-                    _compare_mcp_error(registry, call.name, "tool_execution_failed")
+                    error_code = "tool_timeout" if timed_out else "tool_execution_failed"
+                    _compare_mcp_error(registry, call.name, error_code)
                     run, _failed_invocation, failure_event = await run_in_threadpool(
                         task_store.commit_tool_failure,
                         invocation.invocation_id,
-                        status="failed",
+                        status="unknown" if timed_out else "failed",
                         expected_version=run.state_version,
-                        error_code="tool_execution_failed",
+                        error_code=error_code,
                         error_text=error_text,
-                        source="tool",
-                        retryable=True,
+                        source="system" if timed_out else "tool",
+                        retryable=not timed_out,
                     )
                     if failure_event is not None:
                         yield _task_event(failure_event, conversation_id)
@@ -914,7 +1249,11 @@ async def stream_agent_chat(
                             "tool": call.name,
                             "status": "error",
                             "message": error_text,
-                            "suggestion": "请按错误提示修正参数后重试。",
+                            "suggestion": (
+                                "执行结果未知，请不要自动重试。"
+                                if timed_out
+                                else "请按错误提示修正参数后重试。"
+                            ),
                         },
                     )
                     working.append(
@@ -935,6 +1274,32 @@ async def stream_agent_chat(
                             "fields": fields,
                         },
                     )
+                    if timed_out:
+                        run, timeout_event = await run_in_threadpool(
+                            task_store.transition,
+                            run_id,
+                            expected_version=run.state_version,
+                            status="blocked",
+                            event_type="run.blocked",
+                            payload={
+                                "reason": "tool_timeout",
+                                "invocation_id": invocation.invocation_id,
+                            },
+                            terminal_reason="tool_timeout",
+                            usage={"tool_calls": calls_used},
+                        )
+                        yield _task_event(timeout_event, conversation_id)
+                        yield _event(
+                            "error",
+                            {
+                                "code": "tool_timeout",
+                                "message": "工具执行超时，结果状态未知，任务已停止且不会自动重试。",
+                                "retryable": False,
+                                "run_id": run_id,
+                                "run_status": run.status,
+                            },
+                        )
+                        return
                     continue
 
                 artifact_draft = _prepare_artifact(
@@ -1216,6 +1581,8 @@ def _verification_error(result: VerificationResult) -> tuple[str, str]:
         return "unsupported_numeric_claim", "最终答复包含没有工具 Evidence 支持的数字。"
     if "unsupported_knowledge_claim" in codes:
         return "unsupported_knowledge_claim", "最终答复中的知识结论缺少本次检索来源。"
+    if "unrecovered_tool_failure" in codes:
+        return "tool_execution_failed", "工具执行失败且未被后续成功调用恢复，任务没有完成。"
     return "verification_failed", "任务结果未通过完成验证，请重试。"
 
 
@@ -1377,24 +1744,34 @@ async def _execute_tool(
     *,
     trace_id: str,
     invocation_id: str,
-) -> tuple[Any, str | None]:
+    timeout_seconds: int,
+) -> tuple[Any, str | None, bool]:
     """线程池中执行一次工具调用；业务失败返回错误文本（回传模型重试）。"""
     try:
-        with trace_span(
-            "tool.execute",
-            trace_id=trace_id,
+        async with asyncio.timeout(timeout_seconds):
+            with trace_span(
+                "tool.execute",
+                trace_id=trace_id,
+                tool=call.name,
+                invocation_id=invocation_id,
+                transport="in_process",
+            ) as span:
+                result = await run_in_threadpool(
+                    registry.execute, call.name, call.arguments
+                )
+                span.set_attributes(result_type=type(result).__name__)
+    except TimeoutError:
+        _log.error(
+            "agent.tool_timeout",
             tool=call.name,
             invocation_id=invocation_id,
-            transport="in_process",
-        ) as span:
-            result = await run_in_threadpool(
-                registry.execute, call.name, call.arguments
-            )
-            span.set_attributes(result_type=type(result).__name__)
+            timeout_seconds=timeout_seconds,
+        )
+        return None, f"工具执行超过 {timeout_seconds} 秒，结果状态未知。", True
     except _TOOL_BUSINESS_ERRORS as exc:
         _log.warning("agent.tool_failed", tool=call.name, error=str(exc))
-        return None, str(exc) or exc.__class__.__name__
-    return result, None
+        return None, str(exc) or exc.__class__.__name__, False
+    return result, None, False
 
 
 def _compare_mcp_success(
