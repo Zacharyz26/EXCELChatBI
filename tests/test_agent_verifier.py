@@ -7,7 +7,7 @@ from pathlib import Path
 from apps.orchestrator.control.contracts import build_minimal_contract
 from apps.orchestrator.control.verifier import verify_completion
 from packages.session.models import Artifact
-from packages.session.task_models import EvidenceRecord, ToolInvocation
+from packages.session.task_models import EvidenceRecord, TaskStepRecord, ToolInvocation
 
 
 def _artifact(
@@ -46,6 +46,44 @@ def test_model_stopping_does_not_pass_without_required_chart() -> None:
 
     assert result.verdict == "NEEDS_ACTION"
     assert result.issues[0].code == "missing_chart_artifact"
+
+
+def test_model_stopping_does_not_pass_with_pending_production_plan_step() -> None:
+    contract = build_minimal_contract(
+        run_id="planned-run",
+        user_text="检查数据质量",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    step = TaskStepRecord(
+        step_id="persisted-step",
+        plan_id="plan",
+        run_id="planned-run",
+        position=0,
+        logical_id="profile",
+        status="pending",
+        definition={
+            "step_id": "profile",
+            "purpose": "取得质量画像",
+            "capability": "data.profile",
+            "dependencies": [],
+        },
+        started_at=None,
+        completed_at=None,
+    )
+
+    result = verify_completion(
+        contract=contract,
+        final_text="数据质量良好。",
+        artifacts=[],
+        invocations=[],
+        evidence=[],
+        plan_steps=[step],
+    )
+
+    assert result.verdict == "NEEDS_ACTION"
+    assert result.issues[0].code == "incomplete_plan_steps"
 
 
 def test_report_requires_a_real_nonempty_pdf_file(tmp_path: Path) -> None:

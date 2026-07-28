@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from packages.session.models import Artifact
-from packages.session.task_models import ClaimDraft, EvidenceRecord, ToolInvocation
+from packages.session.task_models import (
+    ClaimDraft,
+    EvidenceRecord,
+    TaskStepRecord,
+    ToolInvocation,
+)
 
 from apps.orchestrator.control.contracts import TaskContract
 
@@ -45,6 +50,7 @@ def verify_completion(
     invocations: list[ToolInvocation],
     evidence: list[EvidenceRecord],
     claims: list[ClaimDraft] | None = None,
+    plan_steps: list[TaskStepRecord] | None = None,
     budget_exhausted: bool = False,
     semantic_checker: SemanticCoverageChecker | None = None,
 ) -> VerificationResult:
@@ -56,6 +62,20 @@ def verify_completion(
                 code="empty_response",
                 message="模型没有返回有效的最终答复",
                 criterion_id="response.non_empty",
+            )
+        )
+
+    incomplete_steps = [
+        step
+        for step in plan_steps or []
+        if step.status not in {"completed", "skipped"}
+    ]
+    if incomplete_steps:
+        labels = ", ".join(step.logical_id for step in incomplete_steps[:8])
+        issues.append(
+            VerificationIssue(
+                code="incomplete_plan_steps",
+                message=f"结构化计划仍有未完成步骤：{labels}",
             )
         )
 

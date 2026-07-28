@@ -170,12 +170,29 @@ function persistChartTurn(state: MockWorkspaceState, prompt: string): {
         title: "月度销售趋势",
       }],
       ["understanding", { text: "我将按月份生成销售趋势图。" }],
-      ["plan", {
-        message_id: toolMessageId,
-        steps: [{ id: callId, tool: "gen_chart", label: "生成图表" }],
+      ["plan.created", {
+        schema_version: "2.0",
+        event_id: `plan-event-${suffix}`,
+        run_id: `run-${suffix}`,
+        conversation_id: "conversation-1",
+        sequence: 2,
+        occurred_at: NOW,
+        payload: {
+          plan_id: `plan-${suffix}`,
+          plan_version: 1,
+          summary: "生成月度销售趋势图",
+          steps: [{
+            step_id: "monthly_chart",
+            purpose: "生成月度销售趋势图",
+            capability: "visualization.chart",
+            dependencies: [],
+            status: "pending",
+          }],
+        },
       }],
       ["tool_start", {
         id: callId,
+        step_id: "monthly_chart",
         tool: "gen_chart",
         fields: "数据集: sales-re · 图型: line · X轴: 月份 · Y轴: 销售额",
         args_preview: "{}",
@@ -183,6 +200,7 @@ function persistChartTurn(state: MockWorkspaceState, prompt: string): {
       ["artifact", chart],
       ["tool_end", {
         id: callId,
+        step_id: "monthly_chart",
         tool: "gen_chart",
         status: "ok",
         summary: "已生成 line 图表",

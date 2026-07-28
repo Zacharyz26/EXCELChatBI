@@ -26,8 +26,11 @@ from packages.session.task_models import (
     Observation,
     ObservationSource,
     RunStatus,
+    StepStatus,
     TaskEvent,
+    TaskPlanRecord,
     TaskRun,
+    TaskStepRecord,
     ToolInvocation,
 )
 
@@ -192,11 +195,22 @@ class TaskStore:
             ensure_transition(current.status, status)
             running_invocations = connection.execute(
                 """
-                SELECT invocation_id FROM tool_invocations
+                SELECT invocation_id, step_id FROM tool_invocations
                 WHERE run_id = ? AND status = 'running'
                 """,
                 (run_id,),
             ).fetchall()
+            connection.execute(
+                """
+                UPDATE task_steps
+                SET status = 'blocked', completed_at = ?
+                WHERE step_id IN (
+                    SELECT step_id FROM tool_invocations
+                    WHERE run_id = ? AND status = 'running' AND step_id IS NOT NULL
+                )
+                """,
+                (now, run_id),
+            )
             connection.execute(
                 """
                 UPDATE tool_invocations
@@ -240,7 +254,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated).to_dict()
+            snapshot = _merged_snapshot(connection, updated)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -307,6 +321,264 @@ class TaskStore:
                 "SELECT state_json FROM task_snapshots WHERE run_id = ?", (run_id,)
             ).fetchone()
         return _load_object(str(row[0])) if row is not None else None
+
+    def save_plan(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        plan: JsonObject,
+        reason: str,
+        planner: JsonObject,
+        step_status_overrides: dict[str, StepStatus] | None = None,
+    ) -> tuple[TaskRun, TaskPlanRecord, list[TaskStepRecord], TaskEvent]:
+        """原子保存一个不可变计划版本、步骤、事件和当前快照。"""
+        clean_reason = _required_text(reason, "计划原因")[:200]
+        step_definitions = _validated_plan_steps(plan)
+        definitions_by_id = {
+            str(definition["step_id"]): definition for definition in step_definitions
+        }
+        overrides = dict(step_status_overrides or {})
+        unsupported_overrides = set(overrides.values()) - {"skipped", "blocked"}
+        if unsupported_overrides:
+            raise ValueError("计划修订只允许显式覆盖为 skipped 或 blocked")
+        unknown_overrides = set(overrides) - set(definitions_by_id)
+        if unknown_overrides:
+            raise ValueError(
+                "计划状态覆盖引用未知步骤: " + ", ".join(sorted(unknown_overrides))
+            )
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(row)
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            if current.status not in {"planning", "running", "verifying"}:
+                raise ValueError(f"TaskRun 状态 {current.status} 不能保存计划")
+
+            version = current.plan_version + 1
+            previous_steps: dict[str, TaskStepRecord] = {}
+            if current.plan_version > 0:
+                previous_rows = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    WHERE step.run_id = ? AND plan.version = ?
+                    ORDER BY step.position
+                    """,
+                    (run_id, current.plan_version),
+                ).fetchall()
+                previous_steps = {
+                    step.logical_id: step
+                    for step in (_step_from_row(item) for item in previous_rows)
+                }
+                for logical_id, previous in previous_steps.items():
+                    if previous.status not in {"completed", "skipped"}:
+                        continue
+                    revised_definition = definitions_by_id.get(logical_id)
+                    if revised_definition is None:
+                        raise ValueError(
+                            f"计划修订不能删除已{previous.status}步骤: {logical_id}"
+                        )
+                    if revised_definition != previous.definition:
+                        raise ValueError(
+                            f"计划修订不能修改已{previous.status}步骤: {logical_id}"
+                        )
+
+            plan_record = TaskPlanRecord(
+                plan_id=uuid.uuid4().hex,
+                run_id=run_id,
+                version=version,
+                reason=clean_reason,
+                plan=plan,
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO task_plans(
+                    plan_id, run_id, version, reason, plan_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan_record.plan_id,
+                    plan_record.run_id,
+                    plan_record.version,
+                    plan_record.reason,
+                    _dump_json(plan_record.plan),
+                    plan_record.created_at,
+                ),
+            )
+            steps: list[TaskStepRecord] = []
+            for position, definition in enumerate(step_definitions):
+                logical_id = str(definition["step_id"])
+                previous_step = previous_steps.get(logical_id)
+                if (
+                    previous_step is not None
+                    and previous_step.status in {"completed", "skipped"}
+                ):
+                    status = previous_step.status
+                    started_at = previous_step.started_at
+                    completed_at = previous_step.completed_at
+                else:
+                    status = overrides.get(logical_id, "pending")
+                    started_at = None
+                    completed_at = now if status in {"skipped", "blocked"} else None
+                step = TaskStepRecord(
+                    step_id=uuid.uuid4().hex,
+                    plan_id=plan_record.plan_id,
+                    run_id=run_id,
+                    position=position,
+                    logical_id=logical_id,
+                    status=status,
+                    definition=definition,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO task_steps(
+                        step_id, plan_id, run_id, position, status, step_json,
+                        started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step.step_id,
+                        step.plan_id,
+                        step.run_id,
+                        step.position,
+                        step.status,
+                        _dump_json(step.definition),
+                        step.started_at,
+                        step.completed_at,
+                    ),
+                )
+                steps.append(step)
+
+            next_state_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET state_version = ?, plan_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    next_state_version,
+                    version,
+                    now,
+                    run_id,
+                    expected_version,
+                ),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="plan.created" if version == 1 else "plan.revised",
+                payload={
+                    "plan_id": plan_record.plan_id,
+                    "plan_version": version,
+                    "supersedes_version": version - 1 if version > 1 else None,
+                    "reason": clean_reason,
+                    "summary": str(plan.get("summary", ""))[:500],
+                    "steps": [
+                        {
+                            "step_id": step.logical_id,
+                            "purpose": step.definition["purpose"],
+                            "capability": step.definition["capability"],
+                            "dependencies": step.definition["dependencies"],
+                            "status": step.status,
+                        }
+                        for step in steps
+                    ],
+                    "assumptions": plan.get("assumptions", []),
+                    "clarifications": plan.get("clarifications", []),
+                    "planner": planner,
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "active_plan_id": plan_record.plan_id,
+                    "active_plan": plan,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_state_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated, plan_record, steps, event
+
+    def get_active_plan(self, run_id: str) -> TaskPlanRecord | None:
+        """读取当前 ``plan_version`` 指向的计划。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT plan.* FROM task_plans AS plan
+                JOIN task_runs AS run
+                  ON run.run_id = plan.run_id AND run.plan_version = plan.version
+                WHERE plan.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        return _plan_from_row(row) if row is not None else None
+
+    def list_plans(self, run_id: str) -> list[TaskPlanRecord]:
+        """按版本返回一个任务的完整计划历史。"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_plans WHERE run_id = ? ORDER BY version",
+                (run_id,),
+            ).fetchall()
+        return [_plan_from_row(row) for row in rows]
+
+    def list_plan_steps(
+        self, run_id: str, *, plan_version: int | None = None
+    ) -> list[TaskStepRecord]:
+        """返回指定计划版本的步骤；默认返回当前计划。"""
+        with self._connection() as connection:
+            if plan_version is None:
+                rows = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    JOIN task_runs AS run
+                      ON run.run_id = plan.run_id AND run.plan_version = plan.version
+                    WHERE step.run_id = ?
+                    ORDER BY step.position
+                    """,
+                    (run_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    WHERE step.run_id = ? AND plan.version = ?
+                    ORDER BY step.position
+                    """,
+                    (run_id, plan_version),
+                ).fetchall()
+        return [_step_from_row(row) for row in rows]
 
     def list_events(
         self, run_id: str, *, after_sequence: int = 0, limit: int = 200
@@ -382,7 +654,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated).to_dict()
+            snapshot = _merged_snapshot(connection, updated)
             snapshot["last_sequence"] = sequence
             connection.execute(
                 """
@@ -453,7 +725,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated).to_dict()
+            snapshot = _merged_snapshot(connection, updated)
             snapshot["last_sequence"] = event.sequence
             connection.execute(
                 """
@@ -539,6 +811,7 @@ class TaskStore:
         arguments: JsonObject,
         idempotency_key: str,
         policy_decision: JsonObject,
+        step_id: str | None = None,
     ) -> tuple[TaskRun, ToolInvocation, TaskEvent | None, bool]:
         """Atomically persist a running invocation and its ``step.started`` event."""
         args_json = _dump_json(arguments)
@@ -571,11 +844,30 @@ class TaskStore:
                 )
             if current_run.status != "running":
                 raise ValueError("TaskRun 不在 running 状态，不能开始工具调用")
+            logical_step_id = tool_call_id
+            if step_id is not None:
+                step_row = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    WHERE step.step_id = ? AND step.run_id = ?
+                      AND plan.version = ?
+                    """,
+                    (step_id, run_id, current_run.plan_version),
+                ).fetchone()
+                if step_row is None:
+                    raise ValueError("工具调用引用的 TaskStep 不属于当前计划")
+                logical_step_id = _step_logical_id(step_row)
+            attempt = (
+                _logical_step_attempt_count(connection, run_id, logical_step_id) + 1
+                if step_id is not None
+                else 1
+            )
 
             invocation = ToolInvocation(
                 invocation_id=uuid.uuid4().hex,
                 run_id=run_id,
-                step_id=None,
+                step_id=step_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 idempotency_key=idempotency_key,
@@ -594,11 +886,12 @@ class TaskStore:
                     invocation_id, run_id, step_id, tool_call_id, tool_name,
                     idempotency_key, args_hash, args_json, status, result_hash,
                     error_text, artifact_id, started_at, completed_at
-                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     invocation.invocation_id,
                     invocation.run_id,
+                    invocation.step_id,
                     invocation.tool_call_id,
                     invocation.tool_name,
                     invocation.idempotency_key,
@@ -607,6 +900,16 @@ class TaskStore:
                     invocation.started_at,
                 ),
             )
+            if step_id is not None:
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'running', started_at = COALESCE(started_at, ?),
+                        completed_at = NULL
+                    WHERE step_id = ?
+                    """,
+                    (now, step_id),
+                )
             next_version = current_run.state_version + 1
             connection.execute(
                 """
@@ -622,8 +925,9 @@ class TaskStore:
                 event_type="step.started",
                 payload={
                     "plan_version": current_run.plan_version,
-                    "step_id": tool_call_id,
-                    "attempt": 1,
+                    "step_id": logical_step_id,
+                    "persisted_step_id": step_id,
+                    "attempt": attempt,
                     "tool": tool_name,
                     "invocation_id": invocation.invocation_id,
                     "arguments_hash": args_hash,
@@ -637,7 +941,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated_run = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated_run).to_dict()
+            snapshot = _merged_snapshot(connection, updated_run)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -730,6 +1034,22 @@ class TaskStore:
             if current_run.status != "running":
                 raise ValueError("TaskRun 不在 running 状态，不能提交工具失败")
 
+            logical_step_id = invocation.tool_call_id
+            if invocation.step_id is not None:
+                step_row = connection.execute(
+                    "SELECT * FROM task_steps WHERE step_id = ?",
+                    (invocation.step_id,),
+                ).fetchone()
+                if step_row is None:
+                    raise ValueError("工具调用引用的 TaskStep 不存在")
+                logical_step_id = _step_logical_id(step_row)
+            attempt = (
+                _logical_step_attempt_count(
+                    connection, current_run.run_id, logical_step_id
+                )
+                if invocation.step_id is not None
+                else 1
+            )
             connection.execute(
                 """
                 UPDATE tool_invocations
@@ -739,10 +1059,19 @@ class TaskStore:
                 """,
                 (status, clean_error, now, invocation_id),
             )
+            if invocation.step_id is not None:
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'failed', completed_at = ?
+                    WHERE step_id = ?
+                    """,
+                    (now, invocation.step_id),
+                )
             observation = Observation(
                 observation_id=uuid.uuid4().hex,
                 run_id=current_run.run_id,
-                step_id=invocation.tool_call_id,
+                step_id=logical_step_id,
                 invocation_id=invocation.invocation_id,
                 source=source,
                 status="partial" if status == "unknown" else "error",
@@ -772,8 +1101,9 @@ class TaskStore:
                 event_type="step.completed",
                 payload={
                     "plan_version": current_run.plan_version,
-                    "step_id": invocation.tool_call_id,
-                    "attempt": 1,
+                    "step_id": logical_step_id,
+                    "persisted_step_id": invocation.step_id,
+                    "attempt": attempt,
                     "status": status,
                     "tool": invocation.tool_name,
                     "invocation_id": invocation.invocation_id,
@@ -789,7 +1119,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated_run = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated_run).to_dict()
+            snapshot = _merged_snapshot(connection, updated_run)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -863,6 +1193,22 @@ class TaskStore:
             if current_run.status != "running":
                 raise ValueError("TaskRun 不在 running 状态，不能提交工具结果")
 
+            logical_step_id = invocation.tool_call_id
+            if invocation.step_id is not None:
+                step_row = connection.execute(
+                    "SELECT * FROM task_steps WHERE step_id = ?",
+                    (invocation.step_id,),
+                ).fetchone()
+                if step_row is None:
+                    raise ValueError("工具调用引用的 TaskStep 不存在")
+                logical_step_id = _step_logical_id(step_row)
+            attempt = (
+                _logical_step_attempt_count(
+                    connection, current_run.run_id, logical_step_id
+                )
+                if invocation.step_id is not None
+                else 1
+            )
             message_row = connection.execute(
                 "SELECT conversation_id FROM messages WHERE id = ?",
                 (assistant_message_id,),
@@ -972,6 +1318,15 @@ class TaskStore:
                 """,
                 (result_hash, evidence.artifact_id, now, invocation.invocation_id),
             )
+            if invocation.step_id is not None:
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'completed', completed_at = ?
+                    WHERE step_id = ?
+                    """,
+                    (now, invocation.step_id),
+                )
             connection.execute(
                 """
                 INSERT INTO evidence(
@@ -1003,7 +1358,7 @@ class TaskStore:
             observation = Observation(
                 observation_id=uuid.uuid4().hex,
                 run_id=current_run.run_id,
-                step_id=invocation.tool_call_id,
+                step_id=logical_step_id,
                 invocation_id=invocation.invocation_id,
                 source="tool",
                 status="ok",
@@ -1020,8 +1375,9 @@ class TaskStore:
                 event_type="step.completed",
                 payload={
                     "plan_version": current_run.plan_version,
-                    "step_id": invocation.tool_call_id,
-                    "attempt": 1,
+                    "step_id": logical_step_id,
+                    "persisted_step_id": invocation.step_id,
+                    "attempt": attempt,
                     "status": "completed",
                     "tool": invocation.tool_name,
                     "invocation_id": invocation.invocation_id,
@@ -1038,7 +1394,7 @@ class TaskStore:
             ).fetchone()
             assert updated_row is not None
             updated_run = _run_from_row(updated_row)
-            snapshot = AgentState.from_run(updated_run).to_dict()
+            snapshot = _merged_snapshot(connection, updated_run)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -1368,6 +1724,17 @@ def _insert_event(connection: sqlite3.Connection, event: TaskEvent) -> None:
     )
 
 
+def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject:
+    """刷新基础状态，同时保留活动计划和最近 Observation 等恢复扩展。"""
+    row = connection.execute(
+        "SELECT state_json FROM task_snapshots WHERE run_id = ?",
+        (run.run_id,),
+    ).fetchone()
+    snapshot = _load_object(str(row["state_json"])) if row is not None else {}
+    snapshot.update(AgentState.from_run(run).to_dict())
+    return snapshot
+
+
 def _next_sequence(connection: sqlite3.Connection, run_id: str) -> int:
     row = connection.execute(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM task_events WHERE run_id = ?",
@@ -1412,6 +1779,60 @@ def _event_from_row(row: sqlite3.Row) -> TaskEvent:
         event_type=str(row["event_type"]),
         payload=_load_object(str(row["payload_json"])),
         occurred_at=str(row["occurred_at"]),
+    )
+
+
+def _plan_from_row(row: sqlite3.Row) -> TaskPlanRecord:
+    return TaskPlanRecord(
+        plan_id=str(row["plan_id"]),
+        run_id=str(row["run_id"]),
+        version=int(row["version"]),
+        reason=_optional_text(row["reason"]),
+        plan=_load_object(str(row["plan_json"])),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _step_from_row(row: sqlite3.Row) -> TaskStepRecord:
+    definition = _load_object(str(row["step_json"]))
+    return TaskStepRecord(
+        step_id=str(row["step_id"]),
+        plan_id=str(row["plan_id"]),
+        run_id=str(row["run_id"]),
+        position=int(row["position"]),
+        logical_id=str(definition["step_id"]),
+        status=cast(StepStatus, str(row["status"])),
+        definition=definition,
+        started_at=_optional_text(row["started_at"]),
+        completed_at=_optional_text(row["completed_at"]),
+    )
+
+
+def _step_logical_id(row: sqlite3.Row) -> str:
+    definition = _load_object(str(row["step_json"]))
+    value = definition.get("step_id")
+    if not isinstance(value, str) or not value:
+        raise ValueError("数据库中的 TaskStep 缺少逻辑 step_id")
+    return value
+
+
+def _logical_step_attempt_count(
+    connection: sqlite3.Connection, run_id: str, logical_step_id: str
+) -> int:
+    """跨计划版本统计同一逻辑步骤已经持久化的 Invocation 次数。"""
+    rows = connection.execute(
+        """
+        SELECT step.step_json
+        FROM tool_invocations AS invocation
+        JOIN task_steps AS step ON step.step_id = invocation.step_id
+        WHERE invocation.run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    return sum(
+        1
+        for row in rows
+        if _step_logical_id(row) == logical_step_id
     )
 
 
@@ -1495,6 +1916,35 @@ def _required_text(value: str, label: str) -> str:
     if not clean:
         raise ValueError(f"{label}不能为空")
     return clean
+
+
+def _validated_plan_steps(plan: JsonObject) -> list[JsonObject]:
+    raw_steps = plan.get("steps")
+    if not isinstance(raw_steps, list):
+        raise ValueError("TaskPlan.steps 必须是数组")
+    steps: list[JsonObject] = []
+    logical_ids: set[str] = set()
+    for raw in raw_steps:
+        if not isinstance(raw, dict):
+            raise ValueError("TaskPlan.steps 条目必须是对象")
+        definition = cast(JsonObject, raw)
+        logical_id = definition.get("step_id")
+        if not isinstance(logical_id, str) or not logical_id.strip():
+            raise ValueError("TaskStep.step_id 不能为空")
+        if logical_id in logical_ids:
+            raise ValueError(f"TaskStep.step_id 重复: {logical_id}")
+        for field in ("purpose", "capability"):
+            value = definition.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"TaskStep.{field} 不能为空")
+        dependencies = definition.get("dependencies")
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) and item for item in dependencies
+        ):
+            raise ValueError("TaskStep.dependencies 必须是字符串数组")
+        logical_ids.add(logical_id)
+        steps.append(definition)
+    return steps
 
 
 def _utc_now() -> str:

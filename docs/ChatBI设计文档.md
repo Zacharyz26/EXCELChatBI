@@ -1,6 +1,6 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.4-stage1 · 状态：v2.3 基线已完成，v2.4 阶段 1 本地实现完成、远端镜像门禁待运行 · 语言场景：中文优先
+> 版本：v2.4-stage2b · 状态：阶段 1 已验收、阶段 2A–2B 已实现，G7 待人工签字 · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
 ---
@@ -195,7 +195,7 @@
 |------|------|------|
 | 兼容直调流程（分析 / 统计 / 报告 / KB） | FastAPI 路由直调编排函数（`apps/orchestrator/*`） | 已实现并保留兼容；原端点安全门控不变 |
 | **v2.3 Agent 基线（主入口，第 14 章）** | DeepSeek function-calling 循环（`Scenario.AGENT`），模型选工具并观察结果，SSE 逐步吐事件 | 已完成；属于反应式工具调用 Agent |
-| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 本地实现完成、远端镜像门禁待运行；Planner/Replanner 等属于阶段 2 |
+| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 已验收；阶段 2A–2B 的 Planner、依赖图 Executor 和 Replanner 已实现，任务控制等属于 2C–2E |
 
 #### 5.2.1 双轨判定规则（v2.1 作废，留档）
 
@@ -383,10 +383,15 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 
 ---
 
-## 11. 演进路线（2026-07-22 更新）
+## 11. 演进路线（2026-07-27 更新）
 
 1. **v2.3 基线 — 已完成**：知识库、Excel/统计/图表/报告工具、对话工作区、function-calling 循环和五阶段迁移；第 14 章记录其设计与交付历史。
-2. **v2.4 Agent 控制面 — 当前进行中**：阶段 1 本地实现已收尾，已具备 SQLite v2、TaskRun/TaskContract、事件/快照、Invocation/Evidence、数值与知识 Claim、确定性 Verifier、策略/审计/trace、MCP 单源 adapter/Gateway、API/Web 基础镜像和报告文件对账；本批远端镜像 CI 尚待提交推送后运行。阶段 0 的真实 Planner/行为基线、语义候选、MCP 双传输探针和评审债务未关闭；阶段 2 负责结构化计划、动态重规划、澄清、任务控制、MCP 规范执行和完整 Compose。
+2. **v2.4 Agent 控制面 — 当前进行中**：阶段 1 已验收，SQLite v3、TaskRun/
+   Contract/Event/Snapshot/Invocation/Evidence、确定性 Verifier、策略/审计/trace、
+   MCP 单源 adapter/Gateway、双传输探针、API/Web Compose 与真实全栈 E2E 已落地。
+   阶段 2A 已实现混合 Planner、TaskPlan/TaskStep 版本、能力白名单和计划完成校验；
+   2B 已负责依赖图重规划；2C–2E 继续任务控制/恢复、MCP 规范执行和独立工具服务 Compose。
+   G7 自动门禁已落地，仍待人工盲评、负责人签字与 ADR 接受。
 3. **v2.5 记忆、自主性与协作**：阶段 3 记忆；阶段 4 可干预前端；阶段 5 业务语义层；阶段 6 自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
@@ -655,8 +660,8 @@ Artifact     {id, conversation_id, message_id, type, payload_json|file_ref,
 
 > 本章给出总体架构和版本边界。逐项交付、验收、安全项目与优先级以
 > `docs/Agent自主化开发规划.md` 为准。阶段 0 详细草案见 `docs/v2.4/README.md`；
-> 阶段 1 本地实现已经收尾，正式验收还需本批代码的远端镜像 CI；真实 Planner/行为基线、
-> MCP 双传输探针和评审仍是阶段 0 未关闭债务。
+> 阶段 1 已验收，阶段 2A–2B 已实现；G7 自动门禁已落地，但人工盲评、负责人签字和 ADR
+> 接受仍是未关闭债务。
 
 ### 15.1 目标
 
@@ -687,11 +692,22 @@ Memory/Context ← Finalizer ← Verifier ← Claim/Evidence
 | 1. 验证驱动结束 | 最小 AgentState、Claim/Evidence、确定性 Verifier、TaskEvent/Checkpoint、幂等、策略/审计骨架 | 固定回归集无虚假 Artifact 完成和无依据数值 Claim；旧接口无回归 |
 | 2. 结构化计划与重规划 | Goal/Planner/Executor/Verifier/Replanner/Finalizer、工具能力契约、澄清、暂停/恢复/取消 | 多步骤任务能按 Observation 改计划；恢复不重复步骤；终态可追溯 |
 
+阶段 2A 已交付 Goal 后的混合 Planner、不可变 TaskPlan/TaskStep 版本、能力到工具的
+fail-closed 解析、步骤状态绑定和未完成计划拒绝；阶段 2B 已交付 ready frontier
+依赖图 Executor、失败 Observation Replanner、跨版本步骤保护和条件 skip；任务控制与
+Checkpoint 恢复按 2C 继续实现。
+
 Planner 采用三条统一输出路径：简单任务确定性快速路径、已知任务族模板路径、开放多步骤 LLM 路径。Verifier 以确定性后置条件为主，语义模型只判断覆盖性等软条件，并返回 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
 
 图表和报告正则在阶段 1 先与通用后置条件影子运行；回归等价后才能降级和删除。暂停/恢复必须同时具备 run_id、Checkpoint、取消令牌和工具幂等性。
 
-MCP 与 Docker 是 v2.4 的横向交付轨，不另起一个脱离控制面的版本：阶段 0 固定协议、SDK、双传输和容器拓扑；阶段 1 完成全部项目内工具的标准 MCP Server 接口、Client Gateway 与 API/Web 基础镜像；阶段 2 切换为规范 MCP 执行路径并交付包含工具服务和可选 RAG profile 的单机 Compose。当前单源 adapter/Gateway 影子层和 API/Web 基础镜像代码已经落地，阶段 1 本地契约与回归已通过；但生产仍是进程内 `Tool.invoke`，本批远端镜像 CI 尚未运行，运行中容器基线仍是独立 Milvus Compose，因此不能把 v2.4 目标架构标记为已实现。详细边界、服务分组、卷、网络和验收见 `docs/v2.4/MCP与Docker架构决策.md`。
+MCP 与 Docker 是 v2.4 的横向交付轨，不另起一个脱离控制面的版本：阶段 0 固定协议、SDK、
+双传输和容器拓扑；阶段 1 完成全部项目内工具的标准 MCP Server 接口、Client Gateway 与
+API/Web 基础镜像；阶段 2 切换为规范 MCP 执行路径并交付包含工具服务和可选 RAG profile
+的单机 Compose。当前单源 adapter/Gateway、双传输探针、API/Web 根 Compose 和真实全栈
+E2E 已通过；生产仍是进程内 `Tool.invoke`，独立 MCP 工具服务尚未纳入 Compose，因此不能
+把 v2.4 目标架构整体标记为已实现。详细边界、服务分组、卷、网络和验收见
+`docs/v2.4/MCP与Docker架构决策.md`。
 
 ### 15.4 v2.5 — 记忆、自主性与协作
 

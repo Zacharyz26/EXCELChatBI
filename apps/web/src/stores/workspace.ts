@@ -460,19 +460,76 @@ function applyTurnEvent(event: ChatStreamEvent, set: WorkspaceSetter): void {
         status: "pending",
       }));
     if (toolSteps.length === 0) return;
-    set((state) => ({
-      liveTurn: [...state.liveTurn, { kind: "tools", id: nextItemId(), steps: toolSteps }],
-    }));
+    set((state) => {
+      if (
+        state.liveTurn.some(
+          (item) => item.kind === "tools" && item.source === "task_plan",
+        )
+      ) {
+        return state;
+      }
+      return {
+        liveTurn: [
+          ...state.liveTurn,
+          {
+            kind: "tools",
+            id: nextItemId(),
+            steps: toolSteps,
+            source: "tool_calls",
+          },
+        ],
+      };
+    });
+  } else if (event.event === "plan.created" || event.event === "plan.revised") {
+    const payload = objectValue(event.data.payload);
+    const steps = Array.isArray(payload.steps) ? payload.steps : [];
+    const plannedSteps: ToolStep[] = steps
+      .filter((step): step is Record<string, unknown> => !!step && typeof step === "object")
+      .map((step) => ({
+        id: stringValue(step.step_id),
+        tool: stringValue(step.capability),
+        label: stringValue(step.purpose) || stringValue(step.capability),
+        status: planStepStatus(step.status),
+        summary: stringValue(step.status) === "skipped"
+          ? "已根据执行结果跳过"
+          : undefined,
+        message: ["failed", "blocked"].includes(stringValue(step.status))
+          ? "步骤未完成"
+          : undefined,
+        dependencies: stringArray(step.dependencies),
+      }));
+    if (plannedSteps.length === 0) return;
+    const planVersion = numberValue(payload.plan_version);
+    set((state) => {
+      const withoutOlderPlan = state.liveTurn.filter(
+        (item) => item.kind !== "tools" || item.source !== "task_plan",
+      );
+      return {
+        liveTurn: [
+          ...withoutOlderPlan,
+          {
+            kind: "tools",
+            id: `plan-${stringValue(payload.plan_id) || nextItemId()}`,
+            steps: plannedSteps,
+            source: "task_plan",
+            planVersion,
+          },
+        ],
+      };
+    });
   } else if (event.event === "tool_start") {
-    updateToolStep(set, stringValue(event.data.id), (step) => ({
+    const stepId = stringValue(event.data.step_id) || stringValue(event.data.id);
+    updateToolStep(set, stepId, (step) => ({
       ...step,
+      tool: stringValue(event.data.tool) || step.tool,
       status: "running",
       fields: stringValue(event.data.fields) || step.fields,
       argsPreview: stringValue(event.data.args_preview) || step.argsPreview,
     }));
   } else if (event.event === "tool_end") {
     const ok = stringValue(event.data.status) === "ok";
-    updateToolStep(set, stringValue(event.data.id), (step) => ({
+    const stepId = stringValue(event.data.step_id) || stringValue(event.data.id);
+    updateToolStep(set, stepId, (step) => ({
       ...step,
       status: ok ? "ok" : "error",
       summary: stringValue(event.data.summary) || step.summary,
@@ -507,6 +564,30 @@ function updateToolStep(
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function planStepStatus(value: unknown): ToolStep["status"] {
+  const status = stringValue(value);
+  if (status === "completed" || status === "skipped") return "ok";
+  if (status === "failed" || status === "blocked") return "error";
+  if (status === "running") return "running";
+  return "pending";
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 function errorMessage(error: unknown): string {

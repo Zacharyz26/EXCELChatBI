@@ -34,6 +34,9 @@ from apps.orchestrator.control.planner_prompt import (  # noqa: E402
     PlannerProtocolError,
     generate_plan,
 )
+from apps.orchestrator.control.production_planner import (  # noqa: E402
+    choose_planner_route,
+)
 from packages.models.gateway import ModelGateway  # noqa: E402
 from packages.models.registry import ModelRegistry  # noqa: E402
 from packages.models.types import Scenario  # noqa: E402
@@ -167,42 +170,10 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
 
 def choose_route(case: dict[str, Any]) -> PlannerRoute:
     """Deterministic stage-0 router; it never reads expected labels."""
-    request = str(case["request"]).lower()
-    context = cast(dict[str, Any], case["context"])
-    datasets = cast(list[dict[str, Any]], context.get("datasets") or [])
-    columns = [
-        str(column)
-        for dataset in datasets
-        for column in cast(list[object], dataset.get("columns") or [])
-    ]
-    if context.get("knowledge_conflicts"):
-        return "llm"
-    if "深入分析" in request or "替代解释" in request:
-        return "llm"
-    if (
-        ("先" in request and ("最后" in request or "然后" in request))
-        or ("排除" in request and "重新" in request)
-        or ("关系" in request and ("不同" in request or "比较" in request))
-    ):
-        return "llm"
-    if context.get("observations") or context.get("artifacts"):
-        return "template"
-    if len([column for column in columns if "时间" in column]) > 1:
-        return "template"
-    if any(
-        token in request
-        for token in (
-            "图",
-            "报告",
-            "pdf",
-            "趋势",
-            "转化率",
-            "异常",
-            "预测",
-        )
-    ):
-        return "template"
-    return "fast"
+    return choose_planner_route(
+        str(case["request"]),
+        cast(JsonObject, case["context"]),
+    )
 
 
 def build_contract(case: dict[str, Any]) -> JsonObject:

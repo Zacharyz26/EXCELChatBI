@@ -21,6 +21,7 @@ RunStatus = Literal[
 InvocationStatus = Literal["running", "succeeded", "failed", "unknown"]
 ObservationSource = Literal["tool", "user", "policy", "system"]
 ObservationStatus = Literal["ok", "error", "partial"]
+StepStatus = Literal["pending", "running", "completed", "failed", "skipped", "blocked"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +51,33 @@ class TaskEvent:
     event_type: str
     payload: JsonObject
     occurred_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPlanRecord:
+    """一个 TaskRun 的不可变计划版本。"""
+
+    plan_id: str
+    run_id: str
+    version: int
+    reason: str | None
+    plan: JsonObject
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStepRecord:
+    """持久化计划中的一个步骤；``logical_id`` 仅在所属计划内唯一。"""
+
+    step_id: str
+    plan_id: str
+    run_id: str
+    position: int
+    logical_id: str
+    status: StepStatus
+    definition: JsonObject
+    started_at: str | None
+    completed_at: str | None
 
 
 @dataclass(frozen=True, slots=True)

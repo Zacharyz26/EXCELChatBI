@@ -151,6 +151,54 @@ class AgentToolRegistry:
         """全部工具的 OpenAI 兼容定义（喂给网关 tools 参数）。"""
         return [s.openai_tool() for s in self._specs.values()]
 
+    def capability_catalog(self) -> list[JsonObject]:
+        """从实际注册工具生成 Planner 能力目录，避免另维护一份静态清单。"""
+        catalog: dict[str, JsonObject] = {}
+        for spec in self._specs.values():
+            for capability in spec.metadata.capabilities:
+                existing = catalog.get(capability)
+                if existing is None:
+                    catalog[capability] = {
+                        "name": capability,
+                        "description": spec.description,
+                        "allowed": True,
+                        "risk": spec.metadata.risk_level,
+                        "read_only": spec.metadata.read_only,
+                        "artifact_types": list(spec.metadata.artifact_types),
+                    }
+                    continue
+                artifact_types = {
+                    str(item)
+                    for item in existing.get("artifact_types", [])
+                    if isinstance(item, str)
+                }
+                artifact_types.update(spec.metadata.artifact_types)
+                existing["artifact_types"] = sorted(artifact_types)
+        return [catalog[name] for name in sorted(catalog)]
+
+    def openai_tools_for_capabilities(
+        self, capabilities: set[str]
+    ) -> list[dict[str, Any]]:
+        """只暴露当前计划声明的 capability 对应工具。"""
+        return [
+            spec.openai_tool()
+            for spec in self._specs.values()
+            if capabilities.intersection(spec.metadata.capabilities)
+        ]
+
+    def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
+        """返回工具声明的能力；未知工具返回空元组。"""
+        spec = self._specs.get(tool_name)
+        return spec.metadata.capabilities if spec is not None else ()
+
+    def tool_names_for_capability(self, capability: str) -> tuple[str, ...]:
+        """把一个计划能力解析为已注册工具名，保持注册顺序。"""
+        return tuple(
+            spec.name
+            for spec in self._specs.values()
+            if capability in spec.metadata.capabilities
+        )
+
     def mcp_descriptors(self) -> tuple[MCPToolDescriptor, ...]:
         """Canonical tools/list expectation used by discovery and CI."""
         return self._mcp_adapter.list_tools()

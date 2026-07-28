@@ -1,7 +1,7 @@
-"""Stage-0 TaskPlan contract and deterministic validation.
+"""TaskPlan contract and deterministic validation.
 
-This module defines the shared shape used by the fast, template and LLM planner
-spikes.  It does not participate in the production Agent loop until stage 2.
+This module defines the shared shape used by the production fast, template and
+LLM Planner paths as well as the frozen evaluation harness.
 """
 
 from __future__ import annotations
@@ -128,6 +128,7 @@ class PlanValidation:
     dependencies_valid: bool
     capability_valid: bool
     criteria_coverage: bool
+    clarification_valid: bool
     budget_valid: bool
     issues: tuple[str, ...]
 
@@ -138,6 +139,7 @@ class PlanValidation:
             and self.dependencies_valid
             and self.capability_valid
             and self.criteria_coverage
+            and self.clarification_valid
             and self.budget_valid
         )
 
@@ -174,6 +176,7 @@ def validate_task_plan(
             dependencies_valid=False,
             capability_valid=False,
             criteria_coverage=False,
+            clarification_valid=False,
             budget_valid=False,
             issues=tuple(issues),
         )
@@ -206,6 +209,11 @@ def validate_task_plan(
 
     clarifications = cast(list[dict[str, Any]], plan["clarifications"])
     waiting_user = any(bool(item["blocking"]) for item in clarifications)
+    clarification_valid = not waiting_user or (allow_waiting_user and not steps)
+    if waiting_user and steps:
+        issues.append("clarification:blocking_requires_empty_steps")
+    elif waiting_user and not allow_waiting_user:
+        issues.append("clarification:blocking_not_allowed")
     requirements = criterion_capabilities or {}
     missing_criteria = {
         criterion_id
@@ -227,6 +235,7 @@ def validate_task_plan(
         dependencies_valid=dependencies_valid,
         capability_valid=capability_valid,
         criteria_coverage=criteria_coverage,
+        clarification_valid=clarification_valid,
         budget_valid=budget_valid,
         issues=tuple(issues),
     )

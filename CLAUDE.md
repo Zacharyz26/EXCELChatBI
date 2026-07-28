@@ -10,28 +10,25 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.3 反应式工具调用 Agent**：
+当前生产基线是 **v2.4 阶段 2B 依赖图与重规划 Agent**：
 
 ```text
-React 对话工作区 → /chat/stream → 自研 function-calling 循环
-                    → 进程内 Tool.invoke → parquet/文件 + SQLite
+React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
+                    → ready capability 白名单 → Observation Replanner → 进程内 Tool.invoke
+                    → Evidence/Artifact/TaskPlan/TaskStep → SQLite v3 + 文件
 ```
 
 - v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
-- 已有模型选工具、结果回填、多轮循环、Artifact、SQLite 对话历史和 SSE 透明度卡片，但计划仍是工具调用列表，结束条件仍主要由模型停止调用工具决定。
+- fast/template/LLM 混合 Planner 已统一输出并持久化 TaskPlan/TaskStep；生产 API 只向
+  Executor 暴露依赖已满足的 ready capability；失败 Observation 会生成不可变计划新版本，
+  模型提前结束时 Verifier 会因未完成步骤拒绝成功。任务控制/恢复仍待阶段 2C。
 - 知识库第一至第四阶段代码、评测、生命周期、可观测和 Standalone 运维基线已经完成；目标机首次部署与恢复演练仍是运维任务。
-- **v2.4 阶段 1 本地实现已完成，远端镜像门禁待运行**：首个控制面纵向切片已落地 SQLite v2、
-  TaskRun/TaskContract/Event/Snapshot/Invocation/Evidence、最小确定性 Verifier、v2 生命周期
-  SSE 和只读任务接口；第二个切片已原子化任务启动，并接入数值 Claim→Evidence 校验和
-  无依据数字纠正；第三个切片已原子化工具成功、Artifact/Evidence/Event/Checkpoint 和报告
-  文件发布；第四个切片已落地受约束语义 Verifier 协议、14 场景评测集和隔离模型评测入口。
-  DeepSeek V3/R1 首轮均因 false PASS 判定 `NO_GO`，语义路径未接入生产；第五个切片已接入
-  中央策略、结构化审计/trace，以及原子的 `step.started`、失败/未知 Observation，unknown
-  结果不能完成。第六个切片已落地 MCP 单源契约、官方 SDK Server adapter、Client Gateway
-  与无副作用影子比对，并加入 API/Web 基础镜像和远端构建 smoke job。收尾批次补齐知识来源/
-  空结果 Claim、同值多路径记录、显式局限、报告文件对账和 Artifact 后置条件影子门禁。阶段 0
-  的 Planner/行为基线、MCP 双传输探针和评审仍是未关闭债务；阶段 1 只剩提交推送后首次远端
-  镜像构建这一正式验收门禁，双传输规范执行切换属于阶段 2。
+- **v2.4 阶段 1 已正式验收；阶段 2A 已实现**：SQLite schema v3 已包含 TaskRun、
+  TaskContract/Event/Snapshot/Plan/Step/Invocation/Evidence/Checkpoint；确定性 Verifier、
+  Claim/Evidence、权限/项目隔离、超时恢复、文件生命周期、MCP 同源契约与双传输探针、
+  API/Web Compose 和真实全栈 E2E 均已落地。G1–G6 和 G7 自动门禁已完成；G7 仍待
+  Planner/Verifier 人工盲评、负责人签字和 ADR 接受。语义 Verifier 因 false PASS
+  继续 `NO_GO`，生产仅使用确定性 Verifier。
 
 目标控制循环：
 
@@ -46,8 +43,12 @@ React 对话工作区 → /chat/stream → 自研 function-calling 循环
 
 - Dify 已放弃，不恢复 A/B 低代码双轨。
 - v2.4 采用统一的自研类型化状态机；简单任务、模板任务和 LLM 规划任务输出同一种 TaskPlan。是否引入 LangGraph 只在状态机复杂度和评测收益证明必要时再决定。
-- 生产 MCP 执行当前仍为进程内 `Tool.invoke`；单源 Tool Contract、官方 SDK adapter、stdio 入口、Client Gateway 和影子校验已实现。阶段 0 关闭 stdio/Streamable HTTP 探针后，阶段 2 才切换规范执行路径；v3.0 再实现外部服务动态发现、企业授权与准入。
-- API/Web 基础 Dockerfile、非 root 健康检查和镜像构建 CI 已实现但尚未首次远端运行；当前可运行容器基线仍只有 Milvus Standalone。阶段 2 提供含 MCP 工具服务的完整单机 Compose；所有状态目录必须持久化，容器默认非 root 且不得向 API 暴露 Docker Socket。
+- 生产 MCP 执行当前仍为进程内 `Tool.invoke`；单源 Tool Contract、官方 SDK adapter、
+  认证的 stdio/Streamable HTTP、Client Gateway、影子校验和双传输探针已实现。阶段 2D
+  切换规范执行路径；v3.0 再实现外部服务动态发现、企业授权与准入。
+- API/Web Dockerfile、非 root 健康检查、镜像 CI、根 Compose 与真实全栈 E2E 已实现。
+  阶段 2E 提供独立 MCP 工具服务的完整单机 Compose；所有状态目录必须持久化，容器默认
+  非 root 且不得向 API 暴露 Docker Socket。
 - 原 v2.3 设计历史见设计文档第 14 章；现行开发路线以 Agent 自主化规划和第 15 章为准。
 
 ## 3. 不变量（任何执行路径均不可违反）
@@ -76,13 +77,13 @@ React 对话工作区 → /chat/stream → 自研 function-calling 循环
 | 类别 | 当前选型 | 已规划演进 |
 |---|---|---|
 | 后端 | Python 3.11、FastAPI、uv | 保持 |
-| 前端 | React 18、ECharts 5、Zustand、SSE | v2.5 增加真实计划、澄清、暂停/恢复和证据交互 |
-| 编排 | 自研 DeepSeek function-calling 循环、`Scenario.AGENT` | v2.4 类型化状态机：Goal/Planner/Executor/Verifier/Replanner/Finalizer |
+| 前端 | React 18、ECharts 5、Zustand、SSE；真实计划只读展示 | v2.5 增加计划编辑、结构化澄清、暂停/恢复和证据交互 |
+| 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier | v2.4 后续完成任务控制、恢复与 Finalizer 收口 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite `.data/chatbi.db` + LRU 热缓存 | v2.4 增加迁移器、Task/Event/Plan/Evidence/Checkpoint |
+| 对话持久层 | SQLite v3 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Checkpoint | v2.4 后续增加自动恢复与任务控制 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 进程内 `Tool.invoke` + JSON Schema | v2.4 标准 MCP Client/Server、stdio/Streamable HTTP、Tool Capability Contract；v3.0 外部准入与企业授权 |
-| 部署 | 本机进程；仅 Milvus 有 Compose | v2.4 API/Web/MCP 镜像与单机 Compose；v3.0 镜像供应链和多实例运维 |
+| 部署 | 本机进程 + API/Web 根 Compose；Milvus profile | v2.4 增加独立 MCP 工具服务 Compose；v3.0 镜像供应链和多实例运维 |
 | 检索 | bge-m3、bge-reranker、Milvus Lite/Standalone；替身后端可用 | v2.5 业务语义层与数据 Evidence 联合推理 |
 | 统计 | statsmodels、scikit-learn、Prophet | v2.5 增加自主分析和统计护栏 |
 | 报告/截图 | Markdown、WeasyPrint、Playwright | 保持确定性工具执行 |
@@ -118,33 +119,23 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：关闭 v2.4 阶段 1 外部门禁并进入阶段 2
+### 6.2 当前任务：G7 收口与 v2.4 阶段 2
 
-阶段 1 本地实现已完成，但远端镜像门禁通过前不得写成正式验收完成：
+1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
+   `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
+2. 阶段 2A 已落地生产混合 Planner、TaskPlan/TaskStep 版本持久化、能力到工具解析、
+   计划工具白名单、步骤状态绑定、计划完成校验和 Web 只读计划卡。
+3. 阶段 2B 已实现依赖图 ready frontier、Observation 驱动 Replanner、不可变
+   `plan.revised`、跨版本 attempt 和条件 skip。
+4. 下一批阶段 2C 完成 clarification answer、pause/resume/cancel、step retry 与 Checkpoint
+   自动续跑；2D 切换生产 MCP Gateway；2E 完成独立工具服务 Compose 和完整恢复/E2E。
 
-1. 已落地 SQLite v2 正式迁移器、checksum、v1 备份与受保护 v2→v1 回滚；
-2. 已落地最小 TaskContract/AgentState、TaskRun/Event/Snapshot、Invocation/Evidence；
-3. 已把确定性 Verifier 接入旧循环，候选最终文本验证通过后才发送并完成；
-4. 已实现 run_id、v2 生命周期 SSE 和 TaskRun/Event 只读恢复接口；
-5. 已把用户消息、TaskRun/TaskContract、goal 和初始快照合并为原子事务；
-6. 已接入数值、知识来源、空检索诚实回答、显式局限和同值多路径 Claim/Evidence 校验；
-   受约束语义模型首轮 `NO_GO`，生产保持禁用；
-7. 已原子提交工具成功的 Artifact/Invocation/Evidence/Event/Snapshot/Checkpoint，报告文件采用
-   临时文件原子发布并补提交失败清理，Evidence 引用 Artifact 禁止单独删除；
-8. 正则意图编译与通用 Artifact 后置条件的固定影子集已达到 9/9；正则仅作阶段 1 兼容层，
-   最终完成只由 TaskContract/Verifier 判断；
-9. 已接入 `tool-policy-v1`、结构化审计/trace、原子 `step.started` 和失败/未知 Observation；
-   当前为本地主体与代码静态 allowlist，不得宣称已有企业身份治理；
-10. 已完成 MCP Server adapter/Gateway 影子路径、API/Web 基础镜像和报告文件对账；阶段 1 仅剩
-    提交推送后的首次远端镜像构建门禁。stdio/Streamable HTTP 探针是阶段 0 债务，服务认证、
-    规范执行切换和完整 Compose 属于阶段 2。
-
-阶段 0 的真实模型评测、MCP 双传输探针和正式评审未完成，作为显式前置债务并行关闭，
-不得回填为已通过。完整状态见 `/docs/v2.4/阶段1实施记录.md`。
+完整状态见 `/docs/v2.4/阶段2B实施记录.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.4：复杂多步、成功验证、动态重规划、澄清、Checkpoint 和恢复；全项目 MCP 规范接口；API/Web/MCP 镜像和单机 Compose；
+- v2.4 后续：结构化澄清、Checkpoint 自动恢复和任务控制；
+  生产 MCP 规范执行；独立 MCP 工具服务镜像和完整单机 Compose；
 - v2.5：上下文压缩、指代消解、长期记忆、可干预前端、业务语义层、自主分析和多数据集；同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker 状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；
 - v3.0：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态、镜像供应链、多实例、多 Agent、多租户和企业治理。

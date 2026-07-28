@@ -88,6 +88,33 @@ class ScriptedGateway:
         )
 
 
+class PlannerAwareGateway(ScriptedGateway):
+    """同时提供结构化 Planner 与流式 Executor 的测试网关。"""
+
+    def __init__(
+        self, turns: list[dict[str, Any]], planner_plan: dict[str, Any]
+    ) -> None:
+        super().__init__(turns)
+        self.planner_plan = planner_plan
+        self.planner_calls = 0
+
+    async def complete(
+        self,
+        scenario: Scenario,
+        messages: list[ModelMessage],
+        *,
+        params: dict[str, object] | None = None,
+    ) -> ModelResponse:
+        assert scenario == Scenario.COMPLEX_REASONING
+        assert params is not None
+        assert messages
+        self.planner_calls += 1
+        return ModelResponse(
+            content=json.dumps(self.planner_plan, ensure_ascii=False),
+            model="eligible-planner",
+        )
+
+
 class FakeRegistry:
     """确定性工具注册表替身：按工具名执行 handler。"""
 
@@ -100,6 +127,48 @@ class FakeRegistry:
             {"type": "function", "function": {"name": name, "parameters": {}}}
             for name in self._handlers
         ]
+
+    def capability_catalog(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": capability,
+                "description": name,
+                "allowed": True,
+                "risk": "low",
+                "read_only": True,
+                "artifact_types": [],
+            }
+            for name in self._handlers
+            for capability in self.capabilities_for_tool(name)
+        ]
+
+    def openai_tools_for_capabilities(
+        self, capabilities: set[str]
+    ) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.openai_tools()
+            if capabilities.intersection(
+                self.capabilities_for_tool(str(item["function"]["name"]))
+            )
+        ]
+
+    def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
+        mapping = {
+            "get_data_profile": "data.profile",
+            "trend_analysis": "stats.trend",
+            "anomaly_detect": "stats.anomaly",
+            "regression": "stats.regression",
+            "correlation": "stats.correlation",
+            "gen_chart": "visualization.chart",
+            "chart_screenshot": "visualization.screenshot",
+            "transform_dataset": "dataset.transform",
+            "aggregate_preview": "data.aggregate",
+            "kb_search": "knowledge.search",
+            "generate_report": "report.generate",
+        }
+        capability = mapping.get(tool_name)
+        return (capability,) if capability is not None else ()
 
     def execute(self, name: str, arguments_json: str) -> Any:
         self.executed.append((name, arguments_json))
@@ -118,6 +187,8 @@ async def _run_loop(
     user_text: str = "分析一下",
     config: AgentLoopConfig | None = None,
     policy: ToolPolicyGateway | None = None,
+    planner_gateway: Any | None = None,
+    enforce_plan: bool | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     raw = [
         item
@@ -131,6 +202,12 @@ async def _run_loop(
             locks=ConversationLockPool(),
             config=config or AgentLoopConfig(tool_result_max_chars=500),
             policy=policy,
+            planner_gateway=planner_gateway,
+            enforce_plan=(
+                planner_gateway is not None
+                if enforce_plan is None
+                else enforce_plan
+            ),
         )
     ]
     return _events(raw)
@@ -198,6 +275,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "text.delta",       # 工具轮开场白流式吐出
         "understanding",    # 轮末转为理解卡
@@ -244,6 +322,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
         4,
         5,
         6,
+        7,
     ]
     step_started = by_name["step.started"]
     assert step_started["payload"]["policy"]["allowed"] is True
@@ -287,6 +366,470 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "c1"
     assert '"duplicate_rows":0' in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_production_planner_limits_tools_and_binds_invocation_to_step(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    plan = {
+        "schema_version": 1,
+        "summary": "检查数据质量",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "取得质量画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像调用成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "deltas": ["我先检查质量"],
+                "tool_calls": [
+                    ToolCall(
+                        id="planned-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["共有 3 行。"]},
+        ],
+        plan,
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
+            "anomaly_detect": lambda _: {"anomalies": []},
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="先检查数据质量，然后给出结论",
+        planner_gateway=gateway,
+    )
+
+    assert gateway.planner_calls == 1
+    offered_names = {
+        str(item["function"]["name"])
+        for item in cast(list[dict[str, Any]], gateway.calls[0]["tools"])
+    }
+    assert offered_names == {"get_data_profile"}
+    by_name = dict(events)
+    plan_payload = cast(dict[str, Any], by_name["plan.created"]["payload"])
+    assert plan_payload["planner"]["route"] == "llm"
+    run_id = cast(str, by_name["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    steps = task_store.list_plan_steps(run_id)
+    assert len(steps) == 1
+    assert steps[0].logical_id == "profile"
+    assert steps[0].status == "completed"
+    invocation = task_store.list_invocations(run_id)[0]
+    assert invocation.step_id == steps[0].step_id
+
+
+@pytest.mark.asyncio
+async def test_dependency_executor_only_offers_the_current_ready_frontier(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    plan = {
+        "schema_version": 1,
+        "summary": "先画像再分析趋势",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "取得数据画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像调用成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "trend",
+                "purpose": "分析趋势",
+                "capability": "stats.trend",
+                "dependencies": ["profile"],
+                "expected_evidence": ["趋势 Evidence"],
+                "completion_conditions": ["趋势调用成功"],
+                "fallback": [
+                    {"when": "失败", "action": "correct_parameters"}
+                ],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="profile-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-call",
+                        name="trend_analysis",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {"deltas": ["计划中的分析已经完成。"]},
+        ],
+        plan,
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
+            "trend_analysis": lambda _: {"series": [{"period": "一月"}]},
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="先检查数据规模，然后分析趋势",
+        planner_gateway=gateway,
+    )
+
+    offered = [
+        {
+            str(item["function"]["name"])
+            for item in cast(list[dict[str, Any]], call["tools"] or [])
+        }
+        for call in gateway.calls
+    ]
+    assert offered == [
+        {"get_data_profile"},
+        {"trend_analysis"},
+        set(),
+    ]
+    assert [item[0] for item in registry.executed] == [
+        "get_data_profile",
+        "trend_analysis",
+    ]
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    assert [
+        (step.logical_id, step.status)
+        for step in TaskStore(store.db_path).list_plan_steps(run_id)
+    ] == [("profile", "completed"), ("trend", "completed")]
+    assert events[-1][0] == "done"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_guard_does_not_block_distinct_steps_using_same_tool(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    steps = [
+        {
+            "step_id": "schema_profile",
+            "purpose": "确认字段结构",
+            "capability": "data.profile",
+            "dependencies": [],
+            "expected_evidence": ["字段 Evidence"],
+            "completion_conditions": ["字段画像成功"],
+            "fallback": [{"when": "失败", "action": "retry"}],
+        },
+        {
+            "step_id": "quality_profile",
+            "purpose": "确认质量概况",
+            "capability": "data.profile",
+            "dependencies": ["schema_profile"],
+            "expected_evidence": ["质量 Evidence"],
+            "completion_conditions": ["质量画像成功"],
+            "fallback": [{"when": "失败", "action": "retry"}],
+        },
+    ]
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="schema-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="quality-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {"deltas": ["两个画像步骤都已完成。"]},
+        ],
+        {
+            "schema_version": 1,
+            "summary": "分步检查结构和质量",
+            "steps": steps,
+            "assumptions": [],
+            "clarifications": [],
+        },
+    )
+    registry = FakeRegistry(
+        {"get_data_profile": lambda _: {"profile": {"row_count": 3}}}
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="先确认字段结构，然后再检查质量并给出替代解释",
+        planner_gateway=gateway,
+    )
+
+    assert [item[0] for item in registry.executed] == [
+        "get_data_profile",
+        "get_data_profile",
+    ]
+    assert events[-1][0] == "done"
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_creates_new_plan_version_and_recovers(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    plan = {
+        "schema_version": 1,
+        "summary": "分析趋势",
+        "steps": [
+            {
+                "step_id": "trend",
+                "purpose": "分析趋势",
+                "capability": "stats.trend",
+                "dependencies": [],
+                "expected_evidence": ["趋势 Evidence"],
+                "completion_conditions": ["趋势调用成功"],
+                "fallback": [
+                    {"when": "参数不适用", "action": "correct_parameters"}
+                ],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    attempts = 0
+
+    def trend_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ValueError("时间列不存在")
+        return {"series": [{"period": arguments.get("time_col", "月份")}]}
+
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-bad",
+                        name="trend_analysis",
+                        arguments=(
+                            f'{{"dataset_ref":"{_DATASET_REF}",'
+                            '"time_col":"错误列"}'
+                        ),
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-fixed",
+                        name="trend_analysis",
+                        arguments=(
+                            f'{{"dataset_ref":"{_DATASET_REF}",'
+                            '"time_col":"月份"}'
+                        ),
+                    )
+                ]
+            },
+            {"deltas": ["修正参数后已完成趋势分析。"]},
+        ],
+        plan,
+    )
+    registry = FakeRegistry({"trend_analysis": trend_handler})
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="先分析趋势，然后给出替代解释",
+        planner_gateway=gateway,
+    )
+
+    names = [name for name, _ in events]
+    assert "replanning.started" in names
+    assert "plan.revised" in names
+    assert "replanning.completed" in names
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    run = task_store.get_run(run_id)
+    assert run is not None
+    assert run.plan_version == 2
+    assert run.status == "completed"
+    assert task_store.list_plan_steps(run_id)[0].status == "completed"
+    attempts_by_event = [
+        payload["payload"]["attempt"]
+        for name, payload in events
+        if name == "step.started"
+    ]
+    assert attempts_by_event == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_zero_anomaly_observation_skips_conditional_transform(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    plan = {
+        "schema_version": 1,
+        "summary": "检测异常并按需清洗",
+        "steps": [
+            {
+                "step_id": "detect",
+                "purpose": "检测异常",
+                "capability": "stats.anomaly",
+                "dependencies": [],
+                "expected_evidence": ["异常 Evidence"],
+                "completion_conditions": ["异常检测成功"],
+                "fallback": [
+                    {"when": "失败", "action": "correct_parameters"}
+                ],
+            },
+            {
+                "step_id": "clean",
+                "purpose": "仅在存在异常时清洗",
+                "capability": "dataset.transform",
+                "dependencies": ["detect"],
+                "expected_evidence": ["衍生数据集"],
+                "completion_conditions": ["清洗成功或条件跳过"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="detect-call",
+                        name="anomaly_detect",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {"deltas": ["未发现需要清洗的异常，条件流程已经结束。"]},
+        ],
+        plan,
+    )
+    registry = FakeRegistry(
+        {
+            "anomaly_detect": lambda _: {"n_anomalies": 0, "anomalies": []},
+            "transform_dataset": lambda _: {"dataset_ref": "derived"},
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="先检测异常，然后在需要时清洗并给出替代解释",
+        planner_gateway=gateway,
+    )
+
+    assert [item[0] for item in registry.executed] == ["anomaly_detect"]
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    run = task_store.get_run(run_id)
+    assert run is not None and run.plan_version == 2
+    assert [
+        (step.logical_id, step.status)
+        for step in task_store.list_plan_steps(run_id)
+    ] == [("detect", "completed"), ("clean", "skipped")]
+    assert "plan.revised" in [name for name, _ in events]
+    assert events[-1][0] == "done"
+
+
+@pytest.mark.asyncio
+async def test_plan_enforcement_stays_fail_closed_without_llm_planner_gateway(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="outside-plan",
+                        name="anomaly_detect",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}","columns":["销售额"]}}',
+                    )
+                ]
+            },
+            {"deltas": ["已经完成。"]},
+            {"deltas": ["仍然无法执行计划外工具。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
+            "anomaly_detect": lambda _: {"anomalies": []},
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="介绍这份数据的规模和质量",
+        enforce_plan=True,
+    )
+
+    offered_names = {
+        str(item["function"]["name"])
+        for item in cast(list[dict[str, Any]], gateway.calls[0]["tools"])
+    }
+    assert offered_names == {"get_data_profile"}
+    assert registry.executed == []
+    tool_end = next(payload for name, payload in events if name == "tool_end")
+    assert tool_end["status"] == "error"
+    assert "不属于当前持久化计划" in tool_end["message"]
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "incomplete_plan"
 
 
 @pytest.mark.asyncio
@@ -396,7 +939,7 @@ async def test_ambiguous_metric_waits_for_user_without_calling_model(
     assert [name for name, _ in events] == [
         "meta",
         "goal",
-        "run.started",
+        "plan.created",
         "waiting_user",
         "text.delta",
         "done",
@@ -706,6 +1249,7 @@ async def test_explicit_chart_request_errors_if_retry_still_returns_only_text(
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "verification.started",
         "verification",
@@ -804,6 +1348,7 @@ async def test_explicit_report_errors_if_retry_still_returns_only_text(
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "verification.started",
         "verification",
@@ -1274,6 +1819,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "verification.started",
         "verification",
@@ -1298,7 +1844,13 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert messages[1].id == meta["message_id"]
     call = chat_harness.gateway.calls[0]
     assert call["scenario"] == Scenario.AGENT
-    assert call["tools"], "Agent 轮必须带工具定义"
+    assert call["tools"] is None, "无数据且计划无工具步骤时应走快速答复路径"
+    run_response = chat_harness.client.get(f"/agent/runs/{meta['run_id']}")
+    assert run_response.status_code == 200
+    run_payload = run_response.json()
+    assert run_payload["plan"]["version"] == 1
+    assert run_payload["plan"]["definition"]["steps"] == []
+    assert run_payload["steps"] == []
     model_messages = call["messages"]
     assert model_messages[0].role == "system"
     assert "编造数字" in model_messages[0].content
@@ -1373,6 +1925,7 @@ def test_stream_model_failure_emits_error_and_does_not_persist_partial_assistant
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "run.failed",
         "error",
@@ -1398,6 +1951,7 @@ def test_stream_empty_response_is_not_persisted(chat_harness: ChatHarness) -> No
     assert [name for name, _ in events] == [
         "meta",
         "goal",
+        "plan.created",
         "run.started",
         "verification.started",
         "verification",

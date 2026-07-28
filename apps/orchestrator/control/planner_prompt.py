@@ -1,10 +1,11 @@
-"""Versioned LLM Planner prompt used only by the v2.4 stage-0 spike."""
+"""版本化 LLM Planner：阶段 0 评测与阶段 2A 生产路径共用同一实现。"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -102,6 +103,7 @@ async def generate_plan(
     criterion_capabilities: dict[str, set[str]],
     temperature: float,
     max_steps: int = 12,
+    additional_validator: Callable[[JsonObject], tuple[str, ...]] | None = None,
 ) -> PlannerGeneration:
     """Generate and validate a plan, allowing exactly one structured repair."""
     payload: JsonObject = {
@@ -132,6 +134,7 @@ async def generate_plan(
         capabilities=capabilities,
         criterion_capabilities=criterion_capabilities,
         max_steps=max_steps,
+        additional_validator=additional_validator,
     )
     repaired = False
     aggregate = response
@@ -155,6 +158,7 @@ async def generate_plan(
             capabilities=capabilities,
             criterion_capabilities=criterion_capabilities,
             max_steps=max_steps,
+            additional_validator=additional_validator,
         )
         response = repair
     if error is not None or plan is None or validation is None:
@@ -211,6 +215,7 @@ def _parse_and_validate(
     capabilities: set[str],
     criterion_capabilities: dict[str, set[str]],
     max_steps: int,
+    additional_validator: Callable[[JsonObject], tuple[str, ...]] | None,
 ) -> tuple[JsonObject | None, PlanValidation | None, str | None]:
     try:
         plan = parse_task_plan(content)
@@ -224,6 +229,9 @@ def _parse_and_validate(
     )
     if not validation.valid:
         return plan, validation, "; ".join(validation.issues)
+    extra_issues = additional_validator(plan) if additional_validator is not None else ()
+    if extra_issues:
+        return plan, validation, "; ".join(extra_issues)
     return plan, validation, None
 
 

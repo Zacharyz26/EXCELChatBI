@@ -98,6 +98,7 @@ async def chat_stream(
             registry=registry,
             locks=_conversation_locks,
             config=config,
+            planner_gateway=gateway,
             principal=principal,
         ),
         ping=15,

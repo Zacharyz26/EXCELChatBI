@@ -8,7 +8,7 @@
 
 ## 当前进度
 
-当前可运行基线是带 **v2.4 控制面骨架** 的对话式 Agent。自然语言对话是唯一前端入口；
+当前可运行基线是带 **v2.4 阶段 2B 依赖图执行与动态重规划控制面** 的对话式 Agent。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
 SSE 展示。SQLite schema v3 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员和报告所有权。
@@ -45,20 +45,25 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 上传、parquet、报告和临时截图的受限生命周期清理；
 - 不使用网络 mock 的 Web→API→Excel→SQLite/parquet Playwright 全栈 E2E；
 - v2 生命周期 SSE 双发以及 `GET /agent/runs/{run_id}` 和事件游标读取接口；
+- fast/template/LLM 混合 Planner、持久化 TaskPlan/TaskStep、计划 capability 工具白名单、
+  步骤状态绑定和未完成计划的确定性拒绝；
+- 按持久化依赖图只开放当前 ready capability；可恢复失败生成不可变计划新版本，
+  已完成步骤和 Evidence 不被改写，零异常可显式跳过条件清洗；
 - React 对话工作区、SSE 理解/执行/图表/表格/报告/引用卡；
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
 - 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
 ### 当前缺口
 
-- 计划仍主要依赖模型工具调用，没有完整的持久化依赖图与可编辑计划；
+- 依赖图调度和 Observation 自动重规划已实现；计划编辑、结构化澄清回答和用户触发的
+  单步重试尚未实现；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
 - 更广泛的非数值 Claim、同值路径语义消歧、Checkpoint 自动续跑尚未完成；
 - 上下文压缩、指代消解和长期项目记忆尚未实现；
 - 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、审批和企业审计后端尚未实现；
-- 生产 Executor 仍走进程内 `Tool.invoke`；MCP stdio 子进程/Streamable HTTP 双传输探针、
-  服务认证和规范执行切换尚未完成；
+- 生产 Executor 仍走进程内 `Tool.invoke`；MCP stdio/Streamable HTTP 双传输探针和服务
+  认证已完成，规范执行切换尚未完成；
 - 单机 API/Web Compose 已提供；多实例外置状态、对象存储和独立工具服务编排尚未完成；
 - 前端能展示阻塞澄清文本，但尚无结构化澄清控件、计划编辑、暂停/续跑和自主等级；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
@@ -66,7 +71,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 
 ### 已规划但未实现
 
-- **v2.4**：混合 Planner、TaskContract、AgentState、Verifier、动态重规划、澄清、任务事件、Checkpoint 和恢复；同时完成全项目 MCP 规范接口、客户端网关、基础镜像和单机 Compose；
+- **v2.4 后续**：结构化澄清、Checkpoint 自动恢复和 pause/resume/cancel 任务控制；
+  同时把生产执行切到 MCP Client Gateway，并交付独立工具服务 Compose；
 - **v2.5**：完整记忆、可干预前端、业务指标语义层、自主探索和多数据集分析；同步扩展 MCP 的记忆/Evidence 引用、知识 Resource、审批与能力目录，并补齐状态恢复和重型工具 Docker profile；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -76,11 +82,11 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ## Agent 演进路线
 
 ```text
-当前 v2.4 控制面骨架
+当前 v2.4 阶段 2B
   理解目标 → 必要澄清 → 结构化计划 → 受控执行
-      ↑                                  ↓
+      ↑                      （依赖图 ready frontier）↓
   持久状态 ← 最终交付 ← Verifier ← Evidence
-                        ↖ 重规划
+          └── 不可变计划版本 ← Observation 重规划
 
 v2.5
   记忆 + 业务语义 + 自主分析 + 人机协作
@@ -127,8 +133,8 @@ parquet/报告文件 + SQLite v3 + Local/Milvus 知识库
 ```
 
 Dify 已放弃。生产执行仍以进程内 `Tool.invoke` 挂载，但 MCP 单源契约、SDK Server adapter、
-Client Gateway 和影子校验已经落地；完成 stdio/Streamable HTTP 探针后，阶段 2 才切换规范执行
-路径。v3.0 继续完成外部 MCP 的动态发现、授权与准入治理。
+Client Gateway、影子校验和 stdio/Streamable HTTP 双传输探针已经落地；阶段 2 后续切换
+生产规范执行路径。v3.0 继续完成外部 MCP 的动态发现、授权与准入治理。
 
 ## 目录速览
 

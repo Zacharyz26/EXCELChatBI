@@ -411,6 +411,7 @@ async def _run_case(
                 registry=cast(Any, fixture_registry),
                 locks=ConversationLockPool(),
                 config=AgentLoopConfig(max_tool_calls=12, tool_result_max_chars=4_000),
+                enforce_plan=False,
             )
         ]
         events = [

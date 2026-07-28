@@ -114,6 +114,337 @@ def test_task_run_events_transition_and_optimistic_version(tmp_path: Path) -> No
         )
 
 
+def test_task_plan_and_steps_are_versioned_and_persisted_atomically(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="planned-run",
+        user_text="检查质量并生成图表",
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "先画像再出图",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "取得字段与质量画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像调用成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "chart",
+                "purpose": "生成图表",
+                "capability": "visualization.chart",
+                "dependencies": ["profile"],
+                "expected_evidence": ["图表 Artifact"],
+                "completion_conditions": ["图表文件已持久化"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+
+    updated, saved, steps, event = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:template",
+        planner={"route": "template", "response_hash": "hash"},
+    )
+
+    assert updated.plan_version == 1
+    assert updated.state_version == run.state_version + 1
+    assert saved.version == 1 and saved.plan == plan
+    assert [step.logical_id for step in steps] == ["profile", "chart"]
+    assert [step.status for step in steps] == ["pending", "pending"]
+    assert event.event_type == "plan.created"
+    assert event.payload["planner"]["route"] == "template"
+    assert tasks.get_active_plan(run.run_id) == saved
+    assert tasks.list_plans(run.run_id) == [saved]
+    assert tasks.list_plan_steps(run.run_id) == steps
+    snapshot = tasks.get_snapshot(run.run_id)
+    assert snapshot is not None
+    assert snapshot["active_plan_id"] == saved.plan_id
+    assert snapshot["active_plan"] == plan
+
+    running, _ = tasks.transition(
+        run.run_id,
+        expected_version=updated.state_version,
+        status="running",
+        event_type="run.started",
+        payload={"reason": "plan_created"},
+    )
+    running_snapshot = tasks.get_snapshot(run.run_id)
+    assert running.status == "running"
+    assert running_snapshot is not None
+    assert running_snapshot["active_plan_id"] == saved.plan_id
+    assert running_snapshot["active_plan"] == plan
+
+    revised_plan = {**plan, "summary": "修订后的计划", "steps": plan["steps"][:1]}
+    revised_run, revised, revised_steps, revised_event = tasks.save_plan(
+        run.run_id,
+        expected_version=running.state_version,
+        plan=revised_plan,
+        reason="observation:column_changed",
+        planner={"route": "template", "response_hash": "revised"},
+    )
+    assert revised_run.plan_version == 2
+    assert revised.version == 2
+    assert revised_event.event_type == "plan.revised"
+    assert [item.version for item in tasks.list_plans(run.run_id)] == [1, 2]
+    assert tasks.list_plan_steps(run.run_id) == revised_steps
+    assert tasks.list_plan_steps(run.run_id, plan_version=1) == steps
+
+
+def test_task_plan_save_rejects_version_conflict_without_partial_rows(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="plan-conflict",
+        user_text="检查数据",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "检查数据",
+        "steps": [],
+        "assumptions": [],
+        "clarifications": [],
+    }
+
+    with pytest.raises(StateVersionConflict):
+        tasks.save_plan(
+            run.run_id,
+            expected_version=run.state_version + 1,
+            plan=plan,
+            reason="stale",
+            planner={"route": "fast"},
+        )
+
+    assert tasks.list_plans(run.run_id) == []
+    assert tasks.list_plan_steps(run.run_id) == []
+
+
+def test_plan_revision_preserves_completed_steps_and_can_explicitly_skip_pending(
+    tmp_path: Path,
+) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="preserved-plan",
+        user_text="检查异常后按需清洗",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "先检查后清洗",
+        "steps": [
+            {
+                "step_id": "detect",
+                "purpose": "检测异常",
+                "capability": "stats.anomaly",
+                "dependencies": [],
+                "expected_evidence": ["异常 Evidence"],
+                "completion_conditions": ["异常检测成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "clean",
+                "purpose": "有异常时创建衍生数据集",
+                "capability": "dataset.transform",
+                "dependencies": ["detect"],
+                "expected_evidence": ["衍生数据集"],
+                "completion_conditions": ["登记血缘"],
+                "fallback": [{"when": "没有异常", "action": "block"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:llm",
+        planner={"route": "llm"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="detect-call",
+        tool_name="anomaly_detect",
+        arguments={"dataset_ref": "d" * 32, "columns": ["销售额"]},
+        idempotency_key="detect-once",
+        policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
+    )
+    assistant = session.append_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content="执行异常检测",
+    )
+    run, _, _, _, _, _ = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=assistant.id,
+        result={"n_anomalies": 0, "anomalies": []},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "anomaly_detect"},
+        evidence_summary={"summary": "未发现异常"},
+        artifact_draft=None,
+    )
+
+    revised_run, _, revised_steps, event = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={**plan, "summary": "未发现异常，跳过清洗"},
+        reason="observation:no_anomalies",
+        planner={"route": "template"},
+        step_status_overrides={"clean": "skipped"},
+    )
+
+    assert revised_run.plan_version == 2
+    assert [item.status for item in revised_steps] == ["completed", "skipped"]
+    assert revised_steps[0].definition == steps[0].definition
+    assert event.payload["supersedes_version"] == 1
+    assert [item["status"] for item in event.payload["steps"]] == [
+        "completed",
+        "skipped",
+    ]
+
+
+def test_plan_revision_cannot_remove_a_completed_step(tmp_path: Path) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="immutable-completed-step",
+        user_text="检查画像",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "读取画像",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "读取画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像"],
+                "completion_conditions": ["画像成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="profile-call",
+        tool_name="get_data_profile",
+        arguments={"dataset_ref": "d" * 32},
+        idempotency_key="profile-once",
+        policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
+    )
+    assistant = session.append_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content="执行画像",
+    )
+    run, _, _, _, _, _ = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=assistant.id,
+        result={"profile": {"row_count": 3}},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "get_data_profile"},
+        evidence_summary={"summary": "画像完成"},
+        artifact_draft=None,
+    )
+    empty_plan = {
+        "schema_version": 1,
+        "summary": "非法删除已完成步骤",
+        "steps": [],
+        "assumptions": [],
+        "clarifications": [],
+    }
+
+    with pytest.raises(ValueError, match="不能删除已completed步骤"):
+        tasks.save_plan(
+            run.run_id,
+            expected_version=run.state_version,
+            plan=empty_plan,
+            reason="invalid",
+            planner={"route": "template"},
+        )
+
+    assert len(tasks.list_plans(run.run_id)) == 1
+
+
 def test_user_turn_run_contract_and_goal_are_created_atomically(tmp_path: Path) -> None:
     session = SessionStore(str(tmp_path / "atomic.db"))
     project = session.create_project("原子任务")
@@ -734,6 +1065,30 @@ def test_startup_recovery_marks_active_invocations_unknown(tmp_path: Path) -> No
         contract=contract,
         budget={"max_tool_calls": 2},
     )
+    plan = {
+        "schema_version": 1,
+        "summary": "执行检索",
+        "steps": [
+            {
+                "step_id": "search",
+                "purpose": "执行知识检索",
+                "capability": "knowledge.search",
+                "dependencies": [],
+                "expected_evidence": ["引用 Evidence"],
+                "completion_conditions": ["检索完成"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
     run, _ = tasks.transition(
         run.run_id,
         expected_version=run.state_version,
@@ -749,6 +1104,7 @@ def test_startup_recovery_marks_active_invocations_unknown(tmp_path: Path) -> No
         arguments={"query": "测试"},
         idempotency_key="recovery-key",
         policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
     )
 
     recovered = tasks.recover_stale_runs(stale_after_seconds=0)
@@ -762,6 +1118,8 @@ def test_startup_recovery_marks_active_invocations_unknown(tmp_path: Path) -> No
     saved_invocation = tasks.list_invocations(run.run_id)[0]
     assert saved_invocation.invocation_id == invocation.invocation_id
     assert saved_invocation.status == "unknown"
+    recovered_steps = tasks.list_plan_steps(run.run_id)
+    assert recovered_steps[0].status == "blocked"
 
 
 def test_startup_recovery_preserves_waiting_user_runs(tmp_path: Path) -> None:

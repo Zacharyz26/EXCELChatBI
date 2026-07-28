@@ -196,7 +196,7 @@ def tool_output_schema(tool_name: str) -> JsonSchema:
 
 
 def tool_metadata(
-    capability: str,
+    capability: str | tuple[str, ...],
     *artifact_types: str,
     read_only: bool = True,
     idempotent: bool = True,
@@ -212,8 +212,11 @@ def tool_metadata(
         risk = "high"
     else:
         raise ValueError(f"invalid risk level: {risk_level}")
+    capabilities = (capability,) if isinstance(capability, str) else capability
+    if not capabilities or any(not item.strip() for item in capabilities):
+        raise ValueError("capability 不能为空")
     return ToolCapabilityMetadata(
-        capabilities=(capability,),
+        capabilities=capabilities,
         artifact_types=tuple(artifact_types),
         read_only=read_only,
         destructive=False,

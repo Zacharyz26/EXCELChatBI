@@ -29,9 +29,34 @@ async def get_agent_run(
     require_run_access(store, run, principal)
     contract = await run_in_threadpool(tasks.get_contract, run_id)
     snapshot = await run_in_threadpool(tasks.get_snapshot, run_id)
+    plan = await run_in_threadpool(tasks.get_active_plan, run_id)
+    steps = await run_in_threadpool(tasks.list_plan_steps, run_id)
     return {
         "run": _run_payload(run),
         "contract": contract,
+        "plan": (
+            {
+                "plan_id": plan.plan_id,
+                "version": plan.version,
+                "reason": plan.reason,
+                "definition": plan.plan,
+                "created_at": plan.created_at,
+            }
+            if plan is not None
+            else None
+        ),
+        "steps": [
+            {
+                "step_id": step.logical_id,
+                "persisted_step_id": step.step_id,
+                "position": step.position,
+                "status": step.status,
+                "definition": step.definition,
+                "started_at": step.started_at,
+                "completed_at": step.completed_at,
+            }
+            for step in steps
+        ],
         "state": snapshot,
     }
 

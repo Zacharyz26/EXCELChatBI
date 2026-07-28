@@ -53,9 +53,9 @@ routes:
     primary: deepseek-v4-pro
     fallback: [deepseek-v4-flash]
     temperature: 0.3
-  complex_reasoning:     # v2.4 Planner/Verifier spike 候选；启用前先过行为评测
-    primary: deepseek-v4-pro
-    fallback: [deepseek-v4-flash]
+  complex_reasoning:     # v2.4 Planner：G7 自动硬门禁仅 Flash 合格，Pro 禁止承担该路由
+    primary: deepseek-v4-flash
+    fallback: []
     temperature: 0.0
   vision:                # 多模态识图，结果回推理模型
     primary: qwen-vl

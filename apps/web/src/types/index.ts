@@ -101,13 +101,20 @@ export interface ToolStep {
   argsPreview?: string;
   summary?: string;
   message?: string;
+  dependencies?: string[];
 }
 
 /** 正在流式进行的一轮 Agent 回复中的一个卡片。 */
 export type LiveTurnItem =
   | { kind: "text"; id: string; content: string }
   | { kind: "understanding"; id: string; text: string }
-  | { kind: "tools"; id: string; steps: ToolStep[] }
+  | {
+    kind: "tools";
+    id: string;
+    steps: ToolStep[];
+    source?: "task_plan" | "tool_calls";
+    planVersion?: number;
+  }
   | { kind: "artifact"; id: string; artifact: WorkspaceArtifact };
 
 export interface IngestResponse {

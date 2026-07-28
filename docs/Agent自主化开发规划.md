@@ -1,8 +1,11 @@
 # ChatBI Agent 自主化开发规划
 
-> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-07-23
-> 基线：v2.3 对话式工具调用 Agent 与知识库第一至第四阶段已经完成
-> 当前进度：v2.4 阶段 1 已正式验收通过；阶段 0 的成本可用化、MCP 双传输探针和迁移隔离演练已于 2026-07-23 完成，剩余 Planner/行为基线、语义 Verifier 新候选与设计评审仍是进入阶段 2 的前置门禁
+> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-07-28
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2B 已实现
+> 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
+> 匿名盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
+> Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
+> 依赖图 Executor 与 Observation 驱动 Replanner；下一批是阶段 2C 任务控制与恢复。
 
 ## 1. 总目标
 
@@ -19,23 +22,25 @@
 
 ## 2. 当前基线与主要缺口
 
-v2.3 已具备模型自主选择工具、工具结果回填、多轮循环、Artifact、SQLite 对话工作区和 SSE 透明度卡片，因此不是伪 Agent；但它仍属于反应式工具调用 Agent：
+当前生产基线已从纯反应式工具调用推进到带结构化计划约束的 Agent：
 
-- “计划”是当前一批 `tool_calls` 的展示，不是带依赖、预期证据和完成条件的任务计划；
+- fast/template/LLM 三条 Planner 路径已统一输出并持久化 TaskPlan/TaskStep；Executor
+  只获得当前依赖已满足的 ready capability 工具，Verifier 会拒绝存在未完成步骤的成功终态；
+  可恢复失败会依据 Observation 生成不可变计划新版本，已完成步骤和 Evidence 保持不变；
 - 阶段 1 已把循环结束收口到确定性 Verifier，并接入当前 run 的数值 Claim/`value_refs`、
   知识 source、空检索诚实回答、显式局限和同值多路径候选；受约束语义协议和评测入口已落地，
   但 DeepSeek V3/R1 首轮均出现 false PASS，因此生产语义模型保持禁用；
 - TaskRun、TaskContract、事件、快照、Invocation/Evidence 和 Checkpoint 表已落地；用户消息、
   TaskRun/Contract/goal 已原子创建，工具成功的 Artifact/Evidence/Event/Checkpoint 也已原子
   提交；工具开始、失败与 unknown Observation 已原子持久化，unknown 会阻断完成；真实计划
-  版本、Checkpoint 恢复和可恢复任务尚未完成；
-- 工具注册表已补 capability、版本、风险、权限、幂等性和 Artifact 后置条件元数据；成本、
-  前置条件与运行时健康评分仍未完成；
+  版本已经落地，Checkpoint 自动续跑和可恢复任务尚未完成；
+- 工具注册表已补 capability、版本、风险、权限、幂等性和 Artifact 后置条件元数据，并由
+  生产 Planner 直接生成能力目录；完整前置条件、运行时健康和多实现选优仍未完成；
 - 生产 Executor 当前仍调用进程内 `Tool.invoke`；标准 MCP Tool Contract、官方 SDK
-  `tools/list`/`tools/call` adapter、Client Gateway 与影子比对已实现，但 stdio 子进程、
-  Streamable HTTP、服务认证和规范执行切换尚未完成；
-- API/Web 基础镜像和构建 smoke CI 已写入但尚未在本批代码上首次远端运行；MCP 服务镜像与统一 Compose
-  尚未交付；
+  adapter、Client Gateway、认证传输入口与 stdio/Streamable HTTP 双传输探针已完成，
+  规范执行切换尚未完成；
+- API/Web 基础镜像、非 root smoke、根 Compose 与无 Mock 全栈 E2E 已完成；独立 MCP
+  服务编排和完整工具服务 Compose 尚未交付；
 - 基础中央策略、结构化审计和模型/工具 trace 已落地；上下文压缩、指代消解、真实身份/租户
   权限、审批与企业审计后端仍未落地；
 - 前端能展示执行过程，但不能澄清、审批、暂停、恢复或修改真实计划。
@@ -189,6 +194,10 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 验收：固定回归集中虚假 Artifact 完成和无依据数值 Claim 为零；预算耗尽不会伪装成功；旧 SSE 和已有端点无回归；数据库升级和回滚均可验证；全部已注册工具通过 MCP schema/调用/错误契约测试；API 与 Web 镜像可独立构建和启动。
 
 ### 阶段 2：结构化计划与动态重规划
+
+> 实施拆分：阶段 2A（混合 Planner、计划持久化、能力约束、计划完成校验）和
+> 2B（依赖图调度、Observation 重规划）已实现；2C–2E 继续完成任务控制/恢复、
+> MCP 规范执行与完整 Compose/E2E。
 
 1. 将编排层拆为 Goal Interpreter、Planner、Executor、Verifier、Replanner、Finalizer。
 2. 落地 Tool Capability Contract 和能力到工具的解析。

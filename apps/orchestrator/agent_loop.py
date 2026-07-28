@@ -38,7 +38,14 @@ from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
 from packages.session.models import Artifact, ArtifactDraft, Dataset, JsonObject
 from packages.session.store import SessionStore
-from packages.session.task_models import ObservationSource, RunStatus, TaskEvent, TaskRun
+from packages.session.task_models import (
+    ObservationSource,
+    RunStatus,
+    StepStatus,
+    TaskEvent,
+    TaskRun,
+    TaskStepRecord,
+)
 from packages.session.task_store import TaskStore, invocation_idempotency_key
 
 from apps.orchestrator.agent_tools import AgentToolError, AgentToolRegistry
@@ -47,7 +54,19 @@ from apps.orchestrator.control.claims import (
     extract_claims,
     repair_candidate_with_evidence,
 )
-from apps.orchestrator.control.contracts import build_minimal_contract
+from apps.orchestrator.control.contracts import TaskContract, build_minimal_contract
+from apps.orchestrator.control.plan_executor import (
+    match_ready_step,
+    schedule_payload,
+    schedule_plan_steps,
+)
+from apps.orchestrator.control.planner_prompt import PlannerGateway, PlannerProtocolError
+from apps.orchestrator.control.production_planner import create_production_plan
+from apps.orchestrator.control.replanner import (
+    conditional_skip_after_success,
+    create_replan,
+    should_replan_failure,
+)
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
 
 _log = get_logger("orchestrator.agent_loop")
@@ -199,6 +218,8 @@ class AgentLoopConfig:
     run_timeout_seconds: int = 300
     model_timeout_seconds: int = 90
     tool_timeout_seconds: int = 120
+    planner_max_steps: int = 12
+    max_replans: int = 3
 
 
 def _requests_chart(user_text: str) -> bool:
@@ -364,6 +385,8 @@ async def stream_agent_chat(
     registry: AgentToolRegistry,
     locks: ConversationLockPool,
     config: AgentLoopConfig,
+    planner_gateway: PlannerGateway | None = None,
+    enforce_plan: bool = True,
     principal: Principal | None = None,
     policy: ToolPolicyGateway | None = None,
 ) -> AsyncIterator[dict[str, str]]:
@@ -382,6 +405,8 @@ async def stream_agent_chat(
                 registry=registry,
                 locks=locks,
                 config=config,
+                planner_gateway=planner_gateway,
+                enforce_plan=enforce_plan,
                 principal=principal,
                 policy=policy,
                 run_id=run_id,
@@ -465,6 +490,8 @@ async def _stream_agent_chat_inner(
     registry: AgentToolRegistry,
     locks: ConversationLockPool,
     config: AgentLoopConfig,
+    planner_gateway: PlannerGateway | None,
+    enforce_plan: bool,
     principal: Principal | None,
     policy: ToolPolicyGateway | None,
     run_id: str,
@@ -515,14 +542,6 @@ async def _stream_agent_chat_inner(
             context = await run_in_threadpool(
                 store.load_conversation_context, conversation_id
             )
-            run, started_event = await run_in_threadpool(
-                task_store.transition,
-                run_id,
-                expected_version=run.state_version,
-                status="running",
-                event_type="run.started",
-                payload={"reason": "task_contract_created"},
-            )
         except (sqlite3.Error, RuntimeError, ValueError) as exc:
             _log.error(
                 "agent.create_run_failed",
@@ -570,7 +589,6 @@ async def _stream_agent_chat_inner(
             },
         )
         yield _task_event(goal_event, conversation_id)
-        yield _task_event(started_event, conversation_id)
 
         system_content = _build_system_content(datasets, list(context.artifacts), config)
         # 13.5：发往模型的数据物料留结构化审计日志
@@ -591,8 +609,76 @@ async def _stream_agent_chat_inner(
             datasets,
             context.messages,
         )
-        if clarification is not None:
-            question = str(clarification["question"])
+        try:
+            production_plan = await create_production_plan(
+                user_text=user_text,
+                contract=contract,
+                datasets=datasets,
+                artifacts=list(context.artifacts),
+                registry=registry,
+                gateway=planner_gateway,
+                blocking_clarification=clarification,
+                temperature=0.0,
+                max_steps=min(config.planner_max_steps, config.max_tool_calls),
+                require_available_capabilities=enforce_plan,
+            )
+            run, plan_record, planned_steps, plan_event = await run_in_threadpool(
+                task_store.save_plan,
+                run_id,
+                expected_version=run.state_version,
+                plan=production_plan.plan,
+                reason=f"initial:{production_plan.route}",
+                planner=production_plan.audit,
+            )
+        except (
+            OpenAIError,
+            PlannerProtocolError,
+            RuntimeError,
+            sqlite3.Error,
+            ValueError,
+        ) as exc:
+            _log.warning(
+                "agent.planning_failed",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=str(exc),
+            )
+            run, failed_event = await _transition_after_failure(
+                task_store,
+                run,
+                event_type="run.failed",
+                reason="planner_failed",
+                tool_calls=0,
+            )
+            yield _task_event(failed_event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": "planner_failed",
+                    "message": "任务计划生成失败，请调整需求后重试。",
+                    "retryable": True,
+                    "run_id": run_id,
+                    "run_status": run.status,
+                },
+            )
+            return
+
+        yield _task_event(plan_event, conversation_id)
+        active_plan = production_plan.plan
+        working[0] = ModelMessage(
+            role="system",
+            content=_plan_system_content(system_content, active_plan, planned_steps),
+        )
+        blocking_questions = [
+            item
+            for item in cast(
+                list[JsonObject], production_plan.plan.get("clarifications", [])
+            )
+            if item.get("blocking") is True
+        ]
+        if blocking_questions:
+            question_item = blocking_questions[0]
+            question = str(question_item["question"])
             try:
                 await run_in_threadpool(
                     store.append_message,
@@ -607,7 +693,11 @@ async def _stream_agent_chat_inner(
                     expected_version=run.state_version,
                     status="waiting_user",
                     event_type="waiting_user",
-                    payload=clarification,
+                    payload={
+                        **question_item,
+                        "plan_id": plan_record.plan_id,
+                        "plan_version": plan_record.version,
+                    },
                     usage={"tool_calls": 0},
                 )
             except (sqlite3.Error, RuntimeError, ValueError) as exc:
@@ -652,9 +742,51 @@ async def _stream_agent_chat_inner(
             )
             return
 
+        try:
+            run, started_event = await run_in_threadpool(
+                task_store.transition,
+                run_id,
+                expected_version=run.state_version,
+                status="running",
+                event_type="run.started",
+                payload={
+                    "reason": "task_plan_created",
+                    "plan_id": plan_record.plan_id,
+                    "plan_version": plan_record.version,
+                    "planner_route": production_plan.route,
+                },
+            )
+        except (sqlite3.Error, RuntimeError, ValueError) as exc:
+            _log.error(
+                "agent.start_planned_run_failed",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=str(exc),
+            )
+            run, failed_event = await _transition_after_failure(
+                task_store,
+                run,
+                event_type="run.failed",
+                reason="planned_run_start_failed",
+                tool_calls=0,
+            )
+            yield _task_event(failed_event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": "persistence_failed",
+                    "message": "计划已生成，但任务启动失败，请重试。",
+                    "retryable": True,
+                    "run_id": run_id,
+                },
+            )
+            return
+        yield _task_event(started_event, conversation_id)
+
         calls_used = 0
         last_signature: str | None = None
-        tools_enabled = True
+        plan_enforced = enforce_plan
+        tools_allowed = True
         final_text = ""
         final_parts: list[str] = []
         passed_verification: VerificationResult | None = None
@@ -662,10 +794,43 @@ async def _stream_agent_chat_inner(
         missing_chart_retries = 0
         missing_report_retries = 0
         unsupported_claim_retries = 0
+        retried_plan_frontiers: set[str] = set()
+        replan_count = 0
         budget_exhausted = False
 
-        for _round in range(config.max_tool_calls + 2):
-            tools = registry.openai_tools() if tools_enabled else None
+        for _round in range(
+            config.max_tool_calls * 2 + config.max_replans + 4
+        ):
+            planned_steps = await run_in_threadpool(
+                task_store.list_plan_steps, run_id
+            )
+            schedule = schedule_plan_steps(planned_steps)
+            planned_capabilities = schedule.ready_capabilities
+            tools_enabled = tools_allowed and (
+                bool(planned_capabilities) if plan_enforced else True
+            )
+            tools = (
+                (
+                    registry.openai_tools_for_capabilities(planned_capabilities)
+                    if plan_enforced
+                    else registry.openai_tools()
+                )
+                if tools_enabled
+                else None
+            )
+            offered_step_ids = (
+                {step.step_id for step in schedule.ready}
+                if plan_enforced and tools_enabled
+                else set()
+            )
+            working[0] = ModelMessage(
+                role="system",
+                content=_plan_system_content(
+                    system_content,
+                    active_plan,
+                    planned_steps,
+                ),
+            )
             turn_parts: list[str] = []
             response: ModelResponse | None = None
             try:
@@ -831,6 +996,11 @@ async def _stream_agent_chat_inner(
                 run_artifacts = [
                     item for item in all_artifacts if item.id in run_artifact_ids
                 ]
+                verified_plan_steps = (
+                    await run_in_threadpool(task_store.list_plan_steps, run_id)
+                    if plan_enforced
+                    else None
+                )
                 verification = verify_completion(
                     contract=contract,
                     final_text=turn_text,
@@ -838,6 +1008,7 @@ async def _stream_agent_chat_inner(
                     invocations=invocations,
                     evidence=evidence,
                     claims=claims,
+                    plan_steps=verified_plan_steps,
                     budget_exhausted=budget_exhausted,
                 )
 
@@ -875,6 +1046,34 @@ async def _stream_agent_chat_inner(
                 ):
                     unsupported_claim_retries += 1
                     retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
+                elif (
+                    "incomplete_plan_steps" in issue_codes
+                    and tools_enabled
+                ):
+                    verified_schedule = schedule_plan_steps(
+                        verified_plan_steps or []
+                    )
+                    frontier_key = (
+                        f"{run.plan_version}:"
+                        + ",".join(
+                            step.logical_id for step in verified_schedule.ready
+                        )
+                    )
+                    if (
+                        verified_schedule.ready
+                        and frontier_key not in retried_plan_frontiers
+                    ):
+                        retried_plan_frontiers.add(frontier_key)
+                        retry_instruction = (
+                            "当前候选答复提前结束，但依赖已满足的计划步骤仍未完成："
+                            + "；".join(
+                                f"{step.logical_id}"
+                                f"（{step.definition.get('purpose', '')}）"
+                                for step in verified_schedule.ready[:8]
+                            )
+                            + "。请只调用本轮已提供的工具完成这些就绪步骤后再回答；"
+                            "不能越过依赖，也不能用文字声称步骤已完成。"
+                        )
 
                 auto_repair_actions: tuple[str, ...] = ()
                 if (
@@ -908,6 +1107,7 @@ async def _stream_agent_chat_inner(
                             invocations=invocations,
                             evidence=evidence,
                             claims=claims,
+                            plan_steps=verified_plan_steps,
                             budget_exhausted=budget_exhausted,
                         )
                         issue_codes = {item.code for item in verification.issues}
@@ -1071,7 +1271,26 @@ async def _stream_agent_chat_inner(
                 )
             )
 
-            for call in tool_calls:
+            for call_index, call in enumerate(tool_calls):
+                current_steps = await run_in_threadpool(
+                    task_store.list_plan_steps, run_id
+                )
+                current_schedule = schedule_plan_steps(current_steps)
+                planned_step = (
+                    match_ready_step(
+                        tool_name=call.name,
+                        schedule=current_schedule,
+                        resolver=registry,
+                        offered_step_ids=offered_step_ids,
+                    )
+                    if plan_enforced
+                    else None
+                )
+                if planned_step is not None:
+                    offered_step_ids.discard(planned_step.step_id)
+                logical_step_id = (
+                    planned_step.logical_id if planned_step is not None else call.id
+                )
                 call_args = _parse_args(call.arguments)
                 fields = _humanize_args(call.name, call_args)
                 resource_project_id: str | None = None
@@ -1108,6 +1327,7 @@ async def _stream_agent_chat_inner(
                         arguments=call_args,
                         idempotency_key=idempotency_key,
                         policy_decision=policy_decision.to_event_payload(),
+                        step_id=planned_step.step_id if planned_step is not None else None,
                     )
                     run, invocation, step_started_event, _created = start_result
                 except (sqlite3.Error, RuntimeError, ValueError) as exc:
@@ -1142,6 +1362,7 @@ async def _stream_agent_chat_inner(
                     "tool_start",
                     {
                         "id": call.id,
+                        "step_id": logical_step_id,
                         "tool": call.name,
                         "label": _TOOL_LABELS.get(call.name, call.name),
                         # 人话参数摘要（14.5.3：涉及字段/筛选条件），执行卡默认展示
@@ -1151,7 +1372,15 @@ async def _stream_agent_chat_inner(
                     },
                 )
 
-                signature = f"{call.name}:{_normalized_arguments(call.arguments)}"
+                signature_scope = (
+                    planned_step.logical_id
+                    if planned_step is not None
+                    else (f"unbound:{call.id}" if plan_enforced else "legacy")
+                )
+                signature = (
+                    f"{signature_scope}:{call.name}:"
+                    f"{_normalized_arguments(call.arguments)}"
+                )
                 failure_code: str | None = None
                 failure_source: ObservationSource = "system"
                 if not policy_decision.allowed:
@@ -1159,8 +1388,29 @@ async def _stream_agent_chat_inner(
                     failure_code = policy_decision.code
                     failure_source = "policy"
                     if policy_decision.code == "tool_budget_exhausted":
-                        tools_enabled = False
+                        tools_allowed = False
                         budget_exhausted = True
+                elif plan_enforced and planned_step is None:
+                    tool_capabilities = set(
+                        registry.capabilities_for_tool(call.name)
+                    )
+                    plan_capabilities = {
+                        str(step.definition.get("capability"))
+                        for step in current_steps
+                    }
+                    if tool_capabilities.intersection(plan_capabilities):
+                        feedback = (
+                            f"未执行：工具 {call.name} 对应的计划步骤本轮尚未就绪，"
+                            "或本轮已被调用；必须等待依赖完成和下一轮调度。"
+                        )
+                        failure_code = "step_dependencies_unmet"
+                    else:
+                        feedback = (
+                            f"未执行：工具 {call.name} 不属于当前持久化计划声明的 "
+                            "capability。请遵循当前计划，或等待 Replanner 生成新计划版本。"
+                        )
+                        failure_code = "tool_not_in_plan"
+                    failure_source = "policy"
                 elif calls_used >= config.max_tool_calls:
                     feedback = (
                         f"未执行：本轮工具调用已达上限（{config.max_tool_calls} 次）。"
@@ -1168,7 +1418,7 @@ async def _stream_agent_chat_inner(
                     )
                     failure_code = "tool_budget_exhausted"
                     failure_source = "policy"
-                    tools_enabled = False
+                    tools_allowed = False
                     budget_exhausted = True
                 elif signature == last_signature:
                     feedback = (
@@ -1176,7 +1426,7 @@ async def _stream_agent_chat_inner(
                         "请调整参数，或基于已有结果直接回答，并向用户说明情况。"
                     )
                     failure_code = "duplicate_invocation_circuit_break"
-                    tools_enabled = False
+                    tools_allowed = False
                     _log.warning(
                         "agent.circuit_break",
                         conversation_id=conversation_id,
@@ -1201,7 +1451,13 @@ async def _stream_agent_chat_inner(
                         yield _task_event(failure_event, conversation_id)
                     yield _event(
                         "tool_end",
-                        {"id": call.id, "tool": call.name, "status": "error", "message": feedback},
+                        {
+                            "id": call.id,
+                            "step_id": logical_step_id,
+                            "tool": call.name,
+                            "status": "error",
+                            "message": feedback,
+                        },
                     )
                     working.append(
                         ModelMessage(role="tool", content=feedback, tool_call_id=call.id)
@@ -1246,6 +1502,7 @@ async def _stream_agent_chat_inner(
                         "tool_end",
                         {
                             "id": call.id,
+                            "step_id": logical_step_id,
                             "tool": call.name,
                             "status": "error",
                             "message": error_text,
@@ -1300,6 +1557,120 @@ async def _stream_agent_chat_inner(
                             },
                         )
                         return
+                    observation = (
+                        cast(JsonObject, failure_event.payload["observation"])
+                        if failure_event is not None
+                        else None
+                    )
+                    if (
+                        plan_enforced
+                        and observation is not None
+                        and should_replan_failure(observation)
+                    ):
+                        if replan_count >= config.max_replans:
+                            run, blocked_event = await run_in_threadpool(
+                                task_store.transition,
+                                run_id,
+                                expected_version=run.state_version,
+                                status="blocked",
+                                event_type="replanning.blocked",
+                                payload={
+                                    "reason": "replan_budget_exhausted",
+                                    "max_replans": config.max_replans,
+                                    "observation_id": observation.get(
+                                        "observation_id"
+                                    ),
+                                },
+                                terminal_reason="replan_budget_exhausted",
+                                usage={"tool_calls": calls_used},
+                            )
+                            yield _task_event(blocked_event, conversation_id)
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replan_budget_exhausted",
+                                    "message": "自动重规划次数已达上限，任务已安全停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        latest_steps = await run_in_threadpool(
+                            task_store.list_plan_steps, run_id
+                        )
+                        latest_artifacts = await run_in_threadpool(
+                            store.list_artifacts, conversation_id
+                        )
+                        outcome = await _replan_from_failure(
+                            task_store,
+                            run,
+                            contract=contract,
+                            current_plan=active_plan,
+                            current_steps=latest_steps,
+                            observation=observation,
+                            datasets=datasets,
+                            artifacts=latest_artifacts,
+                            registry=registry,
+                            planner_gateway=planner_gateway,
+                            config=config,
+                            tool_calls=calls_used,
+                        )
+                        run = outcome.run
+                        for event in outcome.events:
+                            yield _task_event(event, conversation_id)
+                        if outcome.disposition == "failed":
+                            _log.warning(
+                                "agent.replanning_failed",
+                                conversation_id=conversation_id,
+                                run_id=run_id,
+                                error=outcome.error,
+                            )
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replanner_failed",
+                                    "message": "工具失败后的计划修订未通过校验，任务已停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        if outcome.disposition == "blocked":
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replan_blocked",
+                                    "message": "当前失败没有安全的自动恢复路径，任务已停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        replan_count += 1
+                        active_plan = outcome.plan
+                        planned_steps = list(outcome.steps)
+                        last_signature = None
+                        for superseded in tool_calls[call_index + 1 :]:
+                            working.append(
+                                ModelMessage(
+                                    role="tool",
+                                    content="当前工具调用已被新计划版本取代，未执行。",
+                                    tool_call_id=superseded.id,
+                                )
+                            )
+                        working.append(
+                            ModelMessage(
+                                role="user",
+                                content=(
+                                    "已依据失败 Observation 生成新的持久化计划版本。"
+                                    "请重新读取当前计划状态，只执行本轮开放的就绪工具。"
+                                ),
+                            )
+                        )
+                        break
                     continue
 
                 artifact_draft = _prepare_artifact(
@@ -1337,6 +1708,7 @@ async def _stream_agent_chat_inner(
                         "tool_end",
                         {
                             "id": call.id,
+                            "step_id": logical_step_id,
                             "tool": call.name,
                             "status": "error",
                             "message": postcondition_error,
@@ -1361,6 +1733,114 @@ async def _stream_agent_chat_inner(
                             "fields": fields,
                         },
                     )
+                    observation = (
+                        cast(JsonObject, failure_event.payload["observation"])
+                        if failure_event is not None
+                        else None
+                    )
+                    if (
+                        plan_enforced
+                        and observation is not None
+                        and should_replan_failure(observation)
+                    ):
+                        if replan_count >= config.max_replans:
+                            run, blocked_event = await run_in_threadpool(
+                                task_store.transition,
+                                run_id,
+                                expected_version=run.state_version,
+                                status="blocked",
+                                event_type="replanning.blocked",
+                                payload={
+                                    "reason": "replan_budget_exhausted",
+                                    "max_replans": config.max_replans,
+                                    "observation_id": observation.get(
+                                        "observation_id"
+                                    ),
+                                },
+                                terminal_reason="replan_budget_exhausted",
+                                usage={"tool_calls": calls_used},
+                            )
+                            yield _task_event(blocked_event, conversation_id)
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replan_budget_exhausted",
+                                    "message": "自动重规划次数已达上限，任务已安全停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        latest_steps = await run_in_threadpool(
+                            task_store.list_plan_steps, run_id
+                        )
+                        latest_artifacts = await run_in_threadpool(
+                            store.list_artifacts, conversation_id
+                        )
+                        outcome = await _replan_from_failure(
+                            task_store,
+                            run,
+                            contract=contract,
+                            current_plan=active_plan,
+                            current_steps=latest_steps,
+                            observation=observation,
+                            datasets=datasets,
+                            artifacts=latest_artifacts,
+                            registry=registry,
+                            planner_gateway=planner_gateway,
+                            config=config,
+                            tool_calls=calls_used,
+                        )
+                        run = outcome.run
+                        for event in outcome.events:
+                            yield _task_event(event, conversation_id)
+                        if outcome.disposition == "failed":
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replanner_failed",
+                                    "message": "工具失败后的计划修订未通过校验，任务已停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        if outcome.disposition == "blocked":
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replan_blocked",
+                                    "message": "当前失败没有安全的自动恢复路径，任务已停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        replan_count += 1
+                        active_plan = outcome.plan
+                        planned_steps = list(outcome.steps)
+                        last_signature = None
+                        for superseded in tool_calls[call_index + 1 :]:
+                            working.append(
+                                ModelMessage(
+                                    role="tool",
+                                    content="当前工具调用已被新计划版本取代，未执行。",
+                                    tool_call_id=superseded.id,
+                                )
+                            )
+                        working.append(
+                            ModelMessage(
+                                role="user",
+                                content=(
+                                    "已依据后置条件失败生成新的持久化计划版本。"
+                                    "请只执行本轮开放的就绪工具。"
+                                ),
+                            )
+                        )
+                        break
                     continue
                 summary = _summarize_result(call.name, result)
                 try:
@@ -1429,7 +1909,13 @@ async def _stream_agent_chat_inner(
                 yield _task_event(step_event, conversation_id)
                 yield _event(
                     "tool_end",
-                    {"id": call.id, "tool": call.name, "status": "ok", "summary": summary},
+                    {
+                        "id": call.id,
+                        "step_id": logical_step_id,
+                        "tool": call.name,
+                        "status": "ok",
+                        "summary": summary,
+                    },
                 )
                 await _persist_tool_outcome(
                     store,
@@ -1453,6 +1939,66 @@ async def _stream_agent_chat_inner(
                 working.append(
                     ModelMessage(role="tool", content=model_view, tool_call_id=call.id)
                 )
+                if plan_enforced and planned_step is not None:
+                    latest_steps = await run_in_threadpool(
+                        task_store.list_plan_steps, run_id
+                    )
+                    conditional_revision = conditional_skip_after_success(
+                        completed_step=planned_step,
+                        tool_name=call.name,
+                        result=result,
+                        current_steps=latest_steps,
+                    )
+                    if (
+                        conditional_revision is not None
+                        and replan_count < config.max_replans
+                    ):
+                        overrides, revision_reason = conditional_revision
+                        outcome = await _revise_for_conditional_skip(
+                            task_store,
+                            run,
+                            current_plan=active_plan,
+                            current_steps=latest_steps,
+                            reason=revision_reason,
+                            overrides=overrides,
+                            tool_calls=calls_used,
+                        )
+                        run = outcome.run
+                        for event in outcome.events:
+                            yield _task_event(event, conversation_id)
+                        if outcome.disposition == "failed":
+                            yield _event(
+                                "error",
+                                {
+                                    "code": "replanner_failed",
+                                    "message": "条件分支计划修订保存失败，任务已停止。",
+                                    "retryable": True,
+                                    "run_id": run_id,
+                                    "run_status": run.status,
+                                },
+                            )
+                            return
+                        replan_count += 1
+                        active_plan = outcome.plan
+                        planned_steps = list(outcome.steps)
+                        for superseded in tool_calls[call_index + 1 :]:
+                            working.append(
+                                ModelMessage(
+                                    role="tool",
+                                    content="当前工具调用已被条件分支的新计划版本取代，未执行。",
+                                    tool_call_id=superseded.id,
+                                )
+                            )
+                        working.append(
+                            ModelMessage(
+                                role="user",
+                                content=(
+                                    "成功 Observation 已触发条件分支，相关步骤已显式跳过。"
+                                    "请按新的持久化计划状态继续。"
+                                ),
+                            )
+                        )
+                        break
 
         if not final_text.strip() or passed_verification is None:
             run, failed_event = await _transition_after_failure(
@@ -1555,6 +2101,240 @@ async def _transition_after_failure(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PlanRevisionOutcome:
+    run: TaskRun
+    plan: JsonObject
+    steps: tuple[TaskStepRecord, ...]
+    events: tuple[TaskEvent, ...]
+    disposition: str
+    error: str | None = None
+
+
+async def _replan_from_failure(
+    task_store: TaskStore,
+    run: TaskRun,
+    *,
+    contract: TaskContract,
+    current_plan: JsonObject,
+    current_steps: list[TaskStepRecord],
+    observation: JsonObject,
+    datasets: list[Dataset],
+    artifacts: list[Artifact],
+    registry: AgentToolRegistry,
+    planner_gateway: PlannerGateway | None,
+    config: AgentLoopConfig,
+    tool_calls: int,
+) -> _PlanRevisionOutcome:
+    """进入 planning，依据失败 Observation 生成并持久化不可变新计划版本。"""
+    run, started_event = await run_in_threadpool(
+        task_store.transition,
+        run.run_id,
+        expected_version=run.state_version,
+        status="planning",
+        event_type="replanning.started",
+        payload={
+            "observation_id": observation.get("observation_id"),
+            "observation_code": observation.get("code"),
+            "step_id": observation.get("step_id"),
+            "supersedes_version": run.plan_version,
+        },
+        usage={"tool_calls": tool_calls},
+    )
+    events: list[TaskEvent] = [started_event]
+    try:
+        decision = await create_replan(
+            contract=contract,
+            current_plan=current_plan,
+            current_steps=current_steps,
+            observation=observation,
+            datasets=datasets,
+            artifacts=artifacts,
+            registry=registry,
+            gateway=planner_gateway,
+            temperature=0.0,
+            max_steps=min(config.planner_max_steps, config.max_tool_calls),
+        )
+        run, _plan_record, revised_steps, plan_event = await run_in_threadpool(
+            task_store.save_plan,
+            run.run_id,
+            expected_version=run.state_version,
+            plan=decision.plan,
+            reason=decision.reason,
+            planner=decision.audit,
+            step_status_overrides=decision.step_status_overrides,
+        )
+        events.append(plan_event)
+        if decision.disposition == "blocked":
+            run, terminal_event = await run_in_threadpool(
+                task_store.transition,
+                run.run_id,
+                expected_version=run.state_version,
+                status="blocked",
+                event_type="replanning.blocked",
+                payload={
+                    "reason": decision.reason,
+                    "plan_version": run.plan_version,
+                    "observation_id": observation.get("observation_id"),
+                },
+                terminal_reason="replan_blocked",
+                usage={"tool_calls": tool_calls},
+            )
+            events.append(terminal_event)
+            return _PlanRevisionOutcome(
+                run=run,
+                plan=decision.plan,
+                steps=tuple(revised_steps),
+                events=tuple(events),
+                disposition="blocked",
+            )
+        run, completed_event = await run_in_threadpool(
+            task_store.transition,
+            run.run_id,
+            expected_version=run.state_version,
+            status="running",
+            event_type="replanning.completed",
+            payload={
+                "reason": decision.reason,
+                "plan_version": run.plan_version,
+                "observation_id": observation.get("observation_id"),
+            },
+            usage={"tool_calls": tool_calls},
+        )
+        events.append(completed_event)
+        return _PlanRevisionOutcome(
+            run=run,
+            plan=decision.plan,
+            steps=tuple(revised_steps),
+            events=tuple(events),
+            disposition="revised",
+        )
+    except (
+        OpenAIError,
+        PlannerProtocolError,
+        RuntimeError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        run, failed_event = await run_in_threadpool(
+            task_store.transition,
+            run.run_id,
+            expected_version=run.state_version,
+            status="failed",
+            event_type="replanning.failed",
+            payload={
+                "reason": "replanner_failed",
+                "observation_id": observation.get("observation_id"),
+            },
+            terminal_reason="replanner_failed",
+            usage={"tool_calls": tool_calls},
+        )
+        events.append(failed_event)
+        return _PlanRevisionOutcome(
+            run=run,
+            plan=current_plan,
+            steps=tuple(current_steps),
+            events=tuple(events),
+            disposition="failed",
+            error=str(exc),
+        )
+
+
+async def _revise_for_conditional_skip(
+    task_store: TaskStore,
+    run: TaskRun,
+    *,
+    current_plan: JsonObject,
+    current_steps: list[TaskStepRecord],
+    reason: str,
+    overrides: dict[str, StepStatus],
+    tool_calls: int,
+) -> _PlanRevisionOutcome:
+    """把确定性成功 Observation 产生的条件跳过保存成一个计划版本。"""
+    run, started_event = await run_in_threadpool(
+        task_store.transition,
+        run.run_id,
+        expected_version=run.state_version,
+        status="planning",
+        event_type="replanning.started",
+        payload={
+            "reason": reason,
+            "supersedes_version": run.plan_version,
+            "skipped_steps": sorted(overrides),
+        },
+        usage={"tool_calls": tool_calls},
+    )
+    try:
+        run, _plan_record, revised_steps, plan_event = await run_in_threadpool(
+            task_store.save_plan,
+            run.run_id,
+            expected_version=run.state_version,
+            plan=current_plan,
+            reason=reason,
+            planner={
+                "route": "template",
+                "phase": "executor",
+                "action": "conditional_skip",
+                "skipped_steps": sorted(overrides),
+            },
+            step_status_overrides=overrides,
+        )
+        run, completed_event = await run_in_threadpool(
+            task_store.transition,
+            run.run_id,
+            expected_version=run.state_version,
+            status="running",
+            event_type="replanning.completed",
+            payload={
+                "reason": reason,
+                "plan_version": run.plan_version,
+                "skipped_steps": sorted(overrides),
+            },
+            usage={"tool_calls": tool_calls},
+        )
+        return _PlanRevisionOutcome(
+            run=run,
+            plan=current_plan,
+            steps=tuple(revised_steps),
+            events=(started_event, plan_event, completed_event),
+            disposition="revised",
+        )
+    except (RuntimeError, sqlite3.Error, ValueError) as exc:
+        run, failed_event = await run_in_threadpool(
+            task_store.transition,
+            run.run_id,
+            expected_version=run.state_version,
+            status="failed",
+            event_type="replanning.failed",
+            payload={"reason": "conditional_revision_failed"},
+            terminal_reason="conditional_revision_failed",
+            usage={"tool_calls": tool_calls},
+        )
+        return _PlanRevisionOutcome(
+            run=run,
+            plan=current_plan,
+            steps=tuple(current_steps),
+            events=(started_event, failed_event),
+            disposition="failed",
+            error=str(exc),
+        )
+
+
+def _plan_system_content(
+    system_content: str,
+    plan: JsonObject,
+    steps: list[TaskStepRecord] | tuple[TaskStepRecord, ...],
+) -> str:
+    schedule = schedule_plan_steps(list(steps))
+    return (
+        system_content
+        + "\n\n当前任务的已验证计划（只能调用当前就绪 capability 对应的工具）：\n"
+        + _compact_json(plan, 12_000)
+        + "\n当前持久化执行状态：\n"
+        + _compact_json(schedule_payload(schedule), 2_000)
+    )
+
+
 def _verification_payload(result: VerificationResult) -> JsonObject:
     return {
         "verdict": result.verdict,
@@ -1583,6 +2363,8 @@ def _verification_error(result: VerificationResult) -> tuple[str, str]:
         return "unsupported_knowledge_claim", "最终答复中的知识结论缺少本次检索来源。"
     if "unrecovered_tool_failure" in codes:
         return "tool_execution_failed", "工具执行失败且未被后续成功调用恢复，任务没有完成。"
+    if "incomplete_plan_steps" in codes:
+        return "incomplete_plan", "结构化计划仍有未完成步骤，任务不能标记为成功。"
     return "verification_failed", "任务结果未通过完成验证，请重试。"
 
 

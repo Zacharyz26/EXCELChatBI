@@ -84,6 +84,39 @@ def test_plan_validation_rejects_unknown_capability_and_cycle() -> None:
     assert "dependencies:cycle" in result.issues
 
 
+def test_plan_validation_rejects_steps_while_waiting_for_blocking_clarification() -> None:
+    plan: dict[str, Any] = {
+        "schema_version": 1,
+        "summary": "既等待又执行的非法计划",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "读取画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像"],
+                "completion_conditions": ["取得 Evidence"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [
+            {
+                "question_id": "metric",
+                "about": "metric",
+                "question": "请选择指标。",
+                "blocking": True,
+            }
+        ],
+    }
+
+    result = validate_task_plan(plan, capabilities={"data.profile"})
+
+    assert result.valid is False
+    assert result.clarification_valid is False
+    assert "clarification:blocking_requires_empty_steps" in result.issues
+
+
 def test_strict_plan_parser_does_not_accept_markdown_fence() -> None:
     with pytest.raises(ValueError, match="严格 JSON"):
         parse_task_plan("```json\n{}\n```")
