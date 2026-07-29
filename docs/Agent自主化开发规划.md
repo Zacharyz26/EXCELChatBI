@@ -1,11 +1,15 @@
 # ChatBI Agent 自主化开发规划
 
 > 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-07-28
-> 基线：v2.4 阶段 1 已验收，阶段 2A–2B 已实现
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 匿名盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
-> 依赖图 Executor 与 Observation 驱动 Replanner；下一批是阶段 2C 任务控制与恢复。
+> 依赖图 Executor 与 Observation 驱动 Replanner；阶段 2C 已落地任务控制与
+> Checkpoint 恢复；阶段 2D 已把 Executor 切换到受治理 MCP Client Gateway；
+> 阶段 2E 已落地五服务 Compose 与真实容器 E2E 门禁，等待 Docker runner 关闭验收；
+> 阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（成功 70.0%、终态如实 73.3%、
+> 越界 0）；G7 仍待人工盲评/签字。
 
 ## 1. 总目标
 
@@ -33,17 +37,18 @@
 - TaskRun、TaskContract、事件、快照、Invocation/Evidence 和 Checkpoint 表已落地；用户消息、
   TaskRun/Contract/goal 已原子创建，工具成功的 Artifact/Evidence/Event/Checkpoint 也已原子
   提交；工具开始、失败与 unknown Observation 已原子持久化，unknown 会阻断完成；真实计划
-  版本已经落地，Checkpoint 自动续跑和可恢复任务尚未完成；
+  版本、后台 run 宿主、可幂等任务控制与 Checkpoint 同 run 续跑已经落地；
 - 工具注册表已补 capability、版本、风险、权限、幂等性和 Artifact 后置条件元数据，并由
   生产 Planner 直接生成能力目录；完整前置条件、运行时健康和多实现选优仍未完成；
-- 生产 Executor 当前仍调用进程内 `Tool.invoke`；标准 MCP Tool Contract、官方 SDK
-  adapter、Client Gateway、认证传输入口与 stdio/Streamable HTTP 双传输探针已完成，
-  规范执行切换尚未完成；
-- API/Web 基础镜像、非 root smoke、根 Compose 与无 Mock 全栈 E2E 已完成；独立 MCP
-  服务编排和完整工具服务 Compose 尚未交付；
+- Agent Executor 已经由标准 MCP Client Gateway 执行：Host RequestContext、固定协议/
+  契约发现、stdio/认证 Streamable HTTP、超时取消、健康代次、只读幂等有限重连和
+  fail-closed 降级边界均已落地；进程内适配只保留为迁移兼容/测试；
+- API/Web 基础镜像、五个独立 MCP 服务、非 root smoke、私网根 Compose、分卷/secrets、
+  无 Mock 本机全栈 E2E 和容器浏览器/重启门禁已落地；
 - 基础中央策略、结构化审计和模型/工具 trace 已落地；上下文压缩、指代消解、真实身份/租户
   权限、审批与企业审计后端仍未落地；
-- 前端能展示执行过程，但不能澄清、审批、暂停、恢复或修改真实计划。
+- 服务端已提供结构化澄清、暂停、恢复、取消和步骤重试协议；前端仍只展示执行过程，
+  尚未提供这些干预控件、审批或真实计划编辑。
 
 ## 3. 不变量与责任归属
 
@@ -196,8 +201,11 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 ### 阶段 2：结构化计划与动态重规划
 
 > 实施拆分：阶段 2A（混合 Planner、计划持久化、能力约束、计划完成校验）和
-> 2B（依赖图调度、Observation 重规划）已实现；2C–2E 继续完成任务控制/恢复、
-> MCP 规范执行与完整 Compose/E2E。
+> 2B（依赖图调度、Observation 重规划）、2C（任务控制、后台生命周期、
+> Checkpoint 恢复）、2D（MCP Gateway 规范执行）和 2E（五服务 Compose 与容器浏览器
+> 门禁）已实现；阶段 2 真实行为对照已于 2026-07-28 通过自动门禁；2E 的 Docker
+> runner 和 G7 人工签字全部通过后
+> 关闭 v2.4 工程验收。
 
 1. 将编排层拆为 Goal Interpreter、Planner、Executor、Verifier、Replanner、Finalizer。
 2. 落地 Tool Capability Contract 和能力到工具的解析。

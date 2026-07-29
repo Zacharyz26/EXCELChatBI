@@ -135,6 +135,16 @@ class ChatStreamRequest(BaseModel):
     message: ChatMessageText
 
 
+class ClarificationAnswerRequest(BaseModel):
+    """回答一个阻塞澄清问题并继续原 TaskRun。"""
+
+    answer: Any
+    resume_token: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=16, max_length=200),
+    ]
+
+
 class UploadResponse(BaseModel):
     """Excel 上传响应：数据集引用 + 数据画像（供前端展示并确认）。
 

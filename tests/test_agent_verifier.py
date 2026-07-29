@@ -124,7 +124,7 @@ def test_report_requires_a_real_nonempty_pdf_file(tmp_path: Path) -> None:
     assert passed.verdict == "PASS"
 
 
-def test_succeeded_tool_requires_evidence_and_budget_exhaustion_blocks() -> None:
+def test_exact_budget_completion_passes_but_incomplete_budget_blocks() -> None:
     contract = build_minimal_contract(
         run_id="run-3",
         user_text="查询",
@@ -168,12 +168,29 @@ def test_succeeded_tool_requires_evidence_and_budget_exhaustion_blocks() -> None
         summary={"hits": 1},
         created_at="now",
     )
-    blocked = verify_completion(
+    completed_at_limit = verify_completion(
         contract=contract,
         final_text="已找到定义。",
         artifacts=[],
         invocations=[invocation],
         evidence=[evidence],
+        budget_exhausted=True,
+    )
+    assert completed_at_limit.verdict == "PASS"
+
+    chart_contract = build_minimal_contract(
+        run_id="run-3-chart",
+        user_text="生成图表",
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+    )
+    blocked = verify_completion(
+        contract=chart_contract,
+        final_text="未能生成图表。",
+        artifacts=[],
+        invocations=[],
+        evidence=[],
         budget_exhausted=True,
     )
     assert blocked.verdict == "BLOCKED"

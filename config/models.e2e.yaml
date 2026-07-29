@@ -1,0 +1,39 @@
+version: 1
+
+providers:
+  deterministic:
+    type: openai_compatible
+    api_base: ${E2E_MODEL_API_BASE}
+    api_key: ${E2E_MODEL_API_KEY}
+
+models:
+  chatbi-e2e:
+    provider: deterministic
+    model: chatbi-e2e
+    supports_tools: true
+
+routes:
+  core_reasoning:
+    primary: chatbi-e2e
+    fallback: []
+    temperature: 0.0
+  complex_reasoning:
+    primary: chatbi-e2e
+    fallback: []
+    temperature: 0.0
+  vision:
+    primary: chatbi-e2e
+    fallback: []
+    temperature: 0.0
+  lightweight:
+    primary: chatbi-e2e
+    fallback: []
+    temperature: 0.0
+  agent:
+    primary: chatbi-e2e
+    fallback: []
+    temperature: 0.0
+
+defaults:
+  timeout_seconds: 20
+  max_retries: 0

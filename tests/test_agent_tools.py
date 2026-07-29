@@ -107,6 +107,16 @@ def test_registry_exports_all_tools() -> None:
     reg = _registry()
     assert reg.names == _EXPECTED_TOOLS
     assert set(reg.names) == DEFAULT_AGENT_TOOL_ALLOWLIST
+    assert reg.capabilities_for_tool("get_data_profile") == (
+        "data.profile",
+        "data.quality",
+    )
+    quality = next(
+        item
+        for item in reg.capability_catalog()
+        if item["name"] == "data.quality"
+    )
+    assert quality["artifact_types"] == ["profile"]
     defs = reg.openai_tools()
     assert all(d["type"] == "function" for d in defs)
     assert all(d["function"]["description"] for d in defs)

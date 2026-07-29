@@ -8,7 +8,7 @@
 
 ## 当前进度
 
-当前可运行基线是带 **v2.4 阶段 2B 依赖图执行与动态重规划控制面** 的对话式 Agent。自然语言对话是唯一前端入口；
+当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
 SSE 展示。SQLite schema v3 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员和报告所有权。
@@ -40,6 +40,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 15 个底层工具及 Agent 的 11 个模型工具共用 MCP schema/能力元数据；官方 SDK
   `tools/list`/`tools/call`、Client Gateway 发现校验和无副作用影子比对已落地；
 - API/Web 多阶段镜像、非 root 健康检查、SSE/鉴权下载代理、根 Compose 和镜像构建 CI；
+- data/stats/chart/report/knowledge 五个独立 MCP 服务、逐服务认证/发现/健康、私网、
+  Compose secrets、最小卷权限和容器浏览器/重启门禁；
 - Bearer 认证、租户/项目成员隔离，以及浏览器会话级令牌录入；
 - 模型/工具/整轮超时，断连终态，启动时运行态恢复与未知调用保护；
 - 上传、parquet、报告和临时截图的受限生命周期清理；
@@ -49,30 +51,35 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   步骤状态绑定和未完成计划的确定性拒绝；
 - 按持久化依赖图只开放当前 ready capability；可恢复失败生成不可变计划新版本，
   已完成步骤和 Evidence 不被改写，零异常可显式跳过条件清洗；
+- `/chat/stream` 后台 producer 与浏览器订阅解耦；断线不取消任务，澄清回答、
+  pause/resume/cancel 和单步 retry 均使用项目写权限、`If-Match` 与幂等键；
+- pause/等待澄清会原子写入 Checkpoint；API 宿主丢失后可在同一 `run_id` 上恢复
+  Contract、活动计划、预算和已完成步骤，结果未知的活动工具调用禁止自动重试；
 - React 对话工作区、SSE 理解/执行/图表/表格/报告/引用卡；
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
 - 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
 ### 当前缺口
 
-- 依赖图调度和 Observation 自动重规划已实现；计划编辑、结构化澄清回答和用户触发的
-  单步重试尚未实现；
+- 依赖图调度、Observation 自动重规划、结构化澄清回答和用户触发的单步重试已实现；
+  计划编辑和审批尚未实现；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
-- 更广泛的非数值 Claim、同值路径语义消歧、Checkpoint 自动续跑尚未完成；
+- 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
 - 上下文压缩、指代消解和长期项目记忆尚未实现；
 - 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、审批和企业审计后端尚未实现；
-- 生产 Executor 仍走进程内 `Tool.invoke`；MCP stdio/Streamable HTTP 双传输探针和服务
-  认证已完成，规范执行切换尚未完成；
-- 单机 API/Web Compose 已提供；多实例外置状态、对象存储和独立工具服务编排尚未完成；
+- Agent Executor 已切到 MCP Client Gateway；支持 stdio/认证 Streamable HTTP、
+  Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
+- 单机生产结构 Compose 已提供；多实例外置状态、对象存储、Milvus 根 profile 和重型工具
+  CPU/GPU profile 尚未完成；
 - 前端能展示阻塞澄清文本，但尚无结构化澄清控件、计划编辑、暂停/续跑和自主等级；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
 ### 已规划但未实现
 
-- **v2.4 后续**：结构化澄清、Checkpoint 自动恢复和 pause/resume/cancel 任务控制；
-  同时把生产执行切到 MCP Client Gateway，并交付独立工具服务 Compose；
+- **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
+  70.0%、终态如实率 73.3%、越界 0）；剩余 2E Docker runner 门禁和 G7 人工盲评/签字；
 - **v2.5**：完整记忆、可干预前端、业务指标语义层、自主探索和多数据集分析；同步扩展 MCP 的记忆/Evidence 引用、知识 Resource、审批与能力目录，并补齐状态恢复和重型工具 Docker profile；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -82,18 +89,19 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ## Agent 演进路线
 
 ```text
-当前 v2.4 阶段 2B
+当前 v2.4 阶段 2E
   理解目标 → 必要澄清 → 结构化计划 → 受控执行
       ↑                      （依赖图 ready frontier）↓
   持久状态 ← 最终交付 ← Verifier ← Evidence
-          └── 不可变计划版本 ← Observation 重规划
+          ├── 不可变计划版本 ← Observation 重规划
+          └── Checkpoint ← 暂停/断线/重启后同 run 恢复
 
 v2.5
   记忆 + 业务语义 + 自主分析 + 人机协作
 
 横向交付轨
-  MCP：单源契约/影子校验已完成 → 规范执行路径待切换
-  Docker：API/Web 单机 Compose 与真实 E2E 已完成 → 重型工具 profile 待扩展
+  MCP：单源契约 → Client Gateway → 五服务独立路由与认证
+  Docker：仅 Web 公网入口 → 私网 API/MCP → 分卷/secrets/重启 E2E
 
 v2.5 延伸
   MCP：记忆/Evidence 引用 → 前端审批 → 知识 Resource → 自主分析能力目录
@@ -105,7 +113,7 @@ v3.0
 ```
 
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
-v2.4 详细设计与阶段 1 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
+v2.4 详细设计与阶段 1–2E 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
 v2.4 之后各阶段的 MCP/Docker 演进见
 [`docs/MCP与Docker全阶段演进设计.md`](./docs/MCP与Docker全阶段演进设计.md)。
 
@@ -126,15 +134,16 @@ React + Zustand
       ↓ HTTP/SSE
 FastAPI + Bearer/项目隔离 + Agent 控制面 + ModelGateway
       ↓
-Governance → 进程内 Tool.invoke
-             ↘ MCP 同源契约/影子校验
+Governance → MCP Client Gateway
+             ├─ stdio（本地）
+             └─ 认证 Streamable HTTP（部署）
       ↓
 parquet/报告文件 + SQLite v3 + Local/Milvus 知识库
 ```
 
-Dify 已放弃。生产执行仍以进程内 `Tool.invoke` 挂载，但 MCP 单源契约、SDK Server adapter、
-Client Gateway、影子校验和 stdio/Streamable HTTP 双传输探针已经落地；阶段 2 后续切换
-生产规范执行路径。v3.0 继续完成外部 MCP 的动态发现、授权与准入治理。
+Dify 已放弃。Agent 生产执行已使用 MCP 单源契约、官方 SDK Server/Client 和受治理
+Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已把 11 个 Agent 工具分配到
+五个独立服务，v3.0 再扩展外部 MCP 的动态发现、授权与准入治理。
 
 ## 目录速览
 
@@ -204,6 +213,10 @@ pnpm build
 pnpm exec playwright install chromium
 pnpm test:e2e
 pnpm test:e2e:fullstack
+
+# 生产结构 Compose 浏览器与重启门禁（从仓库根目录执行）
+cd ../..
+./scripts/run_compose_e2e.sh
 ```
 
 ## 可选能力依赖

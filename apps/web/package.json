@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test:e2e": "playwright test",
-    "test:e2e:fullstack": "playwright test --config playwright.fullstack.config.ts"
+    "test:e2e:fullstack": "playwright test --config playwright.fullstack.config.ts",
+    "test:e2e:compose": "playwright test --config playwright.compose.config.ts"
   },
   "dependencies": {
     "echarts": "^5.5.0",

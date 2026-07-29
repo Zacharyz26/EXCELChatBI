@@ -23,7 +23,14 @@ class MCPToolBinding:
     """One canonical MCP descriptor bound to the existing deterministic runner."""
 
     descriptor: MCPToolDescriptor
-    handler: Callable[[dict[str, Any]], Any]
+    handler: Callable[[dict[str, Any]], Any] | None = None
+    context_handler: (
+        Callable[[dict[str, Any], MCPRequestContext], Any] | None
+    ) = None
+
+    def __post_init__(self) -> None:
+        if (self.handler is None) == (self.context_handler is None):
+            raise ValueError("MCP binding 必须且只能配置一个 handler")
 
 
 class MCPServerAdapter:
@@ -60,7 +67,12 @@ class MCPServerAdapter:
                 validate_tool_args(arguments, binding.descriptor.input_schema)
             except SchemaValidationError as exc:
                 raise MCPProtocolError("invalid_arguments", str(exc)) from exc
-            result = normalize_structured_result(binding.handler(arguments))
+            if binding.context_handler is not None:
+                raw_result = binding.context_handler(arguments, context)
+            else:
+                assert binding.handler is not None
+                raw_result = binding.handler(arguments)
+            result = normalize_structured_result(raw_result)
             validate_json(
                 result,
                 binding.descriptor.output_schema,

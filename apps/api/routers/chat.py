@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends
 from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
@@ -30,16 +32,19 @@ from apps.api.deps import (
     settings_dep,
     stats_tools_dep,
 )
+from apps.api.run_host import agent_run_manager, conversation_locks
 from apps.api.schemas import ChatStreamRequest
 from apps.orchestrator.agent_loop import (
     AgentLoopConfig,
-    ConversationLockPool,
     stream_agent_chat,
 )
-from apps.orchestrator.agent_tools import AgentContext, build_registry
+from apps.orchestrator.agent_tools import (
+    AgentContext,
+    build_registry,
+    mcp_client_config_from_settings,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-_conversation_locks = ConversationLockPool()
 
 
 @router.post("/stream", response_class=EventSourceResponse)
@@ -77,6 +82,7 @@ async def chat_stream(
             project_id=conversation.project_id,
             conversation_id=conversation.id,
         ),
+        mcp_config=mcp_client_config_from_settings(settings),
     )
     config = AgentLoopConfig(
         history_limit=settings.chat_history_limit,
@@ -88,18 +94,22 @@ async def chat_stream(
         model_timeout_seconds=settings.agent_model_timeout_seconds,
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
     )
-    return EventSourceResponse(
-        stream_agent_chat(
+    run_id = uuid.uuid4().hex
+    subscription = agent_run_manager.start(
+        run_id,
+        lambda control: stream_agent_chat(
             conversation_id=conversation.id,
             project_id=conversation.project_id,
             user_text=req.message,
             store=store,
             gateway=gateway,
             registry=registry,
-            locks=_conversation_locks,
+            locks=conversation_locks,
             config=config,
             planner_gateway=gateway,
             principal=principal,
+            run_id=run_id,
+            control=control,
         ),
-        ping=15,
     )
+    return EventSourceResponse(subscription, ping=15)

@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import httpx
 import pytest
 
@@ -26,12 +27,18 @@ from mcp_servers.chart.server import build_server as build_chart_server  # noqa:
 from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding  # noqa: E402
 from mcp_servers.common.catalog import tool_metadata  # noqa: E402
 from mcp_servers.common.client_gateway import (  # noqa: E402
+    InProcessMCPTransport,
+    ManagedMCPClientGateway,
+    MCPClientConfig,
     MCPClientGateway,
+    MCPGatewayExecutionError,
     MCPShadowComparator,
+    OfficialSDKClientTransport,
     OfficialSDKSessionTransport,
 )
 from mcp_servers.common.contracts import (  # noqa: E402
     CHATBI_CONTEXT_KEY,
+    MCPCallResult,
     MCPProtocolError,
     MCPRequestContext,
     MCPToolDescriptor,
@@ -45,6 +52,7 @@ from mcp_servers.dataset_ops.server import build_server as build_data_server  # 
 from mcp_servers.excel_parser.server import build_server as build_excel_server  # noqa: E402
 from mcp_servers.report.server import build_server as build_report_server  # noqa: E402
 from mcp_servers.stats.server import build_server as build_stats_server  # noqa: E402
+from packages.common.config import Settings  # noqa: E402
 from packages.session.models import ArtifactDraft  # noqa: E402
 
 INPUT_SCHEMA: dict[str, Any] = {
@@ -135,6 +143,22 @@ def test_request_context_is_host_metadata_and_rejects_expired_deadline() -> None
     meta = context.to_request_meta()
     assert list(meta) == [CHATBI_CONTEXT_KEY]
     assert MCPRequestContext.from_request_meta(meta) == context
+    signed = context.to_request_meta(signing_key="context-secret")
+    assert (
+        MCPRequestContext.from_request_meta(
+            signed,
+            signing_key="context-secret",
+            require_signature=True,
+        )
+        == context
+    )
+    signed[CHATBI_CONTEXT_KEY]["project_id"] = "tampered"
+    with pytest.raises(MCPProtocolError, match="签名无效"):
+        MCPRequestContext.from_request_meta(
+            signed,
+            signing_key="context-secret",
+            require_signature=True,
+        )
 
     expired = _context(deadline_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat())
     with pytest.raises(MCPProtocolError, match="截止时间"):
@@ -285,13 +309,111 @@ async def test_streamable_http_is_stateful_authenticated_and_fail_closed() -> No
                 assert get_session_id()
                 listed = await session.list_tools()
                 assert [tool.name for tool in listed.tools] == ["double"]
-                called = await session.call_tool(
+                unsigned = await session.call_tool(
                     "double",
                     {"value": 7},
                     meta=_context().to_request_meta(),
                 )
+                assert unsigned.isError is True
+                assert unsigned.meta is not None
+                assert (
+                    unsigned.meta["com.chatbi/error-code"]
+                    == "invalid_context_signature"
+                )
+                called = await session.call_tool(
+                    "double",
+                    {"value": 7},
+                    meta=_context().to_request_meta(signing_key=token),
+                )
                 assert called.isError is False
                 assert called.structuredContent == {"doubled": 14}
+
+                managed = ManagedMCPClientGateway(
+                    config=MCPClientConfig(transport="streamable_http"),
+                    expected=_adapter().list_tools(),
+                    allowed_tools=frozenset({"double"}),
+                    transport_factory=lambda: OfficialSDKSessionTransport(
+                        session,
+                        context_signing_key=token,
+                    ),
+                )
+                gateway_result = await managed.execute(
+                    "double",
+                    {"value": 8},
+                    _context(invocation_id="http-managed-invocation"),
+                    timeout_seconds=1,
+                )
+                assert gateway_result.result == {"doubled": 16}
+                assert gateway_result.transport == "streamable_http"
+                await managed.aclose()
+
+
+@pytest.mark.asyncio
+async def test_official_sdk_client_transport_stdio_round_trip(
+    tmp_path: Path,
+) -> None:
+    dataset_ref = "a" * 32
+    dataset_path = tmp_path / f"{dataset_ref}.parquet"
+    connection = duckdb.connect()
+    try:
+        connection.execute(
+            """
+            COPY (
+                SELECT * FROM (
+                    VALUES ('east', 10), ('east', 15), ('west', 8)
+                ) AS probe(region, amount)
+            ) TO ? (FORMAT PARQUET)
+            """,
+            [str(dataset_path)],
+        )
+    finally:
+        connection.close()
+    descriptor = next(
+        item
+        for item in build_data_server().as_mcp_adapter().list_tools()
+        if item.name == "aggregate_preview"
+    )
+    config = MCPClientConfig(
+        transport="stdio",
+        stdio_command=(
+            sys.executable,
+            "-m",
+            "scripts.mcp_transport_probe_server",
+        ),
+        stdio_cwd=str(ROOT),
+        stdio_env={
+            "DATASET_DIR": str(tmp_path),
+            "MCP_TRANSPORT": "stdio",
+            "MCP_PROBE_DELAY_SECONDS": "0",
+            "MCP_CONTEXT_SIGNING_KEY": "stdio-context-secret",
+        },
+        context_signing_key="stdio-context-secret",
+    )
+    gateway = ManagedMCPClientGateway(
+        config=config,
+        expected=(descriptor,),
+        allowed_tools=frozenset({"aggregate_preview"}),
+        transport_factory=lambda: OfficialSDKClientTransport(config),
+    )
+    result = await gateway.execute(
+        "aggregate_preview",
+        {
+            "dataset_ref": dataset_ref,
+            "group_col": "region",
+            "value_col": "amount",
+            "agg": "sum",
+            "sort": "group",
+        },
+        _context(invocation_id="stdio-managed-invocation"),
+        timeout_seconds=5,
+    )
+    await gateway.aclose()
+
+    assert result.transport == "stdio"
+    assert result.result["rows"] == [
+        {"group": "east", "value": 25.0, "count": 2},
+        {"group": "west", "value": 8.0, "count": 1},
+    ]
 
 
 @pytest.mark.asyncio
@@ -342,7 +464,7 @@ async def test_streamable_http_client_cancellation_keeps_session_usable() -> Non
                     "params": {
                         "name": "double",
                         "arguments": {"value": 2},
-                        "_meta": _context().to_request_meta(),
+                        "_meta": _context().to_request_meta(signing_key=token),
                     },
                 },
                 headers=session_headers,
@@ -396,3 +518,257 @@ def test_every_project_server_exports_governed_mcp_metadata() -> None:
         if descriptor.name != "multi_layout"
     )
     assert all(descriptor.to_protocol_dict()["_meta"] for descriptor in descriptors)
+
+
+class _ScriptedTransport:
+    def __init__(
+        self,
+        descriptors: tuple[MCPToolDescriptor, ...],
+        *,
+        list_error: Exception | None = None,
+        call_error: Exception | None = None,
+        wait_forever: bool = False,
+    ) -> None:
+        self.descriptors = descriptors
+        self.list_error = list_error
+        self.call_error = call_error
+        self.wait_forever = wait_forever
+        self.calls: list[tuple[str, dict[str, Any], MCPRequestContext]] = []
+        self.call_started = asyncio.Event()
+        self.closed = False
+
+    async def list_tools(self) -> tuple[MCPToolDescriptor, ...]:
+        if self.list_error is not None:
+            raise self.list_error
+        return self.descriptors
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: MCPRequestContext,
+    ) -> MCPCallResult:
+        self.calls.append((name, arguments, context))
+        self.call_started.set()
+        if self.wait_forever:
+            await asyncio.Event().wait()
+        if self.call_error is not None:
+            raise self.call_error
+        return MCPCallResult.success(name, {"doubled": arguments["value"] * 2})
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_reconnects_only_read_only_idempotent_calls() -> None:
+    descriptor = _adapter().list_tools()[0]
+    disconnected = _ScriptedTransport(
+        (descriptor,),
+        call_error=ConnectionError("connection reset"),
+    )
+    recovered = _ScriptedTransport((descriptor,))
+    transports = iter((disconnected, recovered))
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="stdio", max_reconnects=1),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: next(transports),
+    )
+
+    result = await gateway.execute(
+        "double", {"value": 4}, _context(), timeout_seconds=1
+    )
+
+    assert result.result == {"doubled": 8}
+    assert result.transport == "stdio"
+    assert result.health.state == "healthy"
+    assert result.health.generation == 2
+    assert disconnected.closed is True
+    assert disconnected.calls[0][2].idempotency_key == (
+        recovered.calls[0][2].idempotency_key
+    )
+    await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_does_not_retry_ambiguous_mutation() -> None:
+    original = _adapter().list_tools()[0]
+    descriptor = replace(
+        original,
+        metadata=replace(
+            original.metadata,
+            read_only=False,
+            idempotent=False,
+            destructive=True,
+        ),
+    )
+    disconnected = _ScriptedTransport(
+        (descriptor,),
+        call_error=ConnectionError("connection reset"),
+    )
+    factory_calls = 0
+
+    def factory() -> _ScriptedTransport:
+        nonlocal factory_calls
+        factory_calls += 1
+        return disconnected
+
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="streamable_http", max_reconnects=3),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=factory,
+    )
+
+    with pytest.raises(MCPGatewayExecutionError) as captured:
+        await gateway.execute(
+            "double", {"value": 4}, _context(), timeout_seconds=1
+        )
+
+    assert captured.value.code == "mcp_transport_disconnected"
+    assert captured.value.result_unknown is True
+    assert factory_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_timeout_and_cancellation_invalidate_session() -> None:
+    descriptor = _adapter().list_tools()[0]
+    timed_transport = _ScriptedTransport((descriptor,), wait_forever=True)
+    timed_gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="streamable_http"),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: timed_transport,
+    )
+    with pytest.raises(MCPGatewayExecutionError) as captured:
+        await timed_gateway.execute(
+            "double", {"value": 2}, _context(), timeout_seconds=0.01
+        )
+    assert captured.value.code == "mcp_call_timeout"
+    assert captured.value.result_unknown is True
+    assert timed_transport.closed is True
+    assert timed_gateway.health.state == "unhealthy"
+
+    cancelled_transport = _ScriptedTransport((descriptor,), wait_forever=True)
+    cancelled_gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="stdio"),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: cancelled_transport,
+    )
+    task = asyncio.create_task(
+        cancelled_gateway.execute(
+            "double", {"value": 2}, _context(), timeout_seconds=10
+        )
+    )
+    await cancelled_transport.call_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled_transport.closed is True
+    assert cancelled_gateway.health.last_error_code == "mcp_call_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_fallback_is_explicit_read_only_and_fail_closed_on_drift() -> None:
+    adapter = _adapter()
+    descriptor = adapter.list_tools()[0]
+    unavailable = _ScriptedTransport(
+        (descriptor,),
+        list_error=ConnectionError("service unavailable"),
+    )
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(
+            transport="streamable_http",
+            allow_in_process_fallback=True,
+        ),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: unavailable,
+        compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
+    )
+
+    result = await gateway.execute(
+        "double", {"value": 5}, _context(), timeout_seconds=1
+    )
+
+    assert result.result == {"doubled": 10}
+    assert result.transport == "in_process"
+    assert result.degraded is True
+    assert result.health.state == "degraded"
+
+    drifted = _ScriptedTransport((replace(descriptor, description="drift"),))
+    fail_closed = ManagedMCPClientGateway(
+        config=MCPClientConfig(
+            transport="streamable_http",
+            allow_in_process_fallback=True,
+        ),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: drifted,
+        compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
+    )
+    with pytest.raises(MCPGatewayExecutionError) as captured:
+        await fail_closed.execute(
+            "double", {"value": 5}, _context(), timeout_seconds=1
+        )
+    assert captured.value.code == "mcp_catalog_drift"
+
+    class _AuthError(Exception):
+        response = type("_Response", (), {"status_code": 401})()
+
+    unauthorized = _ScriptedTransport(
+        (descriptor,),
+        list_error=_AuthError("401 Unauthorized"),
+    )
+    auth_fail_closed = ManagedMCPClientGateway(
+        config=MCPClientConfig(
+            transport="streamable_http",
+            allow_in_process_fallback=True,
+        ),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: unauthorized,
+        compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
+    )
+    with pytest.raises(MCPGatewayExecutionError) as auth_error:
+        await auth_fail_closed.execute(
+            "double", {"value": 5}, _context(), timeout_seconds=1
+        )
+    assert auth_error.value.code == "mcp_authentication_failed"
+
+
+def test_deployed_settings_require_authenticated_streamable_http_without_fallback() -> None:
+    with pytest.raises(ValueError, match="Streamable HTTP"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            auth_mode="bearer",
+            auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
+        )
+
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        auth_mode="bearer",
+        auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
+        agent_mcp_transport="streamable_http",
+        agent_mcp_http_url="http://agent-tools:8000/mcp/",
+        agent_mcp_service_token="internal-secret",
+        agent_mcp_context_signing_key="context-secret",
+    )
+    assert settings.agent_mcp_transport == "streamable_http"
+
+    with pytest.raises(ValueError, match="禁止降级"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            auth_mode="bearer",
+            auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
+            agent_mcp_transport="streamable_http",
+            agent_mcp_http_url="http://agent-tools:8000/mcp/",
+            agent_mcp_service_token="internal-secret",
+            agent_mcp_context_signing_key="context-secret",
+            agent_mcp_allow_in_process_fallback=True,
+        )

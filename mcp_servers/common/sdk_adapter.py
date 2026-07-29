@@ -10,9 +10,11 @@ import asyncio
 import contextlib
 import hmac
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
+import anyio
 import mcp.server.stdio
 import mcp.types as types
 import uvicorn
@@ -34,7 +36,7 @@ from starlette.applications import Starlette
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mcp_servers.common.adapter import MCPServerAdapter
@@ -46,8 +48,15 @@ DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
 _DOTENV = dotenv_values(".env")
 
 
-def build_sdk_server(adapter: MCPServerAdapter) -> Server[Any, Any]:
+def build_sdk_server(
+    adapter: MCPServerAdapter,
+    *,
+    context_signing_key: str | None = None,
+    require_signed_context: bool = False,
+) -> Server[Any, Any]:
     """Bind canonical tools/list and tools/call handlers to the official SDK."""
+    if require_signed_context and not context_signing_key:
+        raise ValueError("要求 MCP 上下文签名时必须配置 signing key")
     server: Server[Any, Any] = Server(adapter.name, version=SERVER_VERSION)
 
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
@@ -60,7 +69,11 @@ def build_sdk_server(adapter: MCPServerAdapter) -> Server[Any, Any]:
         current = request_ctx.get()
         raw_meta = _meta_to_dict(current.meta)
         try:
-            context = MCPRequestContext.from_request_meta(raw_meta)
+            context = MCPRequestContext.from_request_meta(
+                raw_meta,
+                signing_key=context_signing_key,
+                require_signature=require_signed_context,
+            )
         except Exception as exc:
             from mcp_servers.common.contracts import MCPProtocolError
 
@@ -68,7 +81,13 @@ def build_sdk_server(adapter: MCPServerAdapter) -> Server[Any, Any]:
                 "invalid_request_context", "MCP 请求上下文无效"
             )
             return _error_result(error.code, error.message, error.retryable)
-        result = await asyncio.to_thread(adapter.call_tool, name, arguments, context)
+        result = await anyio.to_thread.run_sync(
+            adapter.call_tool,
+            name,
+            arguments,
+            context,
+            abandon_on_cancel=True,
+        )
         if result.is_error:
             return _error_result(
                 result.error_code or "mcp_tool_error", result.text, result.retryable
@@ -86,12 +105,24 @@ def build_sdk_server(adapter: MCPServerAdapter) -> Server[Any, Any]:
     return server
 
 
-def run_stdio(adapter: MCPServerAdapter) -> None:
-    asyncio.run(_run_stdio(adapter))
+def run_stdio(
+    adapter: MCPServerAdapter,
+    *,
+    context_signing_key: str | None = None,
+) -> None:
+    asyncio.run(_run_stdio(adapter, context_signing_key=context_signing_key))
 
 
-async def _run_stdio(adapter: MCPServerAdapter) -> None:
-    server = build_sdk_server(adapter)
+async def _run_stdio(
+    adapter: MCPServerAdapter,
+    *,
+    context_signing_key: str | None = None,
+) -> None:
+    server = build_sdk_server(
+        adapter,
+        context_signing_key=context_signing_key,
+        require_signed_context=context_signing_key is not None,
+    )
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -224,13 +255,19 @@ def create_streamable_http_app(
     service_token: str,
     allowed_hosts: list[str],
     allowed_origins: list[str],
+    context_signing_key: str | None = None,
+    readiness_check: Callable[[], tuple[bool, dict[str, Any]]] | None = None,
 ) -> ASGIApp:
     """Build a stateful, authenticated Streamable HTTP ASGI application."""
     if not service_token.strip():
         raise ValueError("Streamable HTTP 必须配置非空 MCP_SERVICE_TOKEN")
     if not allowed_hosts:
         raise ValueError("Streamable HTTP 必须配置至少一个 allowed host")
-    server = build_sdk_server(adapter)
+    server = build_sdk_server(
+        adapter,
+        context_signing_key=context_signing_key or service_token,
+        require_signed_context=True,
+    )
     security_settings = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,
@@ -258,7 +295,37 @@ def create_streamable_http_app(
         async with manager.run():
             yield
 
-    return Starlette(routes=[Mount("/mcp", app=endpoint)], lifespan=lifespan)
+    async def health(_: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "status": "ok",
+                "service": adapter.name,
+            }
+        )
+
+    async def ready(_: Request) -> JSONResponse:
+        is_ready, details = (
+            readiness_check()
+            if readiness_check is not None
+            else (True, {"tool_count": len(adapter.names)})
+        )
+        return JSONResponse(
+            {
+                "status": "ready" if is_ready else "not_ready",
+                "service": adapter.name,
+                **details,
+            },
+            status_code=200 if is_ready else 503,
+        )
+
+    return Starlette(
+        routes=[
+            Route("/health", health, methods=["GET"]),
+            Route("/health/ready", ready, methods=["GET"]),
+            Mount("/mcp", app=endpoint),
+        ],
+        lifespan=lifespan,
+    )
 
 
 def run_streamable_http(
@@ -269,6 +336,8 @@ def run_streamable_http(
     service_token: str,
     allowed_hosts: list[str],
     allowed_origins: list[str],
+    context_signing_key: str | None = None,
+    readiness_check: Callable[[], tuple[bool, dict[str, Any]]] | None = None,
 ) -> None:
     """Run the reviewed stateful Streamable HTTP endpoint."""
     app = create_streamable_http_app(
@@ -276,6 +345,8 @@ def run_streamable_http(
         service_token=service_token,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
+        context_signing_key=context_signing_key,
+        readiness_check=readiness_check,
     )
     uvicorn.run(
         app,
@@ -287,17 +358,26 @@ def run_streamable_http(
     )
 
 
-def run_adapter(adapter: MCPServerAdapter, *, default_port: int = 8000) -> None:
+def run_adapter(
+    adapter: MCPServerAdapter,
+    *,
+    default_port: int = 8000,
+    readiness_check: Callable[[], tuple[bool, dict[str, Any]]] | None = None,
+) -> None:
     """Run stdio or authenticated stateful Streamable HTTP."""
     transport = _env("MCP_TRANSPORT", "stdio").strip().lower()
+    context_signing_key = _env_or_file(
+        "MCP_CONTEXT_SIGNING_KEY",
+        "MCP_CONTEXT_SIGNING_KEY_FILE",
+    ) or None
     if transport == "stdio":
-        run_stdio(adapter)
+        run_stdio(adapter, context_signing_key=context_signing_key)
         return
     if transport not in {"streamable-http", "streamable_http"}:
         raise RuntimeError(f"不支持的 MCP_TRANSPORT: {transport}")
     host = _env("MCP_HTTP_HOST", "127.0.0.1").strip()
     port = int(_env("MCP_HTTP_PORT", str(default_port)))
-    token = _env("MCP_SERVICE_TOKEN", "")
+    token = _env_or_file("MCP_SERVICE_TOKEN", "MCP_SERVICE_TOKEN_FILE")
     configured_hosts = _csv_env("MCP_ALLOWED_HOSTS")
     if configured_hosts:
         allowed_hosts = configured_hosts
@@ -314,6 +394,8 @@ def run_adapter(adapter: MCPServerAdapter, *, default_port: int = 8000) -> None:
         service_token=token,
         allowed_hosts=allowed_hosts,
         allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS"),
+        context_signing_key=context_signing_key,
+        readiness_check=readiness_check,
     )
 
 
@@ -327,6 +409,22 @@ def _env(name: str, default: str) -> str:
         return value
     dotenv_value = _DOTENV.get(name)
     return str(dotenv_value) if dotenv_value is not None else default
+
+
+def _env_or_file(value_name: str, file_name: str) -> str:
+    value = _env(value_name, "").strip()
+    file_path = _env(file_name, "").strip()
+    if value and file_path:
+        raise RuntimeError(f"{value_name} 与 {file_name} 不能同时配置")
+    if not file_path:
+        return value
+    try:
+        secret = Path(file_path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"{file_name} 不可读") from exc
+    if not secret:
+        raise RuntimeError(f"{file_name} 不能为空")
+    return secret
 
 
 def _to_sdk_tool(raw: dict[str, Any]) -> types.Tool:

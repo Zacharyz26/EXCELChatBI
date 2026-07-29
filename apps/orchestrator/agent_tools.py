@@ -1,11 +1,11 @@
 """Agent 工具注册表（阶段2，设计文档 14.7）。
 
-把现有确定性工具（生产仍为进程内 ``Tool.invoke``）统一封装为 DeepSeek function
-calling 可消费的工具集；同一份定义也生成 v2.4 MCP 契约与影子校验：
+把现有确定性工具统一封装为 DeepSeek function calling 可消费的工具集；同一份定义
+生成 v2.4 MCP 契约，并由 Client Gateway 承担 Agent 的规范执行：
 
 - **schema 同源**（红线3）：发给模型的 function parameters 与 Tool.invoke 校验
   用的是同一份 JSON Schema，模型看到什么约束、执行时就校验什么约束。
-- **执行必经 Tool.invoke**：注册表的 runner 一律调当前工具校验入口，无旁路。
+- **执行必经 Gateway**：生产循环走 `execute_mcp`；同步 runner 只保留兼容/测试。
 - **零 LLM**（5.3 正式条款）：本模块只做封装、组装与血缘登记，不调模型；
   中文解读在编排层（阶段3 循环 / stats_interpreter）。
 - 本模块由阶段 3 的 Agent 循环消费；阶段 2 内每个工具可独立测试（14.8 验收）。
@@ -13,20 +13,35 @@ calling 可消费的工具集；同一份定义也生成 v2.4 MCP 契约与影�
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding
 from mcp_servers.common.base_server import MCPServer
 from mcp_servers.common.catalog import tool_metadata, tool_output_schema
-from mcp_servers.common.client_gateway import MCPShadowComparator, ShadowComparison
+from mcp_servers.common.client_gateway import (
+    InProcessMCPTransport,
+    ManagedMCPClientGateway,
+    MCPClientConfig,
+    MCPExecutionResult,
+    MCPShadowComparator,
+    OfficialSDKClientTransport,
+    ShadowComparison,
+    client_config_from_json,
+)
 from mcp_servers.common.contracts import (
     GENERIC_OBJECT_OUTPUT_SCHEMA,
+    MCPRequestContext,
     MCPToolDescriptor,
     ToolCapabilityMetadata,
+)
+from mcp_servers.common.service_catalog import (
+    AGENT_MCP_SERVICE_TOOLS,
+    validate_service_keys,
 )
 from mcp_servers.common.tool import Tool
 from mcp_servers.dataset_ops.schemas import (
@@ -40,6 +55,9 @@ from packages.rag.retriever import HybridRetriever
 from packages.session.file_lifecycle import delete_chart_file
 from packages.session.models import Artifact, ArtifactDraft, JsonObject
 from packages.session.store import SessionStore
+
+if TYPE_CHECKING:
+    from packages.common.config import Settings
 
 _log = get_logger("orchestrator.agent_tools")
 
@@ -79,7 +97,7 @@ GENERATE_REPORT_SCHEMA: dict[str, Any] = {
 }
 
 
-class AgentToolError(Exception):
+class AgentToolError(ValueError):
     """工具执行的业务失败（可回传模型重试的那类，区别于编程错误）。"""
 
 
@@ -135,12 +153,81 @@ class AgentToolSpec:
 class AgentToolRegistry:
     """Agent 工具集：定义导出 + 按名执行（入参 JSON 解析在此完成）。"""
 
-    def __init__(self, specs: list[AgentToolSpec]) -> None:
+    def __init__(
+        self,
+        specs: list[AgentToolSpec],
+        *,
+        mcp_config: MCPClientConfig | None = None,
+        context: AgentContext | None = None,
+        lineage_excel: MCPServer | None = None,
+    ) -> None:
         self._specs = {s.name: s for s in specs}
+        self._context = context
+        self._lineage_excel = lineage_excel
         self._mcp_adapter = MCPServerAdapter(
             "agent-tools", (spec.mcp_binding() for spec in self._specs.values())
         )
-        self._mcp_shadow = MCPShadowComparator(self._mcp_adapter.list_tools())
+        descriptors = self._mcp_adapter.list_tools()
+        self._mcp_shadow = MCPShadowComparator(descriptors)
+        config = mcp_config or MCPClientConfig()
+        self._mcp_executors: dict[str, ManagedMCPClientGateway] = {}
+        self._mcp_tool_routes: dict[str, str] = {}
+        if config.service_urls:
+            validate_service_keys(config.service_urls, label="MCP URL")
+            validate_service_keys(config.service_tokens, label="MCP 令牌")
+            for service_name, tool_names in AGENT_MCP_SERVICE_TOOLS.items():
+                selected = [self._specs[name] for name in tool_names]
+                adapter = MCPServerAdapter(
+                    service_name, (spec.mcp_binding() for spec in selected)
+                )
+                routed_config = replace(
+                    config,
+                    http_url=config.service_urls[service_name],
+                    service_token=config.service_tokens[service_name],
+                    service_urls={},
+                    service_tokens={},
+                )
+                executor = self._build_mcp_executor(
+                    routed_config,
+                    adapter,
+                    frozenset(tool_names),
+                )
+                self._mcp_executors[service_name] = executor
+                self._mcp_tool_routes.update(
+                    (tool_name, service_name) for tool_name in tool_names
+                )
+        else:
+            self._mcp_executors["agent-tools"] = self._build_mcp_executor(
+                config,
+                self._mcp_adapter,
+                frozenset(self._specs),
+            )
+            self._mcp_tool_routes.update(
+                (tool_name, "agent-tools") for tool_name in self._specs
+            )
+
+    @staticmethod
+    def _build_mcp_executor(
+        config: MCPClientConfig,
+        adapter: MCPServerAdapter,
+        allowed_tools: frozenset[str],
+    ) -> ManagedMCPClientGateway:
+        def transport_factory() -> InProcessMCPTransport | OfficialSDKClientTransport:
+            if config.transport == "in_process":
+                return InProcessMCPTransport(adapter)
+            return OfficialSDKClientTransport(config)
+
+        return ManagedMCPClientGateway(
+            config=config,
+            expected=adapter.list_tools(),
+            allowed_tools=allowed_tools,
+            transport_factory=transport_factory,
+            compatibility_transport_factory=(
+                (lambda: InProcessMCPTransport(adapter))
+                if config.allow_in_process_fallback
+                else None
+            ),
+        )
 
     @property
     def names(self) -> list[str]:
@@ -230,8 +317,61 @@ class AgentToolRegistry:
     def compare_mcp_error(self, tool_name: str, error_code: str) -> ShadowComparison:
         return self._mcp_shadow.compare_error(tool_name, error_code)
 
+    async def execute_mcp(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: MCPRequestContext,
+        *,
+        timeout_seconds: float,
+    ) -> MCPExecutionResult:
+        """Execute exclusively through the governed MCP Client Gateway."""
+        _log.info(
+            "agent_tool.execute_mcp",
+            tool=name,
+            arg_keys=sorted(arguments),
+            invocation_id=context.invocation_id,
+        )
+        service_name = self._mcp_tool_routes.get(name)
+        if service_name is None:
+            raise AgentToolError(f"工具不存在: {name}")
+        _log.info(
+            "agent_tool.route_mcp",
+            tool=name,
+            service=service_name,
+            invocation_id=context.invocation_id,
+            trace_id=context.trace_id,
+        )
+        execution = await self._mcp_executors[service_name].execute(
+            name,
+            arguments,
+            context,
+            timeout_seconds=timeout_seconds,
+        )
+        execution = replace(execution, service_name=service_name)
+        if (
+            name == "transform_dataset"
+            and self._context is not None
+            and execution.result.get("registered") is not True
+        ):
+            result = dict(execution.result)
+            _register_transformed_dataset(
+                excel=self._lineage_excel,
+                context=self._context,
+                args=arguments,
+                result=result,
+            )
+            execution = replace(execution, result=result)
+        return execution
+
+    async def aclose(self) -> None:
+        """Close a scoped stdio/HTTP session when its TaskRun host exits."""
+        await asyncio.gather(
+            *(executor.aclose() for executor in self._mcp_executors.values())
+        )
+
     def execute(self, name: str, arguments_json: str) -> Any:
-        """执行一次模型发起的工具调用。
+        """Compatibility-only direct runner used by focused unit tests.
 
         Args:
             name: 模型给出的工具名。
@@ -263,6 +403,7 @@ def build_registry(
     report: MCPServer,
     retriever: HybridRetriever,
     context: AgentContext | None = None,
+    mcp_config: MCPClientConfig | None = None,
 ) -> AgentToolRegistry:
     """装配 Agent 工具注册表（14.7 清单）。
 
@@ -280,7 +421,10 @@ def build_registry(
             parameters=excel._tools["infer_schema"].input_schema,
             handler=lambda args: _profile_with_quality(excel, args),
             output_schema=tool_output_schema("get_data_profile"),
-            metadata=tool_metadata("data.profile", "profile"),
+            metadata=tool_metadata(
+                ("data.profile", "data.quality"),
+                "profile",
+            ),
         ),
         _wrap_mcp(
             stats, "trend_analysis",
@@ -375,7 +519,29 @@ def build_registry(
             ),
         ),
     ]
-    return AgentToolRegistry(specs)
+    return AgentToolRegistry(
+        specs,
+        mcp_config=mcp_config,
+        context=context,
+        lineage_excel=excel,
+    )
+
+
+def mcp_client_config_from_settings(settings: Settings) -> MCPClientConfig:
+    """Translate validated application settings into a shell-free client config."""
+    return client_config_from_json(
+        transport=settings.agent_mcp_transport,
+        stdio_command_json=settings.agent_mcp_stdio_command_json,
+        stdio_cwd=settings.agent_mcp_stdio_cwd,
+        http_url=settings.agent_mcp_http_url,
+        service_token=settings.agent_mcp_service_token,
+        context_signing_key=settings.agent_mcp_context_signing_key,
+        service_urls_json=settings.agent_mcp_server_urls_json,
+        service_tokens_json=settings.agent_mcp_service_tokens_json,
+        connect_timeout_seconds=settings.agent_mcp_connect_timeout_seconds,
+        max_reconnects=settings.agent_mcp_max_reconnects,
+        allow_in_process_fallback=settings.agent_mcp_allow_in_process_fallback,
+    )
 
 
 # ── 各 runner 实现 ──
@@ -466,27 +632,48 @@ def _transform_with_lineage(
             raise AgentToolError("源数据集不属于当前项目")
     result: dict[str, Any] = dataset_ops._tools["transform_dataset"].invoke(args)
     if context is not None:
-        assert parent is not None  # 上方已完成当前项目的登记与归属检查。
-        filename = f"{parent.filename}（衍生）"
-        profile: JsonObject = excel._tools["infer_schema"].invoke(
-            {"dataset_ref": result["dataset_ref"]}
-        ).to_dict()
-        context.store.register_dataset(
-            ref=result["dataset_ref"],
-            project_id=context.project_id,
-            filename=filename,
-            profile=profile,
-            parent_ref=result["parent_ref"],
-            transform=result["transform"],
-        )
-        result["registered"] = True
-        _log.info(
-            "agent_tool.lineage",
-            dataset_ref=result["dataset_ref"],
-            parent_ref=result["parent_ref"],
-            project_id=context.project_id,
+        _register_transformed_dataset(
+            excel=excel,
+            context=context,
+            args=args,
+            result=result,
         )
     return result
+
+
+def _register_transformed_dataset(
+    *,
+    excel: MCPServer | None,
+    context: AgentContext,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Commit remote transform lineage in the Host-owned SQLite writer."""
+    parent = context.store.get_dataset(str(args["dataset_ref"]))
+    if parent is None:
+        raise AgentToolError("源数据集未登记到当前工作区")
+    if parent.project_id != context.project_id:
+        raise AgentToolError("源数据集不属于当前项目")
+    if excel is None:
+        raise AgentToolError("Host 缺少衍生数据集画像依赖")
+    profile: JsonObject = excel._tools["infer_schema"].invoke(
+        {"dataset_ref": result["dataset_ref"]}
+    ).to_dict()
+    context.store.register_dataset(
+        ref=str(result["dataset_ref"]),
+        project_id=context.project_id,
+        filename=f"{parent.filename}（衍生）",
+        profile=profile,
+        parent_ref=str(result["parent_ref"]),
+        transform=result["transform"],
+    )
+    result["registered"] = True
+    _log.info(
+        "agent_tool.lineage",
+        dataset_ref=result["dataset_ref"],
+        parent_ref=result["parent_ref"],
+        project_id=context.project_id,
+    )
 
 
 def _kb_search(retriever: HybridRetriever, args: dict[str, Any]) -> dict[str, Any]:

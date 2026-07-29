@@ -36,6 +36,11 @@ jobs:
         env:
           MODEL_REGISTRY_PATH: config/models.example.yaml
 
+      - name: Validate Stage 2 behavior evaluation protocol
+        run: >-
+          uv run --frozen python scripts/stage2_behavior_eval.py
+          --registry config/models.example.yaml --validate-only
+
       - name: Run deterministic knowledge quality gate
         run: >-
           uv run --frozen python scripts/kb_eval.py
@@ -57,6 +62,11 @@ jobs:
 
       - name: Run Ruff
         run: uv run --frozen ruff check .
+
+      - name: Validate production and E2E Compose
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.yaml -f compose.e2e.yaml config --quiet
 
       - name: Validate Milvus Standalone Compose
         run: >-
@@ -113,9 +123,9 @@ jobs:
           retention-days: 14
 
   containers:
-    name: Build and smoke-test API/Web images
+    name: Build images and run Compose browser gate
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     needs: [backend, frontend]
     steps:
       - name: Checkout
@@ -131,7 +141,7 @@ jobs:
           file: Dockerfile
           target: api
           load: true
-          tags: chatbi-api:ci
+          tags: chatbi-python:ci
           cache-from: type=gha,scope=chatbi-api
           cache-to: type=gha,mode=max,scope=chatbi-api
 
@@ -148,7 +158,7 @@ jobs:
 
       - name: Smoke-test API image as non-root
         run: |
-          docker run -d --name chatbi-api-ci -p 18000:8000 chatbi-api:ci
+          docker run -d --name chatbi-api-ci -e APP_ENV=development -p 18000:8000 chatbi-python:ci
           trap 'docker rm -f chatbi-api-ci' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18000/health >/dev/null; then break; fi
@@ -160,7 +170,7 @@ jobs:
       - name: Smoke-test Web image as non-root
         run: |
           docker network create chatbi-ci
-          docker run -d --name chatbi-api-for-web --network chatbi-ci --network-alias api chatbi-api:ci
+          docker run -d --name chatbi-api-for-web -e APP_ENV=development --network chatbi-ci --network-alias api chatbi-python:ci
           docker run -d --name chatbi-web-ci --network chatbi-ci -p 18080:8080 chatbi-web:ci
           trap 'docker rm -f chatbi-web-ci chatbi-api-for-web; docker network rm chatbi-ci' EXIT
           for attempt in $(seq 1 20); do
@@ -169,3 +179,36 @@ jobs:
             sleep 1
           done
           test "$(docker exec chatbi-web-ci id -u)" != "0"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+
+      - name: Install browser gate dependencies
+        working-directory: apps/web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Run isolated Compose browser and restart gate
+        run: ./scripts/run_compose_e2e.sh
+        env:
+          CHATBI_IMAGE_TAG: ci
+          CHATBI_COMPOSE_NO_BUILD: "1"
+
+      - name: Upload Compose browser artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: compose-browser-e2e
+          path: .data/e2e/
+          if-no-files-found: ignore
+          retention-days: 14

@@ -32,6 +32,7 @@ from apps.api.routers import (
     upload,
     workspace,
 )
+from apps.api.run_host import agent_run_manager
 
 _log = get_logger("api.lifecycle")
 
@@ -41,12 +42,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """启动时初始化结构化日志，并对 RAG 后端配置做 fail-fast 自检。"""
     settings = get_settings()
     configure_logging(settings.log_level)
-    recovered = TaskStore(session_store_dep().db_path).recover_stale_runs(
+    session_store = session_store_dep()
+    recovered = TaskStore(session_store.db_path).recover_stale_runs(
         stale_after_seconds=settings.agent_recovery_stale_seconds
     )
     _log.info("agent.run_recovery", recovered_runs=len(recovered))
     reconciliation = reconcile_report_files(
-        session_store_dep(),
+        session_store,
         settings.report_dir,
         stale_after_seconds=settings.report_temp_grace_seconds,
     )
@@ -70,6 +72,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        shutdown_recovered = TaskStore(session_store.db_path).recover_stale_runs(
+            stale_after_seconds=0
+        )
+        _log.info(
+            "agent.run_shutdown",
+            recovered_runs=len(shutdown_recovered),
+        )
+        await agent_run_manager.shutdown()
         store.close()
         retriever_dep.cache_clear()
         kb_store_dep.cache_clear()

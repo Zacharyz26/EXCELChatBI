@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
+from mcp_servers.common.service_catalog import validate_service_keys
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,6 +23,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "development"
+    process_role: Literal["api", "mcp_server"] = "api"
     log_level: str = "INFO"
 
     # API 身份边界。开发环境可显式关闭；staging/production 必须使用 Bearer。
@@ -50,6 +54,25 @@ class Settings(BaseSettings):
     agent_model_timeout_seconds: int = Field(default=90, ge=5, le=600)
     agent_tool_timeout_seconds: int = Field(default=120, ge=5, le=1800)
     agent_recovery_stale_seconds: int = Field(default=0, ge=0, le=86400)
+
+    # v2.4 阶段 2D：Executor 的规范 MCP Client Gateway。
+    # in_process 仅供兼容/测试；staging/production 强制 Streamable HTTP。
+    agent_mcp_transport: Literal[
+        "in_process", "stdio", "streamable_http"
+    ] = "in_process"
+    agent_mcp_stdio_command_json: str = ""
+    agent_mcp_stdio_cwd: str = ""
+    agent_mcp_http_url: str = ""
+    agent_mcp_service_token: str = ""
+    agent_mcp_service_token_file: str = ""
+    agent_mcp_context_signing_key: str = ""
+    agent_mcp_context_signing_key_file: str = ""
+    agent_mcp_server_urls_json: str = ""
+    agent_mcp_service_tokens_json: str = ""
+    agent_mcp_service_token_files_json: str = ""
+    agent_mcp_connect_timeout_seconds: float = Field(default=10, ge=1, le=120)
+    agent_mcp_max_reconnects: int = Field(default=1, ge=0, le=3)
+    agent_mcp_allow_in_process_fallback: bool = False
 
     # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
     redis_host: str = "127.0.0.1"
@@ -106,7 +129,43 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_rag_profile(self) -> Settings:
         """拒绝不安全身份配置及会静默丢能力的 RAG 后端组合。"""
-        if self.app_env.lower() in {"staging", "production"} and self.auth_mode != "bearer":
+        self.agent_mcp_service_token = _resolve_secret(
+            value=self.agent_mcp_service_token,
+            file_path=self.agent_mcp_service_token_file,
+            label="MCP 服务令牌",
+        )
+        self.agent_mcp_context_signing_key = _resolve_secret(
+            value=self.agent_mcp_context_signing_key,
+            file_path=self.agent_mcp_context_signing_key_file,
+            label="MCP 请求上下文签名密钥",
+        )
+        service_urls = _parse_string_mapping(
+            self.agent_mcp_server_urls_json,
+            label="MCP 服务 URL",
+        )
+        direct_service_tokens = _parse_string_mapping(
+            self.agent_mcp_service_tokens_json,
+            label="MCP 服务令牌",
+        )
+        service_token_files = _parse_string_mapping(
+            self.agent_mcp_service_token_files_json,
+            label="MCP 服务令牌文件",
+        )
+        if direct_service_tokens and service_token_files:
+            raise ValueError("MCP 分服务令牌不能同时通过值和文件配置")
+        if service_token_files:
+            direct_service_tokens = {
+                service: _read_secret_file(file_path, label=f"{service} MCP 服务令牌")
+                for service, file_path in service_token_files.items()
+            }
+            self.agent_mcp_service_tokens_json = json.dumps(
+                direct_service_tokens,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        deployed = self.app_env.lower() in {"staging", "production"}
+        deployed_api = deployed and self.process_role == "api"
+        if deployed_api and self.auth_mode != "bearer":
             raise ValueError("staging/production 必须启用 AUTH_MODE=bearer")
         if self.auth_mode == "bearer" and not self.auth_tokens_json.strip():
             raise ValueError("AUTH_MODE=bearer 时 AUTH_TOKENS_JSON 不能为空")
@@ -118,6 +177,47 @@ class Settings(BaseSettings):
             raise ValueError("启用 bge 时 EMBEDDING_MODEL 不能为空")
         if self.rag_reranker == "bge" and not self.rerank_model.strip():
             raise ValueError("启用 bge reranker 时 RERANK_MODEL 不能为空")
+        if deployed_api and self.agent_mcp_transport != "streamable_http":
+            raise ValueError(
+                "staging/production 的 Agent Executor 必须使用 MCP Streamable HTTP"
+            )
+        if deployed_api and self.agent_mcp_allow_in_process_fallback:
+            raise ValueError("staging/production 禁止降级到进程内工具执行")
+        if (
+            self.agent_mcp_transport == "stdio"
+            and not self.agent_mcp_stdio_command_json.strip()
+        ):
+            raise ValueError("AGENT_MCP_TRANSPORT=stdio 时必须配置 stdio command")
+        if self.agent_mcp_stdio_command_json.strip():
+            try:
+                stdio_command = json.loads(self.agent_mcp_stdio_command_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError("MCP stdio command 必须是 JSON 字符串数组") from exc
+            if (
+                not isinstance(stdio_command, list)
+                or not stdio_command
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in stdio_command
+                )
+            ):
+                raise ValueError("MCP stdio command 必须是非空 JSON 字符串数组")
+        if self.agent_mcp_transport == "streamable_http":
+            if service_urls:
+                validate_service_keys(service_urls, label="MCP URL")
+                validate_service_keys(direct_service_tokens, label="MCP 令牌")
+                if any(
+                    not url.startswith(("http://", "https://"))
+                    for url in service_urls.values()
+                ):
+                    raise ValueError("MCP Streamable HTTP URL 必须使用 http(s)")
+            else:
+                if not self.agent_mcp_http_url.startswith(("http://", "https://")):
+                    raise ValueError("MCP Streamable HTTP URL 必须使用 http(s)")
+                if not self.agent_mcp_service_token.strip():
+                    raise ValueError("MCP Streamable HTTP 必须配置服务令牌")
+        if deployed_api and not self.agent_mcp_context_signing_key.strip():
+            raise ValueError("staging/production 必须配置 MCP 请求上下文签名密钥")
         return self
 
 
@@ -125,3 +225,39 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """返回全局配置单例（首次调用时读取环境）。"""
     return Settings()
+
+
+def _parse_string_mapping(raw: str, *, label: str) -> dict[str, str]:
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label}必须是 JSON 对象") from exc
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str)
+        or not key.strip()
+        or not isinstance(item, str)
+        or not item.strip()
+        for key, item in value.items()
+    ):
+        raise ValueError(f"{label}必须是字符串到非空字符串的 JSON 对象")
+    return {key.strip(): item.strip() for key, item in value.items()}
+
+
+def _resolve_secret(*, value: str, file_path: str, label: str) -> str:
+    if value.strip() and file_path.strip():
+        raise ValueError(f"{label}不能同时通过值和文件配置")
+    if file_path.strip():
+        return _read_secret_file(file_path, label=label)
+    return value.strip()
+
+
+def _read_secret_file(file_path: str, *, label: str) -> str:
+    try:
+        value = Path(file_path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"{label}文件不可读") from exc
+    if not value:
+        raise ValueError(f"{label}文件不能为空")
+    return value

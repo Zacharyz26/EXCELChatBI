@@ -28,10 +28,18 @@ from apps.api.main import app  # noqa: E402
 from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
     ConversationLockPool,
+    _enrich_tool_arguments,
     stream_agent_chat,
 )
 from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
+from apps.orchestrator.control.contracts import build_minimal_contract  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from mcp_servers.common.client_gateway import (  # noqa: E402
+    GatewayHealth,
+    MCPExecutionResult,
+    MCPTransportName,
+)
+from mcp_servers.common.contracts import MCPRequestContext  # noqa: E402
 from packages.common.config import Settings  # noqa: E402
 from packages.governance.policy import ToolPolicyGateway  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
@@ -175,6 +183,43 @@ class FakeRegistry:
         return self._handlers[name](json.loads(arguments_json or "{}"))
 
 
+class MCPGatewayRegistry(FakeRegistry):
+    """Prove the production loop uses execute_mcp and Host-owned context."""
+
+    def __init__(
+        self,
+        result: dict[str, Any],
+        *,
+        transport: MCPTransportName = "stdio",
+    ) -> None:
+        super().__init__({"get_data_profile": lambda _: result})
+        self.result = result
+        self.transport = transport
+        self.contexts: list[MCPRequestContext] = []
+
+    async def execute_mcp(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: MCPRequestContext,
+        *,
+        timeout_seconds: float,
+    ) -> MCPExecutionResult:
+        assert name == "get_data_profile"
+        assert arguments == {"dataset_ref": _DATASET_REF}
+        assert timeout_seconds > 0
+        self.contexts.append(context)
+        return MCPExecutionResult(
+            result=self.result,
+            transport=self.transport,
+            degraded=False,
+            health=GatewayHealth("healthy", self.transport, generation=1),
+        )
+
+    def execute(self, name: str, arguments_json: str) -> Any:
+        raise AssertionError("production loop must not call compatibility execute")
+
+
 def _events(raw: list[dict[str, str]]) -> list[tuple[str, dict[str, Any]]]:
     return [(item["event"], json.loads(item["data"])) for item in raw]
 
@@ -290,7 +335,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
         "text.delta",       # 最终答复流式
         "text.delta",
         "done",
-    ]
+    ], events
     by_name = dict(events)
     run_id = cast(str, by_name["meta"]["run_id"])
     assert by_name["goal"]["run_id"] == run_id
@@ -308,7 +353,11 @@ async def test_tool_round_emits_transparency_events_and_persists(
     task_store = TaskStore(store.db_path)
     run = task_store.get_run(run_id)
     assert run is not None and run.status == "completed"
-    assert run.usage == {"tool_calls": 1}
+    assert run.usage == {
+        "tool_calls": 1,
+        "tool_attempts": 1,
+        "invalid_tool_calls": 0,
+    }
     assert len(task_store.list_evidence(run_id)) == 1
     claims = task_store.list_claims(run_id)
     assert len(claims) == 1
@@ -366,6 +415,112 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "c1"
     assert '"duplicate_rows":0' in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_executor_uses_mcp_context_and_transports_have_equivalent_evidence(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    _register_dataset(store, conversation)
+    registry = MCPGatewayRegistry(
+        {
+            "profile": {"row_count": 3, "column_count": 2},
+            "quality": {"duplicate_rows": 0},
+        }
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["读取画像"],
+                "tool_calls": [
+                    ToolCall(
+                        id="mcp-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["共有 3 行。"]},
+        ]
+    )
+
+    events = await _run_loop(store, conversation, gateway, registry)
+
+    by_name = dict(events)
+    run_id = cast(str, by_name["meta"]["run_id"])
+    assert by_name["tool_end"]["transport"] == "stdio"
+    assert by_name["tool_end"]["degraded"] is False
+    assert len(registry.contexts) == 1
+    context = registry.contexts[0]
+    assert context.project_id == conversation.project_id
+    assert context.conversation_id == conversation.id
+    assert context.run_id == run_id
+    assert context.invocation_id
+    assert context.idempotency_key
+    assert context.permission_snapshot_id
+    evidence = TaskStore(store.db_path).list_evidence(run_id)
+    assert len(evidence) == 1
+    assert evidence[0].source["transport"] == "stdio"
+    assert evidence[0].source["mcp_execution"] == "canonical_gateway"
+    assert evidence[0].source["mcp_gateway_health"] == "healthy"
+    assert evidence[0].source["mcp_gateway_generation"] == 1
+
+    http_conversation = store.create_conversation(conversation.project_id)
+    http_registry = MCPGatewayRegistry(
+        registry.result,
+        transport="streamable_http",
+    )
+    http_gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["读取画像"],
+                "tool_calls": [
+                    ToolCall(
+                        id="mcp-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["共有 3 行。"]},
+        ]
+    )
+    http_events = await _run_loop(
+        store,
+        http_conversation,
+        http_gateway,
+        http_registry,
+    )
+    http_run_id = cast(str, dict(http_events)["meta"]["run_id"])
+    http_evidence = TaskStore(store.db_path).list_evidence(http_run_id)
+    assert http_evidence[0].source["transport"] == "streamable_http"
+    assert http_evidence[0].result_hash == evidence[0].result_hash
+
+    stdio_invocation = TaskStore(store.db_path).list_invocations(run_id)[0]
+    http_invocation = TaskStore(store.db_path).list_invocations(http_run_id)[0]
+    assert (
+        stdio_invocation.tool_name,
+        stdio_invocation.args,
+        stdio_invocation.status,
+    ) == (
+        http_invocation.tool_name,
+        http_invocation.args,
+        http_invocation.status,
+    )
+    stdio_artifact = store.list_artifacts(conversation.id)[0]
+    http_artifact = store.list_artifacts(http_conversation.id)[0]
+    assert (
+        stdio_artifact.type,
+        stdio_artifact.source_tool,
+        stdio_artifact.dataset_ref,
+        stdio_artifact.payload,
+    ) == (
+        http_artifact.type,
+        http_artifact.source_tool,
+        http_artifact.dataset_ref,
+        http_artifact.payload,
+    )
 
 
 @pytest.mark.asyncio
@@ -943,7 +1098,7 @@ async def test_ambiguous_metric_waits_for_user_without_calling_model(
         "waiting_user",
         "text.delta",
         "done",
-    ]
+    ], events
     waiting = dict(events)["waiting_user"]
     assert waiting["payload"]["about"] == "metric"
     assert "销售额、销量" in dict(events)["text.delta"]["delta"]
@@ -1579,6 +1734,80 @@ async def test_policy_denial_is_persisted_before_tool_execution(
     assert completed["payload"]["observation"]["source"] == "policy"
     assert completed["payload"]["observation"]["code"] == "tool_not_allowlisted"
     assert dict(events)["done"]["tool_calls"] == 0
+    assert dict(events)["done"]["tool_attempts"] == 1
+    assert dict(events)["done"]["invalid_tool_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_denials_consume_budget_and_disable_tools(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    registry = FakeRegistry(
+        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="denied-once",
+                        name="code_interpreter",
+                        arguments='{"code":"print(1)"}',
+                    )
+                ]
+            },
+            {"deltas": ["该能力没有执行。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        config=AgentLoopConfig(max_tool_calls=1, tool_result_max_chars=500),
+    )
+
+    assert registry.executed == []
+    assert gateway.calls[1]["tools"] is None
+    done = dict(events)["done"]
+    assert done["tool_calls"] == 0
+    assert done["tool_attempts"] == 1
+    # 拒绝已被如实说明，且本任务没有未完成的 Required criterion，可以安全完成。
+    assert done["run_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_invalid_tool_call_limit_stops_varying_hallucinated_calls(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    registry = FakeRegistry(
+        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id=f"hallucinated-{index}",
+                        name="code_interpreter",
+                        arguments=json.dumps({"code": f"print({index})"}),
+                    )
+                ]
+            }
+            for index in range(3)
+        ]
+        + [{"deltas": ["无法执行未授权能力。"]}]
+    )
+
+    events = await _run_loop(store, conversation, gateway, registry)
+
+    assert registry.executed == []
+    assert len(gateway.calls) == 4
+    assert gateway.calls[-1]["tools"] is None
+    tool_ends = [payload for name, payload in events if name == "tool_end"]
+    assert len(tool_ends) == 3
+    assert "无效工具调用次数已达上限" in tool_ends[-1]["message"]
 
 
 @pytest.mark.asyncio
@@ -1611,6 +1840,97 @@ async def test_consecutive_same_tool_same_args_circuit_breaks(
 
 
 @pytest.mark.asyncio
+async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda args: {"profile": {}},
+            "aggregate_preview": lambda args: pytest.fail(
+                "计划外工具不得执行"
+            ),
+        }
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="random-id-1",
+                        name="aggregate_preview",
+                        arguments='{"value_col":"销售额"}',
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="random-id-2",
+                        name="aggregate_preview",
+                        arguments='{"value_col":"销售额"}',
+                    )
+                ]
+            },
+            {"deltas": ["没有执行计划外能力。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="介绍这份数据的规模和质量",
+        enforce_plan=True,
+    )
+
+    ends = [payload for name, payload in events if name == "tool_end"]
+    assert "不属于当前持久化计划" in ends[0]["message"]
+    assert "熔断" in ends[1]["message"]
+    assert registry.executed == []
+    assert gateway.calls[2]["tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_model_round_limit_stops_nonconverging_executor(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    registry = FakeRegistry(
+        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id=f"round-{index}",
+                        name="code_interpreter",
+                        arguments=json.dumps({"code": f"print({index})"}),
+                    )
+                ]
+            }
+            for index in range(3)
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        config=AgentLoopConfig(
+            max_invalid_tool_calls=10,
+            max_model_rounds=2,
+            tool_result_max_chars=500,
+        ),
+    )
+
+    assert len(gateway.calls) == 2
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "model_round_limit_exhausted"
+
+
+@pytest.mark.asyncio
 async def test_tool_call_budget_is_enforced(
     store: SessionStore, conversation: Conversation
 ) -> None:
@@ -1634,6 +1954,89 @@ async def test_tool_call_budget_is_enforced(
     assert gateway.calls[1]["tools"] is None
     assert dict(events)["done"]["tool_calls"] == 1
     assert dict(events)["done"]["run_status"] == "blocked"
+
+
+def test_host_enriches_report_delivery_and_referenced_chart_lineage(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="已有分析",
+    )
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"direction": "up"}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "stats-analysis"},
+        dataset_ref=first_ref,
+    )
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="chart",
+        payload={"chart_type": "line"},
+        source_tool="gen_chart",
+        params={"analysis_id": "chart-analysis-1", "grain": "day"},
+        dataset_ref=first_ref,
+    )
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="chart",
+        payload={"chart_type": "line"},
+        source_tool="gen_chart",
+        params={"analysis_id": "chart-analysis-2", "grain": "week"},
+        dataset_ref=second_ref,
+    )
+    artifacts = store.list_artifacts(conversation.id)
+    datasets = store.list_datasets(conversation.project_id)
+
+    report_contract = build_minimal_contract(
+        run_id="report-enrichment",
+        user_text="把刚才的趋势和图表生成 PDF 报告。",
+        chart_required=False,
+        report_required=True,
+        pdf_required=True,
+    )
+    report_args = _enrich_tool_arguments(
+        "generate_report",
+        {},
+        contract=report_contract,
+        artifacts=artifacts,
+        datasets=datasets,
+    )
+    assert report_args == {
+        "analysis_ids": [
+            "stats-analysis",
+            "chart-analysis-1",
+            "chart-analysis-2",
+        ],
+        "include_pdf": True,
+        "title": "数据分析报告",
+    }
+
+    chart_contract = build_minimal_contract(
+        run_id="chart-enrichment",
+        user_text="把第二张图改成按月展示。",
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+    )
+    chart_args = _enrich_tool_arguments(
+        "gen_chart",
+        {"chart_type": "line"},
+        contract=chart_contract,
+        artifacts=artifacts,
+        datasets=datasets,
+    )
+    assert chart_args["dataset_ref"] == second_ref
 
 
 @pytest.mark.asyncio
@@ -1826,7 +2229,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
         "text.delta",
         "text.delta",
         "done",
-    ]
+    ], events
     meta = events[0][1]
     done = events[-1][1]
     assert meta["conversation_id"] == chat_harness.conversation.id
@@ -1856,6 +2259,225 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert "编造数字" in model_messages[0].content
     assert model_messages[-1].role == "user"
     assert model_messages[-1].content == "请介绍一下这个数据集"
+
+
+def test_resume_stream_reconstructs_lost_host_from_checkpoint(
+    chat_harness: ChatHarness,
+) -> None:
+    _, user_message = chat_harness.store.start_user_turn(
+        conversation_id=chat_harness.conversation.id,
+        content="继续完成已有任务",
+        suggested_title="继续完成已有任务",
+    )
+    run_id = "checkpoint-recovery-run"
+    contract = build_minimal_contract(
+        run_id=run_id,
+        user_text="继续完成已有任务",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    tasks = TaskStore(chat_harness.store.db_path)
+    run, _ = tasks.create_run(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        user_message_id=user_message.id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "完成画像后形成最终答复",
+            "steps": [
+                {
+                    "step_id": "profile",
+                    "purpose": "读取已有画像",
+                    "capability": "data.profile",
+                    "dependencies": [],
+                    "expected_evidence": ["画像 Evidence"],
+                    "completion_conditions": ["画像读取完成"],
+                    "fallback": [{"when": "失败", "action": "block"}],
+                }
+            ],
+            "assumptions": [],
+            "clarifications": [],
+        },
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="completed-profile",
+        tool_name="get_data_profile",
+        arguments={"dataset_ref": _DATASET_REF},
+        idempotency_key="completed-profile-before-restart",
+        policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
+    )
+    tool_message = chat_harness.store.append_message(
+        conversation_id=chat_harness.conversation.id,
+        role="assistant",
+        content="已读取画像",
+    )
+    run, _, _, _, _, _ = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=tool_message.id,
+        result={"profile": {"row_count": 3}},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "get_data_profile"},
+        evidence_summary={"summary": "画像读取完成"},
+        artifact_draft=None,
+    )
+    paused, _, _ = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="pause-before-restart",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "process_recovery"},
+        require_idle=True,
+        checkpoint_reason="process_recovery",
+    )
+
+    response = chat_harness.client.post(
+        f"/agent/runs/{run.run_id}/resume/stream",
+        headers={
+            "Idempotency-Key": "resume-after-restart",
+            "If-Match": str(paused.state_version),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    events = _sse_events(response.text)
+    assert [name for name, _ in events] == [
+        "run.resumed",
+        "meta",
+        "verification.started",
+        "verification",
+        "text.delta",
+        "text.delta",
+        "done",
+    ], events
+    assert events[1][1]["run_id"] == run.run_id
+    assert events[1][1]["resumed"] is True
+    assert events[-1][1]["run_status"] == "completed"
+    assert events[-1][1]["tool_calls"] == 1
+    saved = tasks.get_run(run.run_id)
+    assert saved is not None and saved.status == "completed"
+    assert len(tasks.list_invocations(run.run_id)) == 1
+    assert chat_harness.gateway.calls[0]["tools"] is None
+    messages = chat_harness.store.list_messages(chat_harness.conversation.id)
+    assert [item.role for item in messages] == ["user", "assistant", "assistant"]
+    assert messages[0].id == user_message.id
+
+
+def test_clarification_answer_reconstructs_lost_host(
+    chat_harness: ChatHarness,
+) -> None:
+    _, user_message = chat_harness.store.start_user_turn(
+        conversation_id=chat_harness.conversation.id,
+        content="请确认回复方式",
+        suggested_title="请确认回复方式",
+    )
+    run_id = "clarification-recovery-run"
+    contract = build_minimal_contract(
+        run_id=run_id,
+        user_text="请确认回复方式",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    tasks = TaskStore(chat_harness.store.db_path)
+    run, _ = tasks.create_run(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        user_message_id=user_message.id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    question_id = "q_style"
+    resume_token = "resume-token-after-restart"
+    run, plan, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "等待回复方式",
+            "steps": [],
+            "assumptions": [],
+            "clarifications": [
+                {
+                    "question_id": question_id,
+                    "question": "请选择回复方式",
+                    "about": "style",
+                    "blocking": True,
+                }
+            ],
+        },
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    waiting, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="waiting_user",
+        event_type="waiting_user",
+        payload={
+            "question_id": question_id,
+            "question": "请选择回复方式",
+            "plan_id": plan.plan_id,
+            "plan_version": plan.version,
+            "resume_token": resume_token,
+        },
+        checkpoint_reason="waiting_user",
+    )
+
+    response = chat_harness.client.post(
+        (
+            f"/agent/runs/{run.run_id}/clarifications/"
+            f"{question_id}/answer/stream"
+        ),
+        headers={
+            "Idempotency-Key": "answer-after-restart",
+            "If-Match": str(waiting.state_version),
+        },
+        json={"answer": "简洁", "resume_token": resume_token},
+    )
+
+    assert response.status_code == 200, response.text
+    events = _sse_events(response.text)
+    assert [name for name, _ in events] == [
+        "clarification.answered",
+        "meta",
+        "plan.revised",
+        "run.started",
+        "verification.started",
+        "verification",
+        "text.delta",
+        "text.delta",
+        "done",
+    ], events
+    assert events[-1][1]["run_status"] == "completed"
+    saved = tasks.get_run(run.run_id)
+    assert saved is not None and saved.status == "completed"
+    assert saved.plan_version == 2
+    messages = chat_harness.store.list_messages(chat_harness.conversation.id)
+    assert len([item for item in messages if item.role == "user"]) == 2
+    assert "简洁" in messages[1].content
 
 
 def test_stream_context_contains_latest_profile_and_limited_history(

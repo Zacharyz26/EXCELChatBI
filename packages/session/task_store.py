@@ -43,6 +43,10 @@ class IdempotencyConflict(RuntimeError):
     """An idempotency key was reused for a different invocation."""
 
 
+class ControlConflict(RuntimeError):
+    """A task-control command is unsafe for the current persisted state."""
+
+
 class TaskStore:
     """Task control-plane persistence sharing the SessionStore SQLite file."""
 
@@ -277,10 +281,11 @@ class TaskStore:
         stale_after_seconds: int,
         limit: int = 1000,
     ) -> list[tuple[TaskRun, TaskEvent]]:
-        """启动时把失去执行宿主的旧执行中任务收敛为 failed。
+        """启动时恢复失去执行宿主的任务。
 
-        ``waiting_user`` 和 ``paused`` 不依赖旧进程中的执行协程，必须跨重启保留，
-        以便用户稍后继续，而不是被启动恢复错误地判成失败。
+        没有活动工具调用的 ``running`` 任务停在可恢复的 ``paused`` + Checkpoint；
+        有活动调用时外部副作用无法确认，仍收敛为 failed/unknown。``planning`` 和
+        ``verifying`` 尚无可重建执行边界，继续失败关闭。
         """
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=max(stale_after_seconds, 0))
@@ -288,7 +293,7 @@ class TaskStore:
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT run_id FROM task_runs
+                SELECT run_id, status, state_version FROM task_runs
                 WHERE status IN ('planning', 'running', 'verifying')
                   AND updated_at <= ?
                 ORDER BY updated_at
@@ -298,8 +303,30 @@ class TaskStore:
             ).fetchall()
         recovered: list[tuple[TaskRun, TaskEvent]] = []
         for row in rows:
+            if str(row["status"]) == "running":
+                try:
+                    paused, event, _ = self.control_transition(
+                        str(row["run_id"]),
+                        expected_version=int(row["state_version"]),
+                        idempotency_key=(
+                            f"process-recovery:{row['run_id']}:"
+                            f"{row['state_version']}"
+                        ),
+                        command="recover_pause",
+                        allowed_statuses={"running"},
+                        status="paused",
+                        event_type="run.paused",
+                        payload={"reason": "process_recovery"},
+                        require_idle=True,
+                        checkpoint_reason="process_recovery",
+                    )
+                except (ControlConflict, StateVersionConflict):
+                    pass
+                else:
+                    recovered.append((paused, event))
+                    continue
             result = self.terminate_active_run(
-                str(row[0]),
+                str(row["run_id"]),
                 status="failed",
                 reason="process_recovery",
                 event_type="run.failed",
@@ -321,6 +348,673 @@ class TaskStore:
                 "SELECT state_json FROM task_snapshots WHERE run_id = ?", (run_id,)
             ).fetchone()
         return _load_object(str(row[0])) if row is not None else None
+
+    def get_latest_checkpoint(self, run_id: str) -> Checkpoint | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return _checkpoint_from_row(row) if row is not None else None
+
+    def control_transition(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        command: str,
+        allowed_statuses: set[RunStatus],
+        status: RunStatus,
+        event_type: str,
+        payload: JsonObject,
+        terminal_reason: str | None = None,
+        require_idle: bool = False,
+        checkpoint_reason: str | None = None,
+        require_checkpoint: bool = False,
+    ) -> tuple[TaskRun, TaskEvent, bool]:
+        """原子执行一个可幂等重放的 pause/resume/cancel 控制命令。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_command = _required_text(command, "控制命令")[:100]
+        request_hash = _control_request_hash(clean_command, payload)
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(row)
+            replay = _control_replay(
+                connection,
+                run_id=run_id,
+                idempotency_key=clean_key,
+                command=clean_command,
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                return current, replay, False
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            if current.status not in allowed_statuses:
+                raise ControlConflict(
+                    f"TaskRun 状态 {current.status} 不能执行 {clean_command}"
+                )
+            if require_idle:
+                active = connection.execute(
+                    """
+                    SELECT 1 FROM tool_invocations
+                    WHERE run_id = ? AND status IN ('running', 'unknown')
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if active is not None:
+                    raise ControlConflict(
+                        "任务存在执行中或结果未知的工具调用，不能进入可恢复安全边界"
+                    )
+            checkpoint: Checkpoint | None = None
+            if require_checkpoint:
+                checkpoint_row = connection.execute(
+                    """
+                    SELECT * FROM checkpoints
+                    WHERE run_id = ?
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if checkpoint_row is None:
+                    raise ControlConflict("TaskRun 没有可用 Checkpoint")
+                checkpoint = _checkpoint_from_row(checkpoint_row)
+                _validate_checkpoint(connection, current, checkpoint)
+            ensure_transition(current.status, status)
+
+            unknown_invocations = 0
+            if status == "cancelled":
+                running_rows = connection.execute(
+                    """
+                    SELECT invocation_id FROM tool_invocations
+                    WHERE run_id = ? AND status = 'running'
+                    """,
+                    (run_id,),
+                ).fetchall()
+                unknown_invocations = len(running_rows)
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'blocked', completed_at = ?
+                    WHERE step_id IN (
+                        SELECT step_id FROM tool_invocations
+                        WHERE run_id = ? AND status = 'running'
+                          AND step_id IS NOT NULL
+                    )
+                    """,
+                    (now, run_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE tool_invocations
+                    SET status = 'unknown', error_text = 'user_cancelled',
+                        completed_at = ?
+                    WHERE run_id = ? AND status = 'running'
+                    """,
+                    (now, run_id),
+                )
+
+            next_version = current.state_version + 1
+            finished_at = now if status in {
+                "completed",
+                "blocked",
+                "failed",
+                "cancelled",
+            } else None
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = ?, state_version = ?, terminal_reason = ?,
+                    updated_at = ?, finished_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    status,
+                    next_version,
+                    terminal_reason,
+                    now,
+                    finished_at,
+                    run_id,
+                    current.state_version,
+                ),
+            )
+            event_payload: JsonObject = {
+                **payload,
+                "control": {
+                    "command": clean_command,
+                    "idempotency_key": clean_key,
+                    "request_hash": request_hash,
+                },
+            }
+            if checkpoint is not None:
+                event_payload["checkpoint"] = {
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "sequence": checkpoint.sequence,
+                    "state_version": checkpoint.state_version,
+                    "last_event_sequence": checkpoint.state.get(
+                        "last_sequence", 0
+                    ),
+                    "completed_step_ids": checkpoint.state.get(
+                        "completed_step_ids", []
+                    ),
+                }
+            if status == "cancelled":
+                event_payload["unknown_invocations"] = unknown_invocations
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type=event_type,
+                payload=event_payload,
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "completed_step_ids": _completed_step_ids(
+                        connection, run_id
+                    ),
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+            if checkpoint_reason is not None:
+                _insert_checkpoint(
+                    connection,
+                    run_id=run_id,
+                    state_version=next_version,
+                    state=snapshot,
+                    reason=checkpoint_reason,
+                    created_at=now,
+                )
+        return updated, event, True
+
+    def answer_clarification(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        question_id: str,
+        resume_token: str,
+        answer: object,
+    ) -> tuple[TaskRun, TaskEvent, bool]:
+        """校验并消费 waiting_user 问题，同时把回答作为用户消息和 Observation 落库。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_question_id = _required_text(question_id, "question_id")[:100]
+        clean_token = _required_text(resume_token, "resume_token")[:200]
+        if not _valid_clarification_answer(answer):
+            raise ControlConflict("澄清答案必须是非空且有界的 JSON 标量或对象")
+        request_payload: JsonObject = {
+            "question_id": clean_question_id,
+            "resume_token_hash": _hash_text(clean_token),
+            "answer": answer,
+        }
+        request_hash = _control_request_hash(
+            "answer_clarification",
+            request_payload,
+        )
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(row)
+            replay = _control_replay(
+                connection,
+                run_id=run_id,
+                idempotency_key=clean_key,
+                command="answer_clarification",
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                return current, replay, False
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            if current.status != "waiting_user":
+                raise ControlConflict(
+                    f"TaskRun 状态 {current.status} 不能回答澄清问题"
+                )
+            waiting_rows = connection.execute(
+                """
+                SELECT payload_json FROM task_events
+                WHERE run_id = ? AND event_type = 'waiting_user'
+                ORDER BY sequence DESC
+                """,
+                (run_id,),
+            ).fetchall()
+            waiting_payload = next(
+                (
+                    item
+                    for item in (
+                        _load_object(str(waiting_row["payload_json"]))
+                        for waiting_row in waiting_rows
+                    )
+                    if item.get("question_id") == clean_question_id
+                ),
+                None,
+            )
+            if waiting_payload is None:
+                raise ControlConflict("澄清问题不属于当前任务")
+            if waiting_payload.get("resume_token") != clean_token:
+                raise ControlConflict("resume_token 无效或已不属于当前问题")
+            checkpoint_row = connection.execute(
+                """
+                SELECT * FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY sequence DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if checkpoint_row is None:
+                raise ControlConflict("澄清任务缺少可恢复 Checkpoint")
+            _validate_checkpoint(
+                connection,
+                current,
+                _checkpoint_from_row(checkpoint_row),
+            )
+
+            ensure_transition(current.status, "planning")
+            answer_text = _dump_json_value(answer)
+            message = Message(
+                id=uuid.uuid4().hex,
+                conversation_id=current.conversation_id,
+                role="user",
+                content=f"澄清回答（{clean_question_id}）：{answer_text}",
+                tool_calls=None,
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO messages(
+                    id, conversation_id, role, content, tool_calls_json, created_at
+                ) VALUES (?, ?, 'user', ?, NULL, ?)
+                """,
+                (
+                    message.id,
+                    message.conversation_id,
+                    message.content,
+                    message.created_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, current.conversation_id),
+            )
+            next_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'planning', state_version = ?,
+                    terminal_reason = NULL, updated_at = ?, finished_at = NULL
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (next_version, now, run_id, current.state_version),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="clarification.answered",
+                payload={
+                    "question_id": clean_question_id,
+                    "answer": answer,
+                    "user_message_id": message.id,
+                    "control": {
+                        "command": "answer_clarification",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            answers = snapshot.get("clarification_answers")
+            answer_map = dict(answers) if isinstance(answers, dict) else {}
+            answer_map[clean_question_id] = answer
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "clarification_answers": answer_map,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated, event, True
+
+    def retry_step(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        step_id: str,
+    ) -> tuple[
+        TaskRun,
+        TaskPlanRecord,
+        list[TaskStepRecord],
+        TaskEvent,
+        bool,
+    ]:
+        """从 paused 安全边界创建不可变计划修订并只重置指定失败步骤。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_step_id = _required_text(step_id, "step_id")[:100]
+        request_payload: JsonObject = {"step_id": clean_step_id}
+        request_hash = _control_request_hash("retry_step", request_payload)
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(row)
+            replay = _control_replay(
+                connection,
+                run_id=run_id,
+                idempotency_key=clean_key,
+                command="retry_step",
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                replay_version = replay.payload.get("plan_version")
+                if not isinstance(replay_version, int):
+                    raise RuntimeError("步骤重试事件缺少 plan_version")
+                replay_plan_row = connection.execute(
+                    """
+                    SELECT * FROM task_plans
+                    WHERE run_id = ? AND version = ?
+                    """,
+                    (run_id, replay_version),
+                ).fetchone()
+                if replay_plan_row is None:
+                    raise RuntimeError("步骤重试对应的计划版本不存在")
+                replay_step_rows = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    WHERE step.run_id = ? AND plan.version = ?
+                    ORDER BY step.position
+                    """,
+                    (run_id, replay_version),
+                ).fetchall()
+                return (
+                    current,
+                    _plan_from_row(replay_plan_row),
+                    [_step_from_row(item) for item in replay_step_rows],
+                    replay,
+                    False,
+                )
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            if current.status != "paused":
+                raise ControlConflict(
+                    f"TaskRun 状态 {current.status} 不能重试步骤"
+                )
+            active_invocation = connection.execute(
+                """
+                SELECT 1 FROM tool_invocations
+                WHERE run_id = ? AND status = 'running'
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if active_invocation is not None:
+                raise ControlConflict("工具正在执行，不能安全重试步骤")
+            plan_row = connection.execute(
+                """
+                SELECT plan.* FROM task_plans AS plan
+                JOIN task_runs AS run
+                  ON run.run_id = plan.run_id AND run.plan_version = plan.version
+                WHERE plan.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise ControlConflict("TaskRun 尚无可重试的活动计划")
+            previous_plan = _plan_from_row(plan_row)
+            previous_step_rows = connection.execute(
+                """
+                SELECT * FROM task_steps
+                WHERE run_id = ? AND plan_id = ?
+                ORDER BY position
+                """,
+                (run_id, previous_plan.plan_id),
+            ).fetchall()
+            previous_steps = [_step_from_row(item) for item in previous_step_rows]
+            target = next(
+                (item for item in previous_steps if item.logical_id == clean_step_id),
+                None,
+            )
+            if target is None:
+                raise ControlConflict("重试步骤不属于当前活动计划")
+            if target.status not in {"failed", "blocked"}:
+                raise ControlConflict(
+                    f"步骤 {clean_step_id} 状态 {target.status} 不能重试"
+                )
+            running_step = next(
+                (item for item in previous_steps if item.status == "running"),
+                None,
+            )
+            if running_step is not None:
+                raise ControlConflict("活动计划仍有 running 步骤，不能安全重试")
+
+            ensure_transition(current.status, "running")
+            version = current.plan_version + 1
+            plan_record = TaskPlanRecord(
+                plan_id=uuid.uuid4().hex,
+                run_id=run_id,
+                version=version,
+                reason=f"user_retry:{clean_step_id}"[:200],
+                plan=previous_plan.plan,
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO task_plans(
+                    plan_id, run_id, version, reason, plan_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan_record.plan_id,
+                    plan_record.run_id,
+                    plan_record.version,
+                    plan_record.reason,
+                    _dump_json(plan_record.plan),
+                    plan_record.created_at,
+                ),
+            )
+            steps: list[TaskStepRecord] = []
+            for previous in previous_steps:
+                if previous.status in {"completed", "skipped"}:
+                    status = previous.status
+                    started_at = previous.started_at
+                    completed_at = previous.completed_at
+                elif previous.logical_id == clean_step_id:
+                    status = "pending"
+                    started_at = None
+                    completed_at = None
+                elif previous.status in {"failed", "blocked"}:
+                    status = "blocked"
+                    started_at = None
+                    completed_at = now
+                else:
+                    status = "pending"
+                    started_at = None
+                    completed_at = None
+                step = TaskStepRecord(
+                    step_id=uuid.uuid4().hex,
+                    plan_id=plan_record.plan_id,
+                    run_id=run_id,
+                    position=previous.position,
+                    logical_id=previous.logical_id,
+                    status=status,
+                    definition=previous.definition,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO task_steps(
+                        step_id, plan_id, run_id, position, status, step_json,
+                        started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step.step_id,
+                        step.plan_id,
+                        step.run_id,
+                        step.position,
+                        step.status,
+                        _dump_json(step.definition),
+                        step.started_at,
+                        step.completed_at,
+                    ),
+                )
+                steps.append(step)
+
+            next_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'running', state_version = ?, plan_version = ?,
+                    terminal_reason = NULL, updated_at = ?, finished_at = NULL
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    next_version,
+                    version,
+                    now,
+                    run_id,
+                    current.state_version,
+                ),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="plan.revised",
+                payload={
+                    "plan_id": plan_record.plan_id,
+                    "plan_version": version,
+                    "supersedes_version": version - 1,
+                    "reason": plan_record.reason,
+                    "summary": str(previous_plan.plan.get("summary", ""))[:500],
+                    "steps": [
+                        {
+                            "step_id": step.logical_id,
+                            "purpose": step.definition["purpose"],
+                            "capability": step.definition["capability"],
+                            "dependencies": step.definition["dependencies"],
+                            "status": step.status,
+                        }
+                        for step in steps
+                    ],
+                    "assumptions": previous_plan.plan.get("assumptions", []),
+                    "clarifications": previous_plan.plan.get(
+                        "clarifications", []
+                    ),
+                    "planner": {
+                        "route": "user",
+                        "phase": "step_retry",
+                    },
+                    "retry_step_id": clean_step_id,
+                    "control": {
+                        "command": "retry_step",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "active_plan_id": plan_record.plan_id,
+                    "active_plan": previous_plan.plan,
+                    "retry_step_id": clean_step_id,
+                    "completed_step_ids": _completed_step_ids(
+                        connection, run_id
+                    ),
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+            _insert_checkpoint(
+                connection,
+                run_id=run_id,
+                state_version=next_version,
+                state=snapshot,
+                reason=f"user_step_retry:{clean_step_id}",
+                created_at=now,
+            )
+        return updated, plan_record, steps, event, True
 
     def save_plan(
         self,
@@ -607,6 +1301,7 @@ class TaskStore:
         payload: JsonObject,
         terminal_reason: str | None = None,
         usage: JsonObject | None = None,
+        checkpoint_reason: str | None = None,
     ) -> tuple[TaskRun, TaskEvent]:
         with self._connection() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -655,7 +1350,14 @@ class TaskStore:
             assert updated_row is not None
             updated = _run_from_row(updated_row)
             snapshot = _merged_snapshot(connection, updated)
-            snapshot["last_sequence"] = sequence
+            snapshot.update(
+                {
+                    "last_sequence": sequence,
+                    "completed_step_ids": _completed_step_ids(
+                        connection, run_id
+                    ),
+                }
+            )
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -664,6 +1366,15 @@ class TaskStore:
                 """,
                 (next_version, _dump_json(snapshot), now, run_id),
             )
+            if checkpoint_reason is not None:
+                _insert_checkpoint(
+                    connection,
+                    run_id=run_id,
+                    state_version=next_version,
+                    state=snapshot,
+                    reason=checkpoint_reason,
+                    created_at=now,
+                )
         return updated, event
 
     def update_contract(
@@ -1403,6 +2114,9 @@ class TaskStore:
                     "last_artifact_ids": [artifact.id] if artifact is not None else [],
                     "active_invocation_id": None,
                     "last_observation": observation.to_dict(),
+                    "completed_step_ids": _completed_step_ids(
+                        connection, current_run.run_id
+                    ),
                 }
             )
             connection.execute(
@@ -1566,32 +2280,17 @@ class TaskStore:
             ).fetchone()
             if snapshot is None:
                 raise ValueError(f"TaskRun 不存在: {run_id}")
-            sequence = _next_checkpoint_sequence(connection, run_id)
-            checkpoint = Checkpoint(
-                checkpoint_id=uuid.uuid4().hex,
+            state = _load_object(str(snapshot["state_json"]))
+            state["completed_step_ids"] = _completed_step_ids(
+                connection, run_id
+            )
+            checkpoint = _insert_checkpoint(
+                connection,
                 run_id=run_id,
-                sequence=sequence,
                 state_version=int(snapshot["state_version"]),
-                state=_load_object(str(snapshot["state_json"])),
+                state=state,
                 reason=reason,
                 created_at=_utc_now(),
-            )
-            connection.execute(
-                """
-                INSERT INTO checkpoints(
-                    checkpoint_id, run_id, sequence, state_version,
-                    state_json, reason, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    checkpoint.checkpoint_id,
-                    checkpoint.run_id,
-                    checkpoint.sequence,
-                    checkpoint.state_version,
-                    _dump_json(checkpoint.state),
-                    checkpoint.reason,
-                    checkpoint.created_at,
-                ),
             )
         return checkpoint
 
@@ -1751,6 +2450,106 @@ def _next_checkpoint_sequence(connection: sqlite3.Connection, run_id: str) -> in
     return int(row[0])
 
 
+def _completed_step_ids(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT json_extract(step.step_json, '$.step_id') AS logical_id
+        FROM task_steps AS step
+        JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+        JOIN task_runs AS run
+          ON run.run_id = plan.run_id AND run.plan_version = plan.version
+        WHERE step.run_id = ? AND step.status = 'completed'
+        ORDER BY step.position
+        """,
+        (run_id,),
+    ).fetchall()
+    return [str(row["logical_id"]) for row in rows]
+
+
+def _insert_checkpoint(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    state_version: int,
+    state: JsonObject,
+    reason: str,
+    created_at: str,
+) -> Checkpoint:
+    checkpoint = Checkpoint(
+        checkpoint_id=uuid.uuid4().hex,
+        run_id=run_id,
+        sequence=_next_checkpoint_sequence(connection, run_id),
+        state_version=state_version,
+        state=state,
+        reason=_required_text(reason, "Checkpoint 原因")[:200],
+        created_at=created_at,
+    )
+    connection.execute(
+        """
+        INSERT INTO checkpoints(
+            checkpoint_id, run_id, sequence, state_version,
+            state_json, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            checkpoint.checkpoint_id,
+            checkpoint.run_id,
+            checkpoint.sequence,
+            checkpoint.state_version,
+            _dump_json(checkpoint.state),
+            checkpoint.reason,
+            checkpoint.created_at,
+        ),
+    )
+    return checkpoint
+
+
+def _validate_checkpoint(
+    connection: sqlite3.Connection,
+    run: TaskRun,
+    checkpoint: Checkpoint,
+) -> None:
+    if checkpoint.run_id != run.run_id:
+        raise ControlConflict("Checkpoint 不属于当前 TaskRun")
+    checkpoint_plan = checkpoint.state.get("plan_version")
+    if checkpoint_plan != run.plan_version:
+        raise ControlConflict("Checkpoint 计划版本已过期")
+    last_sequence = checkpoint.state.get("last_sequence")
+    if (
+        not isinstance(last_sequence, int)
+        or isinstance(last_sequence, bool)
+        or last_sequence < 1
+    ):
+        raise ControlConflict("Checkpoint 事件游标无效")
+    latest_event_row = connection.execute(
+        "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE run_id = ?",
+        (run.run_id,),
+    ).fetchone()
+    if latest_event_row is None or last_sequence > int(latest_event_row[0]):
+        raise ControlConflict("Checkpoint 事件游标超出持久化日志")
+    raw_completed = checkpoint.state.get("completed_step_ids")
+    if not isinstance(raw_completed, list) or not all(
+        isinstance(item, str) and item for item in raw_completed
+    ):
+        raise ControlConflict("Checkpoint 已完成步骤集合无效")
+    persisted_completed = _completed_step_ids(connection, run.run_id)
+    if set(raw_completed) != set(persisted_completed):
+        raise ControlConflict("Checkpoint 与当前已完成步骤不一致")
+    unknown = connection.execute(
+        """
+        SELECT 1 FROM tool_invocations
+        WHERE run_id = ? AND status IN ('running', 'unknown')
+        LIMIT 1
+        """,
+        (run.run_id,),
+    ).fetchone()
+    if unknown is not None:
+        raise ControlConflict("TaskRun 存在结果未知的工具调用，禁止自动恢复")
+
+
 def _run_from_row(row: sqlite3.Row) -> TaskRun:
     return TaskRun(
         run_id=str(row["run_id"]),
@@ -1768,6 +2567,18 @@ def _run_from_row(row: sqlite3.Row) -> TaskRun:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
         finished_at=_optional_text(row["finished_at"]),
+    )
+
+
+def _checkpoint_from_row(row: sqlite3.Row) -> Checkpoint:
+    return Checkpoint(
+        checkpoint_id=str(row["checkpoint_id"]),
+        run_id=str(row["run_id"]),
+        sequence=int(row["sequence"]),
+        state_version=int(row["state_version"]),
+        state=_load_object(str(row["state_json"])),
+        reason=str(row["reason"]),
+        created_at=str(row["created_at"]),
     )
 
 
@@ -1945,6 +2756,63 @@ def _validated_plan_steps(plan: JsonObject) -> list[JsonObject]:
         logical_ids.add(logical_id)
         steps.append(definition)
     return steps
+
+
+def _control_request_hash(command: str, payload: JsonObject) -> str:
+    return _hash_text(
+        _dump_json(
+            {
+                "command": command,
+                "payload": payload,
+            }
+        )
+    )
+
+
+def _control_replay(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    idempotency_key: str,
+    command: str,
+    request_hash: str,
+) -> TaskEvent | None:
+    """在同一写事务内查找控制命令；相同键的不同请求必须冲突关闭。"""
+    rows = connection.execute(
+        """
+        SELECT event_id, run_id, sequence, event_type, payload_json, occurred_at
+        FROM task_events
+        WHERE run_id = ?
+        ORDER BY sequence DESC
+        """,
+        (run_id,),
+    ).fetchall()
+    for row in rows:
+        payload = _load_object(str(row["payload_json"]))
+        control = payload.get("control")
+        if not isinstance(control, dict):
+            continue
+        if control.get("idempotency_key") != idempotency_key:
+            continue
+        if (
+            control.get("command") != command
+            or control.get("request_hash") != request_hash
+        ):
+            raise IdempotencyConflict("Idempotency-Key 已绑定到不同控制命令")
+        return _event_from_row(row)
+    return None
+
+
+def _valid_clarification_answer(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip()) and len(value) <= 20_000
+    try:
+        encoded = _dump_json_value(value)
+    except (TypeError, ValueError):
+        return False
+    return len(encoded) <= 20_000
 
 
 def _utc_now() -> str:

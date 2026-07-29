@@ -63,6 +63,7 @@ def _fixture(root: Path, *, reviewed: bool) -> None:
     _write_json(
         root / "baseline" / "report.json",
         {
+            "scenario_set_hash": "frozen-cases",
             "metrics": {
                 "deepseek-v4-flash": {
                     "forbidden_violations": 0,
@@ -75,6 +76,26 @@ def _fixture(root: Path, *, reviewed: bool) -> None:
                     "truthful_terminal_rate": 0.23333333333333334,
                 },
             }
+        },
+    )
+    _write_json(
+        root / "stage2" / "report.json",
+        {
+            "execution_mode": "stage2_structured_plan",
+            "scenario_set_hash": "frozen-cases",
+            "case_count": 20,
+            "repetitions": 3,
+            "models": ["deepseek-v4-flash"],
+            "rows": [{} for _ in range(60)],
+            "metrics": {
+                "deepseek-v4-flash": {
+                    "runs": 60,
+                    "task_success_rate": 0.6,
+                    "truthful_terminal_rate": 0.7,
+                    "forbidden_violations": 0,
+                    "cost_availability": "available",
+                }
+            },
         },
     )
     rating = 2 if reviewed else None
@@ -141,3 +162,14 @@ def test_g7_gate_detects_a_rating_row_removed_from_frozen_report(
     assert result["status"] == "review_required"
     assert result["planner"]["missing_ratings"] == 1
     assert "planner_blind_reviews_missing:1" in result["blockers"]
+
+
+def test_g7_gate_requires_passing_stage2_behavior_report(tmp_path: Path) -> None:
+    _fixture(tmp_path, reviewed=True)
+    (tmp_path / "stage2" / "report.json").unlink()
+
+    result = evaluate_g7(tmp_path, reviewer="owner", approve=True)
+
+    assert result["status"] == "review_required"
+    assert result["stage2"]["status"] == "missing"
+    assert "stage2_behavior_report_missing" in result["blockers"]

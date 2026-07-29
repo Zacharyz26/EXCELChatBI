@@ -1,6 +1,7 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.4-stage2b · 状态：阶段 1 已验收、阶段 2A–2B 已实现，G7 待人工签字 · 语言场景：中文优先
+> 版本：v2.4-stage2e · 状态：阶段 1 已验收、阶段 2A–2E 已实现，Docker runner、
+> G7 人工签字待完成；阶段 2 真实行为对照自动门禁已通过 · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
 ---
@@ -69,7 +70,9 @@
 ### 1.2 关键设计原则
 
 1. **数据与推理分离**：LLM 负责理解意图、选择方法、解读结果；所有数值计算交由工具执行，杜绝幻觉数字。
-2. **能力工具化**：v2.4 目标是把分析能力以标准 MCP 工具暴露，使其可独立部署、扩缩容和复用；当前已落地单源契约、SDK adapter 与 Client Gateway 影子层，生产执行仍是进程内 `Tool.invoke`。
+2. **能力工具化**：v2.4 已把分析能力以标准 MCP 工具暴露，单源契约、官方 SDK
+   adapter、Client Gateway 和 data/stats/chart/report/knowledge 五服务 Compose 已落地；
+   外部动态发现与企业授权仍留在 v3.0。
 3. **编排分层**：标准流程用简单直调编排，复杂流程用状态机/循环编排保证控制力（v2.1：全部自研代码，低代码路线已放弃，见 5.2）。
 4. **模型可插拔**：模型层与业务逻辑解耦，按场景路由到不同模型，便于替换与成本控制。
 5. **中文优先**：所有涉及语义理解的组件（embedding/rerank/分词/解析）按中文场景选型。
@@ -195,7 +198,7 @@
 |------|------|------|
 | 兼容直调流程（分析 / 统计 / 报告 / KB） | FastAPI 路由直调编排函数（`apps/orchestrator/*`） | 已实现并保留兼容；原端点安全门控不变 |
 | **v2.3 Agent 基线（主入口，第 14 章）** | DeepSeek function-calling 循环（`Scenario.AGENT`），模型选工具并观察结果，SSE 逐步吐事件 | 已完成；属于反应式工具调用 Agent |
-| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 已验收；阶段 2A–2B 的 Planner、依赖图 Executor 和 Replanner 已实现，任务控制等属于 2C–2E |
+| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 已验收；阶段 2A–2D 的 Planner、依赖图 Executor、Replanner、任务控制/恢复与 MCP Gateway 规范执行已实现 |
 
 #### 5.2.1 双轨判定规则（v2.1 作废，留档）
 
@@ -230,11 +233,12 @@ SessionState {
 
 ### 5.3 MCP 工具层
 
-> **当前形态**：生产工具仍以**进程内 `Tool.invoke`** 挂载进 API；Tool Capability Contract、
-> 15 个底层工具的官方 SDK Server adapter、stdio 入口、Client Gateway 和 Agent 影子比对已
-> 实现。影子校验不执行第二次工具调用。stdio 子进程与 Streamable HTTP 探针、上下文签名/
-> 服务认证和生产切换尚未完成；所有路径必须继续共用同一 schema 与中央策略网关。v3.0 负责
-> 第三方/跨网络服务的动态发现、企业授权和管理员准入。
+> **当前形态**：Agent Executor 已通过受治理 MCP Client Gateway 执行；Tool Capability
+> Contract、15 个底层工具的官方 SDK Server adapter、stdio/认证 Streamable HTTP、
+> Host 上下文 HMAC、固定目录发现、超时/取消、健康代次和受控降级均已实现。进程内适配
+> 只保留为兼容/测试，兼容直调 API 不受本次切换影响；所有路径继续共用同一 schema 与中央
+> 策略网关。阶段 2E 已负责独立工具服务 Compose，v3.0 再负责第三方/跨网络服务的动态发现、
+> 企业授权和管理员准入。
 >
 > **解读唯一出口（正式条款，v2.1 升格）**：MCP 工具本身**零 LLM**——report 的 `insight_summary` 已改为**纯拼接**（不调模型）；统计结果的 LLM 中文解读只发生在编排层（`stats_interpreter`，以及第 13 章助手通道）。**新增工具不得内嵌 LLM 调用。**
 
@@ -388,9 +392,11 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 1. **v2.3 基线 — 已完成**：知识库、Excel/统计/图表/报告工具、对话工作区、function-calling 循环和五阶段迁移；第 14 章记录其设计与交付历史。
 2. **v2.4 Agent 控制面 — 当前进行中**：阶段 1 已验收，SQLite v3、TaskRun/
    Contract/Event/Snapshot/Invocation/Evidence、确定性 Verifier、策略/审计/trace、
-   MCP 单源 adapter/Gateway、双传输探针、API/Web Compose 与真实全栈 E2E 已落地。
+   MCP 单源 adapter/Gateway、双传输探针、五服务 Compose 与真实全栈 E2E 门禁已落地。
    阶段 2A 已实现混合 Planner、TaskPlan/TaskStep 版本、能力白名单和计划完成校验；
-   2B 已负责依赖图重规划；2C–2E 继续任务控制/恢复、MCP 规范执行和独立工具服务 Compose。
+   2B 已负责依赖图重规划，2C 已负责任务控制/恢复，2D 已完成 MCP Gateway 规范执行；
+   2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照已通过自动门禁；
+   Docker runner 与该对照均通过后关闭工程验收。
    G7 自动门禁已落地，仍待人工盲评、负责人签字与 ADR 接受。
 3. **v2.5 记忆、自主性与协作**：阶段 3 记忆；阶段 4 可干预前端；阶段 5 业务语义层；阶段 6 自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
@@ -660,8 +666,8 @@ Artifact     {id, conversation_id, message_id, type, payload_json|file_ref,
 
 > 本章给出总体架构和版本边界。逐项交付、验收、安全项目与优先级以
 > `docs/Agent自主化开发规划.md` 为准。阶段 0 详细草案见 `docs/v2.4/README.md`；
-> 阶段 1 已验收，阶段 2A–2B 已实现；G7 自动门禁已落地，但人工盲评、负责人签字和 ADR
-> 接受仍是未关闭债务。
+> 阶段 1 已验收，阶段 2A–2E 已实现；阶段 2 的 60-run 真实行为对照已通过自动门禁；
+> Docker runner、人工盲评、负责人签字和 ADR 接受仍是未关闭债务。
 
 ### 15.1 目标
 
@@ -695,7 +701,8 @@ Memory/Context ← Finalizer ← Verifier ← Claim/Evidence
 阶段 2A 已交付 Goal 后的混合 Planner、不可变 TaskPlan/TaskStep 版本、能力到工具的
 fail-closed 解析、步骤状态绑定和未完成计划拒绝；阶段 2B 已交付 ready frontier
 依赖图 Executor、失败 Observation Replanner、跨版本步骤保护和条件 skip；任务控制与
-Checkpoint 恢复按 2C 继续实现。
+Checkpoint 恢复已按 2C 实现；执行宿主丢失后会校验事件游标、计划版本、已完成步骤和
+unknown invocation，再在同一 run 上继续未完成步骤。
 
 Planner 采用三条统一输出路径：简单任务确定性快速路径、已知任务族模板路径、开放多步骤 LLM 路径。Verifier 以确定性后置条件为主，语义模型只判断覆盖性等软条件，并返回 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
 
@@ -705,8 +712,8 @@ MCP 与 Docker 是 v2.4 的横向交付轨，不另起一个脱离控制面的�
 双传输和容器拓扑；阶段 1 完成全部项目内工具的标准 MCP Server 接口、Client Gateway 与
 API/Web 基础镜像；阶段 2 切换为规范 MCP 执行路径并交付包含工具服务和可选 RAG profile
 的单机 Compose。当前单源 adapter/Gateway、双传输探针、API/Web 根 Compose 和真实全栈
-E2E 已通过；生产仍是进程内 `Tool.invoke`，独立 MCP 工具服务尚未纳入 Compose，因此不能
-把 v2.4 目标架构整体标记为已实现。详细边界、服务分组、卷、网络和验收见
+E2E 已通过；阶段 2E 已把独立 MCP 工具服务纳入根 Compose，容器 runner 结果仍待关闭，
+因此暂不把 v2.4 工程验收标记为完成。详细边界、服务分组、卷、网络和验收见
 `docs/v2.4/MCP与Docker架构决策.md`。
 
 ### 15.4 v2.5 — 记忆、自主性与协作

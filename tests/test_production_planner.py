@@ -14,7 +14,7 @@ from apps.orchestrator.control.production_planner import (
 )
 from mcp_servers.common.contracts import ToolCapabilityMetadata
 from packages.models.types import Message, ModelResponse, Scenario
-from packages.session.models import Dataset
+from packages.session.models import Artifact, Dataset
 
 
 def _registry() -> AgentToolRegistry:
@@ -67,6 +67,63 @@ def _dataset() -> Dataset:
     )
 
 
+def _artifact(
+    artifact_id: str,
+    artifact_type: str,
+    *,
+    analysis_id: str,
+    dataset_ref: str | None = None,
+    params: dict[str, Any] | None = None,
+    file_ref: str | None = None,
+) -> Artifact:
+    return Artifact(
+        id=artifact_id,
+        conversation_id="conversation",
+        message_id="message",
+        type=artifact_type,
+        payload={},
+        file_ref=file_ref,
+        source_tool={
+            "stats": "trend_analysis",
+            "chart": "gen_chart",
+            "report": "generate_report",
+        }.get(artifact_type),
+        params={"analysis_id": analysis_id, **(params or {})},
+        dataset_ref=dataset_ref,
+        created_at="now",
+    )
+
+
+def _artifact_registry() -> AgentToolRegistry:
+    return AgentToolRegistry(
+        [
+            AgentToolSpec(
+                name="trend_analysis",
+                description="趋势",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(capabilities=("stats.trend",)),
+            ),
+            AgentToolSpec(
+                name="gen_chart",
+                description="图表",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(
+                    capabilities=("visualization.chart",)
+                ),
+            ),
+            AgentToolSpec(
+                name="generate_report",
+                description="报告",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(capabilities=("report.generate",)),
+            ),
+        ]
+    )
+
+
 class _PlannerGateway:
     def __init__(self, plan: dict[str, Any]) -> None:
         self.plan = plan
@@ -93,12 +150,102 @@ class _PlannerGateway:
 
 
 def test_planner_context_excludes_sample_rows_and_file_paths() -> None:
-    context = build_planner_context(datasets=[_dataset()], artifacts=[])
+    report = _artifact(
+        "report-1",
+        "report",
+        analysis_id="report-analysis",
+        file_ref="/private/reports/customer-secret.pdf",
+    )
+    context = build_planner_context(datasets=[_dataset()], artifacts=[report])
     encoded = json.dumps(context, ensure_ascii=False)
 
     assert "SECRET-ROW" not in encoded
     assert "sample_rows" not in encoded
+    assert "/private/reports/customer-secret.pdf" not in encoded
     assert context["datasets"][0]["columns"] == ["订单号", "销售额"]
+    assert context["artifacts"][0]["file_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
+    artifacts = [
+        _artifact(
+            "stats-1",
+            "stats",
+            analysis_id="analysis-stats",
+            dataset_ref=_dataset().ref,
+            params={"grain": "month"},
+        ),
+        _artifact(
+            "chart-1",
+            "chart",
+            analysis_id="analysis-chart",
+            dataset_ref=_dataset().ref,
+            params={"chart_type": "line"},
+        ),
+    ]
+    contract = build_minimal_contract(
+        run_id="report-follow-up",
+        user_text="把刚才的趋势和图表生成 PDF 报告。",
+        chart_required=True,
+        report_required=True,
+        pdf_required=True,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=artifacts,
+        registry=_artifact_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert [step["capability"] for step in result.plan["steps"]] == [
+        "report.generate"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chart_revision_reuses_referenced_chart_lineage() -> None:
+    artifacts = [
+        _artifact(
+            "chart-1",
+            "chart",
+            analysis_id="analysis-chart-1",
+            dataset_ref=_dataset().ref,
+            params={"grain": "day"},
+        ),
+        _artifact(
+            "chart-2",
+            "chart",
+            analysis_id="analysis-chart-2",
+            dataset_ref=_dataset().ref,
+            params={"grain": "week"},
+        ),
+    ]
+    contract = build_minimal_contract(
+        run_id="chart-follow-up",
+        user_text="把第二张图改成按月展示。",
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=artifacts,
+        registry=_artifact_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert [step["capability"] for step in result.plan["steps"]] == [
+        "visualization.chart"
+    ]
 
 
 @pytest.mark.asyncio

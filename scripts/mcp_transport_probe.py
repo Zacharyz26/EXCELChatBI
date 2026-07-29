@@ -76,7 +76,7 @@ def _context(*, expired: bool = False) -> MCPRequestContext:
 
 
 def _write_dataset(directory: Path) -> tuple[str, dict[str, Any]]:
-    dataset_ref = "stage0_mcp_probe"
+    dataset_ref = "2" * 32
     path = directory / f"{dataset_ref}.parquet"
     connection = duckdb.connect()
     try:
@@ -124,19 +124,19 @@ async def _exercise_session(
     success = await session.call_tool(
         "aggregate_preview",
         arguments,
-        meta=_context().to_request_meta(),
+        meta=_context().to_request_meta(signing_key=TOKEN),
     )
     if success.isError or not isinstance(success.structuredContent, dict):
         raise RuntimeError(f"{name} 合法调用失败")
     invalid = await session.call_tool(
         "aggregate_preview",
         {**arguments, "agg": "median"},
-        meta=_context().to_request_meta(),
+        meta=_context().to_request_meta(signing_key=TOKEN),
     )
     unknown = await session.call_tool(
         "missing_tool",
         {},
-        meta=_context().to_request_meta(),
+        meta=_context().to_request_meta(signing_key=TOKEN),
     )
     business = await session.call_tool(
         "aggregate_preview",
@@ -145,12 +145,12 @@ async def _exercise_session(
             "group_col": "region",
             "agg": "sum",
         },
-        meta=_context().to_request_meta(),
+        meta=_context().to_request_meta(signing_key=TOKEN),
     )
     expired = await session.call_tool(
         "aggregate_preview",
         arguments,
-        meta=_context(expired=True).to_request_meta(),
+        meta=_context(expired=True).to_request_meta(signing_key=TOKEN),
     )
     errors = {
         "schema": _error_code(invalid),
@@ -186,6 +186,7 @@ async def _probe_stdio(
         "DATASET_DIR": str(dataset_dir),
         "MCP_TRANSPORT": "stdio",
         "MCP_PROBE_DELAY_SECONDS": "0",
+        "MCP_CONTEXT_SIGNING_KEY": TOKEN,
     }
     params = StdioServerParameters(
         command=sys.executable,
@@ -321,7 +322,7 @@ async def _cancel_http_call(
                 "params": {
                     "name": "aggregate_preview",
                     "arguments": arguments,
-                    "_meta": _context().to_request_meta(),
+                    "_meta": _context().to_request_meta(signing_key=TOKEN),
                 },
             },
             headers=headers,
@@ -360,6 +361,7 @@ async def _probe_http(
         "MCP_HTTP_HOST": "127.0.0.1",
         "MCP_HTTP_PORT": str(port),
         "MCP_SERVICE_TOKEN": TOKEN,
+        "MCP_CONTEXT_SIGNING_KEY": TOKEN,
         "MCP_ALLOWED_HOSTS": "127.0.0.1:*",
         "MCP_ALLOWED_ORIGINS": "https://trusted.example",
         "MCP_PROBE_DELAY_SECONDS": "0.5",

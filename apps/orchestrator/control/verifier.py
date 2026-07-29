@@ -181,7 +181,7 @@ def verify_completion(
                     message="Claim 的 Evidence 关联不属于当前任务或未写入关联表",
                 )
             )
-    if budget_exhausted:
+    if budget_exhausted and issues:
         issues.append(
             VerificationIssue(
                 code="budget_exhausted",

@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 from apps.api.deps import session_store_dep, settings_dep
 from apps.api.main import app
+from apps.orchestrator.control.contracts import build_minimal_contract
 from fastapi.testclient import TestClient
 from packages.common.config import Settings
 from packages.session.store import SessionStore
+from packages.session.task_store import TaskStore
 
 _ALICE_TOKEN = "alice-secret-token-0000000000000001"
 _BOB_TOKEN = "bob-secret-token-0000000000000000002"
@@ -145,3 +147,64 @@ def test_report_download_is_scoped_to_owning_project(
     response = alice.get(f"/analyze/report/{report_id}.md")
     assert response.status_code == 200
     assert response.text == "# private"
+
+
+def test_task_control_write_is_project_scoped_and_idempotent(
+    auth_clients: tuple[TestClient, TestClient, TestClient, SessionStore],
+) -> None:
+    alice, bob, _, store = auth_clients
+    project = alice.post("/projects", json={"name": "Alice"}).json()
+    conversation = alice.post(
+        f"/projects/{project['id']}/conversations",
+        json={"title": "受控任务"},
+    ).json()
+    _, message = store.start_user_turn(
+        conversation_id=conversation["id"],
+        content="分析数据",
+        suggested_title="分析数据",
+    )
+    contract = build_minimal_contract(
+        run_id="private-controlled-run",
+        user_text="分析数据",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    tasks = TaskStore(store.db_path)
+    run, _ = tasks.create_run(
+        project_id=project["id"],
+        conversation_id=conversation["id"],
+        user_message_id=message.id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    headers = {
+        "Idempotency-Key": "cancel-private-run",
+        "If-Match": str(run.state_version),
+    }
+
+    assert bob.post(
+        f"/agent/runs/{run.run_id}/cancel",
+        headers=headers,
+    ).status_code == 404
+    cancelled = alice.post(
+        f"/agent/runs/{run.run_id}/cancel",
+        headers=headers,
+    )
+    replayed = alice.post(
+        f"/agent/runs/{run.run_id}/cancel",
+        headers=headers,
+    )
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["run"]["status"] == "cancelled"
+    assert cancelled.json()["replayed"] is False
+    assert replayed.status_code == 200
+    assert replayed.json()["replayed"] is True
+    assert len(
+        [
+            event
+            for event in tasks.list_events(run.run_id)
+            if event.event_type == "run.cancelled"
+        ]
+    ) == 1

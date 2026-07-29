@@ -9,6 +9,7 @@ not grow separate schemas.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ RiskLevel = Literal["low", "medium", "high"]
 
 CHATBI_META_PREFIX = "com.chatbi/"
 CHATBI_CONTEXT_KEY = f"{CHATBI_META_PREFIX}context"
+CHATBI_CONTEXT_SIGNATURE_KEY = f"{CHATBI_META_PREFIX}context-signature"
 MCP_CONTRACT_VERSION = "chatbi-mcp-tool-v1"
 POSTCONDITIONS_VERSION = "artifact-postconditions-v1"
 GENERIC_OBJECT_OUTPUT_SCHEMA: JsonObject = {"type": "object"}
@@ -203,14 +205,39 @@ class MCPRequestContext:
     def to_dict(self) -> JsonObject:
         return asdict(self)
 
-    def to_request_meta(self) -> JsonObject:
-        return {CHATBI_CONTEXT_KEY: self.to_dict()}
+    def to_request_meta(self, *, signing_key: str | None = None) -> JsonObject:
+        raw = self.to_dict()
+        meta: JsonObject = {CHATBI_CONTEXT_KEY: raw}
+        if signing_key is not None:
+            meta[CHATBI_CONTEXT_SIGNATURE_KEY] = _sign_context(raw, signing_key)
+        return meta
 
     @classmethod
-    def from_request_meta(cls, meta: JsonObject) -> MCPRequestContext:
+    def from_request_meta(
+        cls,
+        meta: JsonObject,
+        *,
+        signing_key: str | None = None,
+        require_signature: bool = False,
+    ) -> MCPRequestContext:
         raw = meta.get(CHATBI_CONTEXT_KEY)
         if not isinstance(raw, dict):
             raise MCPProtocolError("invalid_request_context", "缺少 ChatBI MCP 请求上下文")
+        signature = meta.get(CHATBI_CONTEXT_SIGNATURE_KEY)
+        if signing_key is not None:
+            if not isinstance(signature, str) or not hmac.compare_digest(
+                signature,
+                _sign_context(raw, signing_key),
+            ):
+                raise MCPProtocolError(
+                    "invalid_context_signature",
+                    "MCP 请求上下文签名无效",
+                )
+        elif require_signature:
+            raise MCPProtocolError(
+                "invalid_context_signature",
+                "MCP 请求上下文缺少签名密钥配置",
+            )
         try:
             context = cls(
                 subject_id=_required_string(raw, "subject_id"),
@@ -339,3 +366,18 @@ def _required_nonnegative_int(raw: JsonObject, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(key)
     return cast(int, value)
+
+
+def _sign_context(raw: JsonObject, signing_key: str) -> str:
+    if not signing_key:
+        raise MCPProtocolError(
+            "invalid_context_signature",
+            "MCP 请求上下文签名密钥不能为空",
+        )
+    encoded = json.dumps(
+        _normalize_json(raw),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(signing_key.encode("utf-8"), encoded, hashlib.sha256).hexdigest()

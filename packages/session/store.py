@@ -109,9 +109,16 @@ COMMIT;
 class SessionStore:
     """项目、对话、消息和工件的 SQLite repository。"""
 
-    def __init__(self, db_path: str, *, cache_size: int = 128) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        cache_size: int = 128,
+        read_only: bool = False,
+    ) -> None:
         self._path = Path(db_path)
         self._cache = ConversationCache(cache_size)
+        self._read_only = read_only
         self._initialize()
 
     @property
@@ -958,6 +965,18 @@ class SessionStore:
     # ── SQLite 生命周期 ──
 
     def _initialize(self) -> None:
+        if self._read_only:
+            if not self._path.is_file():
+                raise FileNotFoundError(f"SQLite 数据库不存在: {self._path}")
+            with self._connection() as connection:
+                row = connection.execute("PRAGMA user_version").fetchone()
+            version = int(row[0]) if row is not None else 0
+            if version != CURRENT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"只读 SQLite schema 版本不兼容: {version}，"
+                    f"期望 {CURRENT_SCHEMA_VERSION}"
+                )
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _SCHEMA_LOCK, self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -965,7 +984,14 @@ class SessionStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self._path, timeout=5.0)
+        if self._read_only:
+            connection = sqlite3.connect(
+                f"file:{self._path.resolve().as_posix()}?mode=ro",
+                timeout=5.0,
+                uri=True,
+            )
+        else:
+            connection = sqlite3.connect(self._path, timeout=5.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")

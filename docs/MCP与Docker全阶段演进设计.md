@@ -13,9 +13,9 @@
   Client Gateway、Server、镜像和单机 Compose 基础；
 - 本文件决定 v2.5/v3.0 如何在该基础上扩展，不重复定义另一套传输、工具 schema 或部署方式。
 
-当前生产执行仍是 v2.3 进程内 `Tool.invoke` 基线；v2.4 阶段 1 已落地单源 MCP Contract、
-SDK Server adapter、Client Gateway 影子层及 API/Web 基础镜像代码。本文描述的 v2.5/v3.0
-扩展仍是未来设计，不代表 stdio/Streamable HTTP 切换、完整 Compose 或后续治理已经实现。
+v2.4 阶段 2D 已把 Agent Executor 切到受治理 MCP Client Gateway，阶段 2E 已落地五个
+独立工具服务、私网 Compose、分卷/secrets 和容器浏览器/重启门禁。本文描述的
+v2.5/v3.0 扩展仍是未来设计，不代表后续治理已经实现。
 
 ## 2. 不随阶段变化的边界
 

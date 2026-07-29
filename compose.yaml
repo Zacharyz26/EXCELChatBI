@@ -1,17 +1,177 @@
 name: chatbi
 
+x-python-image: &python-image
+  image: chatbi-python:${CHATBI_IMAGE_TAG:-local}
+  build:
+    context: .
+    target: api
+
+x-runtime-hardening: &runtime-hardening
+  read_only: true
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+  pids_limit: 256
+  stop_grace_period: 30s
+
+x-mcp-environment: &mcp-environment
+  APP_ENV: production
+  PROCESS_ROLE: mcp_server
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  MCP_TRANSPORT: streamable-http
+  MCP_HTTP_HOST: 0.0.0.0
+  MCP_HTTP_PORT: "8000"
+  MCP_CONTEXT_SIGNING_KEY_FILE: /run/secrets/mcp_context_signing_key
+  RAG_EMBEDDER: ${RAG_EMBEDDER:-hashing}
+  RAG_RERANKER: ${RAG_RERANKER:-lexical}
+  RAG_STORE: ${RAG_STORE:-local}
+  CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
+  DATASET_DIR: /var/lib/chatbi/datasets
+  REPORT_DIR: /var/lib/chatbi/artifacts
+  KB_INDEX_DIR: /var/lib/chatbi/kb/index
+  KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+
+x-mcp-service: &mcp-service
+  <<: [*python-image, *runtime-hardening]
+  restart: unless-stopped
+  command: ["python", "-m", "mcp_servers.agent_service.server"]
+  expose:
+    - "8000"
+  networks:
+    - app
+  depends_on:
+    storage-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).read()",
+      ]
+    interval: 10s
+    timeout: 3s
+    start_period: 30s
+    retries: 6
+  cpus: 1.5
+  mem_limit: 2g
+  secrets:
+    - mcp_context_signing_key
+
 services:
+  storage-init:
+    <<: [*python-image, *runtime-hardening]
+    restart: "no"
+    command: ["python", "-m", "apps.api.init_storage"]
+    environment:
+      APP_ENV: production
+      PROCESS_ROLE: mcp_server
+      CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
+      UPLOAD_DIR: /var/lib/chatbi/uploads
+      DATASET_DIR: /var/lib/chatbi/datasets
+      REPORT_DIR: /var/lib/chatbi/artifacts
+      KB_INDEX_DIR: /var/lib/chatbi/kb/index
+      KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+    volumes:
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-uploads:/var/lib/chatbi/uploads
+      - chatbi-datasets:/var/lib/chatbi/datasets
+      - chatbi-artifacts:/var/lib/chatbi/artifacts
+      - chatbi-kb:/var/lib/chatbi/kb
+    networks:
+      - app
+
+  data-tools:
+    <<: *mcp-service
+    environment:
+      <<: *mcp-environment
+      MCP_AGENT_SERVICE: data-tools
+      MCP_ALLOWED_HOSTS: data-tools:8000
+      MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_data_token
+    volumes:
+      # SQLite WAL readers need directory write access for -shm coordination;
+      # the service opens the database with URI mode=ro and cannot issue writes.
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-datasets:/var/lib/chatbi/datasets
+    secrets:
+      - mcp_context_signing_key
+      - mcp_data_token
+
+  stats-tools:
+    <<: *mcp-service
+    environment:
+      <<: *mcp-environment
+      MCP_AGENT_SERVICE: stats-tools
+      MCP_ALLOWED_HOSTS: stats-tools:8000
+      MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_stats_token
+    volumes:
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-datasets:/var/lib/chatbi/datasets:ro
+    secrets:
+      - mcp_context_signing_key
+      - mcp_stats_token
+
+  chart-tools:
+    <<: *mcp-service
+    environment:
+      <<: *mcp-environment
+      MCP_AGENT_SERVICE: chart-tools
+      MCP_ALLOWED_HOSTS: chart-tools:8000
+      MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_chart_token
+    volumes:
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-datasets:/var/lib/chatbi/datasets:ro
+      - chatbi-artifacts:/var/lib/chatbi/artifacts
+    secrets:
+      - mcp_context_signing_key
+      - mcp_chart_token
+    mem_limit: 3g
+
+  report-tools:
+    <<: *mcp-service
+    environment:
+      <<: *mcp-environment
+      MCP_AGENT_SERVICE: report-tools
+      MCP_ALLOWED_HOSTS: report-tools:8000
+      MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_report_token
+    volumes:
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-artifacts:/var/lib/chatbi/artifacts
+    secrets:
+      - mcp_context_signing_key
+      - mcp_report_token
+    mem_limit: 3g
+
+  knowledge-tools:
+    <<: *mcp-service
+    environment:
+      <<: *mcp-environment
+      MCP_AGENT_SERVICE: knowledge-tools
+      MCP_ALLOWED_HOSTS: knowledge-tools:8000
+      MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_knowledge_token
+    volumes:
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-kb:/var/lib/chatbi/kb:ro
+    secrets:
+      - mcp_context_signing_key
+      - mcp_knowledge_token
+
   api:
-    build:
-      context: .
-      target: api
+    <<: [*python-image, *runtime-hardening]
     restart: unless-stopped
     environment:
-      APP_ENV: ${APP_ENV:-development}
+      APP_ENV: production
+      PROCESS_ROLE: api
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      AUTH_MODE: ${AUTH_MODE:-disabled}
-      AUTH_TOKENS_JSON: ${AUTH_TOKENS_JSON:-}
-      MODEL_REGISTRY_PATH: config/models.example.yaml
+      AUTH_MODE: bearer
+      AUTH_TOKENS_JSON: '${AUTH_TOKENS_JSON:-{"chatbi-local-e2e-token-00000001":{"user_id":"local-user","tenant_id":"local","roles":["kb_admin"]}}}'
+      MODEL_REGISTRY_PATH: ${MODEL_REGISTRY_PATH:-config/models.example.yaml}
+      DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       RAG_EMBEDDER: ${RAG_EMBEDDER:-hashing}
       RAG_RERANKER: ${RAG_RERANKER:-lexical}
@@ -22,42 +182,107 @@ services:
       REPORT_DIR: /var/lib/chatbi/artifacts
       KB_INDEX_DIR: /var/lib/chatbi/kb/index
       KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+      AGENT_MCP_TRANSPORT: streamable_http
+      AGENT_MCP_SERVER_URLS_JSON: '{"data-tools":"http://data-tools:8000/mcp/","stats-tools":"http://stats-tools:8000/mcp/","chart-tools":"http://chart-tools:8000/mcp/","report-tools":"http://report-tools:8000/mcp/","knowledge-tools":"http://knowledge-tools:8000/mcp/"}'
+      AGENT_MCP_SERVICE_TOKEN_FILES_JSON: '{"data-tools":"/run/secrets/mcp_data_token","stats-tools":"/run/secrets/mcp_stats_token","chart-tools":"/run/secrets/mcp_chart_token","report-tools":"/run/secrets/mcp_report_token","knowledge-tools":"/run/secrets/mcp_knowledge_token"}'
+      AGENT_MCP_CONTEXT_SIGNING_KEY_FILE: /run/secrets/mcp_context_signing_key
+      AGENT_MCP_ALLOW_IN_PROCESS_FALLBACK: "false"
     volumes:
-      - chatbi-data:/var/lib/chatbi
-    tmpfs:
-      - /tmp:size=1g,mode=1777
-    ports:
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      - chatbi-db:/var/lib/chatbi/db
+      - chatbi-uploads:/var/lib/chatbi/uploads
+      - chatbi-datasets:/var/lib/chatbi/datasets
+      - chatbi-artifacts:/var/lib/chatbi/artifacts
+      - chatbi-kb:/var/lib/chatbi/kb
+    networks:
+      - edge
+      - app
+    expose:
+      - "8000"
+    depends_on:
+      data-tools:
+        condition: service_healthy
+      stats-tools:
+        condition: service_healthy
+      chart-tools:
+        condition: service_healthy
+      report-tools:
+        condition: service_healthy
+      knowledge-tools:
+        condition: service_healthy
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2).read()",
         ]
-      interval: 15s
+      interval: 10s
       timeout: 3s
       start_period: 30s
-      retries: 5
+      retries: 6
+    cpus: 2
+    mem_limit: 3g
+    secrets:
+      - mcp_context_signing_key
+      - mcp_data_token
+      - mcp_stats_token
+      - mcp_chart_token
+      - mcp_report_token
+      - mcp_knowledge_token
 
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
       target: web
+    image: chatbi-web:${CHATBI_IMAGE_TAG:-local}
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       api:
         condition: service_healthy
+    networks:
+      - edge
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
-      interval: 15s
+      interval: 10s
       timeout: 3s
       start_period: 10s
       retries: 5
+    pids_limit: 128
+    cpus: 0.5
+    mem_limit: 256m
+    stop_grace_period: 15s
+
+networks:
+  edge:
+  app:
+    internal: true
 
 volumes:
-  chatbi-data:
+  chatbi-db:
+  chatbi-uploads:
+  chatbi-datasets:
+  chatbi-artifacts:
+  chatbi-kb:
+
+secrets:
+  mcp_context_signing_key:
+    file: ${MCP_CONTEXT_SIGNING_KEY_FILE_PATH:-./deploy/secrets/mcp_context_signing_key.dev}
+  mcp_data_token:
+    file: ${MCP_DATA_TOKEN_FILE_PATH:-./deploy/secrets/mcp_data_token.dev}
+  mcp_stats_token:
+    file: ${MCP_STATS_TOKEN_FILE_PATH:-./deploy/secrets/mcp_stats_token.dev}
+  mcp_chart_token:
+    file: ${MCP_CHART_TOKEN_FILE_PATH:-./deploy/secrets/mcp_chart_token.dev}
+  mcp_report_token:
+    file: ${MCP_REPORT_TOKEN_FILE_PATH:-./deploy/secrets/mcp_report_token.dev}
+  mcp_knowledge_token:
+    file: ${MCP_KNOWLEDGE_TOKEN_FILE_PATH:-./deploy/secrets/mcp_knowledge_token.dev}

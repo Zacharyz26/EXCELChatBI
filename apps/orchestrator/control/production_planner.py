@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, cast
 
 from packages.session.models import Artifact, Dataset, JsonObject
@@ -34,6 +35,41 @@ _ARTIFACT_CAPABILITY = {
     "chart": "visualization.chart",
     "report": "report.generate",
 }
+
+_SAFE_ARTIFACT_PARAM_KEYS = {
+    "analysis_id",
+    "chart_type",
+    "grain",
+    "group_col",
+    "time_col",
+    "value_col",
+}
+
+_ARTIFACT_REUSE_TOKENS = (
+    "刚才",
+    "已有",
+    "上次",
+    "这些",
+    "上述",
+    "前面",
+    "之前",
+    "第一张",
+    "第二张",
+    "上一张",
+)
+
+_CHART_REVISION_TOKENS = (
+    "改成",
+    "改为",
+    "换成",
+    "调整",
+    "重新画",
+    "重画",
+    "再画",
+    "新图",
+)
+
+_RECOMPUTE_TOKENS = ("重新分析", "再分析", "更新分析", "重算", "重新计算")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +108,7 @@ async def create_production_plan(
     context = build_planner_context(datasets=datasets, artifacts=artifacts)
     capability_catalog = registry.capability_catalog()
     capabilities = {str(item["name"]) for item in capability_catalog}
-    required_capabilities = criterion_capabilities(contract)
+    required_capabilities = criterion_capabilities(contract, artifacts=artifacts)
 
     if blocking_clarification is not None:
         plan = _clarification_plan(blocking_clarification)
@@ -185,13 +221,25 @@ def build_planner_context(
     artifact_items: list[JsonObject] = []
     for artifact in artifacts[-20:]:
         params = artifact.params or {}
+        safe_params = {
+            key: params[key]
+            for key in _SAFE_ARTIFACT_PARAM_KEYS
+            if key in params
+            and isinstance(params[key], str | int | float | bool)
+        }
         artifact_items.append(
             {
                 "artifact_id": artifact.id,
                 "type": artifact.type,
                 "source_tool": artifact.source_tool,
-                "analysis_id": params.get("analysis_id"),
+                "analysis_id": _artifact_analysis_id(artifact),
                 "dataset_ref": artifact.dataset_ref,
+                "params": safe_params,
+                "file_available": (
+                    bool(artifact.file_ref and Path(artifact.file_ref).is_file())
+                    if artifact.type == "report"
+                    else None
+                ),
             }
         )
     return {
@@ -347,15 +395,68 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
             add("data.profile")
         add("report.generate")
 
+    artifacts = cast(list[JsonObject], context.get("artifacts") or [])
+    artifact_types = {
+        str(item.get("type"))
+        for item in artifacts
+        if isinstance(item.get("type"), str)
+    }
+    reuses_artifacts = any(token in request for token in _ARTIFACT_REUSE_TOKENS)
+    revises_chart = (
+        "chart" in artifact_types
+        and any(token in request for token in _CHART_REVISION_TOKENS)
+    )
+    recomputes_analysis = any(token in request for token in _RECOMPUTE_TOKENS)
+
+    if reuses_artifacts and not recomputes_analysis:
+        if "stats" in artifact_types:
+            result = [item for item in result if item != "stats.trend"]
+        if "table" in artifact_types:
+            result = [item for item in result if item != "data.aggregate"]
+        if "chart" in artifact_types and not revises_chart:
+            result = [item for item in result if item != "visualization.chart"]
+    if revises_chart and not recomputes_analysis:
+        # “把第二张图改成按月”描述的是已有图表的展示参数，不是重新做趋势分析。
+        result = [
+            item
+            for item in result
+            if item not in {"stats.trend", "data.aggregate"}
+        ]
+        if "visualization.chart" not in result:
+            result.append("visualization.chart")
+
     if not result and cast(list[JsonObject], context.get("datasets") or []):
         if any(token in request for token in ("数据", "分析", "看看", "介绍")):
             add("data.profile")
     return result
 
 
-def criterion_capabilities(contract: TaskContract) -> dict[str, set[str]]:
+def _artifact_analysis_id(artifact: Artifact) -> str:
+    params = artifact.params or {}
+    value = params.get("analysis_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    payload = artifact.payload or {}
+    value = payload.get("analysis_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return artifact.id
+
+
+def criterion_capabilities(
+    contract: TaskContract, *, artifacts: list[Artifact] | None = None
+) -> dict[str, set[str]]:
     mapping: dict[str, set[str]] = {}
     for criterion in contract.success_criteria:
+        if artifacts and any(
+            _artifact_satisfies_criterion(
+                artifact,
+                criterion.artifact_type,
+                criterion.artifact_format,
+            )
+            for artifact in artifacts
+        ):
+            continue
         capability = (
             _ARTIFACT_CAPABILITY.get(criterion.artifact_type or "")
             if criterion.kind == "artifact"
@@ -364,6 +465,20 @@ def criterion_capabilities(contract: TaskContract) -> dict[str, set[str]]:
         if capability is not None:
             mapping[criterion.criterion_id] = {capability}
     return mapping
+
+
+def _artifact_satisfies_criterion(
+    artifact: Artifact,
+    artifact_type: str | None,
+    artifact_format: str | None,
+) -> bool:
+    if artifact_type is None or artifact.type != artifact_type:
+        return False
+    if artifact.type != "report":
+        return True
+    if not artifact.file_ref or not Path(artifact.file_ref).is_file():
+        return False
+    return artifact_format != "pdf" or artifact.file_ref.lower().endswith(".pdf")
 
 
 def _clarification_plan(clarification: JsonObject) -> JsonObject:

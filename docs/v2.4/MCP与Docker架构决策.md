@@ -25,10 +25,12 @@
 官方 MCP 当前定义的标准传输是 stdio 与 Streamable HTTP，后者已替代旧 HTTP+SSE。Python SDK v1.x 是当前稳定线，v2 在 2026-07-22 仍为预发布。因此本项目先固定稳定版本完成协议探针，不用临近发布的预览版本承载控制面。
 
 当前实现边界：Tool Capability Contract、15 个底层工具的 SDK Server adapter、stdio 入口、
-认证的 stateful Streamable HTTP 入口、Client Gateway、官方 SDK 会话和生产影子比对已落地；
-`aggregate_preview` 双传输探针已通过，API/Web 基础镜像的远端构建与非 root smoke 也已通过。
-生产 Executor 仍使用进程内 runner；上下文签名、规范执行切换、完整 Compose 和容器 E2E 属于
-阶段 2，ADR 的“接受”状态仍须等待 G7 设计评审。
+认证的 stateful Streamable HTTP 入口、Client Gateway、官方 SDK 会话和 Artifact
+后置条件校验已落地；`aggregate_preview` 双传输探针和 Managed Gateway 真实 stdio/HTTP
+调用均已通过。阶段 2D 已把 Agent Executor 切到规范 Gateway 路径，Host RequestContext HMAC、
+超时/取消、健康代次、有限重连和受控降级已实现；进程内仅作兼容/测试。阶段 2E 已增加
+五服务独立路由、逐服务认证、私网 Compose、分卷和浏览器/重启门禁；ADR 的“接受”状态
+仍须等待 Docker runner 和 G7 设计评审。
 
 G7 的冻结门槛、缺失人工评分和签字命令见
 [`G7评审与阶段2A实施记录.md`](./G7评审与阶段2A实施记录.md)。自动门禁通过不能代替

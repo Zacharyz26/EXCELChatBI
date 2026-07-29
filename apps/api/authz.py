@@ -65,6 +65,8 @@ def require_run_access(
     store: SessionStore,
     run: TaskRun,
     principal: Principal,
+    *,
+    write: bool = False,
 ) -> None:
     """校验 TaskRun 所属项目。"""
-    require_project_access(store, run.project_id, principal)
+    require_project_access(store, run.project_id, principal, write=write)

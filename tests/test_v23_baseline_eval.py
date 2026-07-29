@@ -6,11 +6,13 @@ import json
 from pathlib import Path
 
 import pytest
+from packages.models.registry import ModelRegistry
 from scripts.v23_baseline_eval import (
     DEFAULT_CASES,
     _FixtureRegistry,
     _score_rows,
     load_cases,
+    run_evaluation,
 )
 
 
@@ -73,3 +75,85 @@ def test_case_loader_rejects_duplicate_ids(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="case id 重复"):
         load_cases(path)
+
+
+@pytest.mark.asyncio
+async def test_evaluation_checkpoints_successes_and_resumes_only_missing_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.v23_baseline_eval as baseline_eval
+
+    cases = load_cases(DEFAULT_CASES)[:2]
+    registry = ModelRegistry("config/models.example.yaml")
+    registry.load()
+    calls: list[str] = []
+    fail_second = True
+
+    async def fake_run_case(
+        case: dict[str, object],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal fail_second
+        case_id = str(case["id"])
+        calls.append(case_id)
+        if case_id == str(cases[1]["id"]) and fail_second:
+            raise TimeoutError
+        return {
+            "case_id": case_id,
+            "configured_model": str(kwargs["model_name"]),
+            "repetition": int(kwargs["repetition"]),
+            "task_satisfied": True,
+            "required_artifacts": {},
+            "numeric_claims_supported": True,
+            "terminal_truthful": True,
+            "clarification": "none",
+            "tool_calls": 0,
+            "invalid_tool_calls": 0,
+            "forbidden_violations": [],
+            "model_calls": 1,
+            "agent_model_calls": 1,
+            "planner_model_calls": 0,
+            "plan_steps_total": 1,
+            "plan_steps_completed": 1,
+            "plan_revisions": 0,
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "latency_ms": 1.0,
+            "cost": 0.001,
+            "cost_currency": "USD",
+        }
+
+    monkeypatch.setattr(baseline_eval, "_run_case", fake_run_case)
+    checkpoints: list[list[dict[str, object]]] = []
+    first = await run_evaluation(
+        cases=cases,
+        registry=registry,
+        model_names=["deepseek-v4-flash"],
+        repetitions=1,
+        on_row_completed=lambda rows: checkpoints.append(rows),
+    )
+
+    assert first["completed_runs"] == 1
+    assert first["execution_failures"] == [
+        {
+            "case_id": cases[1]["id"],
+            "configured_model": "deepseek-v4-flash",
+            "repetition": 1,
+            "error_type": "TimeoutError",
+        }
+    ]
+    assert len(checkpoints) == 1
+
+    calls.clear()
+    fail_second = False
+    resumed = await run_evaluation(
+        cases=cases,
+        registry=registry,
+        model_names=["deepseek-v4-flash"],
+        repetitions=1,
+        existing_rows=first["rows"],
+    )
+
+    assert calls == [cases[1]["id"]]
+    assert resumed["completed_runs"] == 2
+    assert resumed["execution_failures"] == []

@@ -1,8 +1,8 @@
-"""FastAPI 依赖注入：配置、模型网关、MCP 工具服务（进程内）。
+"""FastAPI 依赖注入：配置、模型网关与确定性工具实现。
 
-生产工具仍走进程内 `Tool.invoke`（仍经 schema 校验挂载点，红线3）。标准 MCP
-Tool Contract、stdio Server adapter、Client Gateway 和影子比对已落地；双传输
-探针和阶段 2 执行切换前，本模块仍不得把协议路径当成生产依赖。
+Agent Executor 已通过受治理 MCP Client Gateway 执行；本模块中的进程内 Server 对象
+仍是 schema/handler 的单源装配入口，并供兼容端点与测试使用。部署环境由 Settings
+强制使用认证的 Streamable HTTP，独立工具服务 Compose 属于阶段 2E。
 """
 
 from __future__ import annotations

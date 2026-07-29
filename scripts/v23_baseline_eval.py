@@ -15,7 +15,7 @@ import re
 import sys
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -50,6 +50,36 @@ _CAPABILITY_BY_TOOL = {
     "correlation": "stats.correlation",
     "gen_chart": "visualization.chart",
     "generate_report": "report.generate",
+}
+_CAPABILITIES_BY_TOOL = {
+    "get_data_profile": ("data.profile", "data.quality"),
+    "kb_search": ("knowledge.search",),
+    "aggregate_preview": ("data.aggregate",),
+    "trend_analysis": ("stats.trend",),
+    "anomaly_detect": ("stats.anomaly",),
+    "transform_dataset": ("dataset.transform",),
+    "regression": ("stats.regression",),
+    "correlation": ("stats.correlation",),
+    "gen_chart": ("visualization.chart",),
+    "chart_screenshot": ("visualization.screenshot",),
+    "generate_report": ("report.generate",),
+}
+_ARTIFACT_TYPES_BY_CAPABILITY = {
+    "data.profile": ["profile"],
+    "data.quality": ["profile"],
+    "data.aggregate": ["table"],
+    "stats.trend": ["stats"],
+    "stats.anomaly": ["stats"],
+    "stats.regression": ["stats"],
+    "stats.correlation": ["stats"],
+    "visualization.chart": ["chart"],
+    "knowledge.search": ["citations"],
+    "report.generate": ["report"],
+}
+_MEDIUM_RISK_CAPABILITIES = {
+    "dataset.transform",
+    "visualization.screenshot",
+    "report.generate",
 }
 _ARTIFACT_EXPECTED_TYPE = {
     "profile": "profile",
@@ -124,6 +154,26 @@ class _ObservingGateway:
         except TimeoutError as exc:
             raise RuntimeError("Agent 模型轮次超过 45 秒总时限") from exc
 
+    async def complete(
+        self,
+        scenario: Scenario,
+        messages: list[Message],
+        *,
+        params: dict[str, object] | None = None,
+    ) -> ModelResponse:
+        """Observe Planner calls without retaining prompts or response content."""
+        try:
+            async with asyncio.timeout(45):
+                response = await self._gateway.complete(
+                    scenario,
+                    messages,
+                    params=params,
+                )
+        except TimeoutError as exc:
+            raise RuntimeError("Planner 模型轮次超过 45 秒总时限") from exc
+        self.responses.append(response)
+        return response
+
 
 class _FixtureRegistry:
     """Schema-guided deterministic tools used only by the behavior baseline."""
@@ -188,6 +238,59 @@ class _FixtureRegistry:
                 ["analysis_ids", "title", "include_pdf"],
             ),
         ]
+
+    def capability_catalog(self) -> list[JsonObject]:
+        """Expose the production Planner catalog shape for Stage 2 evaluation."""
+        descriptions = {
+            str(item["function"]["name"]): str(item["function"]["description"])
+            for item in self.openai_tools()
+        }
+        catalog: list[JsonObject] = []
+        for capability in sorted(
+            {
+                capability
+                for values in _CAPABILITIES_BY_TOOL.values()
+                for capability in values
+            }
+        ):
+            tool_name = next(
+                name
+                for name, values in _CAPABILITIES_BY_TOOL.items()
+                if capability in values
+            )
+            catalog.append(
+                {
+                    "name": capability,
+                    "description": descriptions[tool_name],
+                    "allowed": True,
+                    "risk": (
+                        "medium"
+                        if capability in _MEDIUM_RISK_CAPABILITIES
+                        else "low"
+                    ),
+                    "read_only": capability not in _MEDIUM_RISK_CAPABILITIES,
+                    "artifact_types": _ARTIFACT_TYPES_BY_CAPABILITY.get(
+                        capability,
+                        [],
+                    ),
+                }
+            )
+        return catalog
+
+    def openai_tools_for_capabilities(
+        self,
+        capabilities: set[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.openai_tools()
+            if capabilities.intersection(
+                self.capabilities_for_tool(str(item["function"]["name"]))
+            )
+        ]
+
+    def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
+        return _CAPABILITIES_BY_TOOL.get(tool_name, ())
 
     def execute(self, name: str, arguments_json: str) -> JsonObject:
         try:
@@ -313,10 +416,38 @@ async def run_evaluation(
     registry: ModelRegistry,
     model_names: list[str],
     repetitions: int,
+    enforce_plan: bool = False,
+    planner_model_name: str | None = None,
+    evaluation_name: str = "reactive_agent_observable_baseline",
+    evaluation_label: str = (
+        "v2.3-compatible loop with stage-1 deterministic verifier"
+    ),
+    scenario_set_hash: str | None = None,
+    existing_rows: list[dict[str, Any]] | None = None,
+    on_row_completed: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
+    if enforce_plan and planner_model_name is None:
+        raise ValueError("阶段 2 评测必须显式指定隔离 Planner 模型")
     concurrency = 4
     semaphore = asyncio.Semaphore(concurrency)
     pending: list[Any] = []
+    rows = list(existing_rows or [])
+    case_order = {str(case["id"]): index for index, case in enumerate(cases)}
+    model_order = {model_name: index for index, model_name in enumerate(model_names)}
+    expected_keys = {
+        (model_name, repetition, str(case["id"]))
+        for model_name in model_names
+        for repetition in range(1, repetitions + 1)
+        for case in cases
+    }
+    completed_keys: set[tuple[str, int, str]] = set()
+    for row in rows:
+        key = _evaluation_row_key(row)
+        if key not in expected_keys:
+            raise ValueError(f"恢复行不属于本次评测协议: {key}")
+        if key in completed_keys:
+            raise ValueError(f"恢复行重复: {key}")
+        completed_keys.add(key)
 
     async def bounded(
         case: dict[str, Any],
@@ -324,14 +455,26 @@ async def run_evaluation(
         model_name: str,
         repetition: int,
         gateway: ModelGateway,
-    ) -> dict[str, Any]:
+        planner_gateway: ModelGateway | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         async with semaphore:
-            return await _run_case(
-                case,
-                model_name=model_name,
-                repetition=repetition,
-                gateway=gateway,
-            )
+            try:
+                row = await _run_case(
+                    case,
+                    model_name=model_name,
+                    repetition=repetition,
+                    gateway=gateway,
+                    planner_gateway=planner_gateway,
+                    enforce_plan=enforce_plan,
+                )
+            except Exception as exc:
+                return None, {
+                    "case_id": str(case["id"]),
+                    "configured_model": model_name,
+                    "repetition": repetition,
+                    "error_type": type(exc).__name__,
+                }
+            return row, None
 
     for model_name in model_names:
         isolated = registry.isolated_route(
@@ -342,17 +485,58 @@ async def run_evaluation(
             max_retries=0,
         )
         model_gateway = ModelGateway(isolated)
+        planner_gateway = (
+            ModelGateway(
+                registry.isolated_route(
+                    Scenario.COMPLEX_REASONING,
+                    planner_model_name,
+                    temperature=0.0,
+                    timeout_seconds=30,
+                    max_retries=0,
+                )
+            )
+            if enforce_plan and planner_model_name is not None
+            else None
+        )
         for repetition in range(1, repetitions + 1):
             for case in cases:
+                key = (model_name, repetition, str(case["id"]))
+                if key in completed_keys:
+                    continue
                 pending.append(
                     bounded(
                         case,
                         model_name=model_name,
                         repetition=repetition,
                         gateway=model_gateway,
+                        planner_gateway=planner_gateway,
                     )
                 )
-    rows = list(await asyncio.gather(*pending))
+    failures: list[dict[str, Any]] = []
+    for completed in asyncio.as_completed(pending):
+        row, failure = await completed
+        if failure is not None:
+            failures.append(failure)
+            continue
+        if row is None:
+            raise RuntimeError("评测任务既没有结果也没有失败记录")
+        rows.append(row)
+        if on_row_completed is not None:
+            on_row_completed(list(rows))
+    rows.sort(
+        key=lambda row: (
+            model_order[str(row["configured_model"])],
+            int(row["repetition"]),
+            case_order[str(row["case_id"])],
+        )
+    )
+    failures.sort(
+        key=lambda failure: (
+            model_order[str(failure["configured_model"])],
+            int(failure["repetition"]),
+            case_order[str(failure["case_id"])],
+        )
+    )
     metrics = {
         model_name: _score_rows(
             [row for row in rows if row["configured_model"] == model_name]
@@ -361,14 +545,23 @@ async def run_evaluation(
     }
     return {
         "schema_version": 1,
-        "evaluation": "reactive_agent_observable_baseline",
-        "baseline_label": "v2.3-compatible loop with stage-1 deterministic verifier",
+        "evaluation": evaluation_name,
+        "baseline_label": evaluation_label,
+        "execution_mode": "stage2_structured_plan" if enforce_plan else "v23_baseline",
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "scenario_set_hash": hashlib.sha256(DEFAULT_CASES.read_bytes()).hexdigest(),
+        "scenario_set_hash": (
+            scenario_set_hash
+            if scenario_set_hash is not None
+            else hashlib.sha256(DEFAULT_CASES.read_bytes()).hexdigest()
+        ),
         "repetitions": repetitions,
         "concurrency": concurrency,
         "models": model_names,
+        "planner_model": planner_model_name,
         "case_count": len(cases),
+        "expected_runs": len(expected_keys),
+        "completed_runs": len(rows),
+        "execution_failures": failures,
         "metrics": metrics,
         "rows": rows,
         "privacy": {
@@ -380,12 +573,22 @@ async def run_evaluation(
     }
 
 
+def _evaluation_row_key(row: dict[str, Any]) -> tuple[str, int, str]:
+    return (
+        str(row.get("configured_model", "")),
+        int(row.get("repetition", 0)),
+        str(row.get("case_id", "")),
+    )
+
+
 async def _run_case(
     case: dict[str, Any],
     *,
     model_name: str,
     repetition: int,
     gateway: ModelGateway,
+    planner_gateway: ModelGateway | None = None,
+    enforce_plan: bool = False,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="chatbi-baseline-") as raw_workspace:
         workspace = Path(raw_workspace)
@@ -394,6 +597,11 @@ async def _run_case(
         conversation = store.create_conversation(project.id)
         _seed_context(store, conversation, case, workspace)
         observing = _ObservingGateway(gateway)
+        observing_planner = (
+            _ObservingGateway(planner_gateway)
+            if planner_gateway is not None
+            else None
+        )
         fixture_registry = _FixtureRegistry(
             str(case["id"]),
             workspace,
@@ -411,7 +619,8 @@ async def _run_case(
                 registry=cast(Any, fixture_registry),
                 locks=ConversationLockPool(),
                 config=AgentLoopConfig(max_tool_calls=12, tool_result_max_chars=4_000),
-                enforce_plan=False,
+                planner_gateway=observing_planner,
+                enforce_plan=enforce_plan,
             )
         ]
         events = [
@@ -423,10 +632,19 @@ async def _run_case(
             model_name=model_name,
             repetition=repetition,
             events=events,
-            responses=observing.responses,
+            responses=[
+                *(observing_planner.responses if observing_planner is not None else []),
+                *observing.responses,
+            ],
+            planner_responses=(
+                observing_planner.responses if observing_planner is not None else []
+            ),
             store=store,
             conversation=conversation,
             executed=fixture_registry.executed,
+            execution_mode=(
+                "stage2_structured_plan" if enforce_plan else "v23_baseline"
+            ),
         )
 
 
@@ -437,9 +655,11 @@ def _observable_row(
     repetition: int,
     events: list[tuple[str, dict[str, Any]]],
     responses: list[ModelResponse],
+    planner_responses: list[ModelResponse],
     store: SessionStore,
     conversation: Conversation,
     executed: list[tuple[str, dict[str, Any]]],
+    execution_mode: str,
 ) -> dict[str, Any]:
     done = next((payload for name, payload in reversed(events) if name == "done"), None)
     error = next((payload for name, payload in reversed(events) if name == "error"), None)
@@ -447,6 +667,9 @@ def _observable_row(
     run_id = str(meta.get("run_id", ""))
     task_store = TaskStore(store.db_path)
     run = task_store.get_run(run_id) if run_id else None
+    plan = task_store.get_active_plan(run_id) if run_id else None
+    plan_steps = task_store.list_plan_steps(run_id) if run_id else []
+    task_events = task_store.list_events(run_id, limit=1_000) if run_id else []
     claims = task_store.list_claims(run_id) if run_id else []
     evidence = task_store.list_evidence(run_id) if run_id else []
     artifacts = store.list_artifacts(conversation.id)
@@ -461,11 +684,19 @@ def _observable_row(
         for payload in tool_end
         if payload.get("status") == "ok"
     ]
-    capabilities = {
-        _CAPABILITY_BY_TOOL[name]
-        for name in successful_tools
-        if name in _CAPABILITY_BY_TOOL
-    }
+    capabilities = (
+        {
+            capability
+            for name in successful_tools
+            for capability in _CAPABILITIES_BY_TOOL.get(name, ())
+        }
+        if execution_mode == "stage2_structured_plan"
+        else {
+            _CAPABILITY_BY_TOOL[name]
+            for name in successful_tools
+            if name in _CAPABILITY_BY_TOOL
+        }
+    )
     final_text = "".join(
         str(payload.get("delta", ""))
         for name, payload in events
@@ -590,6 +821,33 @@ def _observable_row(
         "terminal_truthful": terminal_truthful,
         "forbidden_violations": forbidden_violations,
         "model_calls": len(responses),
+        "agent_model_calls": len(responses) - len(planner_responses),
+        "planner_model_calls": len(planner_responses),
+        "plan_version": run.plan_version if run is not None else 0,
+        "planner_route": next(
+            (
+                str(event.payload.get("planner_route"))
+                for event in task_events
+                if event.event_type == "run.started"
+                and event.payload.get("planner_route")
+            ),
+            None,
+        ),
+        "planned_capabilities": (
+            sorted(
+                str(step.get("capability"))
+                for step in cast(list[JsonObject], plan.plan.get("steps", []))
+            )
+            if plan is not None
+            else []
+        ),
+        "plan_steps_total": len(plan_steps),
+        "plan_steps_completed": sum(
+            step.status in {"completed", "skipped"} for step in plan_steps
+        ),
+        "plan_revisions": sum(
+            event.event_type == "plan.revised" for event in task_events
+        ),
         "prompt_tokens": sum(response.prompt_tokens for response in responses),
         "completion_tokens": sum(
             response.completion_tokens for response in responses
@@ -613,6 +871,10 @@ def _observable_row(
 def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     costs = [float(row["cost"]) for row in rows if row.get("cost") is not None]
+    cost_complete = all(
+        int(row.get("model_calls", 0)) == 0 or row.get("cost") is not None
+        for row in rows
+    )
     currencies = {
         str(row["cost_currency"])
         for row in rows
@@ -648,13 +910,32 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             len(cast(list[str], row["forbidden_violations"])) for row in rows
         ),
         "model_calls": sum(int(row["model_calls"]) for row in rows),
+        "agent_model_calls": sum(int(row.get("agent_model_calls", 0)) for row in rows),
+        "planner_model_calls": sum(
+            int(row.get("planner_model_calls", 0)) for row in rows
+        ),
+        "plan_completion_rate": _mean(
+            [
+                int(row.get("plan_steps_completed", 0))
+                == int(row.get("plan_steps_total", 0))
+                for row in rows
+                if int(row.get("plan_steps_total", 0)) > 0
+            ]
+        ),
+        "runs_replanned": sum(
+            int(row.get("plan_revisions", 0)) > 0 for row in rows
+        ),
         "prompt_tokens": sum(int(row["prompt_tokens"]) for row in rows),
         "completion_tokens": sum(int(row["completion_tokens"]) for row in rows),
         "latency_ms": round(sum(float(row["latency_ms"]) for row in rows), 3),
-        "cost": round(sum(costs), 9) if costs else None,
+        "cost": (
+            round(sum(costs), 9)
+            if cost_complete and (costs or rows)
+            else None
+        ),
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
         "cost_availability": (
-            "available" if costs and len(costs) == total else "unavailable"
+            "available" if rows and cost_complete else "unavailable"
         ),
     }
 

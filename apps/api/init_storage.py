@@ -1,0 +1,30 @@
+"""One-shot Compose storage initializer and SQLite migration gate."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from packages.common.config import get_settings
+from packages.session.store import SessionStore
+
+
+def main() -> None:
+    settings = get_settings()
+    for raw_path in (
+        settings.upload_dir,
+        settings.dataset_dir,
+        settings.report_dir,
+        settings.kb_index_dir,
+        settings.kb_backup_dir,
+    ):
+        Path(raw_path).mkdir(parents=True, exist_ok=True)
+    store = SessionStore(
+        settings.chat_db_path,
+        cache_size=settings.conversation_cache_size,
+    )
+    if store.schema_version <= 0:
+        raise RuntimeError("SQLite schema 初始化失败")
+
+
+if __name__ == "__main__":
+    main()

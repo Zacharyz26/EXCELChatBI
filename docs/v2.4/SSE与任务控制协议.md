@@ -1,6 +1,6 @@
 # v2.4 SSE 与任务控制协议
 
-> 状态：草案 · schema version：`2`  
+> 状态：阶段 2C 服务端协议已实现，前端干预控件留待 v2.5 阶段 4 · schema version：`"2.0"`
 > 目标：让任务过程可追踪、可恢复、可干预，同时保持 v2.3 前端兼容
 
 ## 1. 现状与边界
@@ -15,7 +15,7 @@ v2.4 保留 `/chat/stream`，在响应中增加 `run_id` 并并行发送 v2 生�
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": "2.0",
   "event_id": "01J...",
   "run_id": "run_...",
   "conversation_id": "conv_...",
@@ -247,7 +247,22 @@ POST /agent/runs/{run_id}/cancel
 POST /agent/runs/{run_id}/steps/{step_id}/retry/stream
 ```
 
-写接口要求 `Idempotency-Key` 和 `If-Match: <state_version>`。版本不匹配返回 `409`，已在终态的 run 返回 `409`，权限不足返回 `403`，不存在或不可见统一返回 `404`。
+写接口要求 `Idempotency-Key` 和 `If-Match: <state_version>`。版本或状态不匹配返回
+`409`；不存在和无项目权限统一返回 `404`，避免资源枚举。
+
+阶段 2C 的恢复语义：
+
+- `/chat/stream` 的后台 producer 由 API 进程持有，SSE 客户端只是订阅者；客户端断开
+  不再关闭 producer；
+- `pause` 只在没有 running ToolInvocation 的安全边界提交，并在同一事务写入 Checkpoint；
+- `resume/stream` 校验 Checkpoint 的计划版本、事件游标、已完成步骤集合及 unknown
+  invocation；执行宿主丢失时重建 Contract、活动计划与预算，只调度未完成步骤；
+- 等待澄清会写入 Checkpoint；回答经 question/token/schema/项目写权限校验后可以跨进程
+  修订计划并继续同一 run；
+- `steps/{step_id}/retry/stream` 创建不可变计划新版本，只重置指定失败步骤，不改写已完成
+  步骤、Invocation、Evidence 或 Artifact；
+- 进程关闭或启动恢复时，无活动调用的 running run 进入 `paused`；存在活动调用时结果标为
+  `unknown` 并 fail-closed，绝不猜测工具是否成功。
 
 ## 7. 安全与数据最小化
 

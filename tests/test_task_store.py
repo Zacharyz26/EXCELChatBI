@@ -13,6 +13,8 @@ from packages.session.models import ArtifactDraft
 from packages.session.store import _SCHEMA_V1, SessionStore
 from packages.session.task_models import ClaimDraft, InvocationStatus, ObservationSource
 from packages.session.task_store import (
+    ControlConflict,
+    IdempotencyConflict,
     StateVersionConflict,
     TaskStore,
     invocation_idempotency_key,
@@ -1149,3 +1151,460 @@ def test_startup_recovery_preserves_waiting_user_runs(tmp_path: Path) -> None:
     assert tasks.recover_stale_runs(stale_after_seconds=0) == []
     saved = tasks.get_run(run.run_id)
     assert saved is not None and saved.status == "waiting_user"
+
+
+def test_startup_recovery_pauses_idle_running_run_with_checkpoint(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="idle-recovery-run",
+        user_text="继续分析",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "等待执行",
+        "steps": [
+            {
+                "step_id": "search",
+                "purpose": "检索资料",
+                "capability": "knowledge.search",
+                "dependencies": [],
+                "expected_evidence": ["检索结果"],
+                "completion_conditions": ["检索成功"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+
+    recovered = tasks.recover_stale_runs(stale_after_seconds=0)
+
+    assert len(recovered) == 1
+    paused, event = recovered[0]
+    assert paused.status == "paused"
+    assert event.event_type == "run.paused"
+    assert event.payload["reason"] == "process_recovery"
+    checkpoint = tasks.get_latest_checkpoint(run.run_id)
+    assert checkpoint is not None
+    assert checkpoint.reason == "process_recovery"
+    assert checkpoint.state["plan_version"] == 1
+    assert checkpoint.state["completed_step_ids"] == []
+
+
+def test_control_transition_is_idempotent_and_version_guarded(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="controlled-run",
+        user_text="比较趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+
+    paused, first_event, created = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="pause-request-1",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "user_requested"},
+        require_idle=True,
+        checkpoint_reason="user_pause",
+    )
+    replayed, replay_event, replay_created = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="pause-request-1",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "user_requested"},
+        require_idle=True,
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert paused.status == "paused"
+    assert replayed == paused
+    assert replay_event == first_event
+    assert len(
+        [
+            event
+            for event in tasks.list_events(run.run_id)
+            if event.event_type == "run.paused"
+        ]
+    ) == 1
+    with pytest.raises(IdempotencyConflict):
+        tasks.control_transition(
+            run.run_id,
+            expected_version=paused.state_version,
+            idempotency_key="pause-request-1",
+            command="cancel",
+            allowed_statuses={"paused"},
+            status="cancelled",
+            event_type="run.cancelled",
+            payload={"reason": "user_requested"},
+        )
+    checkpoint = tasks.get_latest_checkpoint(run.run_id)
+    assert checkpoint is not None
+    assert checkpoint.reason == "user_pause"
+    assert checkpoint.state["completed_step_ids"] == []
+    resumed, resume_event, resume_created = tasks.control_transition(
+        run.run_id,
+        expected_version=paused.state_version,
+        idempotency_key="resume-request-1",
+        command="resume",
+        allowed_statuses={"paused"},
+        status="running",
+        event_type="run.resumed",
+        payload={"reason": "user_requested"},
+        require_checkpoint=True,
+    )
+    assert resume_created is True
+    assert resumed.status == "running"
+    assert resume_event.payload["checkpoint"]["checkpoint_id"] == (
+        checkpoint.checkpoint_id
+    )
+    with pytest.raises(StateVersionConflict):
+        tasks.control_transition(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="cancel-request-stale",
+            command="cancel",
+            allowed_statuses={"paused"},
+            status="cancelled",
+            event_type="run.cancelled",
+            payload={"reason": "user_requested"},
+        )
+
+
+def test_pause_rejects_active_invocation_and_cancel_marks_it_unknown(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="active-tool-run",
+        user_text="检索资料",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "检索",
+        "steps": [
+            {
+                "step_id": "search",
+                "purpose": "检索资料",
+                "capability": "knowledge.search",
+                "dependencies": [],
+                "expected_evidence": ["检索结果"],
+                "completion_conditions": ["检索成功"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="search-call",
+        tool_name="kb_search",
+        arguments={"query": "测试"},
+        idempotency_key="active-tool",
+        policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
+    )
+
+    with pytest.raises(ControlConflict, match="安全边界"):
+        tasks.control_transition(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="pause-active-tool",
+            command="pause",
+            allowed_statuses={"running"},
+            status="paused",
+            event_type="run.paused",
+            payload={"reason": "user_requested"},
+            require_idle=True,
+        )
+
+    cancelled, event, created = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="cancel-active-tool",
+        command="cancel",
+        allowed_statuses={"running"},
+        status="cancelled",
+        event_type="run.cancelled",
+        payload={"reason": "user_requested"},
+        terminal_reason="user_cancelled",
+    )
+    assert created is True
+    assert cancelled.status == "cancelled"
+    assert event.payload["unknown_invocations"] == 1
+    saved_invocation = tasks.list_invocations(run.run_id)[0]
+    assert saved_invocation.invocation_id == invocation.invocation_id
+    assert saved_invocation.status == "unknown"
+    assert tasks.list_plan_steps(run.run_id)[0].status == "blocked"
+
+
+def test_clarification_answer_validates_token_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="clarification-run",
+        user_text="比较趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="waiting_user",
+        event_type="waiting_user",
+        payload={
+            "question_id": "q_metric",
+            "question": "请选择指标",
+            "resume_token": "resume-token-for-test",
+        },
+        checkpoint_reason="waiting_user",
+    )
+
+    with pytest.raises(ControlConflict, match="resume_token"):
+        tasks.answer_clarification(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="answer-invalid-token",
+            question_id="q_metric",
+            resume_token="wrong-token-for-test",
+            answer="销售额",
+        )
+
+    planning, first_event, created = tasks.answer_clarification(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="answer-request-1",
+        question_id="q_metric",
+        resume_token="resume-token-for-test",
+        answer="销售额",
+    )
+    replayed, replay_event, replay_created = tasks.answer_clarification(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="answer-request-1",
+        question_id="q_metric",
+        resume_token="resume-token-for-test",
+        answer="销售额",
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert planning.status == "planning"
+    assert replayed == planning
+    assert replay_event == first_event
+    answers = [
+        message
+        for message in session.list_messages(conversation_id)
+        if message.content.startswith("澄清回答")
+    ]
+    assert len(answers) == 1
+    snapshot = tasks.get_snapshot(run.run_id)
+    assert snapshot is not None
+    assert snapshot["clarification_answers"] == {"q_metric": "销售额"}
+
+
+def test_user_step_retry_creates_one_immutable_plan_revision(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="step-retry-run",
+        user_text="检索资料",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 3},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "检索后总结",
+        "steps": [
+            {
+                "step_id": "search",
+                "purpose": "检索资料",
+                "capability": "knowledge.search",
+                "dependencies": [],
+                "expected_evidence": ["检索结果"],
+                "completion_conditions": ["检索成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "summarize",
+                "purpose": "总结结果",
+                "capability": "data.profile",
+                "dependencies": ["search"],
+                "expected_evidence": ["总结"],
+                "completion_conditions": ["总结成功"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, original_plan, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="search-call",
+        tool_name="kb_search",
+        arguments={"query": "测试"},
+        idempotency_key="failed-search-call",
+        policy_decision={"allowed": True},
+        step_id=steps[0].step_id,
+    )
+    run, _, failure_event = tasks.commit_tool_failure(
+        invocation.invocation_id,
+        status="failed",
+        expected_version=run.state_version,
+        error_code="tool_execution_failed",
+        error_text="temporary failure",
+        source="tool",
+        retryable=True,
+    )
+    assert failure_event is not None
+    run, _, _ = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="pause-after-failure",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "user_requested"},
+        require_idle=True,
+    )
+
+    retried, revised_plan, revised_steps, event, created = tasks.retry_step(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="retry-search-step",
+        step_id="search",
+    )
+    replayed, replay_plan, replay_steps, replay_event, replay_created = (
+        tasks.retry_step(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="retry-search-step",
+            step_id="search",
+        )
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert retried.status == "running"
+    assert revised_plan.version == 2
+    assert replayed == retried
+    assert replay_plan == revised_plan
+    assert replay_steps == revised_steps
+    assert replay_event == event
+    assert [step.status for step in revised_steps] == ["pending", "pending"]
+    assert tasks.list_plans(run.run_id) == [original_plan, revised_plan]
+    original_steps = tasks.list_plan_steps(run.run_id, plan_version=1)
+    assert [step.status for step in original_steps] == ["failed", "pending"]
+    assert event.payload["retry_step_id"] == "search"
