@@ -5,13 +5,6 @@ import { expect, test } from "@playwright/test";
 const E2E_TOKEN = "chatbi-local-e2e-token-00000001";
 
 test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", async ({ page }) => {
-  let streamBody: Promise<string> | undefined;
-  page.on("response", (response) => {
-    if (response.url().includes("/api/chat/stream")) {
-      streamBody = response.text();
-    }
-  });
-
   await page.goto("/");
   await page.getByLabel("访问令牌").fill(E2E_TOKEN);
   await page.getByRole("button", { name: "进入工作区" }).click();
@@ -26,24 +19,37 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await page.getByLabel("消息内容").fill(
     "请把本次对话已完成的数据画像组装成一份报告，附要点解读，并导出 PDF。",
   );
+  const streamResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/api/chat/stream")
+      && response.request().method() === "POST",
+  );
   await page.getByRole("button", { name: "发送消息" }).click();
+  const streamResponse = await streamResponsePromise;
+  expect(streamResponse.ok()).toBeTruthy();
+  const runId = await streamResponse.headerValue("x-chatbi-run-id");
+  expect(runId).toBeTruthy();
   await expect(page.getByText("报告和 PDF 已基于本对话的已验证数据画像生成。")).toBeVisible({
     timeout: 120_000,
   });
   await expect(page.getByText("分析报告")).toBeVisible();
   await expect(page.getByText("已生成", { exact: true })).toBeVisible();
 
+  const pdfResponsePromise = page.waitForResponse((response) => {
+    const pathname = new URL(response.url()).pathname;
+    return response.request().method() === "GET"
+      && pathname.startsWith("/api/")
+      && pathname.endsWith(".pdf");
+  });
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载 PDF" }).click();
   const pdf = await download;
+  const pdfResponse = await pdfResponsePromise;
+  expect(pdfResponse.ok()).toBeTruthy();
   expect(pdf.suggestedFilename()).toMatch(/\.pdf$/);
   expect(await pdf.failure()).toBeNull();
 
-  expect(streamBody).toBeDefined();
-  const body = await streamBody!;
-  const runId = body.match(/"run_id":"([^"]+)"/)?.[1];
-  const reportPdfUrl = body.match(/"pdf_url":"([^"]+\.pdf)"/)?.[1];
-  expect(runId).toBeTruthy();
+  const pdfPath = new URL(pdfResponse.url()).pathname;
+  const reportPdfUrl = pdfPath.slice("/api".length);
   expect(reportPdfUrl).toBeTruthy();
   const eventsResponse = await page.request.get(
     `/api/agent/runs/${encodeURIComponent(runId!)}/events`,

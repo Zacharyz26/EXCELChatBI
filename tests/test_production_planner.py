@@ -98,6 +98,13 @@ def _artifact_registry() -> AgentToolRegistry:
     return AgentToolRegistry(
         [
             AgentToolSpec(
+                name="get_data_profile",
+                description="读取画像",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(capabilities=("data.profile",)),
+            ),
+            AgentToolSpec(
                 name="trend_analysis",
                 description="趋势",
                 parameters={"type": "object"},
@@ -204,6 +211,76 @@ async def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
 
     assert [step["capability"] for step in result.plan["steps"]] == [
         "report.generate"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_report_follow_up_reuses_completed_profile_artifact() -> None:
+    artifacts = [
+        _artifact(
+            "profile-1",
+            "profile",
+            analysis_id="analysis-profile",
+            dataset_ref=_dataset().ref,
+        )
+    ]
+    contract = build_minimal_contract(
+        run_id="profile-report-follow-up",
+        user_text=(
+            "请把本次对话已完成的数据画像组装成一份报告，"
+            "附要点解读，并导出 PDF。"
+        ),
+        chart_required=False,
+        report_required=True,
+        pdf_required=True,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=artifacts,
+        registry=_artifact_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert [step["capability"] for step in result.plan["steps"]] == [
+        "report.generate"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_report_follow_up_recomputes_profile_when_explicitly_requested() -> None:
+    artifacts = [
+        _artifact(
+            "profile-1",
+            "profile",
+            analysis_id="analysis-profile",
+            dataset_ref=_dataset().ref,
+        )
+    ]
+    contract = build_minimal_contract(
+        run_id="profile-report-recompute",
+        user_text="基于已完成的数据画像重新分析，并生成 PDF 报告。",
+        chart_required=False,
+        report_required=True,
+        pdf_required=True,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=artifacts,
+        registry=_artifact_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert [step["capability"] for step in result.plan["steps"]] == [
+        "data.profile",
+        "report.generate",
     ]
 
 

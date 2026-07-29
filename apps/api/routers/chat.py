@@ -112,4 +112,8 @@ async def chat_stream(
             control=control,
         ),
     )
-    return EventSourceResponse(subscription, ping=15)
+    return EventSourceResponse(
+        subscription,
+        ping=15,
+        headers={"X-ChatBI-Run-ID": run_id},
+    )

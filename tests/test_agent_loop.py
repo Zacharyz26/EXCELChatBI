@@ -2232,6 +2232,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     ], events
     meta = events[0][1]
     done = events[-1][1]
+    assert response.headers["x-chatbi-run-id"] == meta["run_id"]
     assert meta["conversation_id"] == chat_harness.conversation.id
     assert meta["message_id"] == done["message_id"]
     assert meta["run_id"] == done["run_id"]

@@ -7,7 +7,10 @@
 
 当前 `/chat/stream` 发送 `meta`、`understanding`、`plan`、`tool_start`、`tool_end`、`artifact`、`text.delta`、`error` 和 `done`。其中 `plan` 只是当前模型轮次的工具调用列表，事件没有 run ID、持久序号或恢复游标。
 
-v2.4 保留 `/chat/stream`，在响应中增加 `run_id` 并并行发送 v2 生命周期事件。浏览器与 API 的 SSE 是产品协议，不等同于 MCP Streamable HTTP 中可选的 SSE 响应流。
+v2.4 保留 `/chat/stream`，在 `meta`/`done` 事件和 `X-ChatBI-Run-ID` 响应头中返回同一个
+`run_id`，并并行发送 v2 生命周期事件。响应头供日志、浏览器门禁和请求关联使用，不替代
+SSE 帧消费；客户端不得为了取得 `run_id` 对仍在传输的响应调用 `response.text()`。
+浏览器与 API 的 SSE 是产品协议，不等同于 MCP Streamable HTTP 中可选的 SSE 响应流。
 
 ## 2. v2 事件 envelope
 

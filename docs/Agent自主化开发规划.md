@@ -1,13 +1,14 @@
 # ChatBI Agent 自主化开发规划
 
-> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-07-28
+> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-07-29
 > 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 匿名盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
 > 依赖图 Executor 与 Observation 驱动 Replanner；阶段 2C 已落地任务控制与
 > Checkpoint 恢复；阶段 2D 已把 Executor 切换到受治理 MCP Client Gateway；
-> 阶段 2E 已落地五服务 Compose 与真实容器 E2E 门禁，等待 Docker runner 关闭验收；
+> 阶段 2E 已落地五服务 Compose 与真实容器 E2E 门禁；首轮 CI 暴露的镜像 smoke 和
+> SSE 测试 harness 问题已修复，等待 Docker runner 重跑关闭验收；
 > 阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（成功 70.0%、终态如实 73.3%、
 > 越界 0）；G7 仍待人工盲评/签字。
 
@@ -204,7 +205,7 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 > 2B（依赖图调度、Observation 重规划）、2C（任务控制、后台生命周期、
 > Checkpoint 恢复）、2D（MCP Gateway 规范执行）和 2E（五服务 Compose 与容器浏览器
 > 门禁）已实现；阶段 2 真实行为对照已于 2026-07-28 通过自动门禁；2E 的 Docker
-> runner 和 G7 人工签字全部通过后
+> runner 首轮问题已修复但仍待重跑；Docker runner 和 G7 人工签字全部通过后
 > 关闭 v2.4 工程验收。
 
 1. 将编排层拆为 Goal Interpreter、Planner、Executor、Verifier、Replanner、Finalizer。

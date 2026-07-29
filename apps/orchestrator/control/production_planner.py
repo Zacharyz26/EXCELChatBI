@@ -48,6 +48,7 @@ _SAFE_ARTIFACT_PARAM_KEYS = {
 _ARTIFACT_REUSE_TOKENS = (
     "刚才",
     "已有",
+    "已完成",
     "上次",
     "这些",
     "上述",
@@ -409,6 +410,8 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
     recomputes_analysis = any(token in request for token in _RECOMPUTE_TOKENS)
 
     if reuses_artifacts and not recomputes_analysis:
+        if "profile" in artifact_types:
+            result = [item for item in result if item != "data.profile"]
         if "stats" in artifact_types:
             result = [item for item in result if item != "stats.trend"]
         if "table" in artifact_types:
