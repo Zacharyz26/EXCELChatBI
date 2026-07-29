@@ -31,8 +31,13 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await expect(page.getByText("报告和 PDF 已基于本对话的已验证数据画像生成。")).toBeVisible({
     timeout: 120_000,
   });
-  await expect(page.getByText("分析报告")).toBeVisible();
-  await expect(page.getByText("已生成", { exact: true })).toBeVisible();
+  const reportArtifact = page.locator(".report-artifact");
+  await expect(
+    reportArtifact.getByText("分析报告", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    reportArtifact.getByText("已生成", { exact: true }),
+  ).toBeVisible();
 
   const pdfResponsePromise = page.waitForResponse((response) => {
     const pathname = new URL(response.url()).pathname;
