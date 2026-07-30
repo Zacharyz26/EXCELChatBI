@@ -100,6 +100,7 @@ class MemoryPolicy:
         subject_user_id: str,
         conversation_id: str | None,
         run_id: str | None,
+        compaction_id: str | None,
         as_of: str,
     ) -> str:
         """计算选择条件 hash，避免把完整记忆正文写入审计元数据。"""
@@ -112,6 +113,9 @@ class MemoryPolicy:
             "run_id": run_id,
             "as_of": as_of,
         }
+        # 保持未绑定压缩版本的 v1 快照 hash 与阶段 3A 完全兼容。
+        if compaction_id is not None:
+            payload["compaction_id"] = compaction_id
         encoded = json.dumps(
             payload,
             ensure_ascii=False,

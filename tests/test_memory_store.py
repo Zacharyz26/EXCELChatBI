@@ -19,7 +19,7 @@ from packages.session.memory_store import (
     MemoryStore,
     MemoryVersionConflict,
 )
-from packages.session.migrations import v4
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
 from packages.session.task_store import TaskStore
@@ -568,11 +568,21 @@ def test_memory_policy_rejects_secrets_host_paths_and_invalid_source_hash(
         )
 
 
-def test_v3_database_is_backed_up_and_migrated_to_v4(tmp_path: Path) -> None:
+def test_v3_database_is_backed_up_and_migrated_through_v5(tmp_path: Path) -> None:
     db_path = tmp_path / "v3.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute('DROP TABLE "conversation_compaction_items"')
+        connection.execute('DROP INDEX "idx_memory_snapshots_compaction"')
+        connection.execute("ALTER TABLE memory_snapshots DROP COLUMN compaction_id")
+        connection.execute('DROP TABLE "conversation_compactions"')
+        for index in v5.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v5.VERSION,),
+        )
         for table in v4.ADDED_TABLES:
             connection.execute(f'DROP TABLE "{table}"')
         for index in v4.ADDED_INDEXES_ON_LEGACY_TABLES:
@@ -585,7 +595,7 @@ def test_v3_database_is_backed_up_and_migrated_to_v4(tmp_path: Path) -> None:
 
     store = SessionStore(str(db_path))
 
-    assert store.schema_version == 4
+    assert store.schema_version == CURRENT_SCHEMA_VERSION
     backups = list(tmp_path.glob("v3.db.v3-backup.*.sqlite3"))
     assert len(backups) == 1
     with sqlite3.connect(db_path) as connection:
@@ -607,6 +617,7 @@ def test_v3_database_is_backed_up_and_migrated_to_v4(tmp_path: Path) -> None:
     assert migration[2] == str(backups[0])
     assert migration[3] == hashlib.sha256(backups[0].read_bytes()).hexdigest()
     assert set(v4.ADDED_TABLES).issubset(tables)
+    assert set(v5.ADDED_TABLES).issubset(tables)
 
 
 def test_project_delete_cascades_memory_control_plane(tmp_path: Path) -> None:

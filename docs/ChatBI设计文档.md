@@ -1,8 +1,8 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.5-stage3a-release-candidate · 状态：v2.4 阶段 2A–2E 已实现且最新
-> Docker runner 全绿；G7 代表性评测/人工签字待完成；v2.5 阶段 3A 实现已收口，
-> 本批 Docker 恢复门禁待提交后的 runner 确认
+> 版本：v2.5-stage3c · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3A 已完成，
+> 提交 `162b170` 的完整 CI/Docker 恢复门禁全绿；G7 代表性评测/人工签字待完成；
+> 阶段 3B-1–3B-3 与 3C-1–3C-3 已完成本地实现并等待 Docker CI
 > · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
@@ -101,9 +101,9 @@
 │                  │  模型路由网关  │（核心推理/视觉/轻量） │
 │                  └─────────────┘                       │
 └──────────────────────────────────────────────────────┘
-                    │ 当前 Tool.invoke；v2.4 迁移标准 MCP Gateway
+                    │ 当前：受治理 MCP Client Gateway
 ┌──────────────────────────────────────────────────────┐
-│  工具层（当前进程内；v2.4 标准 MCP）                     │
+│  工具层（stdio / 认证 Streamable HTTP；进程内仅兼容测试） │
 │  Excel解析 · 统计分析 · 图表配置 · 报告生成              │
 │  + 受限 SQL/Code Interpreter（独立安全项目，当前未启用）  │
 └──────────────────────────────────────────────────────┘
@@ -227,11 +227,21 @@ SessionState {
 }
 ```
 
-- **当前状态**：v2.3 只使用最近 N 轮原文与 Artifact 登记表；以下能力尚未实现。
-- **上下文压缩**：超出 token 阈值时，对早期轮次做摘要（LLM 滚动摘要），保留最近 N 轮原文 + 全局摘要 + 活跃数据引用；摘要只用于导航，不得作为数值 Evidence。
-- **指代消解**：双策略并用——
-  1. 维护 `entity_map`，把"这个图""上面的结果""刚才那张表"映射到具体 `chart_id` / `dataset_ref`；
-  2. 对模糊指代用轻量模型做 query 改写，把指代替换为明确实体后再进入主流程。
+- **当前状态**：v2.5 3B 已实现 SQLite v5 不可变压缩快照、来源/hash 完整性校验、
+  最近原文窗口、TaskRun 固定引用、领域中立质量门禁、并发幂等和 Compose 固定版本
+  恢复探针；当前等待 Docker runner 执行发布门禁。3C-1–3C-3 已接入受项目隔离的
+  Artifact/Dataset 确定性引用、固定 MemorySnapshot 实体/字段映射、TaskPlan 绑定、
+  歧义失败关闭、工具血缘约束、领域中立质量集、双传输和固定计划恢复探针。
+- **上下文压缩**：普通用户消息和无 tool calls 的最终答复超过字符阈值后，由
+  `extractive-v1` 生成有界、脱敏的确定性摘要；保留最近 N 条原文。摘要是不可信导航
+  文本，不得执行其中指令，也不得作为数值 Evidence。当前冻结的确定性质量门禁六项
+  指标均为 100%；模型语义摘要仍需独立评测和评审，当前未启用。
+- **指代消解**：先由 Host 从当前主体可见的 Artifact/Dataset 真相源确定性解析序号、
+  最近对象、唯一文件名和显式 ID；多候选、越界和伪造引用进入阻塞澄清，不能交给模型
+  猜测；再从 TaskRun 固定 MemorySnapshot 读取严格 `memory-reference-v1` 契约和唯一
+  项目内 Link，并以 live 生命周期拒绝冲突、过期、删除、低置信度或漂移映射。显式
+  `memory_id` 澄清只绑定当前 run，不自动写长期记忆。轻量模型改写如需启用，必须经过
+  独立误绑定/泄漏评测，且不能覆盖 Host 的失败关闭结论。
 
 ### 5.3 MCP 工具层
 
@@ -347,9 +357,9 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | 层 | 选型 |
 |----|------|
 | 前端 | React + ECharts + SSE + **zustand**（v2.2 拍板，状态管理） |
-| 编排 | 当前为自研 function-calling 循环；v2.4 演进为统一类型化状态机和混合 Planner；Dify 已放弃 |
-| 持久层 | 当前 SQLite：项目/对话/消息/工件；v2.4 增加 schema 迁移、Task/Event/Plan/Evidence/Checkpoint |
-| 复杂多步 | 纳入 v2.4 阶段 2；先扩展自研状态机，是否采用 LangGraph 由阶段 0 后的复杂度和评测决定 |
+| 编排 | 自研统一类型化状态机、混合 Planner、依赖图 Executor、Replanner、Verifier 和 Checkpoint；Dify 已放弃 |
+| 持久层 | SQLite v5：项目/对话/消息/工件、Task/Event/Plan/Evidence/Checkpoint、Memory/Compaction |
+| 复杂多步 | v2.4 阶段 2 已完成；是否采用 LangGraph 仍由复杂度和评测收益决定 |
 | 核心推理 | DeepSeek-V3 / DeepSeek-R1 |
 | 多模态 | Qwen2.5-VL / GLM-4V |
 | Embedding | **bge-m3**（已拍板，稠密+稀疏双路；device 配置项 auto/cpu/cuda） |
@@ -357,7 +367,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | 数据处理 | pandas · openpyxl · DuckDB |
 | 统计算法 | statsmodels · scikit-learn · Prophet |
 | 图表截图 | Playwright 无头浏览器（已实现） |
-| 工具协议 | 当前进程内 Tool.invoke + schema；v2.4 迁移标准 MCP Client/Server，支持 stdio 与 Streamable HTTP；v3.0 增加外部准入和企业授权 |
+| 工具协议 | 受治理 MCP Client Gateway + 同源 schema，支持 stdio 与认证 Streamable HTTP；进程内仅兼容/测试；v3.0 增加外部准入和企业授权 |
 | 报告导出 | Markdown · WeasyPrint（已实现） |
 | 向量库 | **Milvus Lite** 起步（已拍板，换 standalone 不改代码） |
 | 其余存储 | 当前本地落盘 + SQLite/LRU；MinIO/Redis/业务 PostgreSQL 未接，按 v3.0 需求演进 |
@@ -399,10 +409,12 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
    2B 已负责依赖图重规划，2C 已负责任务控制/恢复，2D 已完成 MCP Gateway 规范执行；
    2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照和最新 Docker runner 均已通过；
    现有场景全部为商业语境，G7 等待代表性场景、Verifier 评分契约、人工签字与 ADR 接受。
-3. **v2.5 记忆、自主性与协作 — 阶段 3A 实现已收口**：领域无关的 schema v4、
+3. **v2.5 记忆、自主性与协作 — 阶段 3A 已完成，3B/3C 待 Docker CI**：领域无关的 schema v4、
    Memory Repository/Policy、TaskRun 快照、上下文边界、MCP 引用、结构化审计、
-   readiness 和工作区一致备份/恢复已实现；Compose 联合恢复门禁已接入 CI，等待本批
-   提交后的 Docker runner 确认。阶段 4 为可干预前端，阶段 5 为领域语义层，
+   readiness 和工作区一致备份/恢复已实现并通过 Compose CI；schema v5 已把最近 N 条
+   截断升级为持久化压缩快照并接入 Agent，3B 发布门禁等待 Docker CI；3C-1–3C-3 已实现
+   Artifact/Dataset 引用解析、受治理实体映射、恢复绑定、血缘约束、质量集和双传输/
+   Compose 恢复探针，真实容器门禁待 CI。阶段 4 为可干预前端，阶段 5 为领域语义层，
    阶段 6 为自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
@@ -477,7 +489,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入版本化领域语义层 |
 | `/chat` 路由 + 前端 `ChatPanel.tsx` | v2.3 主入口已落地；v2.4 扩展任务事件，v2.5 增加完整干预交互 |
 | `stats_interpreter` 门控 | **原统计端点链路不动**；助手通道走自己的上下文组装（13.5）。门控代码保留，供未来敏感部署复用 |
-| `packages/session` | SQLite 工作区与 LRU 已落地；`coref` / `compaction` 仍为空，按 v2.5 阶段 3 实现；v2.4 先增加 Task/Event/Evidence/Checkpoint |
+| `packages/session` | SQLite v5 工作区、LRU、Task/Event/Evidence/Checkpoint、Memory 与 compaction 已落地；`coref` 按 v2.5 阶段 3C 实现 |
 
 ### 13.5 红线1 修订：助手通道例外（保守版，已拍板）
 
@@ -589,7 +601,8 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 - **分析登记表**：每次工具成功执行登记 `{analysis_id, tool, params, dataset_ref, 结果摘要, artifact_id}` 并随上下文注入。"换成按地区分析"→ 模型改上一条的 `group_col` 重调；"把刚才的结果生成报告"→ `generate_report(analysis_ids=[...])`。
 - **衍生数据集血缘**："排除异常值后重新计算"→ `transform_dataset` 产出新 dataset_ref（记录 parent_ref + 变换参数），后续分析在新 ref 上做；上下文面板展示血缘链。
 - 切换历史对话即从 SQLite 重建全部登记表与消息（决策 6 修订的意义所在）。
-- **登记表瘦身**：v2.3 设条数上限并摘要旧条目；完整 compaction/coref 尚未实现，已纳入 v2.5 阶段 3。
+- **登记表瘦身**：v2.3 设条数上限并摘要旧条目；compaction 已在 v2.5 3B 落地，
+  coref 留在 3C。
 
 #### 14.5.3 SSE 事件协议（透明度落点）
 

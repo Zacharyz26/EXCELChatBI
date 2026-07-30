@@ -88,11 +88,7 @@ class MemoryStore:
             )
             raise
         self._audit_allowed(
-            action=(
-                "memory.conflict"
-                if result.outcome == "conflict"
-                else "memory.remember"
-            ),
+            action=("memory.conflict" if result.outcome == "conflict" else "memory.remember"),
             project_id=project_id,
             principal=principal,
             detail={
@@ -616,6 +612,51 @@ class MemoryStore:
                 include_conflicts=include_conflicts,
             )
 
+    def list_records_for_governance(
+        self,
+        *,
+        project_id: str,
+        principal: Principal,
+        conversation_id: str | None = None,
+    ) -> list[MemoryRecord]:
+        """列出主体可见的全部生命周期版本，供治理决策识别冲突和失效记录。
+
+        该接口不用于模型上下文或 MemorySnapshot 选择；调用方必须继续以固定快照
+        决定可执行记录，并只把这里的状态用于失败关闭。
+        """
+        with self._connection() as connection:
+            self._require_project_role(
+                connection,
+                project_id=project_id,
+                principal=principal,
+                write=False,
+            )
+            if conversation_id is not None:
+                self._require_conversation_project(
+                    connection,
+                    conversation_id=conversation_id,
+                    project_id=project_id,
+                )
+            rows = connection.execute(
+                """
+                SELECT * FROM memory_records
+                WHERE tenant_id = ? AND project_id = ?
+                  AND (
+                        scope = 'project'
+                        OR (scope = 'subject' AND subject_user_id = ?)
+                        OR (scope = 'conversation' AND conversation_id = ?)
+                  )
+                ORDER BY semantic_key, version, created_at, memory_id
+                """,
+                (
+                    principal.tenant_scope,
+                    project_id,
+                    principal.user_id,
+                    conversation_id,
+                ),
+            ).fetchall()
+        return [_memory_from_row(row) for row in rows]
+
     def create_snapshot(
         self,
         *,
@@ -623,6 +664,7 @@ class MemoryStore:
         principal: Principal,
         conversation_id: str | None = None,
         run_id: str | None = None,
+        compaction_id: str | None = None,
         as_of: str | None = None,
     ) -> tuple[MemorySnapshot, tuple[MemoryRecord, ...]]:
         """冻结记忆选择并记录 snapshot 审计。"""
@@ -632,6 +674,7 @@ class MemoryStore:
                 principal=principal,
                 conversation_id=conversation_id,
                 run_id=run_id,
+                compaction_id=compaction_id,
                 as_of=as_of,
             )
         except Exception as exc:
@@ -653,6 +696,7 @@ class MemoryStore:
                 "content_hash": snapshot.content_hash,
                 "record_count": snapshot.record_count,
                 "policy_version": snapshot.policy_version,
+                "compaction_id": snapshot.compaction_id,
             },
         )
         return result
@@ -664,6 +708,7 @@ class MemoryStore:
         principal: Principal,
         conversation_id: str | None = None,
         run_id: str | None = None,
+        compaction_id: str | None = None,
         as_of: str | None = None,
     ) -> tuple[MemorySnapshot, tuple[MemoryRecord, ...]]:
         """冻结一次记忆选择；同一 run 始终重放首次快照。"""
@@ -711,12 +756,17 @@ class MemoryStore:
                 if str(run_row["project_id"]) != project_id:
                     raise MemoryAccessDenied("TaskRun 不属于指定项目")
                 run_conversation_id = str(run_row["conversation_id"])
-                if (
-                    conversation_id is not None
-                    and run_conversation_id != conversation_id
-                ):
+                if conversation_id is not None and run_conversation_id != conversation_id:
                     raise ValueError("TaskRun 与记忆快照对话不一致")
                 conversation_id = run_conversation_id
+
+            compaction_hash = self._validate_compaction(
+                connection,
+                compaction_id=compaction_id,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                tenant_id=principal.tenant_scope,
+            )
 
             records = self._list_records(
                 connection,
@@ -732,9 +782,14 @@ class MemoryStore:
                 subject_user_id=principal.user_id,
                 conversation_id=conversation_id,
                 run_id=run_id,
+                compaction_id=compaction_id,
                 as_of=selected_at,
             )
-            content_hash = _content_hash(records)
+            content_hash = _content_hash(
+                records,
+                compaction_id=compaction_id,
+                compaction_hash=compaction_hash,
+            )
             snapshot = MemorySnapshot(
                 memory_snapshot_id=uuid.uuid4().hex,
                 tenant_id=principal.tenant_scope,
@@ -742,6 +797,7 @@ class MemoryStore:
                 subject_user_id=principal.user_id,
                 conversation_id=conversation_id,
                 run_id=run_id,
+                compaction_id=compaction_id,
                 policy_version=self._policy.version,
                 selection_hash=selection_hash,
                 content_hash=content_hash,
@@ -752,9 +808,9 @@ class MemoryStore:
                 """
                 INSERT INTO memory_snapshots(
                     memory_snapshot_id, tenant_id, project_id, subject_user_id,
-                    conversation_id, run_id, policy_version, selection_hash,
+                    conversation_id, run_id, compaction_id, policy_version, selection_hash,
                     content_hash, record_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.memory_snapshot_id,
@@ -763,6 +819,7 @@ class MemoryStore:
                     snapshot.subject_user_id,
                     snapshot.conversation_id,
                     snapshot.run_id,
+                    snapshot.compaction_id,
                     snapshot.policy_version,
                     snapshot.selection_hash,
                     snapshot.content_hash,
@@ -789,6 +846,34 @@ class MemoryStore:
                 ],
             )
         return snapshot, tuple(records)
+
+    def _validate_compaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        compaction_id: str | None,
+        project_id: str,
+        conversation_id: str | None,
+        tenant_id: str,
+    ) -> str | None:
+        if compaction_id is None:
+            return None
+        if conversation_id is None:
+            raise ValueError("压缩快照必须绑定对话")
+        row = connection.execute(
+            """
+            SELECT summary_text, summary_hash FROM conversation_compactions
+            WHERE compaction_id = ? AND project_id = ?
+              AND conversation_id = ? AND tenant_id = ?
+            """,
+            (compaction_id, project_id, conversation_id, tenant_id),
+        ).fetchone()
+        if row is None:
+            raise MemoryAccessDenied("对话压缩快照不存在")
+        summary_hash = str(row["summary_hash"])
+        if hashlib.sha256(str(row["summary_text"]).encode("utf-8")).hexdigest() != summary_hash:
+            raise RuntimeError("对话压缩摘要完整性校验失败")
+        return summary_hash
 
     def get_snapshot(
         self,
@@ -822,9 +907,7 @@ class MemoryStore:
                 )
             except MemoryAccessDenied:
                 return None
-            records = tuple(
-                self._snapshot_records(connection, snapshot.memory_snapshot_id)
-            )
+            records = tuple(self._snapshot_records(connection, snapshot.memory_snapshot_id))
         return snapshot, records
 
     def add_link(
@@ -995,10 +1078,7 @@ class MemoryStore:
             "denied"
             if isinstance(
                 exc,
-                MemoryAccessDenied
-                | MemoryIdempotencyConflict
-                | MemoryVersionConflict
-                | ValueError,
+                MemoryAccessDenied | MemoryIdempotencyConflict | MemoryVersionConflict | ValueError,
             )
             else "error"
         )
@@ -1122,15 +1202,10 @@ class MemoryStore:
             if (
                 row is None
                 or str(row["project_id"]) != project_id
-                or (
-                    source_type == "user_confirmation"
-                    and str(row["role"]) != "user"
-                )
+                or (source_type == "user_confirmation" and str(row["role"]) != "user")
             ):
                 raise ValueError("记忆消息来源不存在、跨项目或不是用户确认")
-            expected_hash = hashlib.sha256(
-                str(row["content"]).encode("utf-8")
-            ).hexdigest()
+            expected_hash = hashlib.sha256(str(row["content"]).encode("utf-8")).hexdigest()
             if source_hash != expected_hash:
                 raise ValueError("记忆消息来源 hash 不匹配")
             return
@@ -1256,12 +1331,8 @@ class MemoryStore:
         record: MemoryRecord,
         principal: Principal,
     ) -> None:
-        if (
-            record.tenant_id != principal.tenant_scope
-            or (
-                record.scope == "subject"
-                and record.subject_user_id != principal.user_id
-            )
+        if record.tenant_id != principal.tenant_scope or (
+            record.scope == "subject" and record.subject_user_id != principal.user_id
         ):
             raise MemoryAccessDenied("记忆不存在")
 
@@ -1284,10 +1355,7 @@ class MemoryStore:
         ).fetchone()
         if row is None:
             return None
-        if (
-            str(row["operation_type"]) != operation_type
-            or str(row["request_hash"]) != request_hash
-        ):
+        if str(row["operation_type"]) != operation_type or str(row["request_hash"]) != request_hash:
             raise MemoryIdempotencyConflict("幂等键已绑定到不同记忆操作")
         result = connection.execute(
             """
@@ -1431,8 +1499,13 @@ def _same_memory(
     )
 
 
-def _content_hash(records: list[MemoryRecord]) -> str:
-    payload = [
+def _content_hash(
+    records: list[MemoryRecord],
+    *,
+    compaction_id: str | None,
+    compaction_hash: str | None,
+) -> str:
+    record_payload = [
         {
             "memory_id": record.memory_id,
             "version": record.version,
@@ -1441,6 +1514,18 @@ def _content_hash(records: list[MemoryRecord]) -> str:
         }
         for record in records
     ]
+    # compaction_id 为空时延续阶段 3A 的 v1 content hash 算法。
+    payload: object = (
+        {
+            "records": record_payload,
+            "compaction": {
+                "compaction_id": compaction_id,
+                "summary_hash": compaction_hash,
+            },
+        }
+        if compaction_id is not None
+        else record_payload
+    )
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -1523,6 +1608,7 @@ def _snapshot_from_row(row: sqlite3.Row) -> MemorySnapshot:
         subject_user_id=str(row["subject_user_id"]),
         conversation_id=_optional_text(row["conversation_id"]),
         run_id=_optional_text(row["run_id"]),
+        compaction_id=_optional_text(row["compaction_id"]),
         policy_version=str(row["policy_version"]),
         selection_hash=str(row["selection_hash"]),
         content_hash=str(row["content_hash"]),

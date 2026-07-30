@@ -99,6 +99,7 @@ class MemorySnapshot:
     subject_user_id: str
     conversation_id: str | None
     run_id: str | None
+    compaction_id: str | None
     policy_version: str
     selection_hash: str
     content_hash: str

@@ -41,6 +41,48 @@ jobs:
           uv run --frozen python scripts/stage2_behavior_eval.py
           --registry config/models.example.yaml --validate-only
 
+      - name: Run deterministic conversation compaction quality gate
+        run: >-
+          uv run --frozen python scripts/compaction_quality_eval.py
+          --enforce --json-output .data/compaction-quality.json
+
+      - name: Upload conversation compaction quality report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: compaction-quality
+          path: .data/compaction-quality.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Run deterministic reference resolution quality gate
+        run: >-
+          uv run --frozen python scripts/coref_quality_eval.py
+          --enforce --json-output .data/coref-quality.json
+
+      - name: Upload reference resolution quality report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: coref-quality
+          path: .data/coref-quality.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Run fixed-reference MCP transport equivalence probe
+        run: >-
+          uv run --frozen python scripts/mcp_transport_probe.py
+          --output .data/coref-mcp-transport.json
+
+      - name: Upload fixed-reference MCP transport report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: coref-mcp-transport
+          path: .data/coref-mcp-transport.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run deterministic knowledge quality gate
         run: >-
           uv run --frozen python scripts/kb_eval.py

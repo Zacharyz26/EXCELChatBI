@@ -5,12 +5,12 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal, TypeAlias
 
 from packages.common.logging import get_logger
-from packages.session.models import JsonObject
 
 AuditOutcome = Literal["allowed", "denied", "error"]
+JsonObject: TypeAlias = dict[str, Any]
 _log = get_logger("governance.audit")
 
 

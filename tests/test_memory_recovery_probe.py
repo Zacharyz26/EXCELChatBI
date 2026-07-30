@@ -144,12 +144,33 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
         probe_run_id=str(seeded["probe_run_id"]),
         memory_snapshot_id=str(seeded["memory_snapshot_id"]),
         memory_content_hash=str(seeded["memory_content_hash"]),
+        compaction_id=str(seeded["compaction_id"]),
+        compaction_summary_hash=str(seeded["compaction_summary_hash"]),
+        latest_compaction_id=str(seeded["latest_compaction_id"]),
         memory_id=str(seeded["memory_id"]),
         artifact_id=str(seeded["artifact_id"]),
+        plan_id=str(seeded["plan_id"]),
+        plan_version=int(seeded["plan_version"]),
+        plan_hash=str(seeded["plan_hash"]),
+        reference_resolution_hash=str(seeded["reference_resolution_hash"]),
+        memory_reference_resolution_hash=str(
+            seeded["memory_reference_resolution_hash"]
+        ),
         principal=principal,
     )
     assert verified["report_completion_count"] == 1
     assert verified["memory_records"] == 1
+    assert seeded["compaction_id"] != seeded["latest_compaction_id"]
+    assert verified["compaction_id"] == seeded["compaction_id"]
+    assert verified["latest_compaction_id"] == seeded["latest_compaction_id"]
+    assert verified["plan_id"] == seeded["plan_id"]
+    assert verified["plan_hash"] == seeded["plan_hash"]
+    assert verified["reference_resolution_hash"] == seeded["reference_resolution_hash"]
+    assert (
+        verified["memory_reference_resolution_hash"]
+        == seeded["memory_reference_resolution_hash"]
+    )
+    assert verified["probe_invocation_count"] == 0
 
     backed_up = backup_workspace(
         db_path=settings.chat_db_path,
@@ -182,10 +203,25 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
         probe_run_id=str(seeded["probe_run_id"]),
         memory_snapshot_id=str(seeded["memory_snapshot_id"]),
         memory_content_hash=str(seeded["memory_content_hash"]),
+        compaction_id=str(seeded["compaction_id"]),
+        compaction_summary_hash=str(seeded["compaction_summary_hash"]),
+        latest_compaction_id=str(seeded["latest_compaction_id"]),
         memory_id=str(seeded["memory_id"]),
         artifact_id=str(seeded["artifact_id"]),
+        plan_id=str(seeded["plan_id"]),
+        plan_version=int(seeded["plan_version"]),
+        plan_hash=str(seeded["plan_hash"]),
+        reference_resolution_hash=str(seeded["reference_resolution_hash"]),
+        memory_reference_resolution_hash=str(
+            seeded["memory_reference_resolution_hash"]
+        ),
         principal=principal,
     )
     assert restored["status"] == "verified"
     assert restored["probe_run_status"] == "paused"
     assert restored["report_completion_count"] == 1
+    assert restored["compaction_id"] == seeded["compaction_id"]
+    assert restored["latest_compaction_id"] == seeded["latest_compaction_id"]
+    assert restored["plan_id"] == seeded["plan_id"]
+    assert restored["plan_hash"] == seeded["plan_hash"]
+    assert restored["probe_invocation_count"] == 0

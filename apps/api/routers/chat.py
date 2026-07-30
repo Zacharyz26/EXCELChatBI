@@ -87,6 +87,10 @@ async def chat_stream(
     config = AgentLoopConfig(
         history_limit=settings.chat_history_limit,
         profile_max_chars=settings.chat_profile_max_chars,
+        compaction_trigger_chars=settings.chat_compaction_trigger_chars,
+        compaction_keep_recent=settings.chat_compaction_keep_recent,
+        compaction_summary_max_chars=settings.chat_compaction_summary_max_chars,
+        compaction_message_max_chars=settings.chat_compaction_message_max_chars,
         max_tool_calls=settings.agent_max_tool_calls,
         tool_result_max_chars=settings.agent_tool_result_max_chars,
         registry_max_entries=settings.agent_registry_max_entries,

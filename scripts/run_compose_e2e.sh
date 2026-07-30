@@ -56,6 +56,25 @@ verify_original_run() {
   test -s .data/e2e/recovered-report.pdf
 }
 
+verify_reference_recovery() {
+  "${compose[@]}" exec -T api \
+    python -m apps.api.memory_recovery_probe verify \
+    --original-run-id "$run_id" \
+    --probe-run-id "$probe_run_id" \
+    --memory-snapshot-id "$memory_snapshot_id" \
+    --memory-content-hash "$memory_content_hash" \
+    --compaction-id "$compaction_id" \
+    --compaction-summary-hash "$compaction_summary_hash" \
+    --latest-compaction-id "$latest_compaction_id" \
+    --memory-id "$memory_id" \
+    --artifact-id "$artifact_id" \
+    --plan-id "$plan_id" \
+    --plan-version "$plan_version" \
+    --plan-hash "$plan_hash" \
+    --reference-resolution-hash "$reference_resolution_hash" \
+    --memory-reference-resolution-hash "$memory_reference_resolution_hash"
+}
+
 "${compose[@]}" down --volumes --remove-orphans
 if [ "${CHATBI_COMPOSE_NO_BUILD:-0}" != "1" ]; then
   CHATBI_IMAGE_TAG="$image_tag" "${compose[@]}" build
@@ -114,6 +133,18 @@ memory_content_hash="$(
   PROBE_JSON="$probe_json" node -e \
     'process.stdout.write(JSON.parse(process.env.PROBE_JSON).memory_content_hash)'
 )"
+compaction_id="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).compaction_id)'
+)"
+compaction_summary_hash="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).compaction_summary_hash)'
+)"
+latest_compaction_id="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).latest_compaction_id)'
+)"
 memory_id="$(
   PROBE_JSON="$probe_json" node -e \
     'process.stdout.write(JSON.parse(process.env.PROBE_JSON).memory_id)'
@@ -122,6 +153,31 @@ artifact_id="$(
   PROBE_JSON="$probe_json" node -e \
     'process.stdout.write(JSON.parse(process.env.PROBE_JSON).artifact_id)'
 )"
+plan_id="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).plan_id)'
+)"
+plan_version="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(String(JSON.parse(process.env.PROBE_JSON).plan_version))'
+)"
+plan_hash="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).plan_hash)'
+)"
+reference_resolution_hash="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).reference_resolution_hash)'
+)"
+memory_reference_resolution_hash="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).memory_reference_resolution_hash)'
+)"
+
+"${compose[@]}" restart api
+wait_for_application "fixed reference API restart"
+restart_reference_json="$(verify_reference_recovery)"
+printf '%s\n' "$restart_reference_json" > .data/e2e/reference-restart-verified.json
 
 CHATBI_IMAGE_TAG="$image_tag" "${compose[@]}" stop
 backup_json="$(
@@ -151,17 +207,8 @@ printf '%s\n' "$restore_json" > .data/e2e/workspace-restore.json
 
 CHATBI_IMAGE_TAG="$image_tag" "${compose[@]}" up -d --no-build
 wait_for_application "offline workspace restore"
-recovery_json="$(
-  "${compose[@]}" exec -T api \
-    python -m apps.api.memory_recovery_probe verify \
-    --original-run-id "$run_id" \
-    --probe-run-id "$probe_run_id" \
-    --memory-snapshot-id "$memory_snapshot_id" \
-    --memory-content-hash "$memory_content_hash" \
-    --memory-id "$memory_id" \
-    --artifact-id "$artifact_id"
-)"
+recovery_json="$(verify_reference_recovery)"
 printf '%s\n' "$recovery_json" > .data/e2e/memory-recovery-verified.json
 verify_original_run
 
-echo "Compose E2E, restart, offline backup/restore and memory recovery passed."
+echo "Compose E2E, restart, offline backup/restore and fixed reference recovery passed."

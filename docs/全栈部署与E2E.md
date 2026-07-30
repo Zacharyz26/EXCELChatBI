@@ -1,5 +1,8 @@
 # 全栈部署与真实 E2E
 
+> 状态：v2.4 生产结构已通过容器 CI；v2.5 3B/3C 的压缩与固定引用恢复门禁已接入，
+> 等待本次提交后的 Docker runner 真实确认 · 更新日期：2026-07-30
+
 ## 单机生产结构 Compose
 
 根 `compose.yaml` 的默认拓扑是：
@@ -78,9 +81,14 @@ docker compose run --rm --no-deps storage-init \
 docker compose up -d
 ```
 
-manifest 会校验 SQLite schema、v4 migration checksum、关键控制面表行数，以及每个
+manifest 会校验 SQLite schema、v4/v5 migration checksum、关键控制面表行数，以及每个
 Dataset/Artifact 文件的大小和 SHA-256。恢复会先保存 `pre-restore-*` 覆盖前副本；
 缺少任一显式确认或备份被篡改时均在覆盖前拒绝。
+
+Compose 联合恢复探针还会固定一个 TaskRun 的 `compaction_id`，随后创建更新的压缩版本；
+同时把 `HOST_COREF_V1` 与 `HOST_MEMORY_REF_V1` 写入不可变 TaskPlan。API 重启和离线恢复后
+必须证明 TaskRun 仍读取旧压缩版本、最新版本未丢失、摘要 hash 未漂移，并保持相同
+plan ID/version/hash、对象/记忆 resolution hash 和目标 Artifact。
 
 ## 三层 E2E
 
@@ -113,6 +121,7 @@ pnpm --dir apps/web exec playwright install chromium
 
 - SQLite 中同一 run 仍为完成态；
 - paused 恢复探针 TaskRun 与 non-empty MemorySnapshot 的 ID/content hash 不变；
+- 不可变 TaskPlan 的 ID/version/hash 以及对象/记忆 resolution hash 不变；
 - MemoryRecord 与 Artifact 文件仍可读取；
 - `generate_report` 的 `step.completed` 只有一次，不重复副作用；
 - 恢复探针本身没有产生任何工具调用；

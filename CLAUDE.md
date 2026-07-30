@@ -10,13 +10,14 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2E + v2.5 阶段 3A 实现收口候选**；3A 的最终阶段关闭
-等待本批提交后的 Docker runner 恢复门禁确认：
+当前生产基线是 **v2.4 阶段 2E + 已完成的 v2.5 阶段 3A**；提交 `162b170`
+的完整 CI 与 Docker/Compose 联合恢复门禁全绿。3B-1–3B-3 与 3C-1–3C-3
+已完成本地实现，当前等待 Docker runner 确认压缩、固定引用和离线恢复发布门禁：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
-                    → ready capability 白名单 → Observation Replanner → 进程内 Tool.invoke
-                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot → SQLite v4 + 文件
+                    → ready capability 白名单 → Observation Replanner → MCP Client Gateway
+                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot → SQLite v5 + 文件
 ```
 
 - v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
@@ -31,9 +32,17 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
   API/Web Compose 和真实全栈 E2E 均已落地。G1–G6 和 G7 自动门禁已完成；G7 仍待
   Planner/Verifier 人工盲评、负责人签字和 ADR 接受。语义 Verifier 因 false PASS
   继续 `NO_GO`，生产仅使用确定性 Verifier。
-- **v2.5 阶段 3A 实现已收口**：SQLite v4 Memory Repository/Policy、不可变
+- **v2.5 阶段 3A 已完成**：SQLite v4 Memory Repository/Policy、不可变
   TaskRun 快照、MCP 引用、结构化审计、readiness、工作区离线一致备份/恢复和 Compose
-  联合破坏/恢复门禁均已落地；本机无 Docker，等待 CI Docker runner 给出关闭证据。
+  联合破坏/恢复门禁均已落地并通过完整 CI。
+- **v2.5 阶段 3B 本地实现已收口**：SQLite v5 持久化压缩版本、确定性脱敏摘要、
+  来源/hash 完整性验证、最近原文窗口、TaskRun 固定引用、领域中立质量门禁、并发
+  幂等和 Compose 联合恢复探针已接入；本机无 Docker，等待 CI runner 关闭发布门禁。
+- **v2.5 阶段 3C-1–3C-3 本地实现完成**：Host 确定性解析当前作用域
+  Artifact/Dataset，并从 TaskRun 固定 MemorySnapshot 执行严格结构化、用户确认的
+  实体/字段映射；歧义、冲突、失效和越界失败关闭，绑定进入计划并约束报告/图表血缘；
+  23 场景质量集、双 MCP 传输和固定计划恢复探针已接入；真实 Compose CI 通过前不得
+  关闭 3C。
 
 目标控制循环：
 
@@ -48,9 +57,10 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 
 - Dify 已放弃，不恢复 A/B 低代码双轨。
 - v2.4 采用统一的自研类型化状态机；简单任务、模板任务和 LLM 规划任务输出同一种 TaskPlan。是否引入 LangGraph 只在状态机复杂度和评测收益证明必要时再决定。
-- 生产 MCP 执行当前仍为进程内 `Tool.invoke`；单源 Tool Contract、官方 SDK adapter、
+- 生产 MCP 执行已使用受治理 Client Gateway；单源 Tool Contract、官方 SDK adapter、
   认证的 stdio/Streamable HTTP、Client Gateway、影子校验和双传输探针已实现。阶段 2D
-  切换规范执行路径；v3.0 再实现外部服务动态发现、企业授权与准入。
+  已切换规范执行路径；进程内适配仅保留给兼容/测试，v3.0 再实现外部服务动态发现、
+  企业授权与准入。
 - API/Web Dockerfile、非 root 健康检查、镜像 CI、根 Compose 与真实全栈 E2E 已实现。
   阶段 2E 提供独立 MCP 工具服务的完整单机 Compose；所有状态目录必须持久化，容器默认
   非 root 且不得向 API 暴露 Docker Socket。
@@ -83,12 +93,12 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 |---|---|---|
 | 后端 | Python 3.11、FastAPI、uv | 保持 |
 | 前端 | React 18、ECharts 5、Zustand、SSE；真实计划只读展示 | v2.5 增加计划编辑、结构化澄清、暂停/恢复和证据交互 |
-| 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier | v2.4 后续完成任务控制、恢复与 Finalizer 收口 |
+| 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复 | v2.5 阶段 4 增加用户计划干预与审批 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v4 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Checkpoint/MemorySnapshot | v2.5 后续增加自动压缩、指代消解和用户记忆治理 |
+| 对话持久层 | SQLite v5 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Checkpoint/MemorySnapshot/ConversationCompaction | 指代消解已完成本地实现；后续完成用户记忆治理 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
-| 工具 | 进程内 `Tool.invoke` + JSON Schema | v2.4 标准 MCP Client/Server、stdio/Streamable HTTP、Tool Capability Contract；v3.0 外部准入与企业授权 |
-| 部署 | 本机进程 + API/Web 根 Compose；Milvus profile | v2.4 增加独立 MCP 工具服务 Compose；v3.0 镜像供应链和多实例运维 |
+| 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
+| 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
 | 检索 | bge-m3、bge-reranker、Milvus Lite/Standalone；替身后端可用 | v2.5 业务语义层与数据 Evidence 联合推理 |
 | 统计 | statsmodels、scikit-learn、Prophet | v2.5 增加自主分析和统计护栏 |
 | 报告/截图 | Markdown、WeasyPrint、Playwright | 保持确定性工具执行 |
@@ -124,24 +134,24 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：G7 收口与 v2.4 阶段 2
+### 6.2 当前任务：v2.5 阶段 3 发布门禁与 G7 评审债务
 
 1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
    `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
-2. 阶段 2A 已落地生产混合 Planner、TaskPlan/TaskStep 版本持久化、能力到工具解析、
-   计划工具白名单、步骤状态绑定、计划完成校验和 Web 只读计划卡。
-3. 阶段 2B 已实现依赖图 ready frontier、Observation 驱动 Replanner、不可变
-   `plan.revised`、跨版本 attempt 和条件 skip。
-4. 下一批阶段 2C 完成 clarification answer、pause/resume/cancel、step retry 与 Checkpoint
-   自动续跑；2D 切换生产 MCP Gateway；2E 完成独立工具服务 Compose 和完整恢复/E2E。
+2. v2.4 阶段 2A–2E 已全部实现，最新已验证提交的 Compose/容器 CI 全绿；生产路径包含
+   结构化计划、依赖图重规划、任务控制/恢复、MCP Gateway 和五服务 Compose。
+3. v2.5 阶段 3A 已关闭；3B-1–3B-3 与 3C-1–3C-3 已完成本地实现和全量回归，
+   当前提交将由 CI Docker runner 验证联合重启、离线恢复和固定 Host 引用。
+4. CI 真实全绿前不得关闭 3B/3C；通过后下一产品开发入口为阶段 4/3D 的用户记忆治理、
+   计划干预、审批和恢复交互。
 
-完整状态见 `/docs/v2.4/阶段2B实施记录.md`。
+完整状态见 `/docs/v2.5/README.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.4 后续：结构化澄清、Checkpoint 自动恢复和任务控制；
-  生产 MCP 规范执行；独立 MCP 工具服务镜像和完整单机 Compose；
-- v2.5：上下文压缩、指代消解、长期记忆、可干预前端、业务语义层、自主分析和多数据集；同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker 状态恢复/资源 profile；
+- v2.5：阶段 3 容器发布门禁关闭后，继续长期记忆治理、可干预前端、业务语义层、
+  自主分析和多数据集；同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、
+  能力目录和 Docker 状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；
 - v3.0：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态、镜像供应链、多实例、多 Agent、多租户和企业治理。
 

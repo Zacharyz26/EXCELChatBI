@@ -30,10 +30,12 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
     ConversationLockPool,
     _enrich_tool_arguments,
+    _preserve_host_reference_assumptions,
     stream_agent_chat,
 )
 from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
 from apps.orchestrator.control.contracts import build_minimal_contract  # noqa: E402
+from apps.orchestrator.control.planner_contract import validate_task_plan  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.common.client_gateway import (  # noqa: E402
     GatewayHealth,
@@ -47,7 +49,18 @@ from packages.governance.policy import ToolPolicyGateway  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
 from packages.models.types import Message as ModelMessage  # noqa: E402
 from packages.models.types import ModelResponse, Scenario, ToolCall  # noqa: E402
+from packages.session.compaction import CompactionStore  # noqa: E402
+from packages.session.coref import (  # noqa: E402
+    ReferenceResolver,
+    find_reference_assumption,
+)
 from packages.session.memory_models import MemoryDraft  # noqa: E402
+from packages.session.memory_refs import (  # noqa: E402
+    MemoryReferenceResolver,
+    find_memory_reference_assumptions,
+    memory_reference_semantic_key,
+    memory_reference_summary,
+)
 from packages.session.memory_store import MemoryStore  # noqa: E402
 from packages.session.models import Conversation  # noqa: E402
 from packages.session.store import SessionStore  # noqa: E402
@@ -78,9 +91,7 @@ class ScriptedGateway:
         params: dict[str, object] | None = None,
     ) -> AsyncIterator[str | ModelResponse]:
         del params
-        self.calls.append(
-            {"scenario": scenario, "messages": list(messages), "tools": tools}
-        )
+        self.calls.append({"scenario": scenario, "messages": list(messages), "tools": tools})
         turn = self.turns.pop(0)
         error = turn.get("error")
         if error is not None and not turn.get("fail_after_deltas"):
@@ -103,9 +114,7 @@ class ScriptedGateway:
 class PlannerAwareGateway(ScriptedGateway):
     """同时提供结构化 Planner 与流式 Executor 的测试网关。"""
 
-    def __init__(
-        self, turns: list[dict[str, Any]], planner_plan: dict[str, Any]
-    ) -> None:
+    def __init__(self, turns: list[dict[str, Any]], planner_plan: dict[str, Any]) -> None:
         super().__init__(turns)
         self.planner_plan = planner_plan
         self.planner_calls = 0
@@ -154,15 +163,11 @@ class FakeRegistry:
             for capability in self.capabilities_for_tool(name)
         ]
 
-    def openai_tools_for_capabilities(
-        self, capabilities: set[str]
-    ) -> list[dict[str, Any]]:
+    def openai_tools_for_capabilities(self, capabilities: set[str]) -> list[dict[str, Any]]:
         return [
             item
             for item in self.openai_tools()
-            if capabilities.intersection(
-                self.capabilities_for_tool(str(item["function"]["name"]))
-            )
+            if capabilities.intersection(self.capabilities_for_tool(str(item["function"]["name"])))
         ]
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
@@ -252,11 +257,7 @@ async def _run_loop(
             config=config or AgentLoopConfig(tool_result_max_chars=500),
             policy=policy,
             planner_gateway=planner_gateway,
-            enforce_plan=(
-                planner_gateway is not None
-                if enforce_plan is None
-                else enforce_plan
-            ),
+            enforce_plan=(planner_gateway is not None if enforce_plan is None else enforce_plan),
         )
     ]
     return _events(raw)
@@ -288,6 +289,56 @@ def _register_dataset(
             "columns": [{"name": "月份"}, {"name": "销售额"}],
         },
     )
+
+
+def _remember_agent_reference(
+    store: SessionStore,
+    conversation: Conversation,
+    *,
+    alias: str,
+    target_ref: str,
+    key: str,
+    scope: str = "project",
+    kind: str = "entity_mapping",
+    canonical_field: str | None = None,
+) -> str:
+    source = store.append_message(
+        conversation_id=conversation.id,
+        role="user",
+        content=f"确认引用 {alias} {key}",
+    )
+    memories = MemoryStore(store)
+    result = memories.remember(
+        project_id=conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        draft=MemoryDraft(
+            scope=scope,  # type: ignore[arg-type]
+            kind=kind,  # type: ignore[arg-type]
+            semantic_key=memory_reference_semantic_key(
+                kind=kind,  # type: ignore[arg-type]
+                alias=alias,
+            ),
+            content_summary=memory_reference_summary(
+                kind=kind,  # type: ignore[arg-type]
+                alias=alias,
+                canonical_field=canonical_field,
+            ),
+            source_type="user_confirmation",
+            source_ref=source.id,
+            source_hash=hashlib.sha256(source.content.encode("utf-8")).hexdigest(),
+            confidence=0.95,
+            conversation_id=(conversation.id if scope == "conversation" else None),
+        ),
+        idempotency_key=f"agent-reference-{key}",
+    )
+    memories.add_link(
+        result.record.memory_id,
+        project_id=conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        target_type="dataset",
+        target_ref=target_ref,
+    )
+    return result.record.memory_id
 
 
 # ── 工具轮：事件序列、工件落库、结果回填 ──
@@ -326,8 +377,8 @@ async def test_tool_round_emits_transparency_events_and_persists(
         "goal",
         "plan.created",
         "run.started",
-        "text.delta",       # 工具轮开场白流式吐出
-        "understanding",    # 轮末转为理解卡
+        "text.delta",  # 工具轮开场白流式吐出
+        "understanding",  # 轮末转为理解卡
         "plan",
         "step.started",
         "tool_start",
@@ -336,7 +387,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
         "tool_end",
         "verification.started",
         "verification",
-        "text.delta",       # 最终答复流式
+        "text.delta",  # 最终答复流式
         "text.delta",
         "done",
     ], events
@@ -348,9 +399,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert by_name["plan"]["steps"][0]["tool"] == "get_data_profile"
     # 执行卡默认展示人话参数摘要，原始 JSON 仅供调参表单
     assert by_name["tool_start"]["fields"] == f"数据集: {_DATASET_REF[:8]}"
-    assert by_name["tool_start"]["args_preview"] == (
-        f'{{"dataset_ref":"{_DATASET_REF}"}}'
-    )
+    assert by_name["tool_start"]["args_preview"] == (f'{{"dataset_ref":"{_DATASET_REF}"}}')
     assert by_name["tool_end"]["status"] == "ok"
     assert "3 行" in by_name["tool_end"]["summary"]
     assert by_name["done"]["tool_calls"] == 1
@@ -627,9 +676,7 @@ async def test_dependency_executor_only_offers_the_current_ready_frontier(
                 "dependencies": ["profile"],
                 "expected_evidence": ["趋势 Evidence"],
                 "completion_conditions": ["趋势调用成功"],
-                "fallback": [
-                    {"when": "失败", "action": "correct_parameters"}
-                ],
+                "fallback": [{"when": "失败", "action": "correct_parameters"}],
             },
         ],
         "assumptions": [],
@@ -676,10 +723,7 @@ async def test_dependency_executor_only_offers_the_current_ready_frontier(
     )
 
     offered = [
-        {
-            str(item["function"]["name"])
-            for item in cast(list[dict[str, Any]], call["tools"] or [])
-        }
+        {str(item["function"]["name"]) for item in cast(list[dict[str, Any]], call["tools"] or [])}
         for call in gateway.calls
     ]
     assert offered == [
@@ -693,8 +737,7 @@ async def test_dependency_executor_only_offers_the_current_ready_frontier(
     ]
     run_id = cast(str, dict(events)["meta"]["run_id"])
     assert [
-        (step.logical_id, step.status)
-        for step in TaskStore(store.db_path).list_plan_steps(run_id)
+        (step.logical_id, step.status) for step in TaskStore(store.db_path).list_plan_steps(run_id)
     ] == [("profile", "completed"), ("trend", "completed")]
     assert events[-1][0] == "done"
 
@@ -754,9 +797,7 @@ async def test_duplicate_guard_does_not_block_distinct_steps_using_same_tool(
             "clarifications": [],
         },
     )
-    registry = FakeRegistry(
-        {"get_data_profile": lambda _: {"profile": {"row_count": 3}}}
-    )
+    registry = FakeRegistry({"get_data_profile": lambda _: {"profile": {"row_count": 3}}})
 
     events = await _run_loop(
         store,
@@ -790,9 +831,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
                 "dependencies": [],
                 "expected_evidence": ["趋势 Evidence"],
                 "completion_conditions": ["趋势调用成功"],
-                "fallback": [
-                    {"when": "参数不适用", "action": "correct_parameters"}
-                ],
+                "fallback": [{"when": "参数不适用", "action": "correct_parameters"}],
             }
         ],
         "assumptions": [],
@@ -814,10 +853,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
                     ToolCall(
                         id="trend-bad",
                         name="trend_analysis",
-                        arguments=(
-                            f'{{"dataset_ref":"{_DATASET_REF}",'
-                            '"time_col":"错误列"}'
-                        ),
+                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"错误列"}'),
                     )
                 ]
             },
@@ -826,10 +862,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
                     ToolCall(
                         id="trend-fixed",
                         name="trend_analysis",
-                        arguments=(
-                            f'{{"dataset_ref":"{_DATASET_REF}",'
-                            '"time_col":"月份"}'
-                        ),
+                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"月份"}'),
                     )
                 ]
             },
@@ -860,9 +893,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
     assert run.status == "completed"
     assert task_store.list_plan_steps(run_id)[0].status == "completed"
     attempts_by_event = [
-        payload["payload"]["attempt"]
-        for name, payload in events
-        if name == "step.started"
+        payload["payload"]["attempt"] for name, payload in events if name == "step.started"
     ]
     assert attempts_by_event == [1, 2]
 
@@ -883,9 +914,7 @@ async def test_zero_anomaly_observation_skips_conditional_transform(
                 "dependencies": [],
                 "expected_evidence": ["异常 Evidence"],
                 "completion_conditions": ["异常检测成功"],
-                "fallback": [
-                    {"when": "失败", "action": "correct_parameters"}
-                ],
+                "fallback": [{"when": "失败", "action": "correct_parameters"}],
             },
             {
                 "step_id": "clean",
@@ -936,10 +965,10 @@ async def test_zero_anomaly_observation_skips_conditional_transform(
     task_store = TaskStore(store.db_path)
     run = task_store.get_run(run_id)
     assert run is not None and run.plan_version == 2
-    assert [
-        (step.logical_id, step.status)
-        for step in task_store.list_plan_steps(run_id)
-    ] == [("detect", "completed"), ("clean", "skipped")]
+    assert [(step.logical_id, step.status) for step in task_store.list_plan_steps(run_id)] == [
+        ("detect", "completed"),
+        ("clean", "skipped"),
+    ]
     assert "plan.revised" in [name for name, _ in events]
     assert events[-1][0] == "done"
 
@@ -1146,11 +1175,7 @@ async def test_unsupported_numeric_claim_is_corrected_before_delivery(
 ) -> None:
     _register_dataset(store, conversation)
     registry = FakeRegistry(
-        {
-            "get_data_profile": lambda args: {
-                "profile": {"row_count": 3, "column_count": 2}
-            }
-        }
+        {"get_data_profile": lambda args: {"profile": {"row_count": 3, "column_count": 2}}}
     )
     gateway = ScriptedGateway(
         [
@@ -1170,21 +1195,15 @@ async def test_unsupported_numeric_claim_is_corrected_before_delivery(
 
     events = await _run_loop(store, conversation, gateway, registry)
 
-    streamed = "".join(
-        payload["delta"] for name, payload in events if name == "text.delta"
-    )
+    streamed = "".join(payload["delta"] for name, payload in events if name == "text.delta")
     assert "4 行" not in streamed
     assert "3 行" in streamed
     assert len(gateway.calls) == 3
     correction = gateway.calls[2]["messages"][-1]
     assert correction.role == "user"
     assert "数字无法在当前工具 Evidence 中定位" in correction.content
-    verification_events = [
-        payload for name, payload in events if name == "verification"
-    ]
-    assert verification_events[0]["payload"]["checks"][0]["code"] == (
-        "unsupported_numeric_claim"
-    )
+    verification_events = [payload for name, payload in events if name == "verification"]
+    assert verification_events[0]["payload"]["checks"][0]["code"] == ("unsupported_numeric_claim")
     assert verification_events[-1]["payload"]["verdict"] == "PASS"
     run_id = cast(str, dict(events)["done"]["run_id"])
     claims = TaskStore(store.db_path).list_claims(run_id)
@@ -1197,9 +1216,7 @@ async def test_unsupported_numeric_claim_is_removed_after_retry_is_exhausted(
     store: SessionStore, conversation: Conversation
 ) -> None:
     _register_dataset(store, conversation)
-    registry = FakeRegistry(
-        {"get_data_profile": lambda args: {"profile": {"row_count": 3}}}
-    )
+    registry = FakeRegistry({"get_data_profile": lambda args: {"profile": {"row_count": 3}}})
     gateway = ScriptedGateway(
         [
             {
@@ -1220,9 +1237,7 @@ async def test_unsupported_numeric_claim_is_removed_after_retry_is_exhausted(
 
     assert events[-1][0] == "done"
     assert events[-1][1]["run_status"] == "completed"
-    streamed = "".join(
-        payload["delta"] for name, payload in events if name == "text.delta"
-    )
+    streamed = "".join(payload["delta"] for name, payload in events if name == "text.delta")
     assert "5 行" not in streamed
     assert "3 行" in streamed
     assert "已省略无法由当前工具证据直接支持的派生数字" in streamed
@@ -1323,12 +1338,8 @@ async def test_kb_answer_without_source_is_revised_before_delivery(
         user_text="活跃用户怎么定义？",
     )
 
-    verification_events = [
-        payload for name, payload in events if name == "verification"
-    ]
-    assert verification_events[0]["payload"]["checks"][0]["code"] == (
-        "unsupported_knowledge_claim"
-    )
+    verification_events = [payload for name, payload in events if name == "verification"]
+    assert verification_events[0]["payload"]["checks"][0]["code"] == ("unsupported_knowledge_claim")
     assert verification_events[-1]["payload"]["verdict"] == "PASS"
     assert dict(events)["done"]["run_status"] == "completed"
     assert store.list_messages(conversation.id)[-1].content.endswith("指标口径.md）。")
@@ -1470,9 +1481,7 @@ async def test_explicit_pdf_report_cannot_finish_before_report_artifact(
     artifact_event = next(payload for name, payload in events if name == "artifact")
     assert artifact_event["type"] == "report"
     assert artifact_event["payload"]["report_id"] == _REPORT_ID
-    assert artifact_event["payload"]["pdf_url"] == (
-        f"/analyze/report/{_REPORT_ID}.pdf"
-    )
+    assert artifact_event["payload"]["pdf_url"] == (f"/analyze/report/{_REPORT_ID}.pdf")
     artifacts = store.list_artifacts(conversation.id)
     assert len(artifacts) == 1 and artifacts[0].id == artifact_event["id"]
     assert artifacts[0].file_ref == str(pdf_path)
@@ -1613,8 +1622,7 @@ async def test_report_files_are_cleaned_if_atomic_success_commit_fails(
                         id="report-commit-failure",
                         name="generate_report",
                         arguments=(
-                            '{"title":"报告","analysis_ids":["analysis-1"],'
-                            '"include_pdf":true}'
+                            '{"title":"报告","analysis_ids":["analysis-1"],' '"include_pdf":true}'
                         ),
                     )
                 ]
@@ -1703,18 +1711,14 @@ async def test_tool_failure_feeds_error_back_for_retry(
     assert dict(events)["done"]["tool_calls"] == 2
     # 失败结果以 tool 消息回传模型
     second_call = gateway.calls[1]["messages"]
-    assert any(
-        m.role == "tool" and "工具执行失败" in m.content for m in second_call
-    )
+    assert any(m.role == "tool" and "工具执行失败" in m.content for m in second_call)
 
 
 @pytest.mark.asyncio
 async def test_policy_denial_is_persisted_before_tool_execution(
     store: SessionStore, conversation: Conversation
 ) -> None:
-    registry = FakeRegistry(
-        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
-    )
+    registry = FakeRegistry({"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")})
     gateway = ScriptedGateway(
         [
             {
@@ -1748,9 +1752,7 @@ async def test_policy_denial_is_persisted_before_tool_execution(
 async def test_policy_denials_consume_budget_and_disable_tools(
     store: SessionStore, conversation: Conversation
 ) -> None:
-    registry = FakeRegistry(
-        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
-    )
+    registry = FakeRegistry({"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")})
     gateway = ScriptedGateway(
         [
             {
@@ -1787,9 +1789,7 @@ async def test_policy_denials_consume_budget_and_disable_tools(
 async def test_invalid_tool_call_limit_stops_varying_hallucinated_calls(
     store: SessionStore, conversation: Conversation
 ) -> None:
-    registry = FakeRegistry(
-        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
-    )
+    registry = FakeRegistry({"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")})
     gateway = ScriptedGateway(
         [
             {
@@ -1831,13 +1831,11 @@ async def test_consecutive_same_tool_same_args_circuit_breaks(
     ends = [payload for name, payload in events if name == "tool_end"]
     assert [end["status"] for end in ends] == ["ok", "error"]
     assert "熔断" in ends[1]["message"]
-    assert len(registry.executed) == 1          # 第二次没有真正执行
-    assert gateway.calls[2]["tools"] is None    # 熔断后禁用 tools 强制作答
+    assert len(registry.executed) == 1  # 第二次没有真正执行
+    assert gateway.calls[2]["tools"] is None  # 熔断后禁用 tools 强制作答
     # 每步结果都有回放记录（含未执行的熔断步）
     outcomes = [
-        json.loads(m.content)
-        for m in store.list_messages(conversation.id)
-        if m.role == "tool"
+        json.loads(m.content) for m in store.list_messages(conversation.id) if m.role == "tool"
     ]
     assert [(o["tool_call_id"], o["status"]) for o in outcomes] == [
         ("c1", "ok"),
@@ -1852,9 +1850,7 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
     registry = FakeRegistry(
         {
             "get_data_profile": lambda args: {"profile": {}},
-            "aggregate_preview": lambda args: pytest.fail(
-                "计划外工具不得执行"
-            ),
+            "aggregate_preview": lambda args: pytest.fail("计划外工具不得执行"),
         }
     )
     gateway = ScriptedGateway(
@@ -1901,9 +1897,7 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
 async def test_model_round_limit_stops_nonconverging_executor(
     store: SessionStore, conversation: Conversation
 ) -> None:
-    registry = FakeRegistry(
-        {"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")}
-    )
+    registry = FakeRegistry({"code_interpreter": lambda args: pytest.fail("被拒工具不得执行")})
     gateway = ScriptedGateway(
         [
             {
@@ -2045,6 +2039,400 @@ def test_host_enriches_report_delivery_and_referenced_chart_lineage(
     assert chart_args["dataset_ref"] == second_ref
 
 
+def test_replanner_cannot_drop_or_replace_host_reference_assumptions() -> None:
+    previous = {
+        "assumptions": [
+            "ordinary-old",
+            'HOST_COREF_V1:{"fixed":true}',
+            'HOST_MEMORY_REF_V1:{"fixed":true}',
+        ]
+    }
+    revised = {
+        "schema_version": 1,
+        "summary": "修订计划",
+        "steps": [],
+        "assumptions": [
+            "ordinary-new",
+            'HOST_COREF_V1:{"forged":true}',
+            'HOST_MEMORY_REF_V1:{"forged":true}',
+        ],
+        "clarifications": [],
+    }
+
+    result = _preserve_host_reference_assumptions(revised, previous)
+
+    assert result["assumptions"] == [
+        "ordinary-new",
+        'HOST_COREF_V1:{"fixed":true}',
+        'HOST_MEMORY_REF_V1:{"fixed":true}',
+    ]
+
+
+def test_verified_reference_overrides_model_delivery_lineage(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="已有分析",
+    )
+    stats = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"direction": "up"}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "stats-analysis"},
+        dataset_ref=first_ref,
+    )
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="chart",
+        payload={"chart_type": "line"},
+        source_tool="gen_chart",
+        params={"analysis_id": "chart-analysis-1"},
+        dataset_ref=first_ref,
+    )
+    second_chart = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="chart",
+        payload={"chart_type": "bar"},
+        source_tool="gen_chart",
+        params={"analysis_id": "chart-analysis-2"},
+        dataset_ref=second_ref,
+    )
+    artifacts = store.list_artifacts(conversation.id)
+    datasets = store.list_datasets(conversation.project_id)
+    resolver = ReferenceResolver(store, audit_recorder=lambda _event: None)
+
+    chart_reference = resolver.resolve(
+        "把第二张图改成按月展示",
+        project_id=conversation.project_id,
+        conversation_id=conversation.id,
+        principal=Principal(user_id="local-user"),
+    )
+    chart_contract = build_minimal_contract(
+        run_id="verified-chart-lineage",
+        user_text=chart_reference.rewritten_query,
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+    )
+    chart_args = _enrich_tool_arguments(
+        "gen_chart",
+        {"chart_type": "line", "dataset_ref": first_ref},
+        contract=chart_contract,
+        artifacts=artifacts,
+        datasets=datasets,
+        references=chart_reference,
+    )
+    assert chart_args["dataset_ref"] == second_ref
+
+    report_reference = resolver.resolve(
+        "把刚才的趋势和图表生成报告",
+        project_id=conversation.project_id,
+        conversation_id=conversation.id,
+        principal=Principal(user_id="local-user"),
+    )
+    report_contract = build_minimal_contract(
+        run_id="verified-report-lineage",
+        user_text=report_reference.rewritten_query,
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+    report_args = _enrich_tool_arguments(
+        "generate_report",
+        {"analysis_ids": ["model-selected-wrong-id"]},
+        contract=report_contract,
+        artifacts=artifacts,
+        datasets=datasets,
+        references=report_reference,
+    )
+    assert report_args["analysis_ids"] == [
+        cast(str, stats.params["analysis_id"]),
+        cast(str, second_chart.params["analysis_id"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_artifact_reference_waits_without_calling_model(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="已有两张图",
+    )
+    for dataset_ref in (first_ref, second_ref):
+        store.create_artifact(
+            conversation_id=conversation.id,
+            message_id=message.id,
+            type="chart",
+            payload={"chart_type": "line"},
+            source_tool="gen_chart",
+            params={},
+            dataset_ref=dataset_ref,
+        )
+    gateway = ScriptedGateway([{"deltas": ["不应调用模型"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="把这个图改成柱状图",
+    )
+
+    assert gateway.calls == []
+    assert dict(events)["meta"]["reference_status"] == "ambiguous"
+    waiting = dict(events)["waiting_user"]
+    assert waiting["payload"]["about"] == "reference_target"
+    assert "多个可能目标" in dict(events)["text.delta"]["delta"]
+    assert dict(events)["done"]["run_status"] == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_resolved_reference_plan_binding_survives_newer_artifact(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    dataset_ref = "1" * 32
+    _register_dataset(store, conversation, dataset_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="已有两张图",
+    )
+    charts = [
+        store.create_artifact(
+            conversation_id=conversation.id,
+            message_id=message.id,
+            type="chart",
+            payload={"chart_type": chart_type},
+            source_tool="gen_chart",
+            params={},
+            dataset_ref=dataset_ref,
+        )
+        for chart_type in ("line", "bar")
+    ]
+    gateway = ScriptedGateway([{"deltas": ["已识别目标。"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="总结第二张图",
+    )
+
+    done = dict(events)["done"]
+    assert done["run_status"] == "completed"
+    tasks = TaskStore(store.db_path)
+    plan_record = tasks.get_active_plan(cast(str, done["run_id"]))
+    assert plan_record is not None
+    assumption = find_reference_assumption(plan_record.plan.get("assumptions", []))
+    assert assumption is not None
+    assert len(assumption) <= 300
+    validation = validate_task_plan(
+        plan_record.plan,
+        capabilities=set(),
+    )
+    assert validation.schema_valid is True
+
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="chart",
+        payload={"chart_type": "scatter"},
+        source_tool="gen_chart",
+        params={},
+        dataset_ref=dataset_ref,
+    )
+    restored = ReferenceResolver(
+        store,
+        audit_recorder=lambda _event: None,
+    ).restore(
+        assumption,
+        query="恢复任务",
+        project_id=conversation.project_id,
+        conversation_id=conversation.id,
+        principal=Principal(user_id="local-user"),
+    )
+    assert [target.reference_id for target in restored.targets] == [charts[1].id]
+
+
+@pytest.mark.asyncio
+async def test_governed_memory_reference_binds_plan_and_chart_dataset(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    memory_id = _remember_agent_reference(
+        store,
+        conversation,
+        alias="主数据",
+        target_ref=second_ref,
+        key="primary",
+    )
+    registry = FakeRegistry(
+        {
+            "gen_chart": lambda _args: {
+                "chart_id": "memory-chart",
+                "chart_type": "line",
+                "option": {"xAxis": {"data": []}, "series": []},
+            }
+        }
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["生成图表。"],
+                "tool_calls": [
+                    ToolCall(
+                        id="memory-chart-call",
+                        name="gen_chart",
+                        arguments=(
+                            f'{{"dataset_ref":"{first_ref}",' '"chart_type":"line","encoding":{}}'
+                        ),
+                    )
+                ],
+            },
+            {"deltas": ["图表已生成。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="使用主数据生成折线图",
+    )
+
+    meta = dict(events)["meta"]
+    assert meta["memory_reference_status"] == "resolved"
+    assert registry.executed, (
+        [name for name, _ in events],
+        events[-1],
+    )
+    assert json.loads(registry.executed[0][1])["dataset_ref"] == second_ref
+    plan = TaskStore(store.db_path).get_active_plan(cast(str, meta["run_id"]))
+    assert plan is not None
+    assumptions = find_memory_reference_assumptions(plan.plan.get("assumptions", []))
+    assert len(assumptions) == 1
+    assert memory_id in assumptions[0]
+    assert len(assumptions[0]) <= 300
+    assert validate_task_plan(
+        plan.plan,
+        capabilities={"visualization.chart"},
+    ).schema_valid
+    assert memory_id in gateway.calls[0]["messages"][0].content
+    assert dict(events)["done"]["run_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_memory_reference_waits_without_model_or_write(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    _remember_agent_reference(
+        store,
+        conversation,
+        alias="当前批次",
+        target_ref=first_ref,
+        key="project-scope",
+    )
+    _remember_agent_reference(
+        store,
+        conversation,
+        alias="当前批次",
+        target_ref=second_ref,
+        key="conversation-scope",
+        scope="conversation",
+    )
+    memories = MemoryStore(store)
+    before = memories.list_records_for_governance(
+        project_id=conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        conversation_id=conversation.id,
+    )
+    gateway = ScriptedGateway([{"deltas": ["不应调用模型"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="总结当前批次",
+    )
+
+    assert gateway.calls == []
+    assert dict(events)["meta"]["memory_reference_status"] == "ambiguous"
+    waiting = dict(events)["waiting_user"]
+    assert waiting["payload"]["about"] == "memory_reference_target"
+    assert "多个受治理映射" in dict(events)["text.delta"]["delta"]
+    after = memories.list_records_for_governance(
+        project_id=conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        conversation_id=conversation.id,
+    )
+    assert [(item.memory_id, item.status) for item in after] == [
+        (item.memory_id, item.status) for item in before
+    ]
+
+
+@pytest.mark.asyncio
+async def test_field_alias_is_injected_as_verified_host_context(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    dataset_ref = "1" * 32
+    _register_dataset(store, conversation, dataset_ref)
+    memory_id = _remember_agent_reference(
+        store,
+        conversation,
+        alias="请求 ID",
+        target_ref=dataset_ref,
+        key="field-alias",
+        kind="field_alias",
+        canonical_field="工单编号",
+    )
+    gateway = ScriptedGateway([{"deltas": ["已确认字段。"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="请求 ID 对应哪个字段",
+    )
+
+    assert dict(events)["meta"]["memory_reference_status"] == "resolved"
+    system = gateway.calls[0]["messages"][0].content
+    assert memory_id in system
+    assert '"canonical_field":"工单编号"' in system
+    assert dict(events)["done"]["run_status"] == "completed"
+
+
 @pytest.mark.asyncio
 async def test_system_context_lists_datasets_and_analysis_registry(
     store: SessionStore, conversation: Conversation
@@ -2059,9 +2447,7 @@ async def test_system_context_lists_datasets_and_analysis_registry(
         parent_ref="d1",
         transform={"drop_nulls": []},
     )
-    seed = store.append_message(
-        conversation_id=conversation.id, role="assistant", content="旧分析"
-    )
+    seed = store.append_message(conversation_id=conversation.id, role="assistant", content="旧分析")
     artifact = store.create_artifact(
         conversation_id=conversation.id,
         message_id=seed.id,
@@ -2087,10 +2473,10 @@ async def test_system_context_lists_datasets_and_analysis_registry(
     assert "可用数据集" in system.content
     assert "d1" in system.content and "d2" in system.content
     assert "衍生自 d1" in system.content
-    assert '"row_count":2' in system.content        # 最新数据集画像
+    assert '"row_count":2' in system.content  # 最新数据集画像
     assert "分析登记表" in system.content
     assert "analysis_id=an-001" in system.content
-    assert '"direction":"up"' in system.content     # 登记表摘要
+    assert '"direction":"up"' in system.content  # 登记表摘要
 
 
 @pytest.mark.asyncio
@@ -2104,21 +2490,25 @@ async def test_system_context_uses_fixed_governed_memory_snapshot(
         role="user",
         content="以后将工单编号称为请求 ID",
     )
-    memory = MemoryStore(store).remember(
-        project_id=conversation.project_id,
-        principal=Principal(user_id="local-user"),
-        draft=MemoryDraft(
-            scope="project",
-            kind="field_alias",
-            semantic_key="field-alias.ticket-id",
-            content_summary="工单编号的展示名称是请求 ID",
-            source_type="user_confirmation",
-            source_ref=source.id,
-            source_hash=hashlib.sha256(source.content.encode("utf-8")).hexdigest(),
-            confidence=0.95,
-        ),
-        idempotency_key="agent-memory-context",
-    ).record
+    memory = (
+        MemoryStore(store)
+        .remember(
+            project_id=conversation.project_id,
+            principal=Principal(user_id="local-user"),
+            draft=MemoryDraft(
+                scope="project",
+                kind="field_alias",
+                semantic_key="field-alias.ticket-id",
+                content_summary="工单编号的展示名称是请求 ID",
+                source_type="user_confirmation",
+                source_ref=source.id,
+                source_hash=hashlib.sha256(source.content.encode("utf-8")).hexdigest(),
+                confidence=0.95,
+            ),
+            idempotency_key="agent-memory-context",
+        )
+        .record
+    )
     gateway = ScriptedGateway([{"deltas": ["好的"]}])
 
     events = await _run_loop(
@@ -2151,9 +2541,7 @@ async def test_history_excludes_tool_call_preambles(
 
     否则长对话后模型会模仿被压平的假示范，停止发起工具调用并声称“图表已生成”。
     """
-    store.append_message(
-        conversation_id=conversation.id, role="user", content="画个图"
-    )
+    store.append_message(conversation_id=conversation.id, role="user", content="画个图")
     store.append_message(
         conversation_id=conversation.id,
         role="assistant",
@@ -2180,29 +2568,95 @@ async def test_history_excludes_tool_call_preambles(
     ]
 
 
+@pytest.mark.asyncio
+async def test_long_history_uses_fixed_compaction_and_recent_raw_messages(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    for index in range(3):
+        store.append_message(
+            conversation_id=conversation.id,
+            role="user",
+            content=f"历史问题 {index}：" + chr(0x7532 + index) * 70,
+        )
+        store.append_message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=f"历史答复 {index}：" + chr(0x4E59 + index) * 70,
+        )
+    gateway = ScriptedGateway([{"deltas": ["完成"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="当前问题必须保持原文",
+        config=AgentLoopConfig(
+            history_limit=20,
+            compaction_trigger_chars=100,
+            compaction_keep_recent=2,
+            compaction_summary_max_chars=800,
+            tool_result_max_chars=500,
+        ),
+    )
+
+    request = gateway.calls[0]["messages"]
+    system = request[0].content
+    assert "持久化历史上下文" in system
+    assert "不能替代 Evidence、Artifact 或工具结果" in system
+    assert "历史问题 0" in system
+    assert [message.content for message in request[1:]] == [
+        "历史答复 2：" + chr(0x4E59 + 2) * 70,
+        "当前问题必须保持原文",
+    ]
+    meta = dict(events)["meta"]
+    assert isinstance(meta["compaction_id"], str)
+    snapshot_result = MemoryStore(store).get_snapshot(
+        cast(str, meta["memory_snapshot_id"]),
+        principal=Principal(user_id="local-user"),
+    )
+    assert snapshot_result is not None
+    assert snapshot_result[0].compaction_id == meta["compaction_id"]
+
+
 # ── 参数人话化（执行卡默认展示，替代原始 JSON）──
 
 
 def test_humanize_args_translates_common_tools() -> None:
     from apps.orchestrator.agent_loop import _humanize_args
 
-    assert _humanize_args(
-        "correlation",
-        {"dataset_ref": "a1b2c3d4e5f6", "columns": ["销售额", "订单数"], "method": "pearson"},
-    ) == "数据集: a1b2c3d4 · 列: 销售额、订单数 · 方法: pearson"
+    assert (
+        _humanize_args(
+            "correlation",
+            {"dataset_ref": "a1b2c3d4e5f6", "columns": ["销售额", "订单数"], "method": "pearson"},
+        )
+        == "数据集: a1b2c3d4 · 列: 销售额、订单数 · 方法: pearson"
+    )
 
-    assert _humanize_args(
-        "gen_chart",
-        {"dataset_ref": "a1b2c3d4", "chart_type": "bar",
-         "encoding": {"x": "地区", "y": "销售额", "agg": "sum"}},
-    ) == "数据集: a1b2c3d4 · 图型: bar · X轴: 地区 · Y轴: 销售额 · 聚合: sum"
+    assert (
+        _humanize_args(
+            "gen_chart",
+            {
+                "dataset_ref": "a1b2c3d4",
+                "chart_type": "bar",
+                "encoding": {"x": "地区", "y": "销售额", "agg": "sum"},
+            },
+        )
+        == "数据集: a1b2c3d4 · 图型: bar · X轴: 地区 · Y轴: 销售额 · 聚合: sum"
+    )
 
-    assert _humanize_args(
-        "transform_dataset",
-        {"dataset_ref": "a1b2c3d4",
-         "filters": [{"column": "地区", "op": "in", "value": ["华东", "华南"]}],
-         "sort": [{"column": "销售额", "order": "desc"}]},
-    ) == "数据集: a1b2c3d4 · 过滤: 地区 in 华东、华南 · 排序: 销售额 desc"
+    assert (
+        _humanize_args(
+            "transform_dataset",
+            {
+                "dataset_ref": "a1b2c3d4",
+                "filters": [{"column": "地区", "op": "in", "value": ["华东", "华南"]}],
+                "sort": [{"column": "销售额", "order": "desc"}],
+            },
+        )
+        == "数据集: a1b2c3d4 · 过滤: 地区 in 华东、华南 · 排序: 销售额 desc"
+    )
 
     assert _humanize_args("chart_screenshot", {"option": {"series": []}}) == "渲染当前图表为 PNG"
     assert _humanize_args("kb_search", {}) == "无参数"
@@ -2268,7 +2722,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
         "/chat/stream",
         json={
             "conversation_id": chat_harness.conversation.id,
-            "message": "  请介绍一下这个数据集  ",
+            "message": "  请介绍一下系统能力  ",
         },
     )
 
@@ -2292,13 +2746,13 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert meta["conversation_id"] == chat_harness.conversation.id
     assert meta["message_id"] == done["message_id"]
     assert meta["run_id"] == done["run_id"]
-    assert meta["title"] == "请介绍一下这个数据集"
+    assert meta["title"] == "请介绍一下系统能力"
     assert done["characters"] == len("你好，有什么可以帮你？")
     assert done["tool_calls"] == 0
 
     messages = chat_harness.store.list_messages(chat_harness.conversation.id)
     assert [(message.role, message.content) for message in messages] == [
-        ("user", "请介绍一下这个数据集"),
+        ("user", "请介绍一下系统能力"),
         ("assistant", "你好，有什么可以帮你？"),
     ]
     assert messages[1].id == meta["message_id"]
@@ -2315,12 +2769,23 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert model_messages[0].role == "system"
     assert "编造数字" in model_messages[0].content
     assert model_messages[-1].role == "user"
-    assert model_messages[-1].content == "请介绍一下这个数据集"
+    assert model_messages[-1].content == "请介绍一下系统能力"
 
 
 def test_resume_stream_reconstructs_lost_host_from_checkpoint(
     chat_harness: ChatHarness,
 ) -> None:
+    for index in range(3):
+        chat_harness.store.append_message(
+            conversation_id=chat_harness.conversation.id,
+            role="user",
+            content=f"恢复前历史问题 {index}：" + "甲" * 70,
+        )
+        chat_harness.store.append_message(
+            conversation_id=chat_harness.conversation.id,
+            role="assistant",
+            content=f"恢复前历史答复 {index}：" + "乙" * 70,
+        )
     _, user_message = chat_harness.store.start_user_turn(
         conversation_id=chat_harness.conversation.id,
         content="继续完成已有任务",
@@ -2342,6 +2807,37 @@ def test_resume_stream_reconstructs_lost_host_from_checkpoint(
         contract=contract,
         budget={"max_tool_calls": 4},
     )
+    compactions = CompactionStore(
+        chat_harness.store,
+        audit_recorder=lambda _event: None,
+    )
+    first_result = compactions.compact_if_needed(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        principal=Principal(user_id="local-user"),
+        trigger_chars=100,
+        keep_recent=2,
+        summary_max_chars=800,
+    )
+    assert first_result.view is not None
+    fixed_compaction = first_result.view
+    fixed_snapshot, _ = MemoryStore(chat_harness.store).create_snapshot(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        run_id=run.run_id,
+        principal=Principal(user_id="local-user"),
+        compaction_id=fixed_compaction.record.compaction_id,
+    )
+    newer_result = compactions.compact_if_needed(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        principal=Principal(user_id="local-user"),
+        trigger_chars=100,
+        keep_recent=1,
+        summary_max_chars=800,
+    )
+    assert newer_result.view is not None
+    assert newer_result.view.record.compaction_id != fixed_compaction.record.compaction_id
     run, _, steps, _ = tasks.save_plan(
         run.run_id,
         expected_version=run.state_version,
@@ -2431,15 +2927,132 @@ def test_resume_stream_reconstructs_lost_host_from_checkpoint(
     ], events
     assert events[1][1]["run_id"] == run.run_id
     assert events[1][1]["resumed"] is True
+    assert events[1][1]["memory_snapshot_id"] == fixed_snapshot.memory_snapshot_id
+    assert events[1][1]["compaction_id"] == fixed_compaction.record.compaction_id
     assert events[-1][1]["run_status"] == "completed"
     assert events[-1][1]["tool_calls"] == 1
     saved = tasks.get_run(run.run_id)
     assert saved is not None and saved.status == "completed"
     assert len(tasks.list_invocations(run.run_id)) == 1
     assert chat_harness.gateway.calls[0]["tools"] is None
+    resumed_system = chat_harness.gateway.calls[0]["messages"][0].content
+    assert fixed_compaction.record.compaction_id in resumed_system
+    assert newer_result.view.record.compaction_id not in resumed_system
     messages = chat_harness.store.list_messages(chat_harness.conversation.id)
-    assert [item.role for item in messages] == ["user", "assistant", "assistant"]
-    assert messages[0].id == user_message.id
+    assert [item.role for item in messages[-3:]] == ["user", "assistant", "assistant"]
+    assert messages[-3].id == user_message.id
+
+
+def test_resume_stream_restores_fixed_memory_reference_binding(
+    chat_harness: ChatHarness,
+) -> None:
+    dataset_ref = "1" * 32
+    _register_dataset(
+        chat_harness.store,
+        chat_harness.conversation,
+        dataset_ref,
+    )
+    memory_id = _remember_agent_reference(
+        chat_harness.store,
+        chat_harness.conversation,
+        alias="固定数据",
+        target_ref=dataset_ref,
+        key="checkpoint",
+    )
+    _, user_message = chat_harness.store.start_user_turn(
+        conversation_id=chat_harness.conversation.id,
+        content="总结固定数据",
+        suggested_title="总结固定数据",
+    )
+    run_id = "memory-reference-recovery-run"
+    contract = build_minimal_contract(
+        run_id=run_id,
+        user_text="总结固定数据",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    tasks = TaskStore(chat_harness.store.db_path)
+    run, _ = tasks.create_run(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        user_message_id=user_message.id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    memories = MemoryStore(chat_harness.store)
+    snapshot, _ = memories.create_snapshot(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        run_id=run.run_id,
+        principal=Principal(user_id="local-user"),
+    )
+    resolution = MemoryReferenceResolver(
+        chat_harness.store,
+        memories,
+        audit_recorder=lambda _event: None,
+    ).resolve(
+        "总结固定数据",
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        memory_snapshot_id=snapshot.memory_snapshot_id,
+        principal=Principal(user_id="local-user"),
+    )
+    run, _, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "使用固定映射完成答复",
+            "steps": [],
+            "assumptions": list(resolution.assumptions()),
+            "clarifications": [],
+        },
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    paused, _, _ = tasks.control_transition(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="pause-memory-reference",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "process_recovery"},
+        require_idle=True,
+        checkpoint_reason="process_recovery",
+    )
+
+    response = chat_harness.client.post(
+        f"/agent/runs/{run.run_id}/resume/stream",
+        headers={
+            "Idempotency-Key": "resume-memory-reference",
+            "If-Match": str(paused.state_version),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    events = _sse_events(response.text)
+    assert events[1][0] == "meta"
+    assert events[1][1]["memory_snapshot_id"] == snapshot.memory_snapshot_id
+    assert events[1][1]["memory_reference_status"] == "resolved"
+    assert events[-1][1]["run_status"] == "completed"
+    system = chat_harness.gateway.calls[0]["messages"][0].content
+    assert memory_id in system
+    active_plan = tasks.get_active_plan(run.run_id)
+    assert active_plan is not None
+    assert (
+        find_memory_reference_assumptions(active_plan.plan.get("assumptions", []))
+        == resolution.assumptions()
+    )
 
 
 def test_clarification_answer_reconstructs_lost_host(
@@ -2504,10 +3117,7 @@ def test_clarification_answer_reconstructs_lost_host(
     )
 
     response = chat_harness.client.post(
-        (
-            f"/agent/runs/{run.run_id}/clarifications/"
-            f"{question_id}/answer/stream"
-        ),
+        (f"/agent/runs/{run.run_id}/clarifications/" f"{question_id}/answer/stream"),
         headers={
             "Idempotency-Key": "answer-after-restart",
             "If-Match": str(waiting.state_version),
@@ -2535,6 +3145,131 @@ def test_clarification_answer_reconstructs_lost_host(
     messages = chat_harness.store.list_messages(chat_harness.conversation.id)
     assert len([item for item in messages if item.role == "user"]) == 2
     assert "简洁" in messages[1].content
+
+
+def test_memory_reference_clarification_selects_once_without_writing(
+    chat_harness: ChatHarness,
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(
+        chat_harness.store,
+        chat_harness.conversation,
+        first_ref,
+    )
+    _register_dataset(
+        chat_harness.store,
+        chat_harness.conversation,
+        second_ref,
+    )
+    _remember_agent_reference(
+        chat_harness.store,
+        chat_harness.conversation,
+        alias="当前批次",
+        target_ref=first_ref,
+        key="answer-project",
+    )
+    selected_memory_id = _remember_agent_reference(
+        chat_harness.store,
+        chat_harness.conversation,
+        alias="当前批次",
+        target_ref=second_ref,
+        key="answer-conversation",
+        scope="conversation",
+    )
+    _, user_message = chat_harness.store.start_user_turn(
+        conversation_id=chat_harness.conversation.id,
+        content="总结当前批次",
+        suggested_title="总结当前批次",
+    )
+    run_id = "memory-reference-answer-run"
+    tasks = TaskStore(chat_harness.store.db_path)
+    contract = build_minimal_contract(
+        run_id=run_id,
+        user_text="总结当前批次",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        user_message_id=user_message.id,
+        contract=contract,
+        budget={"max_tool_calls": 4},
+    )
+    memories = MemoryStore(chat_harness.store)
+    snapshot, snapshot_records = memories.create_snapshot(
+        project_id=chat_harness.conversation.project_id,
+        conversation_id=chat_harness.conversation.id,
+        run_id=run.run_id,
+        principal=Principal(user_id="local-user"),
+    )
+    question_id = "memory_reference_target"
+    resume_token = "memory-reference-answer-token"
+    run, plan, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "等待选择受治理映射",
+            "steps": [],
+            "assumptions": [],
+            "clarifications": [
+                {
+                    "question_id": question_id,
+                    "question": "请选择受治理映射",
+                    "about": "memory_reference_target",
+                    "blocking": True,
+                }
+            ],
+        },
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    waiting, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="waiting_user",
+        event_type="waiting_user",
+        payload={
+            "question_id": question_id,
+            "question": "请选择受治理映射",
+            "plan_id": plan.plan_id,
+            "plan_version": plan.version,
+            "resume_token": resume_token,
+        },
+        checkpoint_reason="waiting_user",
+    )
+
+    response = chat_harness.client.post(
+        f"/agent/runs/{run.run_id}/clarifications/{question_id}/answer/stream",
+        headers={
+            "Idempotency-Key": "answer-memory-reference",
+            "If-Match": str(waiting.state_version),
+        },
+        json={
+            "answer": f"memory_id={selected_memory_id}",
+            "resume_token": resume_token,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    events = _sse_events(response.text)
+    assert events[1][1]["memory_snapshot_id"] == snapshot.memory_snapshot_id
+    assert events[1][1]["memory_reference_status"] == "resolved"
+    assert events[-1][1]["run_status"] == "completed"
+    active_plan = tasks.get_active_plan(run.run_id)
+    assert active_plan is not None
+    assumptions = find_memory_reference_assumptions(active_plan.plan.get("assumptions", []))
+    assert len(assumptions) == 1
+    assert selected_memory_id in assumptions[0]
+    governed_after = memories.list_records_for_governance(
+        project_id=chat_harness.conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        conversation_id=chat_harness.conversation.id,
+    )
+    assert len(governed_after) == len(snapshot_records)
 
 
 def test_stream_context_contains_latest_profile_and_limited_history(
@@ -2574,10 +3309,10 @@ def test_stream_context_contains_latest_profile_and_limited_history(
     request = chat_harness.gateway.calls[0]["messages"]
     assert len(request) == 4  # system + 最近 3 条消息
     system = request[0].content
-    assert "sales-profile" in system    # 数据集清单必须给出 dataset_ref 供模型调工具
+    assert "sales-profile" in system  # 数据集清单必须给出 dataset_ref 供模型调工具
     assert '"row_count":24' in system
     assert "订单数" in system
-    assert "分析登记表" in system        # 上传画像工件已入登记表
+    assert "分析登记表" in system  # 上传画像工件已入登记表
     assert [message.content for message in request[1:]] == [
         "这条历史会被截掉",
         "旧回复",
@@ -2591,8 +3326,11 @@ def test_stream_model_failure_emits_error_and_does_not_persist_partial_assistant
     chat_harness: ChatHarness,
 ) -> None:
     chat_harness.gateway.turns = [
-        {"deltas": ["部分回复"], "error": RuntimeError("provider disconnected"),
-         "fail_after_deltas": True},
+        {
+            "deltas": ["部分回复"],
+            "error": RuntimeError("provider disconnected"),
+            "fail_after_deltas": True,
+        },
     ]
 
     response = chat_harness.client.post(
@@ -2637,9 +3375,9 @@ def test_stream_empty_response_is_not_persisted(chat_harness: ChatHarness) -> No
         "error",
     ]
     assert events[-1][1]["code"] == "empty_response"
-    assert [message.role for message in chat_harness.store.list_messages(
-        chat_harness.conversation.id
-    )] == ["user"]
+    assert [
+        message.role for message in chat_harness.store.list_messages(chat_harness.conversation.id)
+    ] == ["user"]
 
 
 def test_stream_validates_request_before_model_call(chat_harness: ChatHarness) -> None:

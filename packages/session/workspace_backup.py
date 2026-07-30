@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5
 
 BACKUP_FORMAT = "chatbi-workspace-backup-v1"
 _COUNTED_TABLES = (
@@ -33,6 +33,8 @@ _COUNTED_TABLES = (
     "memory_snapshots",
     "memory_snapshot_items",
     "memory_links",
+    "conversation_compactions",
+    "conversation_compaction_items",
 )
 
 
@@ -135,7 +137,7 @@ def verify_workspace_backup(input_dir: str | Path) -> dict[str, Any]:
         raise RuntimeError("工作区备份缺少 SQLite 文件")
     _require_hash(database, database_item.get("sha256"))
     inspected = _inspect_database(database)
-    for key in ("schema_version", "integrity", "migration_checksum", "table_counts"):
+    for key in ("schema_version", "integrity", "migration_checksums", "table_counts"):
         if database_item.get(key) != inspected[key]:
             raise RuntimeError(f"工作区备份 SQLite {key} 与 manifest 不一致")
 
@@ -285,19 +287,23 @@ def _inspect_database(path: Path) -> dict[str, object]:
             raise RuntimeError(
                 f"工作区 SQLite schema 版本不兼容: {version}"
             )
-        migration = connection.execute(
+        migrations = connection.execute(
             """
-            SELECT name, checksum FROM schema_migrations
-            WHERE version = ?
+            SELECT version, name, checksum FROM schema_migrations
+            WHERE version IN (?, ?)
             """,
-            (v4.VERSION,),
-        ).fetchone()
-        if (
-            migration is None
-            or str(migration[0]) != v4.NAME
-            or str(migration[1]) != v4.CHECKSUM
-        ):
-            raise RuntimeError("工作区 Memory migration checksum 不匹配")
+            (v4.VERSION, v5.VERSION),
+        ).fetchall()
+        actual_migrations = {
+            str(int(row[0])): {"name": str(row[1]), "checksum": str(row[2])}
+            for row in migrations
+        }
+        expected_migrations = {
+            str(v4.VERSION): {"name": v4.NAME, "checksum": v4.CHECKSUM},
+            str(v5.VERSION): {"name": v5.NAME, "checksum": v5.CHECKSUM},
+        }
+        if actual_migrations != expected_migrations:
+            raise RuntimeError("工作区 v2.5 migration checksum 不匹配")
         counts = {
             table: int(
                 connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
@@ -311,7 +317,7 @@ def _inspect_database(path: Path) -> dict[str, object]:
     return {
         "schema_version": version,
         "integrity": "ok",
-        "migration_checksum": v4.CHECKSUM,
+        "migration_checksums": expected_migrations,
         "table_counts": counts,
     }
 

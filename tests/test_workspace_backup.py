@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.governance.permissions import Principal
+from packages.session.compaction import CompactionStore
 from packages.session.memory_models import MemoryDraft
 from packages.session.memory_store import MemoryStore
 from packages.session.store import SessionStore
@@ -22,7 +23,7 @@ from packages.session.workspace_backup import (
 
 def _seed_workspace(
     tmp_path: Path,
-) -> tuple[Path, Path, Path, Path, str, str, str]:
+) -> tuple[Path, Path, Path, Path, str, str, str, str]:
     database = tmp_path / "db" / "chatbi.db"
     datasets = tmp_path / "datasets"
     artifacts = tmp_path / "artifacts"
@@ -41,6 +42,16 @@ def _seed_workspace(
         conversation_id=conversation.id,
         role="user",
         content="把工单编号显示为请求 ID",
+    )
+    session.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="我会在后续分析中使用这个已确认的展示名称。" + "甲" * 80,
+    )
+    session.append_message(
+        conversation_id=conversation.id,
+        role="user",
+        content="现在继续处理新的工单数据。" + "乙" * 80,
     )
     dataset_ref = "d" * 32
     session.register_dataset(
@@ -90,11 +101,22 @@ def _seed_workspace(
         contract=contract,
         budget={"max_tool_calls": 1},
     )
+    compaction_result = CompactionStore(session).compact_if_needed(
+        project_id=project.id,
+        conversation_id=conversation.id,
+        principal=principal,
+        trigger_chars=100,
+        keep_recent=1,
+        summary_max_chars=512,
+    )
+    assert compaction_result.view is not None
+    compaction_id = compaction_result.view.record.compaction_id
     snapshot, records = MemoryStore(session).create_snapshot(
         project_id=project.id,
         principal=principal,
         conversation_id=conversation.id,
         run_id=run.run_id,
+        compaction_id=compaction_id,
     )
     assert records == (memory,)
     return (
@@ -105,6 +127,7 @@ def _seed_workspace(
         project.id,
         artifact.id,
         snapshot.memory_snapshot_id,
+        compaction_id,
     )
 
 
@@ -117,6 +140,7 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
         project_id,
         artifact_id,
         snapshot_id,
+        compaction_id,
     ) = _seed_workspace(tmp_path)
     result = backup_workspace(
         db_path=database,
@@ -135,6 +159,8 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
     assert counts["memory_records"] == 1
     assert counts["memory_snapshots"] == 1
     assert counts["memory_snapshot_items"] == 1
+    assert counts["conversation_compactions"] == 1
+    assert counts["conversation_compaction_items"] == 2
     assert counts["artifacts"] == 1
     assert counts["datasets"] == 1
 
@@ -167,6 +193,14 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
         principal=Principal(user_id="owner", tenant_id="tenant-a"),
     )
     assert snapshot is not None and snapshot[0].record_count == 1
+    compaction = CompactionStore(reopened).get_view(
+        compaction_id,
+        project_id=project_id,
+        conversation_id=snapshot[0].conversation_id or "",
+        principal=Principal(user_id="owner", tenant_id="tenant-a"),
+    )
+    assert compaction is not None
+    assert snapshot[0].compaction_id == compaction.record.compaction_id
     assert (datasets / f"{'d' * 32}.parquet").read_bytes() == b"dataset-v1"
     assert not (datasets / "extra.parquet").exists()
     assert (

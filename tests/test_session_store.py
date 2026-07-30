@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
     second = SessionStore(str(db_path))
 
     assert db_path.exists()
-    assert second.schema_version == 4
+    assert second.schema_version == CURRENT_SCHEMA_VERSION
     assert second.get_project(project.id) == project
     with sqlite3.connect(db_path) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
@@ -54,6 +55,8 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "memory_snapshots",
         "memory_snapshot_items",
         "memory_links",
+        "conversation_compactions",
+        "conversation_compaction_items",
     } <= tables
 
 
@@ -66,17 +69,30 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
         SessionStore(str(db_path))
 
 
-def test_readiness_rejects_memory_migration_checksum_drift(tmp_path: Path) -> None:
+def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None:
     db_path = tmp_path / "readiness.db"
     store = SessionStore(str(db_path))
     assert store.readiness_status() == {
-        "schema_version": 4,
+        "schema_version": CURRENT_SCHEMA_VERSION,
         "integrity": "ok",
         "memory_control_plane": "ready",
+        "compaction_control_plane": "ready",
     }
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 4"
+        )
+
+    with pytest.raises(RuntimeError, match="checksum"):
+        store.readiness_status()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+            (v4.CHECKSUM, v4.VERSION),
+        )
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
+            (v5.VERSION,),
         )
 
     with pytest.raises(RuntimeError, match="checksum"):

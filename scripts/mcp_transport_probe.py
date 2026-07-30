@@ -1,10 +1,11 @@
-"""Run the v2.4 stdio/Streamable HTTP MCP transport acceptance probe."""
+"""运行 v2.4/v2.5 stdio/Streamable HTTP 与固定 Host 引用等价探针。"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -27,9 +28,20 @@ from mcp_servers.common.contracts import MCPRequestContext, stable_hash
 from mcp_servers.common.sdk_adapter import MCP_PROTOCOL_VERSION
 from mcp_servers.dataset_ops.tools import aggregate_preview
 from packages.common.config import get_settings
+from packages.governance.permissions import Principal
+from packages.session.coref import ReferenceResolver
+from packages.session.memory_models import MemoryDraft
+from packages.session.memory_refs import (
+    MemoryReferenceResolver,
+    memory_reference_semantic_key,
+    memory_reference_summary,
+)
+from packages.session.memory_store import MemoryStore
+from packages.session.store import SessionStore
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "stage0-local-probe-token"
+_PRINCIPAL = Principal(user_id="probe-user", tenant_id="probe-tenant")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,29 +68,37 @@ class TransportResult:
         }
 
 
-def _context(*, expired: bool = False) -> MCPRequestContext:
+def _context(
+    *,
+    expired: bool = False,
+    memory_snapshot_id: str = "0" * 32,
+    project_id: str = "probe-project",
+    conversation_id: str = "probe-conversation",
+) -> MCPRequestContext:
     deadline = datetime.now(UTC) + (
         timedelta(seconds=-1) if expired else timedelta(minutes=1)
     )
     return MCPRequestContext(
         subject_id="probe-user",
-        project_id="probe-project",
-        conversation_id="probe-conversation",
+        project_id=project_id,
+        conversation_id=conversation_id,
         run_id="probe-run",
         plan_version=0,
         step_id="probe-step",
         invocation_id="probe-invocation",
         idempotency_key="probe-idempotency",
         permission_snapshot_id="probe-permissions",
-        memory_snapshot_id="0" * 32,
+        memory_snapshot_id=memory_snapshot_id,
         evidence_ledger_version=0,
         trace_id="probe-trace",
         deadline_at=deadline.isoformat(),
     )
 
 
-def _write_dataset(directory: Path) -> tuple[str, dict[str, Any]]:
-    dataset_ref = "2" * 32
+def _write_dataset(
+    directory: Path,
+    dataset_ref: str,
+) -> dict[str, Any]:
     path = directory / f"{dataset_ref}.parquet"
     connection = duckdb.connect()
     try:
@@ -101,7 +121,103 @@ def _write_dataset(directory: Path) -> tuple[str, dict[str, Any]]:
         "agg": "sum",
         "sort": "group",
     }
-    return dataset_ref, arguments
+    return arguments
+
+
+def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]:
+    """从 Host 真相源解析同一 Dataset 和记忆映射，供双传输调用共享。"""
+    session = SessionStore(str(database))
+    project = session.create_project(
+        "MCP reference probe",
+        owner_user_id=_PRINCIPAL.user_id,
+        tenant_id=_PRINCIPAL.tenant_scope,
+    )
+    conversation = session.create_conversation(project.id)
+    session.register_dataset(
+        ref=dataset_ref,
+        project_id=project.id,
+        filename="协议样本.parquet",
+        profile={"column_count": 2},
+    )
+    confirmation = session.append_message(
+        conversation_id=conversation.id,
+        role="user",
+        content="确认“协议样本”指向当前探针数据集。",
+    )
+    memories = MemoryStore(session, audit_recorder=lambda _event: None)
+    memory = memories.remember(
+        project_id=project.id,
+        principal=_PRINCIPAL,
+        draft=MemoryDraft(
+            scope="project",
+            kind="entity_mapping",
+            semantic_key=memory_reference_semantic_key(
+                kind="entity_mapping",
+                alias="协议样本",
+            ),
+            content_summary=memory_reference_summary(
+                kind="entity_mapping",
+                alias="协议样本",
+            ),
+            source_type="user_confirmation",
+            source_ref=confirmation.id,
+            source_hash=hashlib.sha256(
+                confirmation.content.encode("utf-8")
+            ).hexdigest(),
+            confidence=1.0,
+        ),
+        idempotency_key="mcp-reference-probe",
+    ).record
+    memories.add_link(
+        memory.memory_id,
+        project_id=project.id,
+        principal=_PRINCIPAL,
+        target_type="dataset",
+        target_ref=dataset_ref,
+    )
+    snapshot, _ = memories.create_snapshot(
+        project_id=project.id,
+        conversation_id=conversation.id,
+        principal=_PRINCIPAL,
+    )
+    conversation_reference = ReferenceResolver(
+        session,
+        audit_recorder=lambda _event: None,
+    ).resolve(
+        "处理当前数据集",
+        project_id=project.id,
+        conversation_id=conversation.id,
+        principal=_PRINCIPAL,
+    )
+    memory_reference = MemoryReferenceResolver(
+        session,
+        memories,
+        audit_recorder=lambda _event: None,
+    ).resolve(
+        "处理协议样本",
+        project_id=project.id,
+        conversation_id=conversation.id,
+        memory_snapshot_id=snapshot.memory_snapshot_id,
+        principal=_PRINCIPAL,
+    )
+    conversation_targets = [target.dataset_ref for target in conversation_reference.targets]
+    memory_targets = [target.dataset_ref for target in memory_reference.targets]
+    if (
+        conversation_reference.status != "resolved"
+        or memory_reference.status != "resolved"
+        or conversation_targets != [dataset_ref]
+        or memory_targets != [dataset_ref]
+    ):
+        raise RuntimeError("MCP 双传输探针未建立唯一 Host Dataset 绑定")
+    return {
+        "dataset_ref": dataset_ref,
+        "project_id": project.id,
+        "conversation_id": conversation.id,
+        "memory_snapshot_id": snapshot.memory_snapshot_id,
+        "conversation_resolution_hash": conversation_reference.resolution_hash,
+        "memory_resolution_hash": memory_reference.resolution_hash,
+        "target_ref_hash": stable_hash(dataset_ref),
+    }
 
 
 def _error_code(result: Any) -> str:
@@ -116,6 +232,9 @@ async def _exercise_session(
     name: str,
     arguments: dict[str, Any],
     session_created: bool,
+    memory_snapshot_id: str,
+    project_id: str,
+    conversation_id: str,
 ) -> TransportResult:
     started = time.perf_counter()
     initialized = await session.initialize()
@@ -126,19 +245,31 @@ async def _exercise_session(
     success = await session.call_tool(
         "aggregate_preview",
         arguments,
-        meta=_context().to_request_meta(signing_key=TOKEN),
+        meta=_context(
+            memory_snapshot_id=memory_snapshot_id,
+            project_id=project_id,
+            conversation_id=conversation_id,
+        ).to_request_meta(signing_key=TOKEN),
     )
     if success.isError or not isinstance(success.structuredContent, dict):
         raise RuntimeError(f"{name} 合法调用失败")
     invalid = await session.call_tool(
         "aggregate_preview",
         {**arguments, "agg": "median"},
-        meta=_context().to_request_meta(signing_key=TOKEN),
+        meta=_context(
+            memory_snapshot_id=memory_snapshot_id,
+            project_id=project_id,
+            conversation_id=conversation_id,
+        ).to_request_meta(signing_key=TOKEN),
     )
     unknown = await session.call_tool(
         "missing_tool",
         {},
-        meta=_context().to_request_meta(signing_key=TOKEN),
+        meta=_context(
+            memory_snapshot_id=memory_snapshot_id,
+            project_id=project_id,
+            conversation_id=conversation_id,
+        ).to_request_meta(signing_key=TOKEN),
     )
     business = await session.call_tool(
         "aggregate_preview",
@@ -147,12 +278,21 @@ async def _exercise_session(
             "group_col": "region",
             "agg": "sum",
         },
-        meta=_context().to_request_meta(signing_key=TOKEN),
+        meta=_context(
+            memory_snapshot_id=memory_snapshot_id,
+            project_id=project_id,
+            conversation_id=conversation_id,
+        ).to_request_meta(signing_key=TOKEN),
     )
     expired = await session.call_tool(
         "aggregate_preview",
         arguments,
-        meta=_context(expired=True).to_request_meta(signing_key=TOKEN),
+        meta=_context(
+            expired=True,
+            memory_snapshot_id=memory_snapshot_id,
+            project_id=project_id,
+            conversation_id=conversation_id,
+        ).to_request_meta(signing_key=TOKEN),
     )
     errors = {
         "schema": _error_code(invalid),
@@ -183,6 +323,9 @@ async def _exercise_session(
 async def _probe_stdio(
     dataset_dir: Path,
     arguments: dict[str, Any],
+    memory_snapshot_id: str,
+    project_id: str,
+    conversation_id: str,
 ) -> TransportResult:
     env = {
         "DATASET_DIR": str(dataset_dir),
@@ -205,6 +348,9 @@ async def _probe_stdio(
                     name="stdio",
                     arguments=arguments,
                     session_created=False,
+                    memory_snapshot_id=memory_snapshot_id,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
                 )
 
 
@@ -353,6 +499,9 @@ async def _cancel_http_call(
 async def _probe_http(
     dataset_dir: Path,
     arguments: dict[str, Any],
+    memory_snapshot_id: str,
+    project_id: str,
+    conversation_id: str,
 ) -> tuple[TransportResult, dict[str, bool], int | None]:
     port = _free_port()
     url = f"http://127.0.0.1:{port}/mcp/"
@@ -394,6 +543,9 @@ async def _probe_http(
                         name="streamable_http",
                         arguments=arguments,
                         session_created=get_session_id() is not None,
+                        memory_snapshot_id=memory_snapshot_id,
+                        project_id=project_id,
+                        conversation_id=conversation_id,
                     )
                     session_created = get_session_id() is not None
                     if not session_created:
@@ -426,12 +578,27 @@ async def run_probe(output: Path) -> dict[str, Any]:
         os.environ["DATASET_DIR"] = str(dataset_dir)
         get_settings.cache_clear()
         try:
-            _, arguments = _write_dataset(dataset_dir)
+            dataset_ref = "2" * 32
+            host_reference = _resolve_probe_reference(
+                Path(temp) / "reference.db",
+                dataset_ref,
+            )
+            arguments = _write_dataset(dataset_dir, host_reference["dataset_ref"])
             direct = aggregate_preview(arguments)
             direct_hash = stable_hash(direct)
-            stdio = await _probe_stdio(dataset_dir, arguments)
+            stdio = await _probe_stdio(
+                dataset_dir,
+                arguments,
+                host_reference["memory_snapshot_id"],
+                host_reference["project_id"],
+                host_reference["conversation_id"],
+            )
             http_result, negative, exit_code = await _probe_http(
-                dataset_dir, arguments
+                dataset_dir,
+                arguments,
+                host_reference["memory_snapshot_id"],
+                host_reference["project_id"],
+                host_reference["conversation_id"],
             )
         finally:
             if previous_dataset_dir is None:
@@ -454,6 +621,15 @@ async def run_probe(output: Path) -> dict[str, Any]:
         "protocol_version": MCP_PROTOCOL_VERSION,
         "tool": "aggregate_preview",
         "equivalent": True,
+        "host_reference": {
+            "conversation_resolution_hash": host_reference[
+                "conversation_resolution_hash"
+            ],
+            "memory_resolution_hash": host_reference["memory_resolution_hash"],
+            "target_ref_hash": host_reference["target_ref_hash"],
+            "memory_snapshot_id": host_reference["memory_snapshot_id"],
+            "same_binding_across_transports": True,
+        },
         "direct_result_hash": direct_hash,
         "transports": [stdio.public_dict(), http_result.public_dict()],
         "http_negative_checks": negative,

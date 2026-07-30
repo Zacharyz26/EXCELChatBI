@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     conversation_cache_size: int = 128
     chat_history_limit: int = 20
     chat_profile_max_chars: int = 12_000
+    chat_compaction_trigger_chars: int = Field(default=24_000, ge=100, le=2_000_000)
+    chat_compaction_keep_recent: int = Field(default=8, ge=1, le=100)
+    chat_compaction_summary_max_chars: int = Field(default=4_000, ge=256, le=12_000)
+    chat_compaction_message_max_chars: int = Field(default=320, ge=40, le=2_000)
 
     # Agent 循环护栏（14.5.1 初值 6，2026-07-17 按真实使用调优为 12：
     # 多指标出图的常见计划是 3×统计 + 3×聚合 + 3×图表，6 次会把图表全部挡掉）

@@ -19,6 +19,7 @@ from packages.session.migrations import (
     v2,
     v3,
     v4,
+    v5,
 )
 from packages.session.store import _SCHEMA_V1
 
@@ -424,6 +425,7 @@ def run_rehearsal(
             str(v2.VERSION): v2.CHECKSUM,
             str(v3.VERSION): v3.CHECKSUM,
             str(v4.VERSION): v4.CHECKSUM,
+            str(v5.VERSION): v5.CHECKSUM,
         },
         "backup_sha256": recorded_backup_hash,
         "versions": {
