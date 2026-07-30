@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from apps.api.deps import embedder_dep, kb_store_dep, settings_dep
+from apps.api.deps import embedder_dep, kb_store_dep, session_store_dep, settings_dep
 from apps.api.main import app
 from fastapi.testclient import TestClient
 from packages.common.config import Settings
@@ -83,5 +83,24 @@ def test_readiness_reports_storage_failure() -> None:
             "error": "RuntimeError",
         }
         assert "storage unavailable" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_readiness_reports_workspace_memory_failure() -> None:
+    class BrokenSession:
+        def readiness_status(self) -> None:
+            raise RuntimeError("database path and details must stay private")
+
+    app.dependency_overrides[session_store_dep] = BrokenSession
+    try:
+        response = TestClient(app).get("/health/ready")
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "status": "not_ready",
+            "component": "workspace_store",
+            "error": "RuntimeError",
+        }
+        assert "database path" not in response.text
     finally:
         app.dependency_overrides.clear()

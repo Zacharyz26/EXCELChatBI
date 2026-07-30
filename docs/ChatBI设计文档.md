@@ -1,7 +1,9 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.4-stage2e · 状态：阶段 1 已验收、阶段 2A–2E 已实现，Docker runner、
-> G7 人工签字待完成；阶段 2 真实行为对照自动门禁已通过 · 语言场景：中文优先
+> 版本：v2.5-stage3a-release-candidate · 状态：v2.4 阶段 2A–2E 已实现且最新
+> Docker runner 全绿；G7 代表性评测/人工签字待完成；v2.5 阶段 3A 实现已收口，
+> 本批 Docker 恢复门禁待提交后的 runner 确认
+> · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
 ---
@@ -11,7 +13,7 @@
 **v2.4-planning（2026-07-22，目标驱动 Agent 路线更新）**：
 
 - v2.3 的 function-calling 循环定性为“反应式工具调用 Agent”基线；已有能力继续维护，不重复开发。
-- 新增第 15 章，并以 `docs/Agent自主化开发规划.md` 作为现行阶段、依赖和验收依据：v2.4 建立 TaskContract、AgentState、Claim/Evidence、Verifier、结构化计划、动态重规划、澄清和恢复；v2.5 建立记忆、业务语义、自主分析和可干预前端；v3.0 扩展数据接入、主动任务、多 Agent 与企业治理。
+- 新增第 15 章，并以 `docs/Agent自主化开发规划.md` 作为现行阶段、依赖和验收依据：v2.4 建立 TaskContract、AgentState、Claim/Evidence、Verifier、结构化计划、动态重规划、澄清和恢复；v2.5 建立记忆、领域语义、自主分析和可干预前端；v3.0 扩展数据接入、主动任务、多 Agent 与企业治理。
 - 原“复杂多步、完整上下文、内部数据、远程 MCP、多租户明确不做”的限制废止，改为分版本实施；原“自由 SQL 永久不做”改为独立受限 SQL 安全项目。所有能力在完成阶段验收前仍视为未实现。
 - 新增两条横向交付轨：v2.4 完成项目内标准 MCP Client/Server、stdio/Streamable HTTP、基础镜像与单机 Compose；v2.5 继续补齐记忆/Evidence、前端审批、知识 Resource、能力目录、状态恢复和资源 profile；v3.0 再扩展外部 MCP 治理、外置状态、镜像供应链和多实例运维。
 - 七条安全红线升级为任何执行路径都必须成立的不变量；新增完成验证、Evidence、预算取消、记忆治理和外部副作用审批约束。
@@ -387,18 +389,21 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 
 ---
 
-## 11. 演进路线（2026-07-27 更新）
+## 11. 演进路线（2026-07-29 更新）
 
 1. **v2.3 基线 — 已完成**：知识库、Excel/统计/图表/报告工具、对话工作区、function-calling 循环和五阶段迁移；第 14 章记录其设计与交付历史。
-2. **v2.4 Agent 控制面 — 当前进行中**：阶段 1 已验收，SQLite v3、TaskRun/
+2. **v2.4 Agent 控制面 — 工程完成、G7 发布评审未关闭**：阶段 1 已验收，SQLite v3、TaskRun/
    Contract/Event/Snapshot/Invocation/Evidence、确定性 Verifier、策略/审计/trace、
    MCP 单源 adapter/Gateway、双传输探针、五服务 Compose 与真实全栈 E2E 门禁已落地。
    阶段 2A 已实现混合 Planner、TaskPlan/TaskStep 版本、能力白名单和计划完成校验；
    2B 已负责依赖图重规划，2C 已负责任务控制/恢复，2D 已完成 MCP Gateway 规范执行；
-   2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照已通过自动门禁；
-   Docker runner 与该对照均通过后关闭工程验收。
-   G7 自动门禁已落地，仍待人工盲评、负责人签字与 ADR 接受。
-3. **v2.5 记忆、自主性与协作**：阶段 3 记忆；阶段 4 可干预前端；阶段 5 业务语义层；阶段 6 自主分析和统计护栏。
+   2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照和最新 Docker runner 均已通过；
+   现有场景全部为商业语境，G7 等待代表性场景、Verifier 评分契约、人工签字与 ADR 接受。
+3. **v2.5 记忆、自主性与协作 — 阶段 3A 实现已收口**：领域无关的 schema v4、
+   Memory Repository/Policy、TaskRun 快照、上下文边界、MCP 引用、结构化审计、
+   readiness 和工作区一致备份/恢复已实现；Compose 联合恢复门禁已接入 CI，等待本批
+   提交后的 Docker runner 确认。阶段 4 为可干预前端，阶段 5 为领域语义层，
+   阶段 6 为自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
 6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。
@@ -469,7 +474,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | 现有物 | 处置 |
 |--------|------|
 | `kb_qa` + `/kb/query` | **保留共存**：纯文档问答轻端点；检索升级后自动受益（同一 `HybridRetriever`）；助手稳定后再评估是否下线 |
-| `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入业务语义层 |
+| `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入版本化领域语义层 |
 | `/chat` 路由 + 前端 `ChatPanel.tsx` | v2.3 主入口已落地；v2.4 扩展任务事件，v2.5 增加完整干预交互 |
 | `stats_interpreter` 门控 | **原统计端点链路不动**；助手通道走自己的上下文组装（13.5）。门控代码保留，供未来敏感部署复用 |
 | `packages/session` | SQLite 工作区与 LRU 已落地；`coref` / `compaction` 仍为空，按 v2.5 阶段 3 实现；v2.4 先增加 Task/Event/Evidence/Checkpoint |
@@ -667,7 +672,7 @@ Artifact     {id, conversation_id, message_id, type, payload_json|file_ref,
 > 本章给出总体架构和版本边界。逐项交付、验收、安全项目与优先级以
 > `docs/Agent自主化开发规划.md` 为准。阶段 0 详细草案见 `docs/v2.4/README.md`；
 > 阶段 1 已验收，阶段 2A–2E 已实现；阶段 2 的 60-run 真实行为对照已通过自动门禁；
-> Docker runner、人工盲评、负责人签字和 ADR 接受仍是未关闭债务。
+> 最新 Docker runner 已全绿；代表性人工盲评、负责人签字和 ADR 接受仍是未关闭债务。
 
 ### 15.1 目标
 
@@ -712,20 +717,25 @@ MCP 与 Docker 是 v2.4 的横向交付轨，不另起一个脱离控制面的�
 双传输和容器拓扑；阶段 1 完成全部项目内工具的标准 MCP Server 接口、Client Gateway 与
 API/Web 基础镜像；阶段 2 切换为规范 MCP 执行路径并交付包含工具服务和可选 RAG profile
 的单机 Compose。当前单源 adapter/Gateway、双传输探针、API/Web 根 Compose 和真实全栈
-E2E 已通过；阶段 2E 已把独立 MCP 工具服务纳入根 Compose，容器 runner 结果仍待关闭，
-因此暂不把 v2.4 工程验收标记为完成。详细边界、服务分组、卷、网络和验收见
+E2E 已通过；阶段 2E 已把独立 MCP 工具服务纳入根 Compose，最新容器 runner 全绿。
+v2.4 工程门禁已完成，但场景代表性和 G7 人工签字仍阻止发布验收关闭。详细边界、
+服务分组、卷、网络和验收见
 `docs/v2.4/MCP与Docker架构决策.md`。
 
 ### 15.4 v2.5 — 记忆、自主性与协作
+
+当前从领域无关的阶段 3A 开始，实施计划见
+`docs/v2.5/阶段3A实施计划.md`。阶段 5–6 在真实需求尚未明确时不预置销售、利润或复购率
+专用语义和分析模板，必须等待代表性场景冻结后再宣称产品适用性。
 
 | 阶段 | Agent 能力 | MCP 演进 | Docker/部署演进 | 关键门禁 |
 |---|---|---|---|---|
 | 3. 记忆 | 工作/对话/项目记忆、compaction/coref、来源与删除 | Observation 以 server/tool/version/hash/reference 进入 Evidence；记忆由 Host 管理，不开放通用写工具 | SQLite/Task/Memory/Dataset/Artifact 卷一致备份、迁移和恢复；保持单写入者 | 容器重建后任务/记忆可恢复且不重复调用；跨项目引用不可读 |
 | 4. 前端协作 | 真实计划、澄清、修改、暂停恢复、证据/局限、自主等级 | 前端显示工具来源/版本/风险/权限/健康；ApprovalRecord 绑定调用，浏览器不直连 MCP | Web 代理覆盖 API/SSE/Artifact 下载；Compose E2E 验证重连、审批、取消和重启 | UI 与审计一致；未批准调用被服务端拒绝；`/mcp` 不公开 |
-| 5. 业务语义 | 版本化指标、公式、粒度、生效期、字段映射与冲突 | `knowledge-tools` 提供受控 Tool 和选择性只读 Resource；Claim 同时引用语义版本与数据调用 | RAG profile 分离原文、索引和模型缓存；CPU/GPU 共用契约 | 旧报告可追溯旧口径；冲突澄清；索引切代不破坏 Resource 引用 |
+| 5. 领域语义 | 版本化定义/指标、公式、粒度、生效期、字段映射与冲突 | `knowledge-tools` 提供受控 Tool 和选择性只读 Resource；Claim 同时引用语义版本与数据调用 | RAG profile 分离原文、索引和模型缓存；CPU/GPU 共用契约 | 旧报告可追溯旧定义；冲突澄清；索引切代不破坏 Resource 引用 |
 | 6. 自主分析 | 数据角色、质量、假设、结果驱动分析、多数据集与统计护栏 | capability 先于工具名；目录变更经 Gateway 复核并冻结到 TaskRun；并行共享预算/版本/取消树 | stats/forecast/browser/gpu profile 隔离资源；阶段 6 仍以单机 Compose 为交付边界 | 能力缺失不心算；并行不重复 Artifact；重型服务故障不拖垮控制面 |
 
-业务语义层先于大规模自主探索。MCP Server 不读取完整记忆、不递归调用其他 Server，也不
+领域语义层先于大规模自主探索。MCP Server 不读取完整记忆、不递归调用其他 Server，也不
 自行扩张目标；Docker 拆分只在依赖、安全或扩缩容收益明确时进行。
 
 ### 15.5 独立安全项目

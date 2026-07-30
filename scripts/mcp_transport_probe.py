@@ -70,6 +70,8 @@ def _context(*, expired: bool = False) -> MCPRequestContext:
         invocation_id="probe-invocation",
         idempotency_key="probe-idempotency",
         permission_snapshot_id="probe-permissions",
+        memory_snapshot_id="0" * 32,
+        evidence_ledger_version=0,
         trace_id="probe-trace",
         deadline_at=deadline.isoformat(),
     )

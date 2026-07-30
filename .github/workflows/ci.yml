@@ -198,7 +198,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec playwright install --with-deps chromium
 
-      - name: Run isolated Compose browser and restart gate
+      - name: Run Compose browser, restart and offline recovery gate
         run: ./scripts/run_compose_e2e.sh
         env:
           CHATBI_IMAGE_TAG: ci

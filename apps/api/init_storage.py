@@ -14,6 +14,7 @@ def main() -> None:
         settings.upload_dir,
         settings.dataset_dir,
         settings.report_dir,
+        settings.workspace_backup_dir,
         settings.kb_index_dir,
         settings.kb_backup_dir,
     ):
@@ -22,7 +23,9 @@ def main() -> None:
         settings.chat_db_path,
         cache_size=settings.conversation_cache_size,
     )
-    if store.schema_version <= 0:
+    status = store.readiness_status()
+    schema_version = status["schema_version"]
+    if not isinstance(schema_version, int) or schema_version <= 0:
         raise RuntimeError("SQLite schema 初始化失败")
 
 

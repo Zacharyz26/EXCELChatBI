@@ -8,10 +8,14 @@
 
 ## 当前进度
 
-当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent。自然语言对话是唯一前端入口；
+当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
+Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
-SSE 展示。SQLite schema v3 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
-Evidence、Claim、Checkpoint、项目成员和报告所有权。
+SSE 展示。SQLite schema v4 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
+幂等操作、不可变快照和资源关联。阶段 3A 实现已收口，新增离线一致备份/恢复、
+Memory readiness 和 Compose 联合恢复门禁；本机无 Docker，最终关闭等待本批提交后的
+Docker runner 结果。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -29,6 +33,12 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - SQLite 项目、数据集、对话、消息和 Artifact 持久化；
 - SQLite v1→v3 迁移/校验/受保护回滚，TaskRun、TaskContract、TaskEvent、快照、
   ToolInvocation、Evidence 和 Checkpoint 数据结构；
+- SQLite v3→v4 带 hash 备份迁移，以及受来源、作用域、置信度、版本、冲突和软删除
+  约束的 Memory Repository/Policy；
+- TaskRun 创建/恢复时固定不可变 `memory_snapshot_id`；Agent 只读取有界记忆摘要，
+  MCP 上下文只携带快照 ID 和 Evidence ledger 版本，记忆不能替代 Evidence；
+- Memory 创建、冲突、修订、删除、关联、快照和拒绝均输出不含正文的结构化审计；
+  SQLite/Dataset/Artifact 可生成带 schema、行数和文件 hash 的离线一致备份；
 - 最小确定性 Verifier：最终正文先验证后发送，图表/报告必须有当前 run 的真实 Artifact，
   报告文件必须真实存在且非空，预算耗尽进入 `blocked`；
 - 原子创建用户消息、TaskRun、TaskContract、goal 与初始快照；数值 Claim 绑定 Evidence 路径，
@@ -66,7 +76,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
 - 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
-- 上下文压缩、指代消解和长期项目记忆尚未实现；
+- 记忆控制面和 TaskRun 快照已实现；自动上下文压缩、指代消解、长期记忆自动提取与
+  用户治理界面尚未实现；
 - 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、审批和企业审计后端尚未实现；
 - Agent Executor 已切到 MCP Client Gateway；支持 stdio/认证 Streamable HTTP、
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
@@ -79,8 +90,11 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ### 已规划但未实现
 
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
-  70.0%、终态如实率 73.3%、越界 0）；剩余 2E Docker runner 门禁和 G7 人工盲评/签字；
-- **v2.5**：完整记忆、可干预前端、业务指标语义层、自主探索和多数据集分析；同步扩展 MCP 的记忆/Evidence 引用、知识 Resource、审批与能力目录，并补齐状态恢复和重型工具 Docker profile；
+  70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
+  数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
+- **v2.5**：阶段 3A 的 schema、Repository、Memory Policy、TaskRun 快照、上下文边界和
+  MCP 引用、离线备份/恢复和 Compose 联合恢复门禁均已实现，尚待 Docker runner
+  实际执行确认；后续再做自动压缩/指代、可干预前端、领域语义、自主探索和多数据集分析；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -89,15 +103,15 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ## Agent 演进路线
 
 ```text
-当前 v2.4 阶段 2E
+当前 v2.4 阶段 2E（代码与容器 CI 已完成，G7 代表性评审债务保留）
   理解目标 → 必要澄清 → 结构化计划 → 受控执行
       ↑                      （依赖图 ready frontier）↓
   持久状态 ← 最终交付 ← Verifier ← Evidence
           ├── 不可变计划版本 ← Observation 重规划
           └── Checkpoint ← 暂停/断线/重启后同 run 恢复
 
-v2.5
-  记忆 + 业务语义 + 自主分析 + 人机协作
+v2.5 阶段 3A（实现已收口，Docker runner 门禁待确认）
+  记忆契约 + SQLite v4 + Memory Policy + 不可变快照 + 项目隔离 + 一致恢复
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证
@@ -114,6 +128,7 @@ v3.0
 
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
 v2.4 详细设计与阶段 1–2E 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
+v2.5 当前入口与阶段 3A 实施计划见 [`docs/v2.5/README.md`](./docs/v2.5/README.md)。
 v2.4 之后各阶段的 MCP/Docker 演进见
 [`docs/MCP与Docker全阶段演进设计.md`](./docs/MCP与Docker全阶段演进设计.md)。
 
@@ -156,7 +171,7 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 | `packages/models` | 模型网关与 registry |
 | `packages/governance` | schema、数据边界、项目权限、策略、审计与 trace |
 | `packages/rag` | embedding、稀疏检索、rerank、Milvus |
-| `packages/session` | SQLite 工作区、schema 迁移、Task/Event/Evidence；后续长期记忆 |
+| `packages/session` | SQLite 工作区、schema 迁移、Task/Event/Evidence、受控记忆与快照 |
 | `docs` | 总设计、现行路线图、安全、验收和运维文档 |
 | `docs/v2.4` | Agent 控制面、SSE、评测、MCP 与 Docker 阶段 0 设计包 |
 | `docs/MCP与Docker全阶段演进设计.md` | v2.5、独立安全项目和 v3.0 的 MCP/容器逐阶段设计 |
@@ -214,10 +229,23 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 pnpm test:e2e:fullstack
 
-# 生产结构 Compose 浏览器与重启门禁（从仓库根目录执行）
+# 生产结构 Compose 浏览器、重启与离线破坏/恢复门禁（从仓库根目录执行）
 cd ../..
 ./scripts/run_compose_e2e.sh
 ```
+
+工作区离线备份/恢复要求先停止 API 和所有写服务。宿主机部署可使用：
+
+```bash
+uv run python -m apps.api.workspace_admin backup --service-stopped
+uv run python -m apps.api.workspace_admin verify --input .data/workspace_backups/<backup>
+uv run python -m apps.api.workspace_admin restore \
+  --input .data/workspace_backups/<backup> \
+  --service-stopped --yes --replace-files
+```
+
+恢复会先在 `WORKSPACE_BACKUP_DIR` 生成 `pre-restore-*` 覆盖前副本。知识库不在这个
+工作区备份中，继续使用独立的 `kb_admin` / Milvus 备份流程。
 
 ## 可选能力依赖
 

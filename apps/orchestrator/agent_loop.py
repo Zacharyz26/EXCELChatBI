@@ -42,6 +42,8 @@ from packages.governance.policy import ToolPolicyGateway, ToolPolicyRequest
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
+from packages.session.memory_models import MemoryRecord
+from packages.session.memory_store import MemoryAccessDenied, MemoryStore
 from packages.session.models import (
     Artifact,
     ArtifactDraft,
@@ -233,6 +235,7 @@ class AgentLoopConfig:
     max_invalid_tool_calls: int = 3
     max_model_rounds: int = 16
     tool_result_max_chars: int = 6_000
+    memory_max_chars: int = 4_000
     registry_max_entries: int = 12
     run_timeout_seconds: int = 300
     model_timeout_seconds: int = 90
@@ -563,6 +566,7 @@ async def _stream_agent_chat_inner(
         active_policy = policy or ToolPolicyGateway()
         final_message_id = uuid.uuid4().hex
         task_store = TaskStore(store.db_path)
+        memory_store = MemoryStore(store)
         try:
             datasets = await run_in_threadpool(store.list_datasets, project_id)
         except (sqlite3.Error, ValueError) as exc:
@@ -655,10 +659,17 @@ async def _stream_agent_chat_inner(
                 )
                 user_message_id = user_message.id
                 store.invalidate_conversation(conversation_id)
+            memory_snapshot, memory_records = await run_in_threadpool(
+                memory_store.create_snapshot,
+                project_id=project_id,
+                principal=active_principal,
+                conversation_id=conversation_id,
+                run_id=run_id,
+            )
             context = await run_in_threadpool(
                 store.load_conversation_context, conversation_id
             )
-        except (sqlite3.Error, RuntimeError, ValueError) as exc:
+        except (MemoryAccessDenied, sqlite3.Error, RuntimeError, ValueError) as exc:
             _log.error(
                 "agent.create_run_failed",
                 conversation_id=conversation_id,
@@ -703,12 +714,18 @@ async def _stream_agent_chat_inner(
                 "title": conversation.title,
                 "run_id": run_id,
                 "resumed": resume_existing,
+                "memory_snapshot_id": memory_snapshot.memory_snapshot_id,
             },
         )
         if goal_event is not None:
             yield _task_event(goal_event, conversation_id)
 
-        system_content = _build_system_content(datasets, list(context.artifacts), config)
+        system_content = _build_system_content(
+            datasets,
+            list(context.artifacts),
+            config,
+            memories=memory_records,
+        )
         # 13.5：发往模型的数据物料留结构化审计日志
         _log.info(
             "agent.context",
@@ -716,6 +733,8 @@ async def _stream_agent_chat_inner(
             system_chars=len(system_content),
             datasets=[d.ref for d in datasets],
             registry_entries=sum(1 for a in context.artifacts if a.type in _REGISTRY_TYPES),
+            memory_snapshot_id=memory_snapshot.memory_snapshot_id,
+            memory_records=len(memory_records),
         )
         working: list[ModelMessage] = [
             ModelMessage(role="system", content=system_content),
@@ -1940,6 +1959,10 @@ async def _stream_agent_chat_inner(
                     total_seconds=config.run_timeout_seconds,
                     operation_seconds=config.tool_timeout_seconds,
                 )
+                evidence_ledger_version = await run_in_threadpool(
+                    task_store.evidence_ledger_version,
+                    run_id,
+                )
                 request_context = MCPRequestContext(
                     subject_id=active_principal.user_id,
                     project_id=project_id,
@@ -1950,6 +1973,8 @@ async def _stream_agent_chat_inner(
                     invocation_id=invocation.invocation_id,
                     idempotency_key=idempotency_key,
                     permission_snapshot_id=policy_decision.permission_snapshot_id,
+                    memory_snapshot_id=memory_snapshot.memory_snapshot_id,
+                    evidence_ledger_version=evidence_ledger_version,
                     trace_id=run_id,
                     deadline_at=(
                         datetime.now(UTC) + timedelta(seconds=operation_timeout)
@@ -3079,9 +3104,13 @@ _REGISTRY_TYPES = {"profile", "stats", "chart", "table", "report"}
 
 
 def _build_system_content(
-    datasets: list[Dataset], artifacts: list[Artifact], config: AgentLoopConfig
+    datasets: list[Dataset],
+    artifacts: list[Artifact],
+    config: AgentLoopConfig,
+    *,
+    memories: tuple[MemoryRecord, ...] = (),
 ) -> str:
-    """system = 角色准则 + 可用数据集（含血缘）+ 最新画像 + 分析登记表。"""
+    """装配数据、工件和受控记忆；记忆只用于导航，不能替代 Evidence。"""
     sections = [_SYSTEM_PROMPT]
 
     if datasets:
@@ -3106,7 +3135,35 @@ def _build_system_content(
         sections.append(
             "分析登记表（本对话已产出的分析，追问改参数或组装报告时引用）：\n" + registry_lines
         )
+    memory_lines = _memory_context_lines(memories, config.memory_max_chars)
+    if memory_lines:
+        sections.append(
+            "受控记忆（仅用于理解偏好、别名和已确认上下文；"
+            "不能作为数值、统计、工件或知识来源 Evidence）：\n"
+            + memory_lines
+        )
     return "\n\n".join(sections)
+
+
+def _memory_context_lines(
+    records: tuple[MemoryRecord, ...],
+    maximum_chars: int,
+) -> str:
+    """在固定预算内输出快照摘要，不把完整项目记忆或原始来源正文交给模型。"""
+    remaining = max(0, maximum_chars)
+    lines: list[str] = []
+    for record in records:
+        prefix = (
+            f"- [memory_id={record.memory_id} version={record.version} "
+            f"scope={record.scope} source={record.source_type}:{record.source_ref}] "
+        )
+        if remaining <= len(prefix):
+            break
+        summary = record.content_summary[: remaining - len(prefix)]
+        line = prefix + summary
+        lines.append(line)
+        remaining -= len(line) + 1
+    return "\n".join(lines)
 
 
 def _registry_lines(artifacts: list[Artifact], max_entries: int) -> str:

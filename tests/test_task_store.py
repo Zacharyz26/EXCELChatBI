@@ -43,7 +43,7 @@ def test_real_v1_database_is_backed_up_and_migrated(tmp_path: Path) -> None:
 
     store = SessionStore(str(db_path))
 
-    assert store.schema_version == 3
+    assert store.schema_version == 4
     assert store.get_project("p1") is not None
     backups = list(tmp_path.glob("legacy.db.v1-backup.*.sqlite3"))
     assert len(backups) == 1

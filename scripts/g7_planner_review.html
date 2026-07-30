@@ -1,0 +1,1087 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>G7 Planner 匿名评分表</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --text: #172033;
+      --muted: #637083;
+      --line: #dce2e9;
+      --primary: #185adb;
+      --primary-soft: #e9f0ff;
+      --good: #16794b;
+      --warning: #a55b00;
+      --danger: #b42318;
+      --shadow: 0 12px 32px rgb(23 32 51 / 8%);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.55;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button,
+    .file-label {
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+
+    button:hover,
+    .file-label:hover {
+      border-color: var(--primary);
+    }
+
+    button.primary {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: white;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .app {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      margin: -24px -24px 20px;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgb(244 246 248 / 94%);
+      backdrop-filter: blur(10px);
+    }
+
+    .top-row,
+    .actions,
+    .progress-row,
+    .navigation {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .top-row {
+      justify-content: space-between;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      margin-bottom: 3px;
+      font-size: 22px;
+    }
+
+    h2 {
+      font-size: 19px;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      font-size: 15px;
+    }
+
+    .subtitle,
+    .muted,
+    .meta {
+      color: var(--muted);
+    }
+
+    .subtitle {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .file-label input {
+      display: none;
+    }
+
+    .progress-row {
+      margin-top: 14px;
+    }
+
+    progress {
+      width: min(520px, 100%);
+      height: 12px;
+      overflow: hidden;
+      border: 0;
+      border-radius: 999px;
+    }
+
+    progress::-webkit-progress-bar {
+      background: #e3e8ee;
+    }
+
+    progress::-webkit-progress-value {
+      background: var(--primary);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      border-radius: 999px;
+      background: var(--surface);
+      padding: 3px 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .badge.good {
+      background: #e9f8f0;
+      color: var(--good);
+    }
+
+    .badge.warning {
+      background: #fff4e5;
+      color: var(--warning);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 390px;
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      padding: 20px;
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 132px;
+    }
+
+    .empty {
+      min-height: 420px;
+      display: grid;
+      place-content: center;
+      text-align: center;
+    }
+
+    .empty p {
+      max-width: 620px;
+    }
+
+    .candidate-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 16px;
+    }
+
+    .candidate-head h2 {
+      margin-bottom: 5px;
+    }
+
+    .summary {
+      border-left: 4px solid var(--primary);
+      border-radius: 8px;
+      background: var(--primary-soft);
+      padding: 14px 16px;
+    }
+
+    .summary p {
+      margin: 0;
+    }
+
+    .list-block {
+      margin-top: 16px;
+    }
+
+    ul {
+      margin: 7px 0 0;
+      padding-left: 22px;
+    }
+
+    .steps {
+      display: grid;
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-soft);
+      padding: 16px;
+    }
+
+    .step-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .capability {
+      display: inline-block;
+      border-radius: 6px;
+      background: #e8edf5;
+      padding: 2px 7px;
+      color: #334155;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .detail {
+      border-radius: 8px;
+      background: white;
+      padding: 11px 12px;
+    }
+
+    .detail strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .fallback-row {
+      margin-top: 7px;
+      border-left: 3px solid #d7a400;
+      padding-left: 10px;
+    }
+
+    .rubric {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .rubric-item {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 9px 11px;
+      font-size: 13px;
+    }
+
+    .rubric-item b {
+      display: inline-block;
+      min-width: 48px;
+    }
+
+    .score-group {
+      margin-top: 18px;
+    }
+
+    .score-options {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .score-option {
+      position: relative;
+      cursor: pointer;
+    }
+
+    .score-option input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .score-option span {
+      display: grid;
+      min-height: 56px;
+      place-content: center;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-soft);
+      text-align: center;
+      font-weight: 700;
+    }
+
+    .score-option input:checked + span {
+      border-color: var(--primary);
+      outline: 2px solid var(--primary);
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 92px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 10px;
+      color: var(--text);
+    }
+
+    .navigation {
+      margin-top: 18px;
+      justify-content: space-between;
+    }
+
+    .status {
+      min-height: 24px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status.error {
+      color: var(--danger);
+    }
+
+    .status.success {
+      color: var(--good);
+    }
+
+    .shortcut {
+      margin-top: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    kbd {
+      border: 1px solid #bac3ce;
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      background: white;
+      padding: 1px 5px;
+      color: var(--text);
+      font-family: inherit;
+    }
+
+    .warning-box {
+      margin-bottom: 18px;
+      border: 1px solid #f1c77b;
+      border-radius: 10px;
+      background: #fff8e8;
+      padding: 12px 14px;
+      color: #754400;
+      font-size: 13px;
+    }
+
+    select {
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: white;
+      padding: 7px 10px;
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .app {
+        padding: 12px;
+      }
+
+      .topbar {
+        margin: -12px -12px 14px;
+        padding: 12px;
+      }
+
+      .detail-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .candidate-head {
+        display: block;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="top-row">
+        <div>
+          <h1>G7 Planner 匿名评分表</h1>
+          <p class="subtitle">只评价计划质量；不要查看模型映射或 report.json。</p>
+        </div>
+        <div class="actions">
+          <button id="load-default">加载仓库默认评分表</button>
+          <label class="file-label">
+            选择 JSONL
+            <input id="file-input" type="file" accept=".jsonl,application/json">
+          </label>
+          <button id="export" class="primary" disabled>导出已评分 JSONL</button>
+        </div>
+      </div>
+      <div class="progress-row">
+        <progress id="progress" value="0" max="60"></progress>
+        <span id="progress-text" class="badge">尚未加载</span>
+        <span id="save-state" class="badge">评分保存在本浏览器</span>
+        <select id="filter" aria-label="候选筛选" disabled>
+          <option value="all">全部候选</option>
+          <option value="unrated">只看未完成</option>
+          <option value="rated">只看已完成</option>
+          <option value="noted">只看有备注</option>
+        </select>
+      </div>
+    </header>
+
+    <section id="empty" class="panel empty">
+      <div>
+        <h2>加载 Planner 匿名表后开始评分</h2>
+        <p class="muted">
+          如果页面通过仓库根目录的 HTTP 服务打开，可直接加载默认评分表；
+          如果直接双击打开，请选择
+          <code>.data/evaluations/v2.4/stage0-acceptance-20260723/planner/blind_review.jsonl</code>。
+        </p>
+        <p class="muted">刷新页面后需重新选择源文件，但已填写的评分会自动恢复。</p>
+      </div>
+    </section>
+
+    <section id="review-layout" class="layout" hidden>
+      <article class="panel">
+        <div class="candidate-head">
+          <div>
+            <h2 id="candidate-title">候选</h2>
+            <div id="candidate-meta" class="meta"></div>
+          </div>
+          <span id="candidate-status" class="badge warning">未完成</span>
+        </div>
+
+        <div class="summary">
+          <h3>计划摘要</h3>
+          <p id="plan-summary"></p>
+        </div>
+
+        <div id="assumptions-block" class="list-block">
+          <h3>假设</h3>
+          <ul id="assumptions"></ul>
+        </div>
+
+        <div id="clarifications-block" class="list-block">
+          <h3>澄清问题</h3>
+          <ul id="clarifications"></ul>
+        </div>
+
+        <div>
+          <h2 style="margin-top: 24px">计划步骤</h2>
+          <div id="steps" class="steps"></div>
+        </div>
+      </article>
+
+      <aside class="panel sidebar">
+        <div class="warning-box">
+          先完整阅读计划，再评价整体质量。不要因为步骤数量多就直接高分，也不要按
+          case_id 推测模型。
+        </div>
+
+        <h2>评分口径</h2>
+        <div class="rubric">
+          <div class="rubric-item"><b>0 分</b>关键条件为空话，无法判定。</div>
+          <div class="rubric-item"><b>1 分</b>方向可用或部分可判定，但信息不完整。</div>
+          <div class="rubric-item"><b>2 分</b>触发条件、动作或后置结果明确，可直接执行或验证。</div>
+        </div>
+
+        <div class="score-group">
+          <h3>condition_specificity</h3>
+          <p class="muted">关键 completion condition 是否能通过 Evidence/Artifact 直接验证？</p>
+          <div id="condition-options" class="score-options"></div>
+        </div>
+
+        <div class="score-group">
+          <h3>fallback_actionability</h3>
+          <p class="muted">关键风险是否有可检测的 when 和明确、安全的 action？</p>
+          <div id="fallback-options" class="score-options"></div>
+        </div>
+
+        <div class="score-group">
+          <label for="note"><h3>评审备注（可选）</h3></label>
+          <textarea id="note" placeholder="只记录边界情况、扣分依据或需要复核的原因"></textarea>
+        </div>
+
+        <div class="navigation">
+          <button id="previous">上一条</button>
+          <button id="next">下一条</button>
+          <button id="next-unrated" class="primary">下一条未完成</button>
+        </div>
+
+        <p id="status" class="status" aria-live="polite"></p>
+        <div class="shortcut">
+          快捷键：
+          condition 使用 <kbd>Q</kbd>/<kbd>W</kbd>/<kbd>E</kbd> 对应 0/1/2；
+          fallback 使用 <kbd>A</kbd>/<kbd>S</kbd>/<kbd>D</kbd> 对应 0/1/2；
+          <kbd>←</kbd>/<kbd>→</kbd> 切换候选。
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+
+    const DEFAULT_REVIEW_URL =
+      "../.data/evaluations/v2.4/stage0-acceptance-20260723/planner/blind_review.jsonl";
+    const EXPECTED_COUNT = 60;
+    const RATING_FIELDS = ["condition_specificity", "fallback_actionability"];
+
+    const state = {
+      rows: [],
+      visibleIndices: [],
+      currentVisibleIndex: 0,
+      storageKey: null,
+      sourceName: "",
+    };
+
+    const elements = {
+      empty: document.querySelector("#empty"),
+      layout: document.querySelector("#review-layout"),
+      loadDefault: document.querySelector("#load-default"),
+      fileInput: document.querySelector("#file-input"),
+      exportButton: document.querySelector("#export"),
+      filter: document.querySelector("#filter"),
+      progress: document.querySelector("#progress"),
+      progressText: document.querySelector("#progress-text"),
+      saveState: document.querySelector("#save-state"),
+      candidateTitle: document.querySelector("#candidate-title"),
+      candidateMeta: document.querySelector("#candidate-meta"),
+      candidateStatus: document.querySelector("#candidate-status"),
+      planSummary: document.querySelector("#plan-summary"),
+      assumptionsBlock: document.querySelector("#assumptions-block"),
+      assumptions: document.querySelector("#assumptions"),
+      clarificationsBlock: document.querySelector("#clarifications-block"),
+      clarifications: document.querySelector("#clarifications"),
+      steps: document.querySelector("#steps"),
+      conditionOptions: document.querySelector("#condition-options"),
+      fallbackOptions: document.querySelector("#fallback-options"),
+      note: document.querySelector("#note"),
+      previous: document.querySelector("#previous"),
+      next: document.querySelector("#next"),
+      nextUnrated: document.querySelector("#next-unrated"),
+      status: document.querySelector("#status"),
+    };
+
+    function isRating(value) {
+      return Number.isInteger(value) && value >= 0 && value <= 2;
+    }
+
+    function isComplete(row) {
+      return RATING_FIELDS.every((field) => isRating(row[field]));
+    }
+
+    function parseJsonl(text) {
+      const rows = [];
+      text.split(/\r?\n/).forEach((line, index) => {
+        if (!line.trim()) return;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch (error) {
+          throw new Error(`第 ${index + 1} 行不是合法 JSON：${error.message}`);
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error(`第 ${index + 1} 行顶层必须是 JSON 对象`);
+        }
+        if (typeof parsed.candidate_id !== "string" || !parsed.candidate_id) {
+          throw new Error(`第 ${index + 1} 行缺少 candidate_id`);
+        }
+        if (!parsed.plan || typeof parsed.plan !== "object") {
+          throw new Error(`第 ${index + 1} 行缺少 plan`);
+        }
+        for (const field of RATING_FIELDS) {
+          if (parsed[field] !== null && !isRating(parsed[field])) {
+            throw new Error(`第 ${index + 1} 行 ${field} 必须是 0、1、2 或 null`);
+          }
+        }
+        rows.push(parsed);
+      });
+
+      const ids = rows.map((row) => row.candidate_id);
+      if (new Set(ids).size !== ids.length) {
+        throw new Error("评分表包含重复 candidate_id");
+      }
+      if (!rows.length) {
+        throw new Error("评分表中没有候选记录");
+      }
+      return rows;
+    }
+
+    function fingerprint(rows) {
+      const input = rows.map((row) => row.candidate_id).join("|");
+      let hash = 2166136261;
+      for (let index = 0; index < input.length; index += 1) {
+        hash ^= input.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return `g7-planner-review-v1:${rows.length}:${(hash >>> 0).toString(16)}`;
+    }
+
+    function restoreProgress() {
+      if (!state.storageKey) return;
+      let stored;
+      try {
+        stored = JSON.parse(localStorage.getItem(state.storageKey) || "{}");
+      } catch {
+        stored = {};
+      }
+      for (const row of state.rows) {
+        const item = stored[row.candidate_id];
+        if (!item || typeof item !== "object") continue;
+        for (const field of RATING_FIELDS) {
+          if (row[field] === null && isRating(item[field])) {
+            row[field] = item[field];
+          }
+        }
+        if (
+          (row.review_note === null || row.review_note === "") &&
+          typeof item.review_note === "string"
+        ) {
+          row.review_note = item.review_note;
+        }
+      }
+    }
+
+    function persistProgress() {
+      if (!state.storageKey) return;
+      const stored = Object.fromEntries(
+        state.rows.map((row) => [
+          row.candidate_id,
+          {
+            condition_specificity: row.condition_specificity,
+            fallback_actionability: row.fallback_actionability,
+            review_note: row.review_note || null,
+          },
+        ]),
+      );
+      try {
+        localStorage.setItem(state.storageKey, JSON.stringify(stored));
+        elements.saveState.textContent = "已自动保存";
+        elements.saveState.className = "badge good";
+      } catch {
+        elements.saveState.textContent = "浏览器禁止自动保存，请及时导出";
+        elements.saveState.className = "badge warning";
+      }
+    }
+
+    function setStatus(message, type = "") {
+      elements.status.textContent = message;
+      elements.status.className = `status ${type}`.trim();
+    }
+
+    function loadRows(rows, sourceName) {
+      state.rows = rows;
+      state.sourceName = sourceName;
+      state.storageKey = fingerprint(rows);
+      restoreProgress();
+      state.currentVisibleIndex = 0;
+      elements.empty.hidden = true;
+      elements.layout.hidden = false;
+      elements.exportButton.disabled = false;
+      elements.filter.disabled = false;
+      applyFilter();
+      updateProgress();
+      setStatus(
+        rows.length === EXPECTED_COUNT
+          ? `已加载 ${rows.length} 条匿名候选。`
+          : `已加载 ${rows.length} 条；冻结评分表预期为 ${EXPECTED_COUNT} 条，请确认文件。`,
+        rows.length === EXPECTED_COUNT ? "success" : "error",
+      );
+    }
+
+    async function loadDefault() {
+      try {
+        setStatus("正在加载仓库默认评分表……");
+        const response = await fetch(DEFAULT_REVIEW_URL, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        loadRows(parseJsonl(await response.text()), "blind_review.jsonl");
+      } catch (error) {
+        setStatus(
+          `无法直接加载默认文件：${error.message}。请点击“选择 JSONL”手动加载。`,
+          "error",
+        );
+      }
+    }
+
+    function applyFilter() {
+      const mode = elements.filter.value;
+      state.visibleIndices = state.rows
+        .map((_, index) => index)
+        .filter((index) => {
+          const row = state.rows[index];
+          if (mode === "unrated") return !isComplete(row);
+          if (mode === "rated") return isComplete(row);
+          if (mode === "noted") return Boolean(String(row.review_note || "").trim());
+          return true;
+        });
+      state.currentVisibleIndex = Math.min(
+        state.currentVisibleIndex,
+        Math.max(0, state.visibleIndices.length - 1),
+      );
+      renderCurrent();
+    }
+
+    function currentRow() {
+      const rowIndex = state.visibleIndices[state.currentVisibleIndex];
+      return Number.isInteger(rowIndex) ? state.rows[rowIndex] : null;
+    }
+
+    function appendList(container, values, emptyText) {
+      container.replaceChildren();
+      const items = Array.isArray(values) ? values : [];
+      if (!items.length) {
+        const li = document.createElement("li");
+        li.className = "muted";
+        li.textContent = emptyText;
+        container.append(li);
+        return;
+      }
+      for (const value of items) {
+        const li = document.createElement("li");
+        li.textContent =
+          typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        container.append(li);
+      }
+    }
+
+    function appendDetail(parent, title, values, emptyText = "无") {
+      const detail = document.createElement("div");
+      detail.className = "detail";
+      const heading = document.createElement("strong");
+      heading.textContent = title;
+      detail.append(heading);
+
+      const items = Array.isArray(values) ? values : [];
+      if (!items.length) {
+        const text = document.createElement("span");
+        text.className = "muted";
+        text.textContent = emptyText;
+        detail.append(text);
+      } else {
+        const list = document.createElement("ul");
+        for (const value of items) {
+          const item = document.createElement("li");
+          item.textContent =
+            typeof value === "string" ? value : JSON.stringify(value);
+          list.append(item);
+        }
+        detail.append(list);
+      }
+      parent.append(detail);
+    }
+
+    function renderSteps(steps) {
+      elements.steps.replaceChildren();
+      const values = Array.isArray(steps) ? steps : [];
+      if (!values.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "计划没有步骤。";
+        elements.steps.append(empty);
+        return;
+      }
+
+      values.forEach((step, index) => {
+        const card = document.createElement("section");
+        card.className = "step";
+
+        const title = document.createElement("div");
+        title.className = "step-title";
+        const heading = document.createElement("h3");
+        heading.textContent = `${index + 1}. ${step.step_id || "未命名步骤"}`;
+        const capability = document.createElement("span");
+        capability.className = "capability";
+        capability.textContent = step.capability || "无 capability";
+        title.append(heading, capability);
+        card.append(title);
+
+        const purpose = document.createElement("p");
+        purpose.textContent = step.purpose || "未说明步骤目的";
+        card.append(purpose);
+
+        const details = document.createElement("div");
+        details.className = "detail-grid";
+        appendDetail(details, "依赖", step.dependencies, "无依赖");
+        appendDetail(details, "Expected Evidence", step.expected_evidence);
+        appendDetail(details, "Completion Conditions", step.completion_conditions);
+
+        const fallbackDetail = document.createElement("div");
+        fallbackDetail.className = "detail";
+        const fallbackTitle = document.createElement("strong");
+        fallbackTitle.textContent = "Fallback";
+        fallbackDetail.append(fallbackTitle);
+        const fallbacks = Array.isArray(step.fallback) ? step.fallback : [];
+        if (!fallbacks.length) {
+          const empty = document.createElement("span");
+          empty.className = "muted";
+          empty.textContent = "无 fallback";
+          fallbackDetail.append(empty);
+        } else {
+          for (const fallback of fallbacks) {
+            const row = document.createElement("div");
+            row.className = "fallback-row";
+            row.textContent =
+              `when: ${fallback.when || "未指定"} → action: ${fallback.action || "未指定"}`;
+            fallbackDetail.append(row);
+          }
+        }
+        details.append(fallbackDetail);
+        card.append(details);
+        elements.steps.append(card);
+      });
+    }
+
+    function renderScoreOptions(container, field, selected) {
+      container.replaceChildren();
+      [0, 1, 2].forEach((rating) => {
+        const label = document.createElement("label");
+        label.className = "score-option";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = field;
+        input.value = String(rating);
+        input.checked = selected === rating;
+        input.addEventListener("change", () => setRating(field, rating));
+        const text = document.createElement("span");
+        text.textContent = `${rating} 分`;
+        label.append(input, text);
+        container.append(label);
+      });
+    }
+
+    function renderCurrent() {
+      const row = currentRow();
+      if (!row) {
+        elements.candidateTitle.textContent = "当前筛选没有候选";
+        elements.candidateMeta.textContent = "切换筛选条件继续评分。";
+        elements.planSummary.textContent = "";
+        elements.steps.replaceChildren();
+        elements.conditionOptions.replaceChildren();
+        elements.fallbackOptions.replaceChildren();
+        elements.note.value = "";
+        elements.previous.disabled = true;
+        elements.next.disabled = true;
+        elements.nextUnrated.disabled = true;
+        return;
+      }
+
+      const absoluteIndex = state.rows.indexOf(row);
+      elements.candidateTitle.textContent =
+        `候选 ${absoluteIndex + 1} / ${state.rows.length}`;
+      elements.candidateMeta.textContent =
+        `case_id: ${row.case_id || "未知"} · candidate_id: ${row.candidate_id}`;
+      elements.candidateStatus.textContent = isComplete(row) ? "已完成" : "未完成";
+      elements.candidateStatus.className =
+        `badge ${isComplete(row) ? "good" : "warning"}`;
+
+      const plan = row.plan || {};
+      elements.planSummary.textContent = plan.summary || "未提供摘要";
+      appendList(elements.assumptions, plan.assumptions, "无显式假设");
+      appendList(elements.clarifications, plan.clarifications, "无澄清问题");
+      renderSteps(plan.steps);
+      renderScoreOptions(
+        elements.conditionOptions,
+        "condition_specificity",
+        row.condition_specificity,
+      );
+      renderScoreOptions(
+        elements.fallbackOptions,
+        "fallback_actionability",
+        row.fallback_actionability,
+      );
+      elements.note.value = row.review_note || "";
+      elements.previous.disabled = state.currentVisibleIndex === 0;
+      elements.next.disabled =
+        state.currentVisibleIndex >= state.visibleIndices.length - 1;
+      elements.nextUnrated.disabled = state.rows.every(isComplete);
+    }
+
+    function setRating(field, rating) {
+      const row = currentRow();
+      if (!row) return;
+      row[field] = rating;
+      persistProgress();
+      updateProgress();
+      renderCurrent();
+      setStatus(`已保存 ${row.candidate_id} 的评分。`, "success");
+    }
+
+    function updateProgress() {
+      const complete = state.rows.filter(isComplete).length;
+      elements.progress.max = state.rows.length || EXPECTED_COUNT;
+      elements.progress.value = complete;
+      elements.progressText.textContent =
+        `${complete} / ${state.rows.length} 已完成`;
+      elements.progressText.className =
+        `badge ${complete === state.rows.length && state.rows.length ? "good" : ""}`;
+    }
+
+    function move(delta) {
+      const target = state.currentVisibleIndex + delta;
+      if (target < 0 || target >= state.visibleIndices.length) return;
+      state.currentVisibleIndex = target;
+      renderCurrent();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function moveToNextUnrated() {
+      const currentAbsolute = state.visibleIndices[state.currentVisibleIndex] ?? -1;
+      const after = state.rows.findIndex(
+        (row, index) => index > currentAbsolute && !isComplete(row),
+      );
+      const before = state.rows.findIndex((row) => !isComplete(row));
+      const target = after >= 0 ? after : before;
+      if (target < 0) {
+        setStatus("60 条 Planner 评分已经全部完成，可以导出。", "success");
+        return;
+      }
+      if (elements.filter.value !== "all") {
+        elements.filter.value = "all";
+        applyFilter();
+      }
+      state.currentVisibleIndex = state.visibleIndices.indexOf(target);
+      renderCurrent();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function exportJsonl() {
+      if (!state.rows.length) return;
+      const invalid = state.rows.filter(
+        (row) =>
+          RATING_FIELDS.some(
+            (field) => row[field] !== null && !isRating(row[field]),
+          ),
+      );
+      if (invalid.length) {
+        setStatus(`存在 ${invalid.length} 条非法评分，无法导出。`, "error");
+        return;
+      }
+      const text = `${state.rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
+      const blob = new Blob([text], { type: "application/x-ndjson;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "blind_review.scored.jsonl";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+
+      const complete = state.rows.filter(isComplete).length;
+      setStatus(
+        complete === state.rows.length
+          ? "已导出完整评分表 blind_review.scored.jsonl。"
+          : `已导出进度文件；还有 ${state.rows.length - complete} 条未完成。`,
+        complete === state.rows.length ? "success" : "",
+      );
+    }
+
+    elements.loadDefault.addEventListener("click", loadDefault);
+    elements.fileInput.addEventListener("change", async (event) => {
+      const [file] = event.target.files;
+      if (!file) return;
+      try {
+        loadRows(parseJsonl(await file.text()), file.name);
+      } catch (error) {
+        setStatus(error.message, "error");
+      } finally {
+        event.target.value = "";
+      }
+    });
+    elements.exportButton.addEventListener("click", exportJsonl);
+    elements.filter.addEventListener("change", () => {
+      state.currentVisibleIndex = 0;
+      applyFilter();
+    });
+    elements.previous.addEventListener("click", () => move(-1));
+    elements.next.addEventListener("click", () => move(1));
+    elements.nextUnrated.addEventListener("click", moveToNextUnrated);
+    elements.note.addEventListener("input", () => {
+      const row = currentRow();
+      if (!row) return;
+      row.review_note = elements.note.value.trim() || null;
+      persistProgress();
+      updateProgress();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (!state.rows.length || document.activeElement === elements.note) return;
+      const key = event.key.toLowerCase();
+      const shortcuts = {
+        q: ["condition_specificity", 0],
+        w: ["condition_specificity", 1],
+        e: ["condition_specificity", 2],
+        a: ["fallback_actionability", 0],
+        s: ["fallback_actionability", 1],
+        d: ["fallback_actionability", 2],
+      };
+      if (shortcuts[key]) {
+        event.preventDefault();
+        setRating(...shortcuts[key]);
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        move(-1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        move(1);
+      }
+    });
+  </script>
+</body>
+</html>

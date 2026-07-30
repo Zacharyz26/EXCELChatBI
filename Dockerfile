@@ -56,6 +56,7 @@ RUN apt-get update \
       /var/lib/chatbi/uploads \
       /var/lib/chatbi/datasets \
       /var/lib/chatbi/artifacts \
+      /var/lib/chatbi/backups \
       /var/lib/chatbi/kb \
     && chown -R "${APP_UID}:${APP_GID}" /var/lib/chatbi
 
@@ -78,6 +79,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     RAG_RERANKER=lexical \
     RAG_STORE=local \
     CHAT_DB_PATH=/var/lib/chatbi/db/chatbi.db \
+    WORKSPACE_BACKUP_DIR=/var/lib/chatbi/backups \
     UPLOAD_DIR=/var/lib/chatbi/uploads \
     DATASET_DIR=/var/lib/chatbi/datasets \
     REPORT_DIR=/var/lib/chatbi/artifacts \

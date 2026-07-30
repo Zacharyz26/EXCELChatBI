@@ -1,8 +1,8 @@
 # v2.4 设计、G7 与阶段 2 实施入口
 
-> 状态：阶段 1 已验收通过；G7 自动签字门禁已落地但仍待人工评分/签字；阶段 2A–2E
-> 已实现，阶段 2 的 60-run 真实行为对照已通过自动门禁；2E Docker runner 首轮 CI
-> 暴露的镜像 smoke 与 SSE E2E harness 问题已修复，门禁待重跑
+> 状态：阶段 1 已验收通过；阶段 2A–2E 已实现，60-run 真实行为对照已通过自动门禁，
+> 最新 Compose/容器 CI 全绿；G7 因现有商业场景代表性不足、Verifier 评分契约待补和
+> 负责人签字未完成而保持 `review_required`
 > · 更新日期：2026-07-29
 > 范围：设计依据、阶段 0 未关闭人工门禁、阶段 1 验收和阶段 2 实施状态
 
@@ -23,9 +23,10 @@
 |---|---|---|
 | [控制面与持久化设计](./控制面与持久化设计.md) | TaskContract、AgentState、状态机、Verifier、SQLite v2、事务和迁移 | 草案完成 |
 | [SSE 与任务控制协议](./SSE与任务控制协议.md) | v2 事件 envelope、事件顺序、旧事件兼容、暂停/恢复/取消接口 | 草案完成 |
-| [Planner 与 Verifier 评测设计](./Planner与Verifier评测设计.md) | 混合 Planner、确定性/语义 Verifier 边界、重复评测、go/no-go 规则 | 三轮及阶段 2 对照完成；Flash 可承担 Planner，语义 Verifier 仍 NO_GO，待盲评 |
+| [Planner 与 Verifier 评测设计](./Planner与Verifier评测设计.md) | 混合 Planner、确定性/语义 Verifier 边界、重复评测、go/no-go 规则 | 三轮及阶段 2 对照完成；商业回归保留，代表性盲评待补 |
 | [MCP 与 Docker ADR](./MCP与Docker架构决策.md) | MCP 版本/SDK/传输/上下文边界，以及镜像、Compose、卷和安全边界 | 双传输探针已通过；ADR 待 G7 评审接受 |
-| [MCP 与 Docker 全阶段演进](../MCP与Docker全阶段演进设计.md) | v2.5 阶段 3–6、安全项目和 v3.0 阶段 7–8 的扩展设计 | 规划草案 |
+| [MCP 与 Docker 全阶段演进](../MCP与Docker全阶段演进设计.md) | v2.5 阶段 3–6、安全项目和 v3.0 阶段 7–8 的扩展设计 | 总体设计完成；3A 计划已冻结 |
+| [v2.5 实施入口](../v2.5/README.md) | 阶段 3–6 边界、评测纪律和阶段 3A 入口 | 阶段 3A 核心路径已实现，恢复门禁待完成 |
 | `scripts/agent_eval_set.jsonl` | 20 个机器可读行为场景 | 已冻结并完成三轮真实基线 |
 | `scripts/stage2_behavior_eval.py` | 同场景开启结构化计划控制面的阶段 2 成功率/终态对照 | 60-run 完成；成功 70.0%、终态如实 73.3%、越界 0，自动门禁 PASS |
 | `scripts/semantic_verifier_eval_set.jsonl` | 语义覆盖正反 fixture | v3 新 heldout 三轮实测完成，仍 NO_GO |
@@ -35,7 +36,7 @@
 | [阶段 2B 实施记录](./阶段2B实施记录.md) | 依赖图调度、Observation 重规划、计划版本安全和条件跳过 | 已实现并完成定向回归 |
 | [阶段 2C 实施记录](./阶段2C实施记录.md) | 后台 run 生命周期、任务控制写接口、Checkpoint 同 run 恢复和步骤重试 | 已实现并完成定向回归 |
 | [阶段 2D 实施记录](./阶段2D实施记录.md) | MCP Gateway 规范执行、双传输、健康/重连/取消和受控降级 | 已实现并完成全量回归 |
-| [阶段 2E 实施记录](./阶段2E实施记录.md) | 五个独立工具服务、Compose 私网/secrets/分卷及浏览器重启门禁 | 已实现；首轮 CI 问题已修复，Docker runner 待重跑验收 |
+| [阶段 2E 实施记录](./阶段2E实施记录.md) | 五个独立工具服务、Compose 私网/secrets/分卷及浏览器重启门禁 | 已实现；最新 Docker runner 全绿 |
 
 ## 文档边界与同步入口
 
@@ -76,8 +77,8 @@
 - 阶段 2 Flash 对照：60 runs，任务成功 70.0%、终态如实 73.3%、越界 0，自动门禁通过；
 - 据实测提议冻结门槛（评测设计 §10.6）。证据见 `.data/evaluations/v2.4/stage0-acceptance-20260723/`。
 
-阶段 0 自身唯一未完成的是 item 6（人工，自动测试无法替代）：Planner/Verifier 匿名盲评、
-设计评审签字，以及据评审把 ADR 从“草案”改“接受”并正式冻结软门槛。完整 v2.4 收口还需
-2E Docker runner；人工项或容器门禁缺失时 G7 保持
+阶段 0 自身唯一未完成的是 item 6（人工，自动测试无法替代）：补充能代表真实工作负载的
+Planner/Verifier 盲评、完善 Verifier 评分契约、设计评审签字，以及据评审把 ADR 从“草案”
+改“接受”并正式冻结软门槛。2E Docker runner 已全绿；人工项缺失时 G7 继续保持
 `review_required`。执行方法见
 [`G7评审与阶段2A实施记录.md`](./G7评审与阶段2A实施记录.md)。

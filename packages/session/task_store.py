@@ -2183,6 +2183,23 @@ class TaskStore:
             ).fetchall()
         return [_evidence_from_row(row) for row in rows]
 
+    def evidence_ledger_version(self, run_id: str) -> int:
+        """返回 TaskRun 追加式 Evidence ledger 的当前版本（即已提交条目数）。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT run.run_id, COUNT(evidence.evidence_id)
+                FROM task_runs AS run
+                LEFT JOIN evidence ON evidence.run_id = run.run_id
+                WHERE run.run_id = ?
+                GROUP BY run.run_id
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"TaskRun 不存在: {run_id}")
+        return int(row[1])
+
     def replace_claims(
         self, run_id: str, claims: list[ClaimDraft]
     ) -> list[ClaimRecord]:

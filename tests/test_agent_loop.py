@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import sys
@@ -41,10 +42,13 @@ from mcp_servers.common.client_gateway import (  # noqa: E402
 )
 from mcp_servers.common.contracts import MCPRequestContext  # noqa: E402
 from packages.common.config import Settings  # noqa: E402
+from packages.governance.permissions import Principal  # noqa: E402
 from packages.governance.policy import ToolPolicyGateway  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
 from packages.models.types import Message as ModelMessage  # noqa: E402
 from packages.models.types import ModelResponse, Scenario, ToolCall  # noqa: E402
+from packages.session.memory_models import MemoryDraft  # noqa: E402
+from packages.session.memory_store import MemoryStore  # noqa: E402
 from packages.session.models import Conversation  # noqa: E402
 from packages.session.store import SessionStore  # noqa: E402
 from packages.session.task_store import TaskStore  # noqa: E402
@@ -459,6 +463,8 @@ async def test_executor_uses_mcp_context_and_transports_have_equivalent_evidence
     assert context.invocation_id
     assert context.idempotency_key
     assert context.permission_snapshot_id
+    assert context.memory_snapshot_id == by_name["meta"]["memory_snapshot_id"]
+    assert context.evidence_ledger_version == 0
     evidence = TaskStore(store.db_path).list_evidence(run_id)
     assert len(evidence) == 1
     assert evidence[0].source["transport"] == "stdio"
@@ -2085,6 +2091,56 @@ async def test_system_context_lists_datasets_and_analysis_registry(
     assert "分析登记表" in system.content
     assert "analysis_id=an-001" in system.content
     assert '"direction":"up"' in system.content     # 登记表摘要
+
+
+@pytest.mark.asyncio
+async def test_system_context_uses_fixed_governed_memory_snapshot(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    """Agent 只读取当前 TaskRun 快照摘要，并明确禁止把记忆当 Evidence。"""
+    source = store.append_message(
+        conversation_id=conversation.id,
+        role="user",
+        content="以后将工单编号称为请求 ID",
+    )
+    memory = MemoryStore(store).remember(
+        project_id=conversation.project_id,
+        principal=Principal(user_id="local-user"),
+        draft=MemoryDraft(
+            scope="project",
+            kind="field_alias",
+            semantic_key="field-alias.ticket-id",
+            content_summary="工单编号的展示名称是请求 ID",
+            source_type="user_confirmation",
+            source_ref=source.id,
+            source_hash=hashlib.sha256(source.content.encode("utf-8")).hexdigest(),
+            confidence=0.95,
+        ),
+        idempotency_key="agent-memory-context",
+    ).record
+    gateway = ScriptedGateway([{"deltas": ["好的"]}])
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({}),
+        user_text="继续",
+    )
+
+    system = gateway.calls[0]["messages"][0]
+    assert "受控记忆" in system.content
+    assert "不能作为数值、统计、工件或知识来源 Evidence" in system.content
+    assert memory.content_summary in system.content
+    assert source.content not in system.content
+    meta = dict(events)["meta"]
+    restored = MemoryStore(store).get_snapshot(
+        cast(str, meta["memory_snapshot_id"]),
+        principal=Principal(user_id="local-user"),
+    )
+    assert restored is not None
+    assert [item.memory_id for item in restored[1]] == [memory.memory_id]
 
 
 @pytest.mark.asyncio

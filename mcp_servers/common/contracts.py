@@ -174,6 +174,8 @@ class MCPRequestContext:
     invocation_id: str
     idempotency_key: str
     permission_snapshot_id: str
+    memory_snapshot_id: str
+    evidence_ledger_version: int
     trace_id: str
     deadline_at: str
 
@@ -187,10 +189,18 @@ class MCPRequestContext:
             self.invocation_id,
             self.idempotency_key,
             self.permission_snapshot_id,
+            self.memory_snapshot_id,
             self.trace_id,
             self.deadline_at,
         )
-        if any(not item.strip() for item in string_fields) or self.plan_version < 0:
+        if (
+            any(not item.strip() for item in string_fields)
+            or self.plan_version < 0
+            or self.evidence_ledger_version < 0
+            or len(self.memory_snapshot_id) != 32
+            or self.memory_snapshot_id != self.memory_snapshot_id.lower()
+            or any(char not in "0123456789abcdef" for char in self.memory_snapshot_id)
+        ):
             raise MCPProtocolError("invalid_request_context", "MCP 请求上下文不完整")
         try:
             deadline = datetime.fromisoformat(self.deadline_at.replace("Z", "+00:00"))
@@ -249,6 +259,11 @@ class MCPRequestContext:
                 invocation_id=_required_string(raw, "invocation_id"),
                 idempotency_key=_required_string(raw, "idempotency_key"),
                 permission_snapshot_id=_required_string(raw, "permission_snapshot_id"),
+                memory_snapshot_id=_required_string(raw, "memory_snapshot_id"),
+                evidence_ledger_version=_required_nonnegative_int(
+                    raw,
+                    "evidence_ledger_version",
+                ),
                 trace_id=_required_string(raw, "trace_id"),
                 deadline_at=_required_string(raw, "deadline_at"),
             )

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # 对话工作区持久层（SQLite 真相源 + 单进程内存热缓存）
     chat_db_path: str = ".data/chatbi.db"
+    workspace_backup_dir: str = ".data/workspace_backups"
     conversation_cache_size: int = 128
     chat_history_limit: int = 20
     chat_profile_max_chars: int = 12_000

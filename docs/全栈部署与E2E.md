@@ -18,7 +18,8 @@
 - API 使用 Bearer 登录，默认 token `chatbi-local-e2e-token-00000001` 只用于本地启动；
 - 五个 MCP 服务各自使用独立 Bearer secret，并共同校验另一个上下文 HMAC secret；
 - `storage-init` 先完成 SQLite 迁移和卷初始化，工具 readiness 全部通过后才启动 API；
-- SQLite、upload、dataset、artifact、KB 是五个独立卷。stats/knowledge 的 dataset/KB
+- SQLite、upload、dataset、artifact、workspace-backup、KB 是六个独立卷。
+  stats/knowledge 的 dataset/KB
   使用只读卷，data 仅写 dataset，chart/report 仅写 artifact。SQLite WAL 读者为维护
   `-shm` 协调必须挂载可写目录，但服务连接固定使用 SQLite URI `mode=ro`，不能执行写入；
 - Python 容器非 root、只读根文件系统、drop all capabilities、禁止提权并带 CPU/内存/PID
@@ -54,8 +55,32 @@ docker compose ps
 - 报告文件由 report-tools 原子生成，API 在同一工具成功事务中提交 Artifact、Evidence 和
   report publication；
 - 删除项目清理 parquet、sidecar 和报告；删除对话清理对话报告；
-- 备份必须在同一恢复点覆盖 `chatbi-db`、`chatbi-datasets`、`chatbi-artifacts` 和
-  `chatbi-kb`，否则启动对账会报告缺失或孤儿。
+- 工作区备份必须先停止 API 和所有写服务，再一致覆盖 `chatbi-db`、
+  `chatbi-datasets` 和 `chatbi-artifacts`；`chatbi-kb` 使用独立知识库备份流程。
+
+工作区离线备份、校验和恢复：
+
+```bash
+# 先停止 API/MCP 等写服务
+docker compose stop
+
+backup_json="$(
+  docker compose run --rm --no-deps storage-init \
+    python -m apps.api.workspace_admin backup --service-stopped
+)"
+
+# 从 backup_json 的 path 字段取得容器内备份路径后校验和恢复
+docker compose run --rm --no-deps storage-init \
+  python -m apps.api.workspace_admin verify --input <backup-path>
+docker compose run --rm --no-deps storage-init \
+  python -m apps.api.workspace_admin restore \
+  --input <backup-path> --service-stopped --yes --replace-files
+docker compose up -d
+```
+
+manifest 会校验 SQLite schema、v4 migration checksum、关键控制面表行数，以及每个
+Dataset/Artifact 文件的大小和 SHA-256。恢复会先保存 `pre-restore-*` 覆盖前副本；
+缺少任一显式确认或备份被篡改时均在覆盖前拒绝。
 
 ## 三层 E2E
 
@@ -83,10 +108,14 @@ pnpm --dir apps/web exec playwright install chromium
 
 最后一条从空卷构建并启动 Web、API、五个真实 MCP 服务和独立模型 HTTP 边界，浏览器完成
 “Bearer 登录→上传真实 Excel→结构化计划→MCP 工具→Evidence/Artifact→Markdown/PDF
-报告→下载”。随后脚本重启 API 和 report-tools，再验证：
+报告→下载”。随后脚本先验证 API/report-tools 普通重启，再停止所有写服务，执行
+工作区备份，主动移走 SQLite 和报告文件，恢复后验证：
 
 - SQLite 中同一 run 仍为完成态；
+- paused 恢复探针 TaskRun 与 non-empty MemorySnapshot 的 ID/content hash 不变；
+- MemoryRecord 与 Artifact 文件仍可读取；
 - `generate_report` 的 `step.completed` 只有一次，不重复副作用；
+- 恢复探针本身没有产生任何工具调用；
 - 持久卷中的 PDF 仍可鉴权下载。
 
 为了让 CI 可复现，只有外部非确定性模型供应商由

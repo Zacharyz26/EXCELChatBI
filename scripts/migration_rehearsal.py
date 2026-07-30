@@ -18,6 +18,7 @@ from packages.session.migrations import (
     migrate_database,
     v2,
     v3,
+    v4,
 )
 from packages.session.store import _SCHEMA_V1
 
@@ -353,7 +354,7 @@ def run_rehearsal(
     restored = workspace / "restored-v1.sqlite3"
     shutil.copy2(backup_path, restored)
 
-    current_tables = set(v2.ADDED_TABLES) | set(v3.ADDED_TABLES)
+    current_tables = set(v2.ADDED_TABLES) | set(v3.ADDED_TABLES) | set(v4.ADDED_TABLES)
     added_after_interrupt = _table_names(interrupted) & current_tables
     checks = {
         "empty_to_current": (
@@ -422,6 +423,7 @@ def run_rehearsal(
         "migration_checksums": {
             str(v2.VERSION): v2.CHECKSUM,
             str(v3.VERSION): v3.CHECKSUM,
+            str(v4.VERSION): v4.CHECKSUM,
         },
         "backup_sha256": recorded_backup_hash,
         "versions": {

@@ -42,6 +42,8 @@ def _context(project_id: str, conversation_id: str) -> MCPRequestContext:
         invocation_id="invocation-stage2e",
         idempotency_key="idempotency-stage2e",
         permission_snapshot_id="permission-stage2e",
+        memory_snapshot_id="0" * 32,
+        evidence_ledger_version=0,
         trace_id="trace-stage2e",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
     )

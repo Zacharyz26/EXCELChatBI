@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from packages.common.identifiers import validate_report_id
 from packages.session.cache import ConversationCache
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, migrate_database
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, migrate_database, v4
 from packages.session.models import (
     Artifact,
     Conversation,
@@ -132,6 +132,55 @@ class SessionStore:
         with self._connection() as connection:
             row = connection.execute("PRAGMA user_version").fetchone()
         return int(row[0]) if row is not None else 0
+
+    def readiness_status(self) -> dict[str, int | str]:
+        """验证 SQLite 当前版本、完整性和 v2.5 Memory 控制面可读性。"""
+        with self._connection() as connection:
+            version_row = connection.execute("PRAGMA user_version").fetchone()
+            version = int(version_row[0]) if version_row is not None else 0
+            if version != _SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"SQLite schema 版本不兼容: {version} != {_SCHEMA_VERSION}"
+                )
+            integrity_row = connection.execute("PRAGMA quick_check").fetchone()
+            if integrity_row is None or str(integrity_row[0]) != "ok":
+                raise RuntimeError("SQLite quick_check 未通过")
+            required_tables = {
+                "task_runs",
+                "task_events",
+                "artifacts",
+                "memory_records",
+                "memory_snapshots",
+                "memory_snapshot_items",
+            }
+            rows = connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name IN (?, ?, ?, ?, ?, ?)
+                """,
+                tuple(sorted(required_tables)),
+            ).fetchall()
+            found = {str(row[0]) for row in rows}
+            if found != required_tables:
+                raise RuntimeError("SQLite 控制面表不完整")
+            migration = connection.execute(
+                """
+                SELECT name, checksum FROM schema_migrations
+                WHERE version = ?
+                """,
+                (v4.VERSION,),
+            ).fetchone()
+            if (
+                migration is None
+                or str(migration[0]) != v4.NAME
+                or str(migration[1]) != v4.CHECKSUM
+            ):
+                raise RuntimeError("SQLite Memory migration checksum 不匹配")
+        return {
+            "schema_version": version,
+            "integrity": "ok",
+            "memory_control_plane": "ready",
+        }
 
     # ── Project ──
 

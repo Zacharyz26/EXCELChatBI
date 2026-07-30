@@ -80,6 +80,8 @@ def _context(**changes: Any) -> MCPRequestContext:
         invocation_id="invocation-1",
         idempotency_key="idempotency-1",
         permission_snapshot_id="permissions-1",
+        memory_snapshot_id="0" * 32,
+        evidence_ledger_version=0,
         trace_id="trace-1",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
     )
@@ -163,6 +165,10 @@ def test_request_context_is_host_metadata_and_rejects_expired_deadline() -> None
     expired = _context(deadline_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat())
     with pytest.raises(MCPProtocolError, match="截止时间"):
         expired.validate()
+    with pytest.raises(MCPProtocolError, match="不完整"):
+        _context(memory_snapshot_id="../host-path").validate()
+    with pytest.raises(MCPProtocolError, match="不完整"):
+        _context(evidence_ledger_version=-1).validate()
 
 
 def test_server_adapter_maps_schema_output_and_unknown_tool_errors() -> None:

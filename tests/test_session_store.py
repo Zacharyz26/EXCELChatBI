@@ -23,7 +23,7 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
     second = SessionStore(str(db_path))
 
     assert db_path.exists()
-    assert second.schema_version == 3
+    assert second.schema_version == 4
     assert second.get_project(project.id) == project
     with sqlite3.connect(db_path) as connection:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
@@ -50,6 +50,10 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "checkpoints",
         "project_memberships",
         "report_publications",
+        "memory_records",
+        "memory_snapshots",
+        "memory_snapshot_items",
+        "memory_links",
     } <= tables
 
 
@@ -60,6 +64,23 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="不支持的 ChatBI 数据库版本 99"):
         SessionStore(str(db_path))
+
+
+def test_readiness_rejects_memory_migration_checksum_drift(tmp_path: Path) -> None:
+    db_path = tmp_path / "readiness.db"
+    store = SessionStore(str(db_path))
+    assert store.readiness_status() == {
+        "schema_version": 4,
+        "integrity": "ok",
+        "memory_control_plane": "ready",
+    }
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 4"
+        )
+
+    with pytest.raises(RuntimeError, match="checksum"):
+        store.readiness_status()
 
 
 def test_project_crud_and_validation(store: SessionStore) -> None:

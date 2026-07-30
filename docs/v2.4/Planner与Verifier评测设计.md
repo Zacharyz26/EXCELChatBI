@@ -1,7 +1,8 @@
 # v2.4 Planner 与 Verifier 评测设计
 
 > 状态：三轮全量实测及阶段 2 60-run 对照完成；语义 Verifier v3 `NO_GO`（保持禁用）、Planner 按模型选型
-> （Flash 合格/Pro 禁用）、v2.3 基线越界违反 0；门槛为提议值，人工盲评与评审签字（item 6）待完成  
+> （Flash 合格/Pro 禁用）、v2.3 基线越界违反 0；现有场景只覆盖商业数据语境，人工盲评暂停，
+> 等待代表性场景和 Verifier 评分契约修订后再签字
 > 场景集：`scripts/agent_eval_set.jsonl`、`scripts/semantic_verifier_v3_eval_set.jsonl`  
 > 原则：先测基线，再冻结数值门槛；安全和真实性不变量始终要求零违反
 
@@ -338,6 +339,38 @@ Verifier` 真路径，共 60 runs：
 | 阶段 2 任务成功率 | > 基线（flash 26.7%） | 软门槛；阶段 2 对照 |
 | 阶段 2 终态如实率 | > 基线（flash 36.7%） | 软门槛；阶段 2 对照 |
 | Planner condition_specificity / fallback_actionability | 盲评均值 ≥ 1.0（0/1/2） | 软门槛；待盲评 |
+
+### 10.7 场景代表性与人工盲评修订（2026-07-29）
+
+冻结的 20 个 Agent 行为场景全部围绕订单、销售额、利润、地区、渠道、产品或复购率。
+这些场景覆盖画像、质量、聚合、图表、报告、追问、重规划、恢复和安全等控制面路径，
+因此继续作为 `business regression`；但当实际工作负载尚未明确且可能不包含上述字段时，
+它们不能单独证明产品适用性。
+
+当前处理：
+
+- 不删除、不改写已有自动报告、70.0%/73.3% 指标或已查看的失败样本；
+- 本地 Planner 匿名表已完成 29/60 条合法评分，其余暂停；已有评分只用于评分口径校准和
+  商业回归，不与未来代表性场景混合平均；
+- Verifier 94 条暂不评分。当前匿名表只含 goal/criteria/claims/predicted verdict，
+  缺少 Evidence 和逐 criterion 判断理由，无法可靠评价 overclaim；G7 目前也只校验这两项
+  是否填入 0/1/2，没有汇总或门槛，不能把形式化填分当质量验收；
+- 新代表性集在运行前冻结；输入可以只保存匿名列名/类型、数据形态、典型请求、Required
+  Artifact、澄清条件和禁止行为，不要求保存敏感原始数据；
+- 新旧场景使用独立 evaluation root、报告和结论，不混合计算总均值。
+
+恢复 Verifier 盲评前必须：
+
+1. 匿名表加入受控 Evidence 摘要、逐 criterion 状态/理由、issue code 和 next action；
+2. 继续隐藏模型名、configured route 和 `expected_verdict`；
+3. 冻结 `coverage_rating` 与 `overclaim_rating` 的 0/1/2 定义，明确高分代表更可靠；
+4. 决定两项是仅作诊断，还是进入带明确汇总方式和门槛的 G7 裁决；
+5. 用未见场景生成新候选，并验证 candidate ID、随机顺序和匿名性。
+
+`g7_review_gate.py` 还必须绑定新场景 manifest/hash 并按冻结规则复算 Verifier 评分；
+修订前不得对旧 evaluation root 使用 `--approve` 作为接受证据。在上述条件满足前，
+G7 必须保持 `review_required`。该评测债务不阻塞 v2.5 阶段 3–4
+的领域无关工程实现，但阻塞 v2.4 的代表性验收以及 v2.5 阶段 5–6 的产品适用性结论。
 
 ## 11. 阶段 0 退出产物
 

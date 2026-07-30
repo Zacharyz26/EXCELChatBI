@@ -10,18 +10,20 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2B 依赖图与重规划 Agent**：
+当前生产基线是 **v2.4 阶段 2E + v2.5 阶段 3A 实现收口候选**；3A 的最终阶段关闭
+等待本批提交后的 Docker runner 恢复门禁确认：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
                     → ready capability 白名单 → Observation Replanner → 进程内 Tool.invoke
-                    → Evidence/Artifact/TaskPlan/TaskStep → SQLite v3 + 文件
+                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot → SQLite v4 + 文件
 ```
 
 - v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
 - fast/template/LLM 混合 Planner 已统一输出并持久化 TaskPlan/TaskStep；生产 API 只向
   Executor 暴露依赖已满足的 ready capability；失败 Observation 会生成不可变计划新版本，
-  模型提前结束时 Verifier 会因未完成步骤拒绝成功。任务控制/恢复仍待阶段 2C。
+  模型提前结束时 Verifier 会因未完成步骤拒绝成功。任务控制/Checkpoint 恢复已在阶段 2C
+  落地。
 - 知识库第一至第四阶段代码、评测、生命周期、可观测和 Standalone 运维基线已经完成；目标机首次部署与恢复演练仍是运维任务。
 - **v2.4 阶段 1 已正式验收；阶段 2A 已实现**：SQLite schema v3 已包含 TaskRun、
   TaskContract/Event/Snapshot/Plan/Step/Invocation/Evidence/Checkpoint；确定性 Verifier、
@@ -29,6 +31,9 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
   API/Web Compose 和真实全栈 E2E 均已落地。G1–G6 和 G7 自动门禁已完成；G7 仍待
   Planner/Verifier 人工盲评、负责人签字和 ADR 接受。语义 Verifier 因 false PASS
   继续 `NO_GO`，生产仅使用确定性 Verifier。
+- **v2.5 阶段 3A 实现已收口**：SQLite v4 Memory Repository/Policy、不可变
+  TaskRun 快照、MCP 引用、结构化审计、readiness、工作区离线一致备份/恢复和 Compose
+  联合破坏/恢复门禁均已落地；本机无 Docker，等待 CI Docker runner 给出关闭证据。
 
 目标控制循环：
 
@@ -80,7 +85,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；真实计划只读展示 | v2.5 增加计划编辑、结构化澄清、暂停/恢复和证据交互 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier | v2.4 后续完成任务控制、恢复与 Finalizer 收口 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v3 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Checkpoint | v2.4 后续增加自动恢复与任务控制 |
+| 对话持久层 | SQLite v4 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Checkpoint/MemorySnapshot | v2.5 后续增加自动压缩、指代消解和用户记忆治理 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 进程内 `Tool.invoke` + JSON Schema | v2.4 标准 MCP Client/Server、stdio/Streamable HTTP、Tool Capability Contract；v3.0 外部准入与企业授权 |
 | 部署 | 本机进程 + API/Web 根 Compose；Milvus profile | v2.4 增加独立 MCP 工具服务 Compose；v3.0 镜像供应链和多实例运维 |
@@ -101,7 +106,7 @@ mcp_servers/           确定性工具；工具内零 LLM
 packages/models/       模型网关与 registry
 packages/governance/   schema、策略、权限、审计、沙箱、trace
 packages/rag/          中文检索、重排、向量存储
-packages/session/      SQLite、缓存；后续 Task/Evidence/记忆
+packages/session/      SQLite、缓存、Task/Evidence、受控记忆与快照
 docs/                  总设计、现行路线图、安全与运维
 tests/                 单元、集成与 Agent 行为评测
 ```
