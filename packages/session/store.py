@@ -18,7 +18,14 @@ from typing import Any, cast
 
 from packages.common.identifiers import validate_report_id
 from packages.session.cache import ConversationCache
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, migrate_database, v4, v5
+from packages.session.lineage import inspect_lineage_connection
+from packages.session.migrations import (
+    CURRENT_SCHEMA_VERSION,
+    migrate_database,
+    v4,
+    v5,
+    v6,
+)
 from packages.session.models import (
     Artifact,
     Conversation,
@@ -134,7 +141,7 @@ class SessionStore:
         return int(row[0]) if row is not None else 0
 
     def readiness_status(self) -> dict[str, int | str]:
-        """验证 SQLite、Memory 与上下文压缩控制面可读性。"""
+        """验证 SQLite、Memory、上下文压缩与血缘控制面可读性。"""
         with self._connection() as connection:
             version_row = connection.execute("PRAGMA user_version").fetchone()
             version = int(version_row[0]) if version_row is not None else 0
@@ -168,9 +175,9 @@ class SessionStore:
             migrations = connection.execute(
                 """
                 SELECT version, name, checksum FROM schema_migrations
-                WHERE version IN (?, ?)
+                WHERE version IN (?, ?, ?)
                 """,
-                (v4.VERSION, v5.VERSION),
+                (v4.VERSION, v5.VERSION, v6.VERSION),
             ).fetchall()
             actual_migrations = {
                 int(row["version"]): (str(row["name"]), str(row["checksum"]))
@@ -179,14 +186,19 @@ class SessionStore:
             expected_migrations = {
                 v4.VERSION: (v4.NAME, v4.CHECKSUM),
                 v5.VERSION: (v5.NAME, v5.CHECKSUM),
+                v6.VERSION: (v6.NAME, v6.CHECKSUM),
             }
             if actual_migrations != expected_migrations:
                 raise RuntimeError("SQLite v2.5 migration checksum 不匹配")
+            lineage = inspect_lineage_connection(connection)
+            if lineage["integrity"] != "ok":
+                raise RuntimeError("SQLite 血缘完整性检查未通过")
         return {
             "schema_version": version,
             "integrity": "ok",
             "memory_control_plane": "ready",
             "compaction_control_plane": "ready",
+            "lineage_control_plane": "ready",
         }
 
     # ── Project ──

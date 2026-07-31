@@ -156,6 +156,9 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
         memory_reference_resolution_hash=str(
             seeded["memory_reference_resolution_hash"]
         ),
+        lineage_graph_hash=str(seeded["lineage_graph_hash"]),
+        lineage_node_count=int(seeded["lineage_node_count"]),
+        lineage_edge_count=int(seeded["lineage_edge_count"]),
         principal=principal,
     )
     assert verified["report_completion_count"] == 1
@@ -171,6 +174,9 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
         == seeded["memory_reference_resolution_hash"]
     )
     assert verified["probe_invocation_count"] == 0
+    assert verified["lineage_graph_hash"] == seeded["lineage_graph_hash"]
+    assert verified["lineage_node_count"] == seeded["lineage_node_count"]
+    assert verified["lineage_edge_count"] == seeded["lineage_edge_count"]
 
     backed_up = backup_workspace(
         db_path=settings.chat_db_path,
@@ -215,6 +221,9 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
         memory_reference_resolution_hash=str(
             seeded["memory_reference_resolution_hash"]
         ),
+        lineage_graph_hash=str(seeded["lineage_graph_hash"]),
+        lineage_node_count=int(seeded["lineage_node_count"]),
+        lineage_edge_count=int(seeded["lineage_edge_count"]),
         principal=principal,
     )
     assert restored["status"] == "verified"
@@ -225,3 +234,6 @@ def test_joint_recovery_probe_survives_exact_workspace_restore(
     assert restored["plan_id"] == seeded["plan_id"]
     assert restored["plan_hash"] == seeded["plan_hash"]
     assert restored["probe_invocation_count"] == 0
+    assert restored["lineage_graph_hash"] == seeded["lineage_graph_hash"]
+    assert restored["lineage_node_count"] == seeded["lineage_node_count"]
+    assert restored["lineage_edge_count"] == seeded["lineage_edge_count"]

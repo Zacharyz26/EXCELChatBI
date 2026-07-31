@@ -1,9 +1,9 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；v2.5 阶段 3A 已完成且 Compose 联合恢复 CI 全绿，
-> 阶段 3B-1–3B-3 与 3C-1–3C-3 已完成本地实现，当前等待 CI Docker runner
-> 确认压缩、固定引用和离线恢复发布门禁
-> · 更新日期：2026-07-30
+> 状态：总体设计已完成；v2.5 阶段 3A–3C 已完成且 Compose 联合恢复 CI 全绿，
+> 阶段 3D 用户记忆治理和 3E 完整血缘/恢复已完成本地实现，等待提交后的
+> CI/Compose 门禁
+> · 更新日期：2026-07-31
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
 ## 1. 文档定位
@@ -18,9 +18,11 @@
 
 v2.4 阶段 2D 已把 Agent Executor 切到受治理 MCP Client Gateway，阶段 2E 已落地五个
 独立工具服务、私网 Compose、分卷/secrets 和容器浏览器/重启门禁。本文描述的
-v2.5 阶段 3B/3C 的实施与证据见
+v2.5 阶段 3B–3E 的实施与证据见
 [`v2.5/阶段3B实施计划.md`](./v2.5/阶段3B实施计划.md)、
-[`v2.5/阶段3C实施计划.md`](./v2.5/阶段3C实施计划.md)及相应实施记录；
+[`v2.5/阶段3C实施计划.md`](./v2.5/阶段3C实施计划.md)、
+[`v2.5/阶段3D实施计划.md`](./v2.5/阶段3D实施计划.md)、
+[`v2.5/阶段3E实施计划.md`](./v2.5/阶段3E实施计划.md)及相应实施记录；
 阶段 4–6 与 v3.0 扩展仍是未来设计，不代表后续治理已经实现。
 
 ## 2. 不随阶段变化的边界
@@ -78,6 +80,8 @@ v2.5 阶段 3B/3C 的实施与证据见
   `memory.write` 工具；写入由 Memory Policy 根据来源、作用域、置信度和用户授权决定。
 - MCP Observation 进入记忆前只保存 `server_id/tool/version/invocation_id`、结果 hash、
   Dataset/Artifact/Resource reference 和允许的摘要，不复制大结果或凭据。
+- 完整血缘由 Host 从 Dataset、Invocation、Artifact、Evidence 和 Claim 真相表只读派生；
+  MCP Server 不获得图写权限，也不通过 Resource 枚举完整项目血缘。
 - `RequestContext` 增加 `memory_snapshot_id` 和 `evidence_ledger_version`。Server 只看到执行所需
   的引用，不能查询全部项目记忆。
 - 用户可查看的项目知识未来可由 `knowledge-tools` 提供只读 Resource；个人偏好、审批记录和
@@ -85,8 +89,9 @@ v2.5 阶段 3B/3C 的实施与证据见
 
 ### Docker 设计
 
-- v2.5 单机部署继续保持一个任务状态写入者。SQLite、TaskEvent、Memory、Artifact 和 Dataset
-  卷必须有一致的备份顺序和恢复演练，禁止把 SQLite 放到多个 API 容器共享写入。
+- v2.5 单机部署继续保持一个任务状态写入者。SQLite、TaskEvent、Memory、Artifact、
+  Dataset 和最小血缘锚点必须有一致的备份顺序和恢复演练，禁止把 SQLite 放到多个
+  API 容器共享写入。
 - compaction/coref 可作为 Agent Worker 内部模块，不因“记忆系统”单独拆容器；只有独立负载、
   权限或扩缩容收益经压测证明后才拆分。
 - 容器启动先执行兼容性检查/迁移，失败不得用空库启动；恢复后从 Checkpoint 继续且不重复调用工具。
@@ -96,6 +101,7 @@ v2.5 阶段 3B/3C 的实施与证据见
 - 同一记忆场景在宿主机、stdio 和 Compose/Streamable HTTP 路径下得到相同实体与 Evidence 引用；
 - 重建 API/工具容器后，长期记忆、未完成 TaskRun 和 Artifact 仍可定位；
 - 项目 A 的记忆、Resource URI 和挂载卷不能被项目 B 的请求读取。
+- API 重启和离线恢复后，项目血缘图 hash、节点数、关系数及完整性保持一致。
 
 ## 5. v2.5 阶段 4：人机协作与 Agent 前端
 

@@ -20,6 +20,7 @@ from packages.session.migrations import (
     v3,
     v4,
     v5,
+    v6,
 )
 from packages.session.store import _SCHEMA_V1
 
@@ -32,6 +33,45 @@ LEGACY_TABLES = (
     "messages",
     "artifacts",
 )
+LEGACY_COLUMNS = {
+    "projects": ("id", "name", "created_at"),
+    "datasets": (
+        "ref",
+        "project_id",
+        "filename",
+        "profile_json",
+        "parent_ref",
+        "transform_json",
+        "created_at",
+    ),
+    "conversations": (
+        "id",
+        "project_id",
+        "title",
+        "created_at",
+        "updated_at",
+    ),
+    "messages": (
+        "id",
+        "conversation_id",
+        "role",
+        "content",
+        "tool_calls_json",
+        "created_at",
+    ),
+    "artifacts": (
+        "id",
+        "conversation_id",
+        "message_id",
+        "type",
+        "payload_json",
+        "file_ref",
+        "source_tool",
+        "params_json",
+        "dataset_ref",
+        "created_at",
+    ),
+}
 
 
 def _sha256_file(path: Path) -> str:
@@ -56,17 +96,15 @@ def _legacy_bytes(path: Path) -> bytes:
     snapshot: list[dict[str, Any]] = []
     with sqlite3.connect(path) as connection:
         for table in LEGACY_TABLES:
-            columns = [
-                str(row[1])
-                for row in connection.execute(f'PRAGMA table_info("{table}")')
-            ]
+            columns = LEGACY_COLUMNS[table]
+            selected = ", ".join(f'"{column}"' for column in columns)
             rows = connection.execute(
-                f'SELECT * FROM "{table}" ORDER BY rowid'
+                f'SELECT {selected} FROM "{table}" ORDER BY rowid'
             ).fetchall()
             snapshot.append(
                 {
                     "table": table,
-                    "columns": columns,
+                    "columns": list(columns),
                     "rows": [list(row) for row in rows],
                 }
             )
@@ -355,7 +393,13 @@ def run_rehearsal(
     restored = workspace / "restored-v1.sqlite3"
     shutil.copy2(backup_path, restored)
 
-    current_tables = set(v2.ADDED_TABLES) | set(v3.ADDED_TABLES) | set(v4.ADDED_TABLES)
+    current_tables = (
+        set(v2.ADDED_TABLES)
+        | set(v3.ADDED_TABLES)
+        | set(v4.ADDED_TABLES)
+        | set(v5.ADDED_TABLES)
+        | set(v6.ADDED_TABLES)
+    )
     added_after_interrupt = _table_names(interrupted) & current_tables
     checks = {
         "empty_to_current": (
@@ -426,6 +470,7 @@ def run_rehearsal(
             str(v3.VERSION): v3.CHECKSUM,
             str(v4.VERSION): v4.CHECKSUM,
             str(v5.VERSION): v5.CHECKSUM,
+            str(v6.VERSION): v6.CHECKSUM,
         },
         "backup_sha256": recorded_backup_hash,
         "versions": {

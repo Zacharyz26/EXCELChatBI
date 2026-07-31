@@ -15,6 +15,7 @@ _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.
     [
         ("compaction_quality", "compaction-quality"),
         ("coref_quality", "coref-quality"),
+        ("lineage_quality", "lineage-quality"),
         ("coref_mcp_transport", "coref-mcp-transport"),
         ("kb_quality", "kb-evaluation"),
     ],

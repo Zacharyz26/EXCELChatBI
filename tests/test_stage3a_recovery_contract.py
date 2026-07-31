@@ -1,4 +1,4 @@
-"""v2.5 3A/3B/3C Compose 离线恢复发布门禁的静态契约测试。"""
+"""v2.5 3A-3E Compose 离线恢复发布门禁的静态契约测试。"""
 
 from __future__ import annotations
 
@@ -44,6 +44,9 @@ def test_compose_e2e_runs_destructive_restore_and_joint_reference_gate() -> None
         "--plan-hash",
         "--reference-resolution-hash",
         "--memory-reference-resolution-hash",
+        "--lineage-graph-hash",
+        "--lineage-node-count",
+        "--lineage-edge-count",
         "reference-restart-verified.json",
         "verify_original_run",
     )

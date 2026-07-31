@@ -76,6 +76,123 @@ export interface WorkspaceArtifact {
   created_at: string;
 }
 
+export type MemoryScope = "conversation" | "project" | "subject";
+export type MemoryKind =
+  | "field_alias"
+  | "user_preference"
+  | "confirmed_decision"
+  | "entity_mapping"
+  | "conversation_summary";
+export type MemoryStatus = "active" | "conflict" | "superseded" | "deleted";
+export type MemorySourceType =
+  | "message"
+  | "user_confirmation"
+  | "artifact"
+  | "evidence"
+  | "invocation";
+
+export interface WorkspaceMemoryLink {
+  target_type: string;
+  target_ref: string;
+}
+
+export interface WorkspaceMemory {
+  memory_id: string;
+  project_id: string;
+  scope: MemoryScope;
+  conversation_id: string | null;
+  kind: MemoryKind;
+  content_summary: string;
+  source_type: MemorySourceType;
+  confidence: number;
+  valid_from: string;
+  expires_at: string | null;
+  version: number;
+  status: MemoryStatus;
+  supersedes_id: string | null;
+  conflicts_with_id: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  links: WorkspaceMemoryLink[];
+}
+
+export interface MemoryListResponse {
+  items: WorkspaceMemory[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface MemoryRevisionInput {
+  expected_version: number;
+  content_summary: string;
+  confidence: number;
+  expires_at: string | null;
+}
+
+export interface MemoryMutationResponse {
+  memory: WorkspaceMemory;
+  outcome: "created" | "conflict" | "replayed" | "reused" | "revised";
+}
+
+export type LineageNodeType =
+  | "dataset"
+  | "analysis"
+  | "artifact"
+  | "evidence"
+  | "claim";
+export type LineageNodeStatus =
+  | "active"
+  | "deleted"
+  | "succeeded"
+  | "failed"
+  | "unknown"
+  | "running";
+export type LineageRelation =
+  | "derived_from"
+  | "used_by"
+  | "produced"
+  | "profiled_as"
+  | "included_in"
+  | "substantiates"
+  | "supports";
+
+export interface LineageNode {
+  node_id: string;
+  node_type: LineageNodeType;
+  resource_ref: string;
+  label: string;
+  status: LineageNodeStatus;
+  conversation_id: string | null;
+  run_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export interface LineageEdge {
+  source: string;
+  target: string;
+  relation: LineageRelation;
+}
+
+export interface LineageIssue {
+  code: string;
+  count: number;
+}
+
+export interface LineageGraphResponse {
+  project_id: string;
+  nodes: LineageNode[];
+  edges: LineageEdge[];
+  graph_hash: string;
+  integrity_status: "ok" | "degraded";
+  issues: LineageIssue[];
+  total_nodes: number;
+  total_edges: number;
+  truncated: boolean;
+}
+
 export interface ConversationDetail {
   conversation: WorkspaceConversation;
   messages: WorkspaceMessage[];

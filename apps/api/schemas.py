@@ -4,6 +4,18 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+from packages.session.lineage import (
+    LineageNodeStatus,
+    LineageNodeType,
+    LineageRelation,
+)
+from packages.session.memory_models import (
+    MemoryKind,
+    MemoryScope,
+    MemorySourceType,
+    MemoryStatus,
+    MemoryWriteOutcome,
+)
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 WorkspaceName = Annotated[
@@ -118,6 +130,110 @@ class ArtifactResponse(BaseModel):
     params: dict[str, Any] | None
     dataset_ref: str | None
     created_at: str
+
+
+class MemoryLinkResponse(BaseModel):
+    """记忆关联的项目内受控资源。"""
+
+    target_type: str
+    target_ref: str
+
+
+class MemoryResponse(BaseModel):
+    """供项目成员治理的安全记忆视图，不暴露租户、subject 或来源摘要。"""
+
+    memory_id: str
+    project_id: str
+    scope: MemoryScope
+    conversation_id: str | None
+    kind: MemoryKind
+    content_summary: str
+    source_type: MemorySourceType
+    confidence: float
+    valid_from: str
+    expires_at: str | None
+    version: int
+    status: MemoryStatus
+    supersedes_id: str | None
+    conflicts_with_id: str | None
+    created_at: str
+    updated_at: str
+    deleted_at: str | None
+    links: list[MemoryLinkResponse] = Field(default_factory=list)
+
+
+class MemoryListResponse(BaseModel):
+    """分页后的项目记忆治理列表。"""
+
+    items: list[MemoryResponse]
+    total: int
+    offset: int
+    limit: int
+
+
+class MemoryRevisionRequest(BaseModel):
+    """用户可纠正的字段；身份、作用域、语义键和原始来源保持不可变。"""
+
+    expected_version: int = Field(ge=1)
+    content_summary: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000),
+    ]
+    confidence: float = Field(ge=0.0, le=1.0)
+    expires_at: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+    ] | None
+
+
+class MemoryMutationResponse(BaseModel):
+    """不可变修订及幂等重放结果。"""
+
+    memory: MemoryResponse
+    outcome: MemoryWriteOutcome
+
+
+class LineageNodeResponse(BaseModel):
+    """血缘图节点；不包含工具参数、结果正文或文件路径。"""
+
+    node_id: str
+    node_type: LineageNodeType
+    resource_ref: str
+    label: str
+    status: LineageNodeStatus
+    conversation_id: str | None
+    run_id: str | None
+    metadata: dict[str, Any]
+    created_at: str | None
+
+
+class LineageEdgeResponse(BaseModel):
+    """血缘图中的确定性有向关系。"""
+
+    source: str
+    target: str
+    relation: LineageRelation
+
+
+class LineageIssueResponse(BaseModel):
+    """不含资源 ID 的血缘完整性问题计数。"""
+
+    code: str
+    count: int
+
+
+class LineageGraphResponse(BaseModel):
+    """项目级有界血缘图及其完整性摘要。"""
+
+    project_id: str
+    nodes: list[LineageNodeResponse]
+    edges: list[LineageEdgeResponse]
+    graph_hash: str
+    integrity_status: str
+    issues: list[LineageIssueResponse]
+    total_nodes: int
+    total_edges: int
+    truncated: bool
 
 
 class ConversationDetailResponse(BaseModel):

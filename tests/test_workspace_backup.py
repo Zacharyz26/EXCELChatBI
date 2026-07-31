@@ -10,6 +10,7 @@ import pytest
 from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.governance.permissions import Principal
 from packages.session.compaction import CompactionStore
+from packages.session.lineage import LineageStore
 from packages.session.memory_models import MemoryDraft
 from packages.session.memory_store import MemoryStore
 from packages.session.store import SessionStore
@@ -163,6 +164,22 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
     assert counts["conversation_compaction_items"] == 2
     assert counts["artifacts"] == 1
     assert counts["datasets"] == 1
+    assert counts["dataset_lineage_anchors"] == 1
+    assert counts["task_plans"] == 0
+    assert counts["task_steps"] == 0
+    assert counts["claims"] == 0
+    assert counts["claim_evidence"] == 0
+    lineage_manifest = database_manifest["lineage"]
+    assert isinstance(lineage_manifest, dict)
+    assert lineage_manifest["integrity"] == "ok"
+    assert len(str(lineage_manifest["content_hash"])) == 64
+    before_graph = LineageStore(
+        SessionStore(str(database)),
+        audit_recorder=lambda _event: None,
+    ).build_graph(
+        project_id=project_id,
+        principal=Principal(user_id="owner", tenant_id="tenant-a"),
+    )
 
     SessionStore(str(database)).update_project(project_id, "已污染")
     (datasets / f"{'d' * 32}.parquet").write_bytes(b"mutated")
@@ -206,6 +223,16 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
     assert (
         artifacts / "reports" / "recovery.md"
     ).read_text(encoding="utf-8") == "# recovery artifact"
+    restored_graph = LineageStore(
+        reopened,
+        audit_recorder=lambda _event: None,
+    ).build_graph(
+        project_id=project_id,
+        principal=Principal(user_id="owner", tenant_id="tenant-a"),
+    )
+    assert restored_graph.graph_hash == before_graph.graph_hash
+    assert restored_graph.total_nodes == before_graph.total_nodes
+    assert restored_graph.total_edges == before_graph.total_edges
 
 
 def test_backup_and_restore_require_explicit_offline_acknowledgement(

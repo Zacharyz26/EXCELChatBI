@@ -19,7 +19,7 @@ from packages.session.memory_store import (
     MemoryStore,
     MemoryVersionConflict,
 )
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
 from packages.session.task_store import TaskStore
@@ -568,11 +568,27 @@ def test_memory_policy_rejects_secrets_host_paths_and_invalid_source_hash(
         )
 
 
-def test_v3_database_is_backed_up_and_migrated_through_v5(tmp_path: Path) -> None:
+def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> None:
     db_path = tmp_path / "v3.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v6.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v6.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v6.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "ALTER TABLE datasets DROP COLUMN lineage_parent_ref"
+        )
+        connection.execute(
+            "ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref"
+        )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v6.VERSION,),
+        )
         connection.execute('DROP TABLE "conversation_compaction_items"')
         connection.execute('DROP INDEX "idx_memory_snapshots_compaction"')
         connection.execute("ALTER TABLE memory_snapshots DROP COLUMN compaction_id")
@@ -618,6 +634,7 @@ def test_v3_database_is_backed_up_and_migrated_through_v5(tmp_path: Path) -> Non
     assert migration[3] == hashlib.sha256(backups[0].read_bytes()).hexdigest()
     assert set(v4.ADDED_TABLES).issubset(tables)
     assert set(v5.ADDED_TABLES).issubset(tables)
+    assert set(v6.ADDED_TABLES).issubset(tables)
 
 
 def test_project_delete_cascades_memory_control_plane(tmp_path: Path) -> None:

@@ -6,6 +6,8 @@ import {
   rebuildKnowledgeBase,
 } from "@/api/client";
 import { ChatPanel } from "@/components/ChatPanel";
+import { LineagePanel } from "@/components/LineagePanel";
+import { MemoryGovernancePanel } from "@/components/MemoryGovernancePanel";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { KBOverview, WorkspaceArtifact, WorkspaceDataset } from "@/types";
 
@@ -40,6 +42,8 @@ export function ChatWorkspace() {
   const [renameDraft, setRenameDraft] = useState("");
   const [renamingDatasetRef, setRenamingDatasetRef] = useState<string | null>(null);
   const [datasetNameDraft, setDatasetNameDraft] = useState("");
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
+  const [lineagePanelOpen, setLineagePanelOpen] = useState(false);
 
   // 本对话正在使用的数据集：以对话工件的 dataset_ref 为事实来源
   const usedDatasetRefs = new Set(
@@ -305,6 +309,24 @@ export function ChatWorkspace() {
             <span>{activeProject?.name ?? (initialized ? "未选择项目" : "正在初始化")}</span>
             <h1>{activeConversation?.title ?? "新对话"}</h1>
           </div>
+          <div className="conversation-header__controls">
+            <button
+              type="button"
+              className="conversation-header__lineage"
+              onClick={() => setLineagePanelOpen(true)}
+              disabled={!activeProject}
+            >
+              数据血缘
+            </button>
+            <button
+              type="button"
+              className="conversation-header__memory"
+              onClick={() => setMemoryPanelOpen(true)}
+              disabled={!activeProject}
+            >
+              项目记忆
+            </button>
+          </div>
           <div className="conversation-header__status">
             <span className={`connection-dot${streaming ? " connection-dot--busy" : ""}`} />
             {streaming ? "正在生成" : datasets.length > 0 ? `${datasets.length} 个数据集` : "未上传数据"}
@@ -328,6 +350,22 @@ export function ChatWorkspace() {
           />
         </div>
       </main>
+      {memoryPanelOpen && activeProject && (
+        <MemoryGovernancePanel
+          key={activeProject.id}
+          projectId={activeProject.id}
+          projectName={activeProject.name}
+          onClose={() => setMemoryPanelOpen(false)}
+        />
+      )}
+      {lineagePanelOpen && activeProject && (
+        <LineagePanel
+          key={activeProject.id}
+          projectId={activeProject.id}
+          projectName={activeProject.name}
+          onClose={() => setLineagePanelOpen(false)}
+        />
+      )}
     </div>
   );
 }

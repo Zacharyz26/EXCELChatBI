@@ -1,4 +1,4 @@
-"""Compose 3A/3B 门禁：验证 TaskRun/Memory/Compaction/Artifact 联合恢复。"""
+"""Compose 3A-3E 门禁：验证运行、记忆、压缩、工件与血缘联合恢复。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from packages.common.config import Settings, get_settings
 from packages.governance.permissions import Principal
 from packages.session.compaction import CompactionStore
 from packages.session.coref import ReferenceResolver, find_reference_assumption
+from packages.session.lineage import LineageStore
 from packages.session.memory_models import MemoryDraft
 from packages.session.memory_refs import (
     MemoryReferenceResolver,
@@ -231,6 +232,15 @@ def seed_probe(
         payload={"reason": "compose_recovery_probe"},
         checkpoint_reason="compose_recovery_probe",
     )
+    lineage = LineageStore(
+        session,
+        audit_recorder=lambda _event: None,
+    ).build_graph(
+        project_id=original.project_id,
+        principal=principal,
+    )
+    if lineage.integrity_status != "ok":
+        raise RuntimeError("恢复探针初始血缘完整性检查未通过")
     return {
         "status": "seeded",
         "original_run_id": original.run_id,
@@ -249,6 +259,9 @@ def seed_probe(
         "memory_reference_resolution_hash": (
             memory_reference_resolution.resolution_hash
         ),
+        "lineage_graph_hash": lineage.graph_hash,
+        "lineage_node_count": lineage.total_nodes,
+        "lineage_edge_count": lineage.total_edges,
         "project_id": original.project_id,
         "conversation_id": original.conversation_id,
     }
@@ -271,6 +284,9 @@ def verify_probe(
     plan_hash: str,
     reference_resolution_hash: str,
     memory_reference_resolution_hash: str,
+    lineage_graph_hash: str,
+    lineage_node_count: int,
+    lineage_edge_count: int,
     principal: Principal,
 ) -> dict[str, object]:
     """验证重启/恢复后引用、快照内容、暂停状态、文件和副作用计数。"""
@@ -383,6 +399,20 @@ def verify_probe(
         raise RuntimeError("报告工具副作用在恢复后发生重复或丢失")
     if tasks.list_invocations(probe_run_id):
         raise RuntimeError("恢复探针不得产生工具调用")
+    lineage = LineageStore(
+        session,
+        audit_recorder=lambda _event: None,
+    ).build_graph(
+        project_id=probe.project_id,
+        principal=principal,
+    )
+    if (
+        lineage.integrity_status != "ok"
+        or lineage.graph_hash != lineage_graph_hash
+        or lineage.total_nodes != lineage_node_count
+        or lineage.total_edges != lineage_edge_count
+    ):
+        raise RuntimeError("项目血缘图在恢复后发生漂移")
     return {
         "status": "verified",
         "original_run_status": original.status,
@@ -401,6 +431,9 @@ def verify_probe(
         "memory_reference_resolution_hash": (
             restored_memory_reference.resolution_hash
         ),
+        "lineage_graph_hash": lineage.graph_hash,
+        "lineage_node_count": lineage.total_nodes,
+        "lineage_edge_count": lineage.total_edges,
         "probe_invocation_count": 0,
         "report_completion_count": len(report_completions),
     }
@@ -498,7 +531,7 @@ def _artifact_files(artifact: Artifact, report_root: Path) -> list[Path]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="v2.5 3A/3B Compose 恢复探针")
+    parser = argparse.ArgumentParser(description="v2.5 3A-3E Compose 恢复探针")
     subparsers = parser.add_subparsers(dest="command", required=True)
     seed = subparsers.add_parser("seed")
     seed.add_argument("--original-run-id", required=True)
@@ -518,6 +551,9 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--plan-hash", required=True)
     verify.add_argument("--reference-resolution-hash", required=True)
     verify.add_argument("--memory-reference-resolution-hash", required=True)
+    verify.add_argument("--lineage-graph-hash", required=True)
+    verify.add_argument("--lineage-node-count", required=True, type=int)
+    verify.add_argument("--lineage-edge-count", required=True, type=int)
     _add_principal(verify)
     disturb = subparsers.add_parser("disturb")
     disturb.add_argument("--artifact-id", required=True)
@@ -555,6 +591,9 @@ def main() -> None:
             plan_hash=args.plan_hash,
             reference_resolution_hash=args.reference_resolution_hash,
             memory_reference_resolution_hash=args.memory_reference_resolution_hash,
+            lineage_graph_hash=args.lineage_graph_hash,
+            lineage_node_count=args.lineage_node_count,
+            lineage_edge_count=args.lineage_edge_count,
             principal=Principal(args.user_id, args.tenant_id),
         )
     else:

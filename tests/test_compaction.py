@@ -18,7 +18,7 @@ from packages.session.compaction import (
     CompactionStore,
 )
 from packages.session.memory_store import MemoryAccessDenied, MemoryStore
-from packages.session.migrations import v5
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v5, v6
 from packages.session.store import SessionStore
 from packages.session.task_store import TaskStore
 
@@ -405,11 +405,27 @@ def test_task_run_memory_snapshot_freezes_compaction_version(tmp_path: Path) -> 
         )
 
 
-def test_v4_database_is_backed_up_and_migrated_to_v5(tmp_path: Path) -> None:
+def test_v4_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> None:
     db_path = tmp_path / "v4.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v6.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v6.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v6.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "ALTER TABLE datasets DROP COLUMN lineage_parent_ref"
+        )
+        connection.execute(
+            "ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref"
+        )
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v6.VERSION,),
+        )
         connection.execute('DROP TABLE "conversation_compaction_items"')
         connection.execute('DROP INDEX "idx_memory_snapshots_compaction"')
         connection.execute("ALTER TABLE memory_snapshots DROP COLUMN compaction_id")
@@ -424,7 +440,7 @@ def test_v4_database_is_backed_up_and_migrated_to_v5(tmp_path: Path) -> None:
 
     migrated = SessionStore(str(db_path))
 
-    assert migrated.schema_version == v5.VERSION
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
     backups = list(tmp_path.glob("v4.db.v4-backup.*.sqlite3"))
     assert len(backups) == 1
     with sqlite3.connect(db_path) as connection:
@@ -439,9 +455,17 @@ def test_v4_database_is_backed_up_and_migrated_to_v5(tmp_path: Path) -> None:
             str(row[1])
             for row in connection.execute("PRAGMA table_info(memory_snapshots)")
         }
+        lineage_migration = connection.execute(
+            """
+            SELECT checksum, source_version
+            FROM schema_migrations WHERE version = ?
+            """,
+            (v6.VERSION,),
+        ).fetchone()
     assert migration is not None
     assert migration[0] == v5.CHECKSUM
     assert migration[1] == 4
     assert migration[2] == str(backups[0])
     assert migration[3] == hashlib.sha256(backups[0].read_bytes()).hexdigest()
     assert "compaction_id" in columns
+    assert lineage_migration == (v6.CHECKSUM, v5.VERSION)

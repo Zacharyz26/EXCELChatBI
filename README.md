@@ -11,12 +11,13 @@
 当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
 Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
-SSE 展示。SQLite schema v5 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+SSE 展示。SQLite schema v6 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
 幂等操作、不可变快照、资源关联和持久化对话压缩。阶段 3A 的离线一致备份/恢复、
 Memory readiness 和 Compose 联合恢复门禁已经通过完整 CI；阶段 3B-1–3B-3
-与阶段 3C-1–3C-3 的本地实现均已完成，当前等待 CI Docker runner
-确认压缩、固定引用和离线恢复发布门禁。
+与阶段 3C-1–3C-3 已由提交 `e3d51fd` 的真实 Docker/Compose CI 验证并关闭。
+阶段 3D 的项目记忆治理与阶段 3E 的完整血缘/恢复已完成本地实现，等待提交后的
+CI/Compose 门禁。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -42,6 +43,14 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   Dataset/Artifact；冲突、过期、低置信度、删除和恢复漂移均失败关闭，澄清不自动写长期记忆；
 - Memory 创建、冲突、修订、删除、关联、快照和拒绝均输出不含正文的结构化审计；
   SQLite/Dataset/Artifact 可生成带 schema、行数和文件 hash 的离线一致备份；
+- 项目记忆治理 API 与 React 面板支持按主体安全查看、不可变纠正和软删除；
+  `expected_version` 防止并发覆盖，`Idempotency-Key` 保证重试，新版本继承受控资源关联，
+  tenant/subject/来源内部字段不会暴露给浏览器，固定历史快照不被改写；
+- SQLite v5→v6 增加不可变 Dataset 来源锚点和删除 tombstone；项目血缘 API 与 React
+  面板从现有真相表派生 Dataset → Analysis/Invocation → Artifact → Evidence → Claim，
+  conversation/tenant/project 隔离、稳定图 hash、漂移检测和安全响应字段均失败关闭；
+- 工作区备份 manifest 与 Compose 联合恢复探针固定 v6 checksum、锚点/Claim/Plan 行数、
+  非正文 lineage hash 及项目图 hash/计数；恢复漂移不允许服务就绪；
 - SQLite v4→v5 增加不可变 ConversationCompaction 版本、精确来源条目和策略参数；
   Agent 使用有界、脱敏的确定性历史摘要与最近原文，TaskRun 恢复固定原 `compaction_id`；
 - 最小确定性 Verifier：最终正文先验证后发送，图表/报告必须有当前 run 的真实 Artifact，
@@ -81,8 +90,10 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
 - 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
-- 记忆控制面、TaskRun 快照、确定性上下文压缩、3C-1–3C-3 指代质量/恢复门禁均已
-  本地实现；3B/3C 的实际容器 CI 确认、长期记忆自动提取与用户治理界面尚未完成；
+- 记忆控制面、TaskRun 快照、确定性上下文压缩和 3C 指代质量/恢复门禁已完成；
+  3D 用户治理与 3E 五阶段血缘/恢复已完成本地实现并通过真实本机 full-stack E2E，
+  仍待提交后的容器 CI；
+  长期记忆自动提取尚未设计，当前继续禁止通用模型 `memory.write`；
 - 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、审批和企业审计后端尚未实现；
 - Agent Executor 已切到 MCP Client Gateway；支持 stdio/认证 Streamable HTTP、
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
@@ -97,9 +108,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A 已完成并通过完整 CI；阶段 3B-1–3B-3 已完成本地实现与全量
-  后端回归，当前等待 CI Docker runner 确认发布门禁；3C-1–3C-3 已完成确定性对象引用、
-  受治理实体映射、质量集和恢复门禁的本地实现，等待真实 Compose CI；后续仍需
+- **v2.5**：阶段 3A–3C 已完成并通过真实 Docker/Compose CI；阶段 3D 用户记忆治理和
+  3E 完整血缘/恢复已完成本地实现，待提交后的 CI/Compose 门禁；后续仍需阶段 4
   可干预前端、领域语义、自主探索和多数据集分析；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -119,13 +129,21 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 v2.5 阶段 3A（已完成，完整 CI 与 Docker 恢复门禁全绿）
   记忆契约 + SQLite v4 + Memory Policy + 不可变快照 + 项目隔离 + 一致恢复
 
-v2.5 阶段 3B（本地实现收口，Docker CI 待确认）
+v2.5 阶段 3B（已完成，Docker/Compose CI 全绿）
   持久化压缩快照 + 最近原文窗口 + TaskRun 固定引用 + 安全脱敏
   领域中立质量门禁 + 并发幂等 + Compose 固定版本恢复探针
 
-v2.5 阶段 3C-1–3C-3（本地实现完成，Docker CI 待确认）
+v2.5 阶段 3C-1–3C-3（已完成，Docker/Compose CI 全绿）
   Artifact/Dataset 确定性指代 + 固定快照实体映射 + 歧义失败关闭
   TaskPlan 恢复绑定 + 工具血缘约束 + 23 场景质量门禁 + 双传输/Compose 恢复探针
+
+v2.5 阶段 3D（本地实现完成，提交后 CI/Compose 待确认）
+  项目记忆安全查询 + 不可变纠正 + 软删除 + 版本/幂等并发控制
+  React 治理面板 + subject/tenant 隔离 + 固定快照不变 + 真实本机 full-stack E2E
+
+v2.5 阶段 3E（本地实现完成，提交后 CI/Compose 待确认）
+  SQLite v6 不可变 Dataset 锚点 + 五阶段只读来源图 + 安全 React 血缘面板
+  领域中立质量门禁 + readiness/备份 hash + API 重启/离线恢复图一致性
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证
@@ -142,7 +160,7 @@ v3.0
 
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
 v2.4 详细设计与阶段 1–2E 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
-v2.5 当前入口与阶段 3B/3C 实施计划见 [`docs/v2.5/README.md`](./docs/v2.5/README.md)。
+v2.5 当前入口与阶段 3B–3E 实施计划见 [`docs/v2.5/README.md`](./docs/v2.5/README.md)。
 v2.4 之后各阶段的 MCP/Docker 演进见
 [`docs/MCP与Docker全阶段演进设计.md`](./docs/MCP与Docker全阶段演进设计.md)。
 

@@ -12,21 +12,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5
+from packages.session.lineage import inspect_lineage_connection
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6
 
 BACKUP_FORMAT = "chatbi-workspace-backup-v1"
 _COUNTED_TABLES = (
     "projects",
     "project_memberships",
     "datasets",
+    "dataset_lineage_anchors",
     "conversations",
     "messages",
     "artifacts",
     "task_runs",
+    "task_plans",
+    "task_steps",
     "task_events",
     "task_snapshots",
     "tool_invocations",
     "evidence",
+    "claims",
+    "claim_evidence",
     "checkpoints",
     "memory_records",
     "memory_operations",
@@ -137,7 +143,13 @@ def verify_workspace_backup(input_dir: str | Path) -> dict[str, Any]:
         raise RuntimeError("工作区备份缺少 SQLite 文件")
     _require_hash(database, database_item.get("sha256"))
     inspected = _inspect_database(database)
-    for key in ("schema_version", "integrity", "migration_checksums", "table_counts"):
+    for key in (
+        "schema_version",
+        "integrity",
+        "migration_checksums",
+        "table_counts",
+        "lineage",
+    ):
         if database_item.get(key) != inspected[key]:
             raise RuntimeError(f"工作区备份 SQLite {key} 与 manifest 不一致")
 
@@ -290,9 +302,9 @@ def _inspect_database(path: Path) -> dict[str, object]:
         migrations = connection.execute(
             """
             SELECT version, name, checksum FROM schema_migrations
-            WHERE version IN (?, ?)
+            WHERE version IN (?, ?, ?)
             """,
-            (v4.VERSION, v5.VERSION),
+            (v4.VERSION, v5.VERSION, v6.VERSION),
         ).fetchall()
         actual_migrations = {
             str(int(row[0])): {"name": str(row[1]), "checksum": str(row[2])}
@@ -301,6 +313,7 @@ def _inspect_database(path: Path) -> dict[str, object]:
         expected_migrations = {
             str(v4.VERSION): {"name": v4.NAME, "checksum": v4.CHECKSUM},
             str(v5.VERSION): {"name": v5.NAME, "checksum": v5.CHECKSUM},
+            str(v6.VERSION): {"name": v6.NAME, "checksum": v6.CHECKSUM},
         }
         if actual_migrations != expected_migrations:
             raise RuntimeError("工作区 v2.5 migration checksum 不匹配")
@@ -310,6 +323,9 @@ def _inspect_database(path: Path) -> dict[str, object]:
             )
             for table in _COUNTED_TABLES
         }
+        lineage = inspect_lineage_connection(connection)
+        if lineage["integrity"] != "ok":
+            raise RuntimeError("工作区血缘完整性检查未通过")
     except sqlite3.Error as exc:
         raise RuntimeError("工作区 SQLite 结构不可读") from exc
     finally:
@@ -319,6 +335,7 @@ def _inspect_database(path: Path) -> dict[str, object]:
         "integrity": "ok",
         "migration_checksums": expected_migrations,
         "table_counts": counts,
+        "lineage": lineage,
     }
 
 

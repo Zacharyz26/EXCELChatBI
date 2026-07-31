@@ -4,10 +4,15 @@ import type {
   ConversationDetail,
   IngestResponse,
   KBOverview,
+  LineageGraphResponse,
+  MemoryListResponse,
+  MemoryMutationResponse,
+  MemoryRevisionInput,
   UploadResponse,
   WorkspaceConversation,
   WorkspaceDataset,
   WorkspaceProject,
+  WorkspaceMemory,
 } from "@/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
@@ -192,6 +197,72 @@ export async function listDatasets(projectId: string): Promise<WorkspaceDataset[
   const resp = await apiFetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/datasets`);
   if (!resp.ok) return asError(resp);
   return resp.json();
+}
+
+/** 读取项目内当前主体可见的全部记忆生命周期版本。 */
+export async function listProjectMemories(projectId: string): Promise<MemoryListResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/memories?limit=100`,
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 读取项目级有界血缘图；响应不包含参数正文、文件路径或结果内容。 */
+export async function getProjectLineage(
+  projectId: string,
+  conversationId?: string,
+): Promise<LineageGraphResponse> {
+  const query = new URLSearchParams({ max_nodes: "500" });
+  if (conversationId) query.set("conversation_id", conversationId);
+  const resp = await apiFetch(
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/lineage?${query}`,
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 以不可变新版本纠正一条 active 记忆。 */
+export async function reviseProjectMemory(
+  projectId: string,
+  memoryId: string,
+  input: MemoryRevisionInput,
+): Promise<MemoryMutationResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/memories/${encodeURIComponent(memoryId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": operationKey("memory-revise"),
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 软删除一条 active/conflict 记忆，不改写已固定的历史快照。 */
+export async function deleteProjectMemory(
+  projectId: string,
+  memoryId: string,
+  expectedVersion: number,
+): Promise<WorkspaceMemory> {
+  const query = new URLSearchParams({ expected_version: String(expectedVersion) });
+  const resp = await apiFetch(
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/memories/${encodeURIComponent(memoryId)}?${query}`,
+    {
+      method: "DELETE",
+      headers: { "Idempotency-Key": operationKey("memory-delete") },
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+function operationKey(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
 /**

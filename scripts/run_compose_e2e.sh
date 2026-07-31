@@ -72,7 +72,10 @@ verify_reference_recovery() {
     --plan-version "$plan_version" \
     --plan-hash "$plan_hash" \
     --reference-resolution-hash "$reference_resolution_hash" \
-    --memory-reference-resolution-hash "$memory_reference_resolution_hash"
+    --memory-reference-resolution-hash "$memory_reference_resolution_hash" \
+    --lineage-graph-hash "$lineage_graph_hash" \
+    --lineage-node-count "$lineage_node_count" \
+    --lineage-edge-count "$lineage_edge_count"
 }
 
 "${compose[@]}" down --volumes --remove-orphans
@@ -172,6 +175,18 @@ reference_resolution_hash="$(
 memory_reference_resolution_hash="$(
   PROBE_JSON="$probe_json" node -e \
     'process.stdout.write(JSON.parse(process.env.PROBE_JSON).memory_reference_resolution_hash)'
+)"
+lineage_graph_hash="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(JSON.parse(process.env.PROBE_JSON).lineage_graph_hash)'
+)"
+lineage_node_count="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(String(JSON.parse(process.env.PROBE_JSON).lineage_node_count))'
+)"
+lineage_edge_count="$(
+  PROBE_JSON="$probe_json" node -e \
+    'process.stdout.write(String(JSON.parse(process.env.PROBE_JSON).lineage_edge_count))'
 )"
 
 "${compose[@]}" restart api

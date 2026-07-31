@@ -420,6 +420,13 @@ class MemoryStore:
                 deleted_at=None,
             )
             self._insert_record(connection, revised)
+            self._copy_links(
+                connection,
+                source_memory_id=current.memory_id,
+                target_memory_id=revised.memory_id,
+                principal=principal,
+                now=now,
+            )
             self._insert_operation(
                 connection,
                 project_id=project_id,
@@ -637,24 +644,43 @@ class MemoryStore:
                     conversation_id=conversation_id,
                     project_id=project_id,
                 )
-            rows = connection.execute(
-                """
-                SELECT * FROM memory_records
-                WHERE tenant_id = ? AND project_id = ?
-                  AND (
-                        scope = 'project'
-                        OR (scope = 'subject' AND subject_user_id = ?)
-                        OR (scope = 'conversation' AND conversation_id = ?)
-                  )
-                ORDER BY semantic_key, version, created_at, memory_id
-                """,
-                (
-                    principal.tenant_scope,
-                    project_id,
-                    principal.user_id,
-                    conversation_id,
-                ),
-            ).fetchall()
+            if conversation_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM memory_records
+                    WHERE tenant_id = ? AND project_id = ?
+                      AND (
+                            scope = 'project'
+                            OR (scope = 'subject' AND subject_user_id = ?)
+                            OR scope = 'conversation'
+                      )
+                    ORDER BY semantic_key, version, created_at, memory_id
+                    """,
+                    (
+                        principal.tenant_scope,
+                        project_id,
+                        principal.user_id,
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM memory_records
+                    WHERE tenant_id = ? AND project_id = ?
+                      AND (
+                            scope = 'project'
+                            OR (scope = 'subject' AND subject_user_id = ?)
+                            OR (scope = 'conversation' AND conversation_id = ?)
+                      )
+                    ORDER BY semantic_key, version, created_at, memory_id
+                    """,
+                    (
+                        principal.tenant_scope,
+                        project_id,
+                        principal.user_id,
+                        conversation_id,
+                    ),
+                ).fetchall()
         return [_memory_from_row(row) for row in rows]
 
     def create_snapshot(
@@ -1043,6 +1069,45 @@ class MemoryStore:
                 (memory_id, principal.tenant_scope),
             ).fetchall()
         return [_link_from_row(row) for row in rows]
+
+    def _copy_links(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_memory_id: str,
+        target_memory_id: str,
+        principal: Principal,
+        now: str,
+    ) -> None:
+        """把旧版本的受控资源关联复制到新版本，保持修订后的可解析性。"""
+        rows = connection.execute(
+            """
+            SELECT project_id, target_type, target_ref
+            FROM memory_links
+            WHERE memory_id = ? AND tenant_id = ?
+            ORDER BY created_at, rowid
+            """,
+            (source_memory_id, principal.tenant_scope),
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                """
+                INSERT INTO memory_links(
+                    link_id, memory_id, project_id, target_type, target_ref,
+                    created_by_user_id, tenant_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    target_memory_id,
+                    str(row["project_id"]),
+                    str(row["target_type"]),
+                    str(row["target_ref"]),
+                    principal.user_id,
+                    principal.tenant_scope,
+                    now,
+                ),
+            )
 
     def _audit_allowed(
         self,
