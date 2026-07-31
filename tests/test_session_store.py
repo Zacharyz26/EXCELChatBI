@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7
 
 
 @pytest.fixture
@@ -58,6 +58,8 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "conversation_compactions",
         "conversation_compaction_items",
         "dataset_lineage_anchors",
+        "approval_records",
+        "approval_operations",
     } <= tables
 
 
@@ -79,10 +81,23 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         "memory_control_plane": "ready",
         "compaction_control_plane": "ready",
         "lineage_control_plane": "ready",
+        "collaboration_control_plane": "ready",
     }
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 4"
+        )
+
+    with pytest.raises(RuntimeError, match="checksum"):
+        store.readiness_status()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+            (v4.CHECKSUM, v4.VERSION),
+        )
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
+            (v5.VERSION,),
         )
 
     with pytest.raises(RuntimeError, match="checksum"):
@@ -102,11 +117,11 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-            (v4.CHECKSUM, v4.VERSION),
+            (v6.CHECKSUM, v6.VERSION),
         )
         connection.execute(
             "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
-            (v5.VERSION,),
+            (v7.VERSION,),
         )
 
     with pytest.raises(RuntimeError, match="checksum"):

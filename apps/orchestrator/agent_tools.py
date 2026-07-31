@@ -290,6 +290,14 @@ class AgentToolRegistry:
         """Canonical tools/list expectation used by discovery and CI."""
         return self._mcp_adapter.list_tools()
 
+    def mcp_descriptor_for_tool(
+        self,
+        tool_name: str,
+    ) -> MCPToolDescriptor | None:
+        """返回 Executor/Gateway 共用的单源工具契约。"""
+        spec = self._specs.get(tool_name)
+        return spec.mcp_descriptor() if spec is not None else None
+
     def mcp_adapter(self) -> MCPServerAdapter:
         """Return the in-process adapter used only for migration contract tests."""
         return self._mcp_adapter

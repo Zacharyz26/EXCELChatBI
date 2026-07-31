@@ -10,16 +10,17 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2E + 已完成的 v2.5 阶段 3A–3C**；提交 `e3d51fd`
-的完整 CI 与 Docker/Compose 联合恢复门禁全绿。3D-1–3D-3 的项目记忆查询、
-不可变纠正、软删除和 React 治理入口已完成本地实现；3E-1–3E-3 的 SQLite v6
-不可变 Dataset 锚点、五阶段来源图、安全 React 查看、领域中立质量与联合恢复探针也已
-完成本地实现。两批一起等待提交后的 CI/Compose 门禁：
+当前生产基线是 **v2.4 阶段 2E + 已完成的 v2.5 阶段 3A–3E + 开发中的 4A**。3A–3C 的历史
+发布门禁已关闭；3D-1–3D-3 的项目记忆治理与 3E-1–3E-3 的 SQLite v6 不可变
+Dataset 锚点、五阶段来源图、安全 React 查看、领域中立质量和联合恢复探针已由提交
+`0b5980c` 的 backend、frontend 与 Docker/Compose CI 验证并关闭。4A-1/4A-2 已落地
+SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/Gateway/Server
+审批执行链；React 协作界面尚未接入：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
                     → ready capability 白名单 → Observation Replanner → MCP Client Gateway
-                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot → SQLite v6 + 文件
+                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot/Approval → SQLite v7 + 文件
 ```
 
 - v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
@@ -44,13 +45,13 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
   Artifact/Dataset，并从 TaskRun 固定 MemorySnapshot 执行严格结构化、用户确认的
   实体/字段映射；歧义、冲突、失效和越界失败关闭，绑定进入计划并约束报告/图表血缘；
   23 场景质量集、双 MCP 传输和固定计划恢复探针已通过真实 CI。
-- **v2.5 阶段 3D-1–3D-3 本地实现完成**：项目成员可经安全 API/React 面板查看、
+- **v2.5 阶段 3D-1–3D-3 已完成**：项目成员可经安全 API/React 面板查看、
   不可变纠正和软删除记忆；版本号与幂等键防止并发覆盖，修订继承资源 Link，固定快照
-  不被改写；后端完整回归和真实本机 Web/API E2E 已通过，待提交后的 Compose CI 关闭。
-- **v2.5 阶段 3E-1–3E-3 本地实现完成**：现有 SQLite 真相表已贯通 Dataset →
+  不被改写；后端完整回归、真实本机 Web/API E2E 和 Compose CI 均已通过。
+- **v2.5 阶段 3E-1–3E-3 已完成**：现有 SQLite 真相表已贯通 Dataset →
   Analysis/Invocation → Artifact → Evidence → Claim；v6 锚点保留删除来源，安全
   API/React 不返回参数、路径或结果正文，图 hash 和计数进入 readiness、离线备份、
-  API 重启及 Compose 恢复探针。
+  API 重启及 Compose 恢复探针，并已通过真实 Docker runner 验证。
 
 目标控制循环：
 
@@ -103,7 +104,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；真实计划只读展示 | v2.5 增加计划编辑、结构化澄清、暂停/恢复和证据交互 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复 | v2.5 阶段 4 增加用户计划干预与审批 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v6 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ConversationCompaction/LineageAnchor | 阶段 3D/3E 本地实现完成；等待 Compose 发布门禁 |
+| 对话持久层 | SQLite v7 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ConversationCompaction/LineageAnchor/ApprovalRecord | 阶段 3 已关闭；4A-1/4A-2 后端协作与审批执行链已完成 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
 | 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
@@ -142,25 +143,27 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：v2.5 阶段 3D/3E 发布门禁与 G7 评审债务
+### 6.2 当前任务：v2.5 阶段 4A 协作契约与 G7 评审债务
 
 1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
    `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
 2. v2.4 阶段 2A–2E 已全部实现，最新已验证提交的 Compose/容器 CI 全绿；生产路径包含
    结构化计划、依赖图重规划、任务控制/恢复、MCP Gateway 和五服务 Compose。
-3. v2.5 阶段 3A–3C 已关闭；3D-1–3D-3 与 3E-1–3E-3 已完成本地实现和全量回归，
-   当前改动需由 CI Docker runner 验证浏览器、联合重启、离线恢复、固定 Host 引用和
-   血缘图 hash。
-4. CI 真实全绿前不得关闭 3D/3E；通过后下一开发入口为阶段 4A 的协作契约。计划干预、
-   ApprovalRecord 和恢复交互仍属于阶段 4，不得把前端按钮当作授权。
+3. v2.5 阶段 3A–3E 已关闭；提交 `0b5980c` 的 CI 已验证浏览器、联合重启、离线恢复、
+   固定 Host 引用和血缘图 hash，阶段 3 的本地与真实容器证据已闭合。
+4. 阶段 4A-1/4A-2 已完成 SQLite v7、暂停边界的不可变计划修订、ApprovalRecord
+   请求/主体决定/一次性消费，以及高风险调用前暂停、恢复消费、签名 MCP 上下文和
+   Gateway/Server 双重校验。下一入口为 4B React 协作界面；结构化澄清、恢复交互和
+   自主等级仍属于阶段 4，不得把前端按钮当作授权。
 
 完整状态见 `/docs/v2.5/README.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.5：阶段 3D/3E 容器发布门禁关闭后，继续可干预前端、业务语义层、
-  自主分析和多数据集；同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、
-  能力目录和 Docker 状态恢复/资源 profile；
+- v2.5：阶段 3 已关闭、阶段 4A 开发中；继续可干预前端、业务语义层、
+  自主分析和多数据集；
+  同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker
+  状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；
 - v3.0：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态、镜像供应链、多实例、多 Agent、多租户和企业治理。
 

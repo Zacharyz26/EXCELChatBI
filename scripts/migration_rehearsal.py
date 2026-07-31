@@ -21,6 +21,7 @@ from packages.session.migrations import (
     v4,
     v5,
     v6,
+    v7,
 )
 from packages.session.store import _SCHEMA_V1
 
@@ -399,6 +400,7 @@ def run_rehearsal(
         | set(v4.ADDED_TABLES)
         | set(v5.ADDED_TABLES)
         | set(v6.ADDED_TABLES)
+        | set(v7.ADDED_TABLES)
     )
     added_after_interrupt = _table_names(interrupted) & current_tables
     checks = {
@@ -471,6 +473,7 @@ def run_rehearsal(
             str(v4.VERSION): v4.CHECKSUM,
             str(v5.VERSION): v5.CHECKSUM,
             str(v6.VERSION): v6.CHECKSUM,
+            str(v7.VERSION): v7.CHECKSUM,
         },
         "backup_sha256": recorded_backup_hash,
         "versions": {

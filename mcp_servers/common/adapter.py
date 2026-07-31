@@ -15,6 +15,7 @@ from mcp_servers.common.contracts import (
     MCPToolDescriptor,
     normalize_structured_result,
     validate_json,
+    validate_tool_approval,
 )
 
 
@@ -67,6 +68,7 @@ class MCPServerAdapter:
                 validate_tool_args(arguments, binding.descriptor.input_schema)
             except SchemaValidationError as exc:
                 raise MCPProtocolError("invalid_arguments", str(exc)) from exc
+            validate_tool_approval(binding.descriptor, arguments, context)
             if binding.context_handler is not None:
                 raw_result = binding.context_handler(arguments, context)
             else:

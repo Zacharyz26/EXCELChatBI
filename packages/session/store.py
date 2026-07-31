@@ -25,6 +25,7 @@ from packages.session.migrations import (
     v4,
     v5,
     v6,
+    v7,
 )
 from packages.session.models import (
     Artifact,
@@ -141,7 +142,7 @@ class SessionStore:
         return int(row[0]) if row is not None else 0
 
     def readiness_status(self) -> dict[str, int | str]:
-        """验证 SQLite、Memory、上下文压缩与血缘控制面可读性。"""
+        """验证 SQLite、记忆、压缩、血缘与协作控制面可读性。"""
         with self._connection() as connection:
             version_row = connection.execute("PRAGMA user_version").fetchone()
             version = int(version_row[0]) if version_row is not None else 0
@@ -161,11 +162,13 @@ class SessionStore:
                 "memory_snapshot_items",
                 "conversation_compactions",
                 "conversation_compaction_items",
+                "approval_records",
+                "approval_operations",
             }
             rows = connection.execute(
                 """
                 SELECT name FROM sqlite_master
-                WHERE type = 'table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?)
+                WHERE type = 'table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(sorted(required_tables)),
             ).fetchall()
@@ -175,9 +178,9 @@ class SessionStore:
             migrations = connection.execute(
                 """
                 SELECT version, name, checksum FROM schema_migrations
-                WHERE version IN (?, ?, ?)
+                WHERE version IN (?, ?, ?, ?)
                 """,
-                (v4.VERSION, v5.VERSION, v6.VERSION),
+                (v4.VERSION, v5.VERSION, v6.VERSION, v7.VERSION),
             ).fetchall()
             actual_migrations = {
                 int(row["version"]): (str(row["name"]), str(row["checksum"]))
@@ -187,6 +190,7 @@ class SessionStore:
                 v4.VERSION: (v4.NAME, v4.CHECKSUM),
                 v5.VERSION: (v5.NAME, v5.CHECKSUM),
                 v6.VERSION: (v6.NAME, v6.CHECKSUM),
+                v7.VERSION: (v7.NAME, v7.CHECKSUM),
             }
             if actual_migrations != expected_migrations:
                 raise RuntimeError("SQLite v2.5 migration checksum 不匹配")
@@ -199,6 +203,7 @@ class SessionStore:
             "memory_control_plane": "ready",
             "compaction_control_plane": "ready",
             "lineage_control_plane": "ready",
+            "collaboration_control_plane": "ready",
         }
 
     # ── Project ──

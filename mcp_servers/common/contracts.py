@@ -20,7 +20,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
 
 JsonObject = dict[str, Any]
-RiskLevel = Literal["low", "medium", "high"]
+RiskLevel = Literal["low", "medium", "high", "critical"]
 
 CHATBI_META_PREFIX = "com.chatbi/"
 CHATBI_CONTEXT_KEY = f"{CHATBI_META_PREFIX}context"
@@ -89,7 +89,7 @@ class ToolCapabilityMetadata:
             meta, f"{CHATBI_META_PREFIX}artifact-types", required=False
         )
         risk = meta.get(f"{CHATBI_META_PREFIX}risk-level")
-        if risk not in {"low", "medium", "high"}:
+        if risk not in {"low", "medium", "high", "critical"}:
             raise MCPProtocolError("invalid_tool_metadata", "MCP Tool 风险等级无效")
         tool_version = meta.get(f"{CHATBI_META_PREFIX}tool-version")
         postconditions_version = meta.get(
@@ -178,6 +178,10 @@ class MCPRequestContext:
     evidence_ledger_version: int
     trace_id: str
     deadline_at: str
+    approval_id: str | None = None
+    approval_version: int | None = None
+    approval_contract_hash: str | None = None
+    approval_parameter_hash: str | None = None
 
     def validate(self, *, now: datetime | None = None) -> None:
         string_fields = (
@@ -211,6 +215,34 @@ class MCPRequestContext:
         current = now or datetime.now(UTC)
         if deadline <= current:
             raise MCPProtocolError("deadline_exceeded", "MCP 工具调用已超过截止时间")
+        approval_fields = (
+            self.approval_id,
+            self.approval_version,
+            self.approval_contract_hash,
+            self.approval_parameter_hash,
+        )
+        if any(item is not None for item in approval_fields):
+            if any(item is None for item in approval_fields):
+                raise MCPProtocolError(
+                    "invalid_request_context",
+                    "MCP 高风险授权上下文不完整",
+                )
+            assert self.approval_id is not None
+            assert self.approval_version is not None
+            assert self.approval_contract_hash is not None
+            assert self.approval_parameter_hash is not None
+            if (
+                len(self.approval_id) != 32
+                or self.approval_id != self.approval_id.lower()
+                or any(char not in "0123456789abcdef" for char in self.approval_id)
+                or self.approval_version < 1
+                or not _is_sha256(self.approval_contract_hash)
+                or not _is_sha256(self.approval_parameter_hash)
+            ):
+                raise MCPProtocolError(
+                    "invalid_request_context",
+                    "MCP 高风险授权上下文字段无效",
+                )
 
     def to_dict(self) -> JsonObject:
         return asdict(self)
@@ -266,11 +298,41 @@ class MCPRequestContext:
                 ),
                 trace_id=_required_string(raw, "trace_id"),
                 deadline_at=_required_string(raw, "deadline_at"),
+                approval_id=_optional_string(raw, "approval_id"),
+                approval_version=_optional_positive_int(raw, "approval_version"),
+                approval_contract_hash=_optional_string(
+                    raw,
+                    "approval_contract_hash",
+                ),
+                approval_parameter_hash=_optional_string(
+                    raw,
+                    "approval_parameter_hash",
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise MCPProtocolError("invalid_request_context", "MCP 请求上下文字段无效") from exc
         context.validate()
         return context
+
+
+def validate_tool_approval(
+    descriptor: MCPToolDescriptor,
+    arguments: JsonObject,
+    context: MCPRequestContext,
+) -> None:
+    """在 Gateway/Server 边界校验高风险调用携带的已消费授权绑定。"""
+    if descriptor.metadata.risk_level not in {"high", "critical"}:
+        return
+    if (
+        context.approval_id is None
+        or context.approval_version is None
+        or context.approval_contract_hash != descriptor.contract_hash
+        or context.approval_parameter_hash != stable_hash(arguments)
+    ):
+        raise MCPProtocolError(
+            "approval_required",
+            "高风险 MCP 工具缺少与当前契约及参数完全匹配的授权",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,6 +443,32 @@ def _required_nonnegative_int(raw: JsonObject, key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(key)
     return cast(int, value)
+
+
+def _optional_string(raw: JsonObject, key: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(key)
+    return value
+
+
+def _optional_positive_int(raw: JsonObject, key: str) -> int | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(key)
+    return cast(int, value)
+
+
+def _is_sha256(value: str) -> bool:
+    return (
+        len(value) == 64
+        and value == value.lower()
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _sign_context(raw: JsonObject, signing_key: str) -> str:

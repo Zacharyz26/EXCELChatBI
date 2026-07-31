@@ -10,14 +10,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from apps.orchestrator.control.contracts import TaskContract
+from apps.orchestrator.control.planner_contract import validate_task_plan
 from apps.orchestrator.control.state import AgentState, ensure_transition
 
 from packages.common.identifiers import validate_report_id
 from packages.session.models import Artifact, ArtifactDraft, Conversation, JsonObject, Message
 from packages.session.task_models import (
+    ApprovalRecord,
+    ApprovalRiskLevel,
+    ApprovalStatus,
     Checkpoint,
     ClaimDraft,
     ClaimRecord,
@@ -1016,6 +1020,747 @@ class TaskStore:
             )
         return updated, plan_record, steps, event, True
 
+    def request_approval(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        tenant_id: str,
+        subject_user_id: str,
+        requested_by_user_id: str,
+        step_id: str,
+        tool_name: str,
+        tool_schema_hash: str,
+        parameter_summary_hash: str,
+        risk_level: ApprovalRiskLevel,
+        expires_at: str,
+        pause_run: bool = False,
+    ) -> tuple[TaskRun, ApprovalRecord, TaskEvent, bool]:
+        """请求固定授权；Executor 可在无活动调用时原子进入 paused。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_tenant = _required_text(tenant_id, "tenant_id")[:200]
+        clean_subject = _required_text(subject_user_id, "subject_user_id")[:200]
+        clean_requester = _required_text(
+            requested_by_user_id, "requested_by_user_id"
+        )[:200]
+        clean_step_id = _required_text(step_id, "step_id")[:100]
+        clean_tool = _required_text(tool_name, "tool_name")[:200]
+        schema_hash = _required_sha256(tool_schema_hash, "tool_schema_hash")
+        parameter_hash = _required_sha256(
+            parameter_summary_hash,
+            "parameter_summary_hash",
+        )
+        if risk_level not in {"high", "critical"}:
+            raise ValueError("ApprovalRecord 只接受 high/critical 风险")
+        expiry = _normalized_timestamp(expires_at, "expires_at")
+        now = _utc_now()
+        expiry_time = _timestamp(expiry)
+        now_time = _timestamp(now)
+        if expiry_time <= now_time:
+            raise ValueError("ApprovalRecord.expires_at 必须晚于当前时间")
+        if expiry_time - now_time > timedelta(hours=24):
+            raise ValueError("ApprovalRecord 有效期不能超过 24 小时")
+        request_payload: JsonObject = {
+            "tenant_id": clean_tenant,
+            "subject_user_id": clean_subject,
+            "requested_by_user_id": clean_requester,
+            "step_id": clean_step_id,
+            "tool_name": clean_tool,
+            "tool_schema_hash": schema_hash,
+            "parameter_summary_hash": parameter_hash,
+            "risk_level": risk_level,
+            "expires_at": expiry,
+            "pause_run": pause_run,
+        }
+        request_hash = _control_request_hash("request_approval", request_payload)
+        approval_id = uuid.uuid4().hex
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(run_row)
+            replay_row = connection.execute(
+                """
+                SELECT * FROM approval_records
+                WHERE run_id = ? AND idempotency_key = ?
+                """,
+                (run_id, clean_key),
+            ).fetchone()
+            if replay_row is not None:
+                replayed = _approval_from_row(replay_row)
+                if replayed.request_hash != request_hash:
+                    raise IdempotencyConflict(
+                        "Idempotency-Key 已绑定到不同授权请求"
+                    )
+                event_row = connection.execute(
+                    """
+                    SELECT event_id, run_id, sequence, event_type,
+                           payload_json, occurred_at
+                    FROM task_events WHERE event_id = ?
+                    """,
+                    (replayed.request_event_id,),
+                ).fetchone()
+                if event_row is None:
+                    raise RuntimeError("授权请求事件不存在")
+                return current, replayed, _event_from_row(event_row), False
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            required_status: RunStatus = "running" if pause_run else "paused"
+            if current.status != required_status:
+                raise ControlConflict(
+                    f"TaskRun 状态 {current.status} 不能请求高风险授权"
+                )
+            if pause_run:
+                ensure_transition(current.status, "paused")
+            active = connection.execute(
+                """
+                SELECT 1 FROM tool_invocations
+                WHERE run_id = ? AND status IN ('running', 'unknown')
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if active is not None:
+                raise ControlConflict(
+                    "任务存在执行中或结果未知的工具调用，不能请求授权"
+                )
+            plan_row = connection.execute(
+                """
+                SELECT plan.* FROM task_plans AS plan
+                JOIN task_runs AS run
+                  ON run.run_id = plan.run_id AND run.plan_version = plan.version
+                WHERE plan.run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise ControlConflict("TaskRun 没有活动计划")
+            plan_record = _plan_from_row(plan_row)
+            step_row = connection.execute(
+                """
+                SELECT step.* FROM task_steps AS step
+                WHERE step.plan_id = ?
+                  AND json_extract(step.step_json, '$.step_id') = ?
+                """,
+                (plan_record.plan_id, clean_step_id),
+            ).fetchone()
+            if step_row is None:
+                raise ControlConflict("授权步骤不属于当前活动计划")
+            step = _step_from_row(step_row)
+            if step.status not in {"pending", "failed", "blocked"}:
+                raise ControlConflict(
+                    f"步骤状态 {step.status} 不能请求高风险授权"
+                )
+            for user_id in {clean_subject, clean_requester}:
+                membership = connection.execute(
+                    """
+                    SELECT 1 FROM project_memberships
+                    WHERE project_id = ? AND user_id = ? AND tenant_id = ?
+                    """,
+                    (current.project_id, user_id, clean_tenant),
+                ).fetchone()
+                if membership is None:
+                    raise ControlConflict("授权主体不是当前项目成员")
+
+            next_state_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET status = 'paused', state_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (next_state_version, now, run_id, current.state_version),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="approval.requested",
+                payload={
+                    "approval_id": approval_id,
+                    "plan_id": plan_record.plan_id,
+                    "plan_version": plan_record.version,
+                    "step_id": step.logical_id,
+                    "tool_name": clean_tool,
+                    "tool_schema_hash": schema_hash,
+                    "parameter_summary_hash": parameter_hash,
+                    "risk_level": risk_level,
+                    "expires_at": expiry,
+                    "run_status": "paused",
+                    "control": {
+                        "command": "request_approval",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            connection.execute(
+                """
+                INSERT INTO approval_records(
+                    approval_id, tenant_id, project_id, run_id, plan_id,
+                    plan_version, task_step_id, step_logical_id,
+                    subject_user_id, requested_by_user_id, tool_name,
+                    tool_schema_hash, parameter_summary_hash, risk_level,
+                    status, version, expires_at, decision_reason,
+                    decided_by_user_id, requested_at, updated_at, decided_at,
+                    consumed_at, idempotency_key, request_hash, request_event_id
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1,
+                    ?, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?
+                )
+                """,
+                (
+                    approval_id,
+                    clean_tenant,
+                    current.project_id,
+                    run_id,
+                    plan_record.plan_id,
+                    plan_record.version,
+                    step.step_id,
+                    step.logical_id,
+                    clean_subject,
+                    clean_requester,
+                    clean_tool,
+                    schema_hash,
+                    parameter_hash,
+                    risk_level,
+                    expiry,
+                    now,
+                    now,
+                    clean_key,
+                    request_hash,
+                    event.event_id,
+                ),
+            )
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            approval_row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            assert updated_row is not None and approval_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "pending_approval_id": approval_id,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_state_version, _dump_json(snapshot), now, run_id),
+            )
+            _insert_checkpoint(
+                connection,
+                run_id=run_id,
+                state_version=next_state_version,
+                state=snapshot,
+                reason=f"approval_requested:{approval_id}",
+                created_at=now,
+            )
+        return updated, _approval_from_row(approval_row), event, True
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        """按 ID 读取 ApprovalRecord。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return _approval_from_row(row) if row is not None else None
+
+    def list_approvals(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str,
+        subject_user_id: str,
+    ) -> list[ApprovalRecord]:
+        """只返回绑定当前认证主体的任务授权记录。"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM approval_records
+                WHERE run_id = ? AND tenant_id = ? AND subject_user_id = ?
+                ORDER BY requested_at, approval_id
+                """,
+                (run_id, tenant_id, subject_user_id),
+            ).fetchall()
+        return [_approval_from_row(row) for row in rows]
+
+    def find_execution_approval(
+        self,
+        run_id: str,
+        *,
+        tenant_id: str,
+        subject_user_id: str,
+        plan_version: int,
+        step_id: str,
+        tool_name: str,
+        tool_schema_hash: str,
+        parameter_summary_hash: str,
+    ) -> ApprovalRecord | None:
+        """读取完全匹配当前执行绑定的最新授权记录，包括拒绝/过期记录。"""
+        schema_hash = _required_sha256(tool_schema_hash, "tool_schema_hash")
+        parameter_hash = _required_sha256(
+            parameter_summary_hash,
+            "parameter_summary_hash",
+        )
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM approval_records
+                WHERE run_id = ?
+                  AND tenant_id = ?
+                  AND subject_user_id = ?
+                  AND plan_version = ?
+                  AND step_logical_id = ?
+                  AND tool_name = ?
+                  AND tool_schema_hash = ?
+                  AND parameter_summary_hash = ?
+                ORDER BY requested_at DESC, approval_id DESC
+                LIMIT 1
+                """,
+                (
+                    run_id,
+                    tenant_id,
+                    subject_user_id,
+                    plan_version,
+                    step_id,
+                    tool_name,
+                    schema_hash,
+                    parameter_hash,
+                ),
+            ).fetchone()
+        return _approval_from_row(row) if row is not None else None
+
+    def has_valid_pending_approval(self, run_id: str) -> bool:
+        """判断任务是否仍有未过期的 pending 授权，防止任意成员绕过等待。"""
+        now = _utc_now()
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM approval_records
+                WHERE run_id = ? AND status = 'pending' AND expires_at > ?
+                LIMIT 1
+                """,
+                (run_id, now),
+            ).fetchone()
+        return row is not None
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        *,
+        expected_run_version: int,
+        expected_approval_version: int,
+        idempotency_key: str,
+        tenant_id: str,
+        actor_user_id: str,
+        decision: Literal["approved", "denied"],
+        reason: str,
+    ) -> tuple[TaskRun, ApprovalRecord, TaskEvent, bool]:
+        """由绑定 subject 在 paused 边界批准或拒绝一次高风险调用。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_tenant = _required_text(tenant_id, "tenant_id")[:200]
+        clean_actor = _required_text(actor_user_id, "actor_user_id")[:200]
+        clean_reason = _required_text(reason, "审批原因")[:500]
+        if decision not in {"approved", "denied"}:
+            raise ValueError("审批决定只接受 approved/denied")
+        request_payload: JsonObject = {
+            "approval_id": approval_id,
+            "expected_approval_version": expected_approval_version,
+            "decision": decision,
+            "reason": clean_reason,
+        }
+        request_hash = _control_request_hash("decide_approval", request_payload)
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            approval_row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if approval_row is None:
+                raise ValueError("ApprovalRecord 不存在")
+            current_approval = _approval_from_row(approval_row)
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (current_approval.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError("ApprovalRecord 对应的 TaskRun 不存在")
+            current_run = _run_from_row(run_row)
+            replay = _approval_operation_replay(
+                connection,
+                approval_id=approval_id,
+                project_id=current_approval.project_id,
+                tenant_id=clean_tenant,
+                actor_user_id=clean_actor,
+                idempotency_key=clean_key,
+                operation_type="decide",
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                record, event = replay
+                return current_run, record, event, False
+            if current_run.state_version != expected_run_version:
+                raise StateVersionConflict(
+                    f"TaskRun {current_run.run_id} 版本冲突: "
+                    f"期望 {expected_run_version}，实际 {current_run.state_version}"
+                )
+            if current_run.status != "paused":
+                raise ControlConflict("高风险审批只能在 paused 安全边界决定")
+            if current_approval.version != expected_approval_version:
+                raise StateVersionConflict(
+                    f"ApprovalRecord 版本冲突: 期望 {expected_approval_version}，"
+                    f"实际 {current_approval.version}"
+                )
+            if current_approval.status != "pending":
+                raise ControlConflict(
+                    f"ApprovalRecord 状态 {current_approval.status} 不能再次决定"
+                )
+            if (
+                current_approval.tenant_id != clean_tenant
+                or current_approval.subject_user_id != clean_actor
+            ):
+                raise ControlConflict("只有绑定的授权主体可以决定该请求")
+            if _timestamp(current_approval.expires_at) <= _timestamp(now):
+                raise ControlConflict("ApprovalRecord 已过期")
+
+            next_approval_version = current_approval.version + 1
+            next_run_version = current_run.state_version + 1
+            connection.execute(
+                """
+                UPDATE approval_records
+                SET status = ?, version = ?, decision_reason = ?,
+                    decided_by_user_id = ?, decided_at = ?, updated_at = ?
+                WHERE approval_id = ? AND version = ? AND status = 'pending'
+                """,
+                (
+                    decision,
+                    next_approval_version,
+                    clean_reason,
+                    clean_actor,
+                    now,
+                    now,
+                    approval_id,
+                    current_approval.version,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET state_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    next_run_version,
+                    now,
+                    current_run.run_id,
+                    current_run.state_version,
+                ),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=current_run.run_id,
+                sequence=_next_sequence(connection, current_run.run_id),
+                event_type=f"approval.{decision}",
+                payload={
+                    "approval_id": approval_id,
+                    "plan_id": current_approval.plan_id,
+                    "plan_version": current_approval.plan_version,
+                    "step_id": current_approval.step_logical_id,
+                    "decision": decision,
+                    "reason": clean_reason,
+                    "control": {
+                        "command": "decide_approval",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            connection.execute(
+                """
+                INSERT INTO approval_operations(
+                    operation_id, approval_id, tenant_id, project_id,
+                    actor_user_id, idempotency_key, operation_type,
+                    request_hash, result_status, result_version, event_id,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'decide', ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    approval_id,
+                    clean_tenant,
+                    current_approval.project_id,
+                    clean_actor,
+                    clean_key,
+                    request_hash,
+                    decision,
+                    next_approval_version,
+                    event.event_id,
+                    now,
+                ),
+            )
+            updated_run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (current_run.run_id,),
+            ).fetchone()
+            updated_approval_row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            assert updated_run_row is not None and updated_approval_row is not None
+            updated_run = _run_from_row(updated_run_row)
+            updated_approval = _approval_from_row(updated_approval_row)
+            snapshot = _merged_snapshot(connection, updated_run)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "pending_approval_id": None,
+                    "last_approval_id": approval_id,
+                    "last_approval_status": decision,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    next_run_version,
+                    _dump_json(snapshot),
+                    now,
+                    current_run.run_id,
+                ),
+            )
+            _insert_checkpoint(
+                connection,
+                run_id=current_run.run_id,
+                state_version=next_run_version,
+                state=snapshot,
+                reason=f"approval_{decision}:{approval_id}",
+                created_at=now,
+            )
+        return updated_run, updated_approval, event, True
+
+    def consume_approval(
+        self,
+        approval_id: str,
+        *,
+        expected_run_version: int,
+        expected_approval_version: int,
+        idempotency_key: str,
+        tenant_id: str,
+        actor_user_id: str,
+        tool_name: str,
+        tool_schema_hash: str,
+        parameter_summary_hash: str,
+    ) -> tuple[TaskRun, ApprovalRecord, TaskEvent, bool]:
+        """执行前精确匹配并一次性消费已批准的授权。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_tenant = _required_text(tenant_id, "tenant_id")[:200]
+        clean_actor = _required_text(actor_user_id, "actor_user_id")[:200]
+        clean_tool = _required_text(tool_name, "tool_name")[:200]
+        schema_hash = _required_sha256(tool_schema_hash, "tool_schema_hash")
+        parameter_hash = _required_sha256(
+            parameter_summary_hash,
+            "parameter_summary_hash",
+        )
+        request_payload: JsonObject = {
+            "approval_id": approval_id,
+            "expected_approval_version": expected_approval_version,
+            "tool_name": clean_tool,
+            "tool_schema_hash": schema_hash,
+            "parameter_summary_hash": parameter_hash,
+        }
+        request_hash = _control_request_hash("consume_approval", request_payload)
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            approval_row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if approval_row is None:
+                raise ValueError("ApprovalRecord 不存在")
+            current_approval = _approval_from_row(approval_row)
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (current_approval.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError("ApprovalRecord 对应的 TaskRun 不存在")
+            current_run = _run_from_row(run_row)
+            replay = _approval_operation_replay(
+                connection,
+                approval_id=approval_id,
+                project_id=current_approval.project_id,
+                tenant_id=clean_tenant,
+                actor_user_id=clean_actor,
+                idempotency_key=clean_key,
+                operation_type="consume",
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                record, event = replay
+                return current_run, record, event, False
+            if current_run.state_version != expected_run_version:
+                raise StateVersionConflict(
+                    f"TaskRun {current_run.run_id} 版本冲突: "
+                    f"期望 {expected_run_version}，实际 {current_run.state_version}"
+                )
+            if current_approval.version != expected_approval_version:
+                raise StateVersionConflict(
+                    f"ApprovalRecord 版本冲突: 期望 {expected_approval_version}，"
+                    f"实际 {current_approval.version}"
+                )
+            if current_approval.status != "approved":
+                raise ControlConflict("只有 approved 授权可以被消费")
+            if (
+                current_approval.tenant_id != clean_tenant
+                or current_approval.subject_user_id != clean_actor
+            ):
+                raise ControlConflict("授权消费主体不匹配")
+            if current_run.plan_version != current_approval.plan_version:
+                raise ControlConflict("活动计划版本已变化，旧授权不可消费")
+            if _timestamp(current_approval.expires_at) <= _timestamp(now):
+                raise ControlConflict("ApprovalRecord 已过期")
+            if (
+                current_approval.tool_name != clean_tool
+                or current_approval.tool_schema_hash != schema_hash
+                or current_approval.parameter_summary_hash != parameter_hash
+            ):
+                raise ControlConflict("工具、schema 或参数摘要与授权绑定不一致")
+
+            next_approval_version = current_approval.version + 1
+            next_run_version = current_run.state_version + 1
+            connection.execute(
+                """
+                UPDATE approval_records
+                SET status = 'consumed', version = ?, consumed_at = ?, updated_at = ?
+                WHERE approval_id = ? AND version = ? AND status = 'approved'
+                """,
+                (
+                    next_approval_version,
+                    now,
+                    now,
+                    approval_id,
+                    current_approval.version,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET state_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    next_run_version,
+                    now,
+                    current_run.run_id,
+                    current_run.state_version,
+                ),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=current_run.run_id,
+                sequence=_next_sequence(connection, current_run.run_id),
+                event_type="approval.consumed",
+                payload={
+                    "approval_id": approval_id,
+                    "plan_id": current_approval.plan_id,
+                    "plan_version": current_approval.plan_version,
+                    "step_id": current_approval.step_logical_id,
+                    "tool_name": clean_tool,
+                    "tool_schema_hash": schema_hash,
+                    "parameter_summary_hash": parameter_hash,
+                    "control": {
+                        "command": "consume_approval",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            connection.execute(
+                """
+                INSERT INTO approval_operations(
+                    operation_id, approval_id, tenant_id, project_id,
+                    actor_user_id, idempotency_key, operation_type,
+                    request_hash, result_status, result_version, event_id,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'consume', ?, 'consumed', ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    approval_id,
+                    clean_tenant,
+                    current_approval.project_id,
+                    clean_actor,
+                    clean_key,
+                    request_hash,
+                    next_approval_version,
+                    event.event_id,
+                    now,
+                ),
+            )
+            updated_run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (current_run.run_id,),
+            ).fetchone()
+            updated_approval_row = connection.execute(
+                "SELECT * FROM approval_records WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            assert updated_run_row is not None and updated_approval_row is not None
+            updated_run = _run_from_row(updated_run_row)
+            updated_approval = _approval_from_row(updated_approval_row)
+            snapshot = _merged_snapshot(connection, updated_run)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "last_approval_id": approval_id,
+                    "last_approval_status": "consumed",
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    next_run_version,
+                    _dump_json(snapshot),
+                    now,
+                    current_run.run_id,
+                ),
+            )
+        return updated_run, updated_approval, event, True
+
     def save_plan(
         self,
         run_id: str,
@@ -1026,6 +1771,92 @@ class TaskStore:
         planner: JsonObject,
         step_status_overrides: dict[str, StepStatus] | None = None,
     ) -> tuple[TaskRun, TaskPlanRecord, list[TaskStepRecord], TaskEvent]:
+        """原子保存 Planner 生成的不可变计划版本。"""
+        run, record, steps, event, _ = self._save_plan(
+            run_id,
+            expected_version=expected_version,
+            plan=plan,
+            reason=reason,
+            planner=planner,
+            step_status_overrides=step_status_overrides,
+            allowed_statuses={"planning", "running", "verifying"},
+        )
+        return run, record, steps, event
+
+    def revise_plan_by_user(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        plan: JsonObject,
+        reason: str,
+        skipped_step_ids: set[str] | None = None,
+    ) -> tuple[
+        TaskRun,
+        TaskPlanRecord,
+        list[TaskStepRecord],
+        TaskEvent,
+        bool,
+    ]:
+        """在 paused 安全边界创建受 capability 约束的用户计划修订。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_reason = _required_text(reason, "修改原因")[:500]
+        current_plan = self.get_active_plan(run_id)
+        if current_plan is None:
+            raise ControlConflict("TaskRun 没有可修改的活动计划")
+        capabilities = {
+            str(item.get("capability"))
+            for item in _validated_plan_steps(current_plan.plan)
+        }
+        validation = validate_task_plan(
+            plan,
+            capabilities=capabilities,
+            max_steps=24,
+            allow_waiting_user=False,
+        )
+        if not validation.valid:
+            raise ControlConflict(
+                "用户计划修订未通过契约校验: " + "; ".join(validation.issues)
+            )
+        skipped = set(skipped_step_ids or set())
+        request_payload: JsonObject = {
+            "plan": plan,
+            "reason": clean_reason,
+            "skipped_step_ids": sorted(skipped),
+        }
+        request_hash = _control_request_hash("revise_plan", request_payload)
+        return self._save_plan(
+            run_id,
+            expected_version=expected_version,
+            plan=plan,
+            reason=f"user:{clean_reason}"[:200],
+            planner={"route": "user", "phase": "collaboration"},
+            step_status_overrides={step_id: "skipped" for step_id in skipped},
+            allowed_statuses={"paused"},
+            control=(clean_key, "revise_plan", request_hash),
+            checkpoint_reason="user_plan_revision",
+        )
+
+    def _save_plan(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        plan: JsonObject,
+        reason: str,
+        planner: JsonObject,
+        step_status_overrides: dict[str, StepStatus] | None = None,
+        allowed_statuses: set[RunStatus],
+        control: tuple[str, str, str] | None = None,
+        checkpoint_reason: str | None = None,
+    ) -> tuple[
+        TaskRun,
+        TaskPlanRecord,
+        list[TaskStepRecord],
+        TaskEvent,
+        bool,
+    ]:
         """原子保存一个不可变计划版本、步骤、事件和当前快照。"""
         clean_reason = _required_text(reason, "计划原因")[:200]
         step_definitions = _validated_plan_steps(plan)
@@ -1050,13 +1881,67 @@ class TaskStore:
             if row is None:
                 raise ValueError(f"TaskRun 不存在: {run_id}")
             current = _run_from_row(row)
+            if control is not None:
+                clean_key, command, request_hash = control
+                replay = _control_replay(
+                    connection,
+                    run_id=run_id,
+                    idempotency_key=clean_key,
+                    command=command,
+                    request_hash=request_hash,
+                )
+                if replay is not None:
+                    replay_version = replay.payload.get("plan_version")
+                    if not isinstance(replay_version, int):
+                        raise RuntimeError("计划修改事件缺少 plan_version")
+                    replay_plan_row = connection.execute(
+                        """
+                        SELECT * FROM task_plans
+                        WHERE run_id = ? AND version = ?
+                        """,
+                        (run_id, replay_version),
+                    ).fetchone()
+                    if replay_plan_row is None:
+                        raise RuntimeError("计划修改对应的计划版本不存在")
+                    replay_step_rows = connection.execute(
+                        """
+                        SELECT step.* FROM task_steps AS step
+                        JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                        WHERE step.run_id = ? AND plan.version = ?
+                        ORDER BY step.position
+                        """,
+                        (run_id, replay_version),
+                    ).fetchall()
+                    return (
+                        current,
+                        _plan_from_row(replay_plan_row),
+                        [_step_from_row(item) for item in replay_step_rows],
+                        replay,
+                        False,
+                    )
             if current.state_version != expected_version:
                 raise StateVersionConflict(
                     f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
                     f"实际 {current.state_version}"
                 )
-            if current.status not in {"planning", "running", "verifying"}:
-                raise ValueError(f"TaskRun 状态 {current.status} 不能保存计划")
+            if current.status not in allowed_statuses:
+                message = f"TaskRun 状态 {current.status} 不能保存计划"
+                if control is not None:
+                    raise ControlConflict(message)
+                raise ValueError(message)
+            if current.status == "paused":
+                active = connection.execute(
+                    """
+                    SELECT 1 FROM tool_invocations
+                    WHERE run_id = ? AND status IN ('running', 'unknown')
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if active is not None:
+                    raise ControlConflict(
+                        "任务存在执行中或结果未知的工具调用，不能修改计划"
+                    )
 
             version = current.plan_version + 1
             previous_steps: dict[str, TaskStepRecord] = {}
@@ -1171,31 +2056,39 @@ class TaskStore:
                     expected_version,
                 ),
             )
+            event_payload: JsonObject = {
+                "plan_id": plan_record.plan_id,
+                "plan_version": version,
+                "supersedes_version": version - 1 if version > 1 else None,
+                "reason": clean_reason,
+                "summary": str(plan.get("summary", ""))[:500],
+                "steps": [
+                    {
+                        "step_id": step.logical_id,
+                        "purpose": step.definition["purpose"],
+                        "capability": step.definition["capability"],
+                        "dependencies": step.definition["dependencies"],
+                        "status": step.status,
+                    }
+                    for step in steps
+                ],
+                "assumptions": plan.get("assumptions", []),
+                "clarifications": plan.get("clarifications", []),
+                "planner": planner,
+            }
+            if control is not None:
+                clean_key, command, request_hash = control
+                event_payload["control"] = {
+                    "command": command,
+                    "idempotency_key": clean_key,
+                    "request_hash": request_hash,
+                }
             event = TaskEvent(
                 event_id=uuid.uuid4().hex,
                 run_id=run_id,
                 sequence=_next_sequence(connection, run_id),
                 event_type="plan.created" if version == 1 else "plan.revised",
-                payload={
-                    "plan_id": plan_record.plan_id,
-                    "plan_version": version,
-                    "supersedes_version": version - 1 if version > 1 else None,
-                    "reason": clean_reason,
-                    "summary": str(plan.get("summary", ""))[:500],
-                    "steps": [
-                        {
-                            "step_id": step.logical_id,
-                            "purpose": step.definition["purpose"],
-                            "capability": step.definition["capability"],
-                            "dependencies": step.definition["dependencies"],
-                            "status": step.status,
-                        }
-                        for step in steps
-                    ],
-                    "assumptions": plan.get("assumptions", []),
-                    "clarifications": plan.get("clarifications", []),
-                    "planner": planner,
-                },
+                payload=event_payload,
                 occurred_at=now,
             )
             _insert_event(connection, event)
@@ -1220,7 +2113,16 @@ class TaskStore:
                 """,
                 (next_state_version, _dump_json(snapshot), now, run_id),
             )
-        return updated, plan_record, steps, event
+            if checkpoint_reason is not None:
+                _insert_checkpoint(
+                    connection,
+                    run_id=run_id,
+                    state_version=next_state_version,
+                    state=snapshot,
+                    reason=checkpoint_reason,
+                    created_at=now,
+                )
+        return updated, plan_record, steps, event, True
 
     def get_active_plan(self, run_id: str) -> TaskPlanRecord | None:
         """读取当前 ``plan_version`` 指向的计划。"""
@@ -2636,6 +3538,47 @@ def _step_from_row(row: sqlite3.Row) -> TaskStepRecord:
     )
 
 
+def _approval_from_row(row: sqlite3.Row) -> ApprovalRecord:
+    return ApprovalRecord(
+        approval_id=str(row["approval_id"]),
+        tenant_id=str(row["tenant_id"]),
+        project_id=str(row["project_id"]),
+        run_id=str(row["run_id"]),
+        plan_id=str(row["plan_id"]),
+        plan_version=int(row["plan_version"]),
+        task_step_id=str(row["task_step_id"]),
+        step_logical_id=str(row["step_logical_id"]),
+        subject_user_id=str(row["subject_user_id"]),
+        requested_by_user_id=str(row["requested_by_user_id"]),
+        tool_name=str(row["tool_name"]),
+        tool_schema_hash=str(row["tool_schema_hash"]),
+        parameter_summary_hash=str(row["parameter_summary_hash"]),
+        risk_level=cast(ApprovalRiskLevel, str(row["risk_level"])),
+        status=cast(ApprovalStatus, str(row["status"])),
+        version=int(row["version"]),
+        expires_at=str(row["expires_at"]),
+        decision_reason=(
+            str(row["decision_reason"])
+            if row["decision_reason"] is not None
+            else None
+        ),
+        decided_by_user_id=(
+            str(row["decided_by_user_id"])
+            if row["decided_by_user_id"] is not None
+            else None
+        ),
+        requested_at=str(row["requested_at"]),
+        updated_at=str(row["updated_at"]),
+        decided_at=str(row["decided_at"]) if row["decided_at"] is not None else None,
+        consumed_at=(
+            str(row["consumed_at"]) if row["consumed_at"] is not None else None
+        ),
+        idempotency_key=str(row["idempotency_key"]),
+        request_hash=str(row["request_hash"]),
+        request_event_id=str(row["request_event_id"]),
+    )
+
+
 def _step_logical_id(row: sqlite3.Row) -> str:
     definition = _load_object(str(row["step_json"]))
     value = definition.get("step_id")
@@ -2818,6 +3761,76 @@ def _control_replay(
             raise IdempotencyConflict("Idempotency-Key 已绑定到不同控制命令")
         return _event_from_row(row)
     return None
+
+
+def _approval_operation_replay(
+    connection: sqlite3.Connection,
+    *,
+    approval_id: str,
+    project_id: str,
+    tenant_id: str,
+    actor_user_id: str,
+    idempotency_key: str,
+    operation_type: str,
+    request_hash: str,
+) -> tuple[ApprovalRecord, TaskEvent] | None:
+    row = connection.execute(
+        """
+        SELECT * FROM approval_operations
+        WHERE project_id = ? AND idempotency_key = ?
+        """,
+        (project_id, idempotency_key),
+    ).fetchone()
+    if row is None:
+        return None
+    if (
+        str(row["approval_id"]) != approval_id
+        or str(row["tenant_id"]) != tenant_id
+        or str(row["actor_user_id"]) != actor_user_id
+        or str(row["operation_type"]) != operation_type
+        or str(row["request_hash"]) != request_hash
+    ):
+        raise IdempotencyConflict(
+            "Idempotency-Key 已绑定到不同 ApprovalRecord 操作"
+        )
+    approval_row = connection.execute(
+        "SELECT * FROM approval_records WHERE approval_id = ?",
+        (approval_id,),
+    ).fetchone()
+    event_row = connection.execute(
+        """
+        SELECT event_id, run_id, sequence, event_type, payload_json, occurred_at
+        FROM task_events WHERE event_id = ?
+        """,
+        (str(row["event_id"]),),
+    ).fetchone()
+    if approval_row is None or event_row is None:
+        raise RuntimeError("ApprovalRecord 幂等操作结果不完整")
+    return _approval_from_row(approval_row), _event_from_row(event_row)
+
+
+def _required_sha256(value: str, label: str) -> str:
+    clean = _required_text(value, label).lower()
+    if len(clean) != 64 or any(char not in "0123456789abcdef" for char in clean):
+        raise ValueError(f"{label} 必须是 64 位小写 SHA-256")
+    return clean
+
+
+def _normalized_timestamp(value: str, label: str) -> str:
+    clean = _required_text(value, label)
+    parsed = _timestamp(clean)
+    return parsed.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _timestamp(value: str) -> datetime:
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError("时间戳必须是 ISO 8601 格式") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("时间戳必须包含时区")
+    return parsed.astimezone(UTC)
 
 
 def _valid_clarification_answer(value: object) -> bool:

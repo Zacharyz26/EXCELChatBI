@@ -19,7 +19,7 @@ from packages.session.memory_store import (
     MemoryStore,
     MemoryVersionConflict,
 )
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
 from packages.session.task_store import TaskStore
@@ -573,6 +573,16 @@ def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v7.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v7.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v7.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v7.VERSION,),
+        )
         for trigger in v6.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v6.ADDED_INDEXES:

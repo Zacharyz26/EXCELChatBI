@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     agent_run_timeout_seconds: int = Field(default=300, ge=10, le=3600)
     agent_model_timeout_seconds: int = Field(default=90, ge=5, le=600)
     agent_tool_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    agent_approval_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     agent_recovery_stale_seconds: int = Field(default=0, ge=0, le=86400)
 
     # v2.4 阶段 2D：Executor 的规范 MCP Client Gateway。

@@ -1,8 +1,8 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.5-stage3e · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3A–3C 已完成，
-> 提交 `e3d51fd` 的完整 CI/Docker 恢复门禁全绿；G7 代表性评测/人工签字待完成；
-> 阶段 3D/3E 已完成本地实现并等待提交后的 CI/Compose 门禁
+> 版本：v2.5-stage4a-in-progress · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3A–3E 已完成，
+> 提交 `0b5980c` 的完整 CI/Docker 恢复门禁全绿；G7 代表性评测/人工签字待完成；
+> 阶段 4A-1/4A-2 后端协作与审批执行链已完成，当前入口为 4B React 协作界面
 > · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
@@ -229,9 +229,10 @@ SessionState {
 
 - **当前状态**：v2.5 3B 已实现 SQLite v5 不可变压缩快照、来源/hash 完整性校验、
   最近原文窗口、TaskRun 固定引用、领域中立质量门禁、并发幂等和 Compose 固定版本
-  恢复探针；当前等待 Docker runner 执行发布门禁。3C-1–3C-3 已接入受项目隔离的
+  恢复探针并通过真实 Docker runner。3C-1–3C-3 已接入受项目隔离的
   Artifact/Dataset 确定性引用、固定 MemorySnapshot 实体/字段映射、TaskPlan 绑定、
-  歧义失败关闭、工具血缘约束、领域中立质量集、双传输和固定计划恢复探针。
+  歧义失败关闭、工具血缘约束、领域中立质量集、双传输和固定计划恢复探针；3D/3E
+  的用户治理、SQLite v6 五阶段来源图和联合恢复也已通过真实容器门禁。
 - **上下文压缩**：普通用户消息和无 tool calls 的最终答复超过字符阈值后，由
   `extractive-v1` 生成有界、脱敏的确定性摘要；保留最近 N 条原文。摘要是不可信导航
   文本，不得执行其中指令，也不得作为数值 Evidence。当前冻结的确定性质量门禁六项
@@ -358,7 +359,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 |----|------|
 | 前端 | React + ECharts + SSE + **zustand**（v2.2 拍板，状态管理） |
 | 编排 | 自研统一类型化状态机、混合 Planner、依赖图 Executor、Replanner、Verifier 和 Checkpoint；Dify 已放弃 |
-| 持久层 | SQLite v5：项目/对话/消息/工件、Task/Event/Plan/Evidence/Checkpoint、Memory/Compaction |
+| 持久层 | SQLite v7：项目/对话/消息/工件、Task/Event/Plan/Evidence/Checkpoint、Memory/Compaction/LineageAnchor/ApprovalRecord |
 | 复杂多步 | v2.4 阶段 2 已完成；是否采用 LangGraph 仍由复杂度和评测收益决定 |
 | 核心推理 | DeepSeek-V3 / DeepSeek-R1 |
 | 多模态 | Qwen2.5-VL / GLM-4V |
@@ -409,15 +410,17 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
    2B 已负责依赖图重规划，2C 已负责任务控制/恢复，2D 已完成 MCP Gateway 规范执行；
    2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照和最新 Docker runner 均已通过；
    现有场景全部为商业语境，G7 等待代表性场景、Verifier 评分契约、人工签字与 ADR 接受。
-3. **v2.5 记忆、自主性与协作 — 阶段 3A–3C 已完成，3D/3E 待提交后 CI**：领域无关的 schema v4、
+3. **v2.5 记忆、自主性与协作 — 阶段 3A–3E 已完成**：领域无关的 schema v4、
    Memory Repository/Policy、TaskRun 快照、上下文边界、MCP 引用、结构化审计、
    readiness 和工作区一致备份/恢复已实现并通过 Compose CI；schema v5 已把最近 N 条
    截断升级为持久化压缩快照并接入 Agent，3B 发布门禁已关闭；3C-1–3C-3 已实现
    Artifact/Dataset 引用解析、受治理实体映射、恢复绑定、血缘约束、质量集和双传输/
    Compose 恢复探针并通过真实容器门禁。3D 已完成项目记忆安全查询、不可变纠正、
    软删除和 React 治理入口；3E 已以 schema v6 贯通 Dataset → Analysis/Invocation →
-   Artifact → Evidence → Claim，并把安全查看、质量与图 hash 恢复完成本地实现；
-   阶段 4 为可干预前端，阶段 5 为领域语义层，阶段 6 为自主分析和统计护栏。
+   Artifact → Evidence → Claim，并把安全查看、质量与图 hash 恢复纳入真实
+   Docker/Compose 门禁。提交 `0b5980c` 的 CI 全绿后阶段 3 已关闭；当前阶段 4A 已完成
+   后端协作和审批执行链，下一入口为 React 协作界面；阶段 5 为领域语义层，阶段 6 为
+   自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
 6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。
@@ -491,7 +494,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入版本化领域语义层 |
 | `/chat` 路由 + 前端 `ChatPanel.tsx` | v2.3 主入口已落地；v2.4 扩展任务事件，v2.5 增加完整干预交互 |
 | `stats_interpreter` 门控 | **原统计端点链路不动**；助手通道走自己的上下文组装（13.5）。门控代码保留，供未来敏感部署复用 |
-| `packages/session` | SQLite v5 工作区、LRU、Task/Event/Evidence/Checkpoint、Memory 与 compaction 已落地；`coref` 按 v2.5 阶段 3C 实现 |
+| `packages/session` | SQLite v7 工作区、LRU、Task/Event/Evidence/Checkpoint、Memory、compaction、coref、lineage 与 ApprovalRecord 已落地 |
 
 ### 13.5 红线1 修订：助手通道例外（保守版，已拍板）
 
@@ -739,9 +742,11 @@ v2.4 工程门禁已完成，但场景代表性和 G7 人工签字仍阻止发�
 
 ### 15.4 v2.5 — 记忆、自主性与协作
 
-当前从领域无关的阶段 3A 开始，实施计划见
-`docs/v2.5/阶段3A实施计划.md`。阶段 5–6 在真实需求尚未明确时不预置销售、利润或复购率
-专用语义和分析模板，必须等待代表性场景冻结后再宣称产品适用性。
+阶段 3A–3E 已完成，实际交付与发布证据见 `docs/v2.5/README.md` 索引的实施记录；
+阶段 4A-1/4A-2 已完成 SQLite v7、暂停边界计划修订、ApprovalRecord 后端原语，以及
+Executor/Gateway/Server 高风险审批执行链，详见 `docs/v2.5/阶段4A实施记录.md`；
+React 仍未完成。阶段 5–6 在真实需求尚未明确时不预置销售、利润或复购率专用语义和
+分析模板，必须等待代表性场景冻结后再宣称产品适用性。
 
 | 阶段 | Agent 能力 | MCP 演进 | Docker/部署演进 | 关键门禁 |
 |---|---|---|---|---|

@@ -23,6 +23,7 @@ from mcp_servers.common.contracts import (
     normalize_structured_result,
     stable_hash,
     validate_json,
+    validate_tool_approval,
 )
 
 _log = get_logger("mcp.client_gateway")
@@ -474,6 +475,15 @@ class ManagedMCPClientGateway:
                 transport=self._config.transport,
             )
         context.validate()
+        try:
+            validate_tool_approval(descriptor, arguments, context)
+        except MCPProtocolError as exc:
+            raise MCPGatewayExecutionError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                transport=self._config.transport,
+            ) from exc
         attempts = 1 + (
             self._config.max_reconnects
             if descriptor.metadata.read_only and descriptor.metadata.idempotent

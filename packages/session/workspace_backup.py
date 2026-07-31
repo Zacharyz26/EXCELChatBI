@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.session.lineage import inspect_lineage_connection
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7
 
 BACKUP_FORMAT = "chatbi-workspace-backup-v1"
 _COUNTED_TABLES = (
@@ -41,6 +41,8 @@ _COUNTED_TABLES = (
     "memory_links",
     "conversation_compactions",
     "conversation_compaction_items",
+    "approval_records",
+    "approval_operations",
 )
 
 
@@ -302,9 +304,9 @@ def _inspect_database(path: Path) -> dict[str, object]:
         migrations = connection.execute(
             """
             SELECT version, name, checksum FROM schema_migrations
-            WHERE version IN (?, ?, ?)
+            WHERE version IN (?, ?, ?, ?)
             """,
-            (v4.VERSION, v5.VERSION, v6.VERSION),
+            (v4.VERSION, v5.VERSION, v6.VERSION, v7.VERSION),
         ).fetchall()
         actual_migrations = {
             str(int(row[0])): {"name": str(row[1]), "checksum": str(row[2])}
@@ -314,6 +316,7 @@ def _inspect_database(path: Path) -> dict[str, object]:
             str(v4.VERSION): {"name": v4.NAME, "checksum": v4.CHECKSUM},
             str(v5.VERSION): {"name": v5.NAME, "checksum": v5.CHECKSUM},
             str(v6.VERSION): {"name": v6.NAME, "checksum": v6.CHECKSUM},
+            str(v7.VERSION): {"name": v7.NAME, "checksum": v7.CHECKSUM},
         }
         if actual_migrations != expected_migrations:
             raise RuntimeError("工作区 v2.5 migration checksum 不匹配")

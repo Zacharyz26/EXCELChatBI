@@ -22,6 +22,8 @@ InvocationStatus = Literal["running", "succeeded", "failed", "unknown"]
 ObservationSource = Literal["tool", "user", "policy", "system"]
 ObservationStatus = Literal["ok", "error", "partial"]
 StepStatus = Literal["pending", "running", "completed", "failed", "skipped", "blocked"]
+ApprovalRiskLevel = Literal["high", "critical"]
+ApprovalStatus = Literal["pending", "approved", "denied", "consumed", "revoked"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,3 +172,35 @@ class Checkpoint:
     state: JsonObject
     reason: str
     created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRecord:
+    """绑定到固定计划、步骤、工具契约和参数摘要的高风险授权记录。"""
+
+    approval_id: str
+    tenant_id: str
+    project_id: str
+    run_id: str
+    plan_id: str
+    plan_version: int
+    task_step_id: str
+    step_logical_id: str
+    subject_user_id: str
+    requested_by_user_id: str
+    tool_name: str
+    tool_schema_hash: str
+    parameter_summary_hash: str
+    risk_level: ApprovalRiskLevel
+    status: ApprovalStatus
+    version: int
+    expires_at: str
+    decision_reason: str | None
+    decided_by_user_id: str | None
+    requested_at: str
+    updated_at: str
+    decided_at: str | None
+    consumed_at: str | None
+    idempotency_key: str
+    request_hash: str
+    request_event_id: str

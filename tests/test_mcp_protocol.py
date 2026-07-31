@@ -42,6 +42,7 @@ from mcp_servers.common.contracts import (  # noqa: E402
     MCPProtocolError,
     MCPRequestContext,
     MCPToolDescriptor,
+    stable_hash,
 )
 from mcp_servers.common.sdk_adapter import (  # noqa: E402
     MCP_PROTOCOL_VERSION,
@@ -184,6 +185,82 @@ def test_server_adapter_maps_schema_output_and_unknown_tool_errors() -> None:
     assert unknown.is_error is True and unknown.error_code == "tool_not_found"
     bad_output = _adapter(bad_output=True).call_tool("double", {"value": 4}, _context())
     assert bad_output.is_error is True and bad_output.error_code == "invalid_tool_output"
+
+
+@pytest.mark.asyncio
+async def test_high_risk_tool_requires_exact_approval_at_gateway_and_server() -> None:
+    executed: list[int] = []
+
+    def execute_double(args: dict[str, Any]) -> dict[str, int]:
+        value = int(args["value"])
+        executed.append(value)
+        return {"doubled": value * 2}
+
+    descriptor = MCPToolDescriptor(
+        name="double",
+        description="High-risk double",
+        input_schema=INPUT_SCHEMA,
+        output_schema=OUTPUT_SCHEMA,
+        metadata=tool_metadata("test.double", risk_level="high"),
+    )
+    adapter = MCPServerAdapter(
+        "high-risk-tools",
+        [
+            MCPToolBinding(
+                descriptor,
+                execute_double,
+            )
+        ],
+    )
+    arguments = {"value": 4}
+    approved_context = _context(
+        approval_id="a" * 32,
+        approval_version=3,
+        approval_contract_hash=descriptor.contract_hash,
+        approval_parameter_hash=stable_hash(arguments),
+    )
+
+    denied_by_server = adapter.call_tool("double", arguments, _context())
+    assert denied_by_server.error_code == "approval_required"
+    assert executed == []
+    drifted_by_server = adapter.call_tool(
+        "double",
+        {"value": 5},
+        approved_context,
+    )
+    assert drifted_by_server.error_code == "approval_required"
+    assert executed == []
+    assert adapter.call_tool(
+        "double",
+        arguments,
+        approved_context,
+    ).structured_content == {"doubled": 8}
+    assert executed == [4]
+
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(),
+        expected=adapter.list_tools(),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: InProcessMCPTransport(adapter),
+    )
+    with pytest.raises(MCPGatewayExecutionError) as missing:
+        await gateway.execute(
+            "double",
+            arguments,
+            _context(),
+            timeout_seconds=1,
+        )
+    assert missing.value.code == "approval_required"
+    assert executed == [4]
+    result = await gateway.execute(
+        "double",
+        arguments,
+        approved_context,
+        timeout_seconds=1,
+    )
+    assert result.result == {"doubled": 8}
+    assert executed == [4, 4]
+    await gateway.aclose()
 
 
 @pytest.mark.asyncio

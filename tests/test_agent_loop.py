@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from apps.api.deps import model_gateway_dep, session_store_dep, settings_dep  # noqa: E402
 from apps.api.main import app  # noqa: E402
+from apps.orchestrator import agent_loop as agent_loop_module  # noqa: E402
 from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
     ConversationLockPool,
@@ -42,7 +43,11 @@ from mcp_servers.common.client_gateway import (  # noqa: E402
     MCPExecutionResult,
     MCPTransportName,
 )
-from mcp_servers.common.contracts import MCPRequestContext  # noqa: E402
+from mcp_servers.common.contracts import (  # noqa: E402
+    MCPRequestContext,
+    MCPToolDescriptor,
+    ToolCapabilityMetadata,
+)
 from packages.common.config import Settings  # noqa: E402
 from packages.governance.permissions import Principal  # noqa: E402
 from packages.governance.policy import ToolPolicyGateway  # noqa: E402
@@ -228,6 +233,34 @@ class MCPGatewayRegistry(FakeRegistry):
 
     def execute(self, name: str, arguments_json: str) -> Any:
         raise AssertionError("production loop must not call compatibility execute")
+
+
+class HighRiskMCPGatewayRegistry(MCPGatewayRegistry):
+    """声明 high 风险的画像工具，用于验证审批恢复执行链。"""
+
+    def mcp_descriptor_for_tool(
+        self,
+        tool_name: str,
+    ) -> MCPToolDescriptor | None:
+        if tool_name != "get_data_profile":
+            return None
+        return MCPToolDescriptor(
+            name=tool_name,
+            description="读取高风险画像",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "dataset_ref": {"type": "string"},
+                },
+                "required": ["dataset_ref"],
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object"},
+            metadata=ToolCapabilityMetadata(
+                capabilities=("data.profile",),
+                risk_level="high",
+            ),
+        )
 
 
 def _events(raw: list[dict[str, str]]) -> list[tuple[str, dict[str, Any]]]:
@@ -469,6 +502,146 @@ async def test_tool_round_emits_transparency_events_and_persists(
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "c1"
     assert '"duplicate_rows":0' in tool_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_loop_module,
+        "run_in_threadpool",
+        direct_threadpool,
+    )
+    _register_dataset(store, conversation)
+    result = {
+        "profile": {"row_count": 3, "column_count": 2},
+        "quality": {"duplicate_rows": 0},
+    }
+    registry = HighRiskMCPGatewayRegistry(result)
+    initial_gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["准备读取高风险画像"],
+                "tool_calls": [
+                    ToolCall(
+                        id="approval-call-before-restart",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            }
+        ]
+    )
+
+    paused_events = await _run_loop(
+        store,
+        conversation,
+        initial_gateway,
+        registry,
+        user_text="查看数据画像",
+        enforce_plan=True,
+    )
+
+    paused_names = [name for name, _ in paused_events]
+    assert "approval.requested" in paused_names
+    assert "approval_required" in paused_names
+    assert paused_names[-1] == "done"
+    meta = dict(paused_events)["meta"]
+    run_id = cast(str, meta["run_id"])
+    tasks = TaskStore(store.db_path)
+    paused = tasks.get_run(run_id)
+    assert paused is not None and paused.status == "paused"
+    assert tasks.list_invocations(run_id) == []
+    assert registry.contexts == []
+    approvals = tasks.list_approvals(
+        run_id,
+        tenant_id="local",
+        subject_user_id="local-user",
+    )
+    assert len(approvals) == 1
+    approval = approvals[0]
+    assert approval.status == "pending"
+
+    approved_run, approved, _, _ = tasks.decide_approval(
+        approval.approval_id,
+        expected_run_version=paused.state_version,
+        expected_approval_version=approval.version,
+        idempotency_key="approve-after-host-restart",
+        tenant_id="local",
+        actor_user_id="local-user",
+        decision="approved",
+        reason="确认读取该数据集画像",
+    )
+    resumed, _, _ = tasks.control_transition(
+        run_id,
+        expected_version=approved_run.state_version,
+        idempotency_key="resume-approved-after-host-restart",
+        command="resume",
+        allowed_statuses={"paused"},
+        status="running",
+        event_type="run.resumed",
+        payload={"reason": "approval_granted"},
+        require_checkpoint=True,
+    )
+    resumed_gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["恢复并读取已批准画像"],
+                "tool_calls": [
+                    ToolCall(
+                        id="approval-call-after-restart",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["结论：共 3 行。"]},
+        ]
+    )
+    resumed_raw = [
+        item
+        async for item in stream_agent_chat(
+            conversation_id=conversation.id,
+            project_id=conversation.project_id,
+            user_text="查看数据画像",
+            store=store,
+            gateway=cast(Any, resumed_gateway),
+            registry=cast(AgentToolRegistry, registry),
+            locks=ConversationLockPool(),
+            config=AgentLoopConfig(tool_result_max_chars=500),
+            principal=Principal(user_id="local-user"),
+            run_id=resumed.run_id,
+            resume_existing=True,
+        )
+    ]
+    resumed_events = _events(resumed_raw)
+
+    resumed_names = [name for name, _ in resumed_events]
+    assert resumed_names.index("approval.consumed") < resumed_names.index(
+        "step.started"
+    )
+    saved = tasks.get_run(run_id)
+    assert saved is not None and saved.status == "completed"
+    consumed = tasks.get_approval(approval.approval_id)
+    assert consumed is not None
+    assert consumed.status == "consumed" and consumed.version == approved.version + 1
+    assert len(tasks.list_invocations(run_id)) == 1
+    assert len(registry.contexts) == 1
+    context = registry.contexts[0]
+    assert context.approval_id == approval.approval_id
+    assert context.approval_version == consumed.version
+    assert context.approval_contract_hash == approval.tool_schema_hash
+    assert context.approval_parameter_hash == approval.parameter_summary_hash
 
 
 @pytest.mark.asyncio

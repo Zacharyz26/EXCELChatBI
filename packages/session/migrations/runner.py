@@ -7,9 +7,9 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from packages.session.migrations import v2, v3, v4, v5, v6
+from packages.session.migrations import v2, v3, v4, v5, v6, v7
 
-CURRENT_SCHEMA_VERSION = v6.VERSION
+CURRENT_SCHEMA_VERSION = v7.VERSION
 
 
 def migrate_database(
@@ -37,6 +37,7 @@ def migrate_database(
         _apply_v4(connection, source_version=3, backup=None)
         _apply_v5(connection, source_version=4, backup=None)
         _apply_v6(connection, source_version=5, backup=None)
+        _apply_v7(connection, source_version=6, backup=None)
         return
     if version == 1:
         backup = _backup_v1(connection, db_path)
@@ -45,6 +46,7 @@ def migrate_database(
         _apply_v4(connection, source_version=3, backup=None)
         _apply_v5(connection, source_version=4, backup=None)
         _apply_v6(connection, source_version=5, backup=None)
+        _apply_v7(connection, source_version=6, backup=None)
         return
     if version == v2.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -53,6 +55,7 @@ def migrate_database(
         _apply_v4(connection, source_version=3, backup=None)
         _apply_v5(connection, source_version=4, backup=None)
         _apply_v6(connection, source_version=5, backup=None)
+        _apply_v7(connection, source_version=6, backup=None)
         return
     if version == v3.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -61,6 +64,7 @@ def migrate_database(
         _apply_v4(connection, source_version=3, backup=backup)
         _apply_v5(connection, source_version=4, backup=None)
         _apply_v6(connection, source_version=5, backup=None)
+        _apply_v7(connection, source_version=6, backup=None)
         return
     if version == v4.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -69,6 +73,7 @@ def migrate_database(
         backup = _backup_database(connection, db_path, "v4-backup")
         _apply_v5(connection, source_version=4, backup=backup)
         _apply_v6(connection, source_version=5, backup=None)
+        _apply_v7(connection, source_version=6, backup=None)
         return
     if version == v5.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -77,6 +82,16 @@ def migrate_database(
         _validate_migration_checksum(connection, v5.VERSION, v5.NAME, v5.CHECKSUM)
         backup = _backup_database(connection, db_path, "v5-backup")
         _apply_v6(connection, source_version=5, backup=backup)
+        _apply_v7(connection, source_version=6, backup=None)
+        return
+    if version == v6.VERSION:
+        _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
+        _validate_migration_checksum(connection, v3.VERSION, v3.NAME, v3.CHECKSUM)
+        _validate_migration_checksum(connection, v4.VERSION, v4.NAME, v4.CHECKSUM)
+        _validate_migration_checksum(connection, v5.VERSION, v5.NAME, v5.CHECKSUM)
+        _validate_migration_checksum(connection, v6.VERSION, v6.NAME, v6.CHECKSUM)
+        backup = _backup_database(connection, db_path, "v6-backup")
+        _apply_v7(connection, source_version=6, backup=backup)
         return
     if version == CURRENT_SCHEMA_VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -84,6 +99,7 @@ def migrate_database(
         _validate_migration_checksum(connection, v4.VERSION, v4.NAME, v4.CHECKSUM)
         _validate_migration_checksum(connection, v5.VERSION, v5.NAME, v5.CHECKSUM)
         _validate_migration_checksum(connection, v6.VERSION, v6.NAME, v6.CHECKSUM)
+        _validate_migration_checksum(connection, v7.VERSION, v7.NAME, v7.CHECKSUM)
         return
     raise RuntimeError(
         f"不支持的 ChatBI 数据库版本 {version}，当前代码仅支持 0 到 "
@@ -108,9 +124,10 @@ def downgrade_v2_to_v1(db_path: str | Path) -> Path:
             v4.VERSION,
             v5.VERSION,
             v6.VERSION,
+            v7.VERSION,
         }:
             raise RuntimeError(
-                f"只能从 schema v2/v3/v4/v5/v6 回滚，当前版本为 {version}"
+                f"只能从 schema v2/v3/v4/v5/v6/v7 回滚，当前版本为 {version}"
             )
         active = connection.execute(
             """
@@ -124,6 +141,13 @@ def downgrade_v2_to_v1(db_path: str | Path) -> Path:
             connection.backup(export_connection)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if version >= v7.VERSION:
+                for trigger in v7.ADDED_TRIGGERS:
+                    connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+                for index in v7.ADDED_INDEXES:
+                    connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+                for table in v7.ADDED_TABLES:
+                    connection.execute(f'DROP TABLE IF EXISTS "{table}"')
             if version >= v6.VERSION:
                 for trigger in v6.ADDED_TRIGGERS:
                     connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
@@ -321,6 +345,40 @@ def _apply_v6(
             ),
         )
         connection.execute(f"PRAGMA user_version = {v6.VERSION}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _apply_v7(
+    connection: sqlite3.Connection,
+    *,
+    source_version: int,
+    backup: tuple[Path, str] | None,
+) -> None:
+    backup_path = str(backup[0]) if backup is not None else None
+    source_sha256 = backup[1] if backup is not None else None
+    try:
+        connection.executescript(f"BEGIN IMMEDIATE;\n{v7.DDL}\n")
+        connection.execute(
+            """
+            INSERT INTO schema_migrations(
+                version, name, checksum, source_version, backup_path,
+                source_sha256, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                v7.VERSION,
+                v7.NAME,
+                v7.CHECKSUM,
+                source_version,
+                backup_path,
+                source_sha256,
+                _utc_now(),
+            ),
+        )
+        connection.execute(f"PRAGMA user_version = {v7.VERSION}")
         connection.commit()
     except Exception:
         connection.rollback()

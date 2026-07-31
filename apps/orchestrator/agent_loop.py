@@ -72,6 +72,7 @@ from packages.session.models import (
 )
 from packages.session.store import SessionStore
 from packages.session.task_models import (
+    ApprovalRecord,
     ObservationSource,
     RunStatus,
     StepStatus,
@@ -260,6 +261,7 @@ class AgentLoopConfig:
     run_timeout_seconds: int = 300
     model_timeout_seconds: int = 90
     tool_timeout_seconds: int = 120
+    approval_ttl_seconds: int = 900
     planner_max_steps: int = 12
     max_replans: int = 3
 
@@ -2048,7 +2050,6 @@ async def _stream_agent_chat_inner(
                     )
                 fields = _humanize_args(call.name, call_args)
                 attempts_before_call = attempts_used
-                attempts_used += 1
                 resource_project_id: str | None = None
                 dataset_ref = call_args.get("dataset_ref")
                 if isinstance(dataset_ref, str) and dataset_ref:
@@ -2069,68 +2070,18 @@ async def _stream_agent_chat_inner(
                     )
                 )
                 idempotency_key = invocation_idempotency_key(run_id, call.id, call.name, call_args)
-                try:
-                    start_result = await run_in_threadpool(
-                        task_store.start_invocation_with_event,
-                        run_id=run_id,
-                        expected_version=run.state_version,
-                        tool_call_id=call.id,
-                        tool_name=call.name,
-                        arguments=call_args,
-                        idempotency_key=idempotency_key,
-                        policy_decision=policy_decision.to_event_payload(),
-                        step_id=planned_step.step_id if planned_step is not None else None,
-                    )
-                    run, invocation, step_started_event, _created = start_result
-                except (sqlite3.Error, RuntimeError, ValueError) as exc:
-                    _log.error(
-                        "agent.persist_invocation_failed",
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        tool=call.name,
-                        error=str(exc),
-                    )
-                    run, failed_event = await _transition_after_failure(
-                        task_store,
-                        run,
-                        event_type="run.failed",
-                        reason="invocation_persistence_failed",
-                        tool_calls=calls_used,
-                    )
-                    yield _task_event(failed_event, conversation_id)
-                    yield _event(
-                        "error",
-                        {
-                            "code": "persistence_failed",
-                            "message": "工具调用状态保存失败，请刷新后重试。",
-                            "retryable": True,
-                            "run_id": run_id,
-                        },
-                    )
-                    return
-                if step_started_event is not None:
-                    yield _task_event(step_started_event, conversation_id)
-                yield _event(
-                    "tool_start",
-                    {
-                        "id": call.id,
-                        "step_id": logical_step_id,
-                        "tool": call.name,
-                        "label": _TOOL_LABELS.get(call.name, call.name),
-                        # 人话参数摘要（14.5.3：涉及字段/筛选条件），执行卡默认展示
-                        "fields": fields,
-                        # 原始入参仅供“调整参数”表单预填
-                        "args_preview": _compact_json(call_args, 300),
-                    },
-                )
-
                 signature_scope = (
                     f"plan:{offered_plan_version}:{planned_step.logical_id}"
                     if planned_step is not None
-                    else (f"plan:{offered_plan_version}:unbound" if plan_enforced else "legacy")
+                    else (
+                        f"plan:{offered_plan_version}:unbound"
+                        if plan_enforced
+                        else "legacy"
+                    )
                 )
                 signature = (
-                    f"{signature_scope}:{call.name}:" f"{_normalized_argument_mapping(call_args)}"
+                    f"{signature_scope}:{call.name}:"
+                    f"{_normalized_argument_mapping(call_args)}"
                 )
                 repeated_signature = signature_counts.get(signature, 0) >= 1
                 signature_counts[signature] = signature_counts.get(signature, 0) + 1
@@ -2203,9 +2154,265 @@ async def _stream_agent_chat_inner(
                     if invalid_attempts_used >= config.max_invalid_tool_calls:
                         tools_allowed = False
                         feedback += " 无效工具调用次数已达上限，后续轮次将不再提供工具。"
+                approval_record: ApprovalRecord | None = None
+                descriptor_lookup = getattr(
+                    registry,
+                    "mcp_descriptor_for_tool",
+                    None,
+                )
+                descriptor = (
+                    descriptor_lookup(call.name)
+                    if callable(descriptor_lookup)
+                    else None
+                )
+                if (
+                    feedback is None
+                    and descriptor is not None
+                    and descriptor.metadata.risk_level in {"high", "critical"}
+                ):
+                    if planned_step is None:
+                        feedback = "未执行：高风险工具必须绑定当前就绪的持久化计划步骤。"
+                        failure_code = "approval_plan_binding_required"
+                        failure_source = "policy"
+                    else:
+                        contract_hash = descriptor.contract_hash
+                        parameter_hash = policy_decision.arguments_hash
+                        while approval_record is None and feedback is None:
+                            candidate = await run_in_threadpool(
+                                task_store.find_execution_approval,
+                                run_id,
+                                tenant_id=active_principal.tenant_scope,
+                                subject_user_id=active_principal.user_id,
+                                plan_version=run.plan_version,
+                                step_id=planned_step.logical_id,
+                                tool_name=call.name,
+                                tool_schema_hash=contract_hash,
+                                parameter_summary_hash=parameter_hash,
+                            )
+                            if (
+                                candidate is not None
+                                and candidate.status in {"denied", "revoked"}
+                            ):
+                                feedback = (
+                                    "未执行：该高风险工具授权已被拒绝或撤销。"
+                                    "如需重新申请，请先修改计划或参数。"
+                                )
+                                failure_code = f"approval_{candidate.status}"
+                                failure_source = "policy"
+                                break
+                            if (
+                                candidate is not None
+                                and candidate.status == "approved"
+                                and not _approval_expired(candidate)
+                            ):
+                                (
+                                    run,
+                                    approval_record,
+                                    consumed_event,
+                                    consumed_created,
+                                ) = await run_in_threadpool(
+                                    task_store.consume_approval,
+                                    candidate.approval_id,
+                                    expected_run_version=run.state_version,
+                                    expected_approval_version=candidate.version,
+                                    idempotency_key=(
+                                        f"approval-consume:{candidate.approval_id}"
+                                    ),
+                                    tenant_id=active_principal.tenant_scope,
+                                    actor_user_id=active_principal.user_id,
+                                    tool_name=call.name,
+                                    tool_schema_hash=contract_hash,
+                                    parameter_summary_hash=parameter_hash,
+                                )
+                                if consumed_created:
+                                    yield _task_event(
+                                        consumed_event,
+                                        conversation_id,
+                                    )
+                                break
+                            pending = (
+                                candidate
+                                if candidate is not None
+                                and candidate.status == "pending"
+                                and not _approval_expired(candidate)
+                                else None
+                            )
+                            if control is not None:
+                                control.pause()
+                            try:
+                                if pending is None:
+                                    expires_at = (
+                                        datetime.now(UTC)
+                                        + timedelta(
+                                            seconds=config.approval_ttl_seconds
+                                        )
+                                    ).isoformat().replace("+00:00", "Z")
+                                    (
+                                        run,
+                                        pending,
+                                        approval_event,
+                                        approval_created,
+                                    ) = await run_in_threadpool(
+                                        task_store.request_approval,
+                                        run_id,
+                                        expected_version=run.state_version,
+                                        idempotency_key=(
+                                            "approval-request:"
+                                            f"{idempotency_key}:{run.state_version}"
+                                        ),
+                                        tenant_id=active_principal.tenant_scope,
+                                        subject_user_id=active_principal.user_id,
+                                        requested_by_user_id=active_principal.user_id,
+                                        step_id=planned_step.logical_id,
+                                        tool_name=call.name,
+                                        tool_schema_hash=contract_hash,
+                                        parameter_summary_hash=parameter_hash,
+                                        risk_level=descriptor.metadata.risk_level,
+                                        expires_at=expires_at,
+                                        pause_run=True,
+                                    )
+                                else:
+                                    (
+                                        run,
+                                        approval_event,
+                                        approval_created,
+                                    ) = await run_in_threadpool(
+                                        task_store.control_transition,
+                                        run_id,
+                                        expected_version=run.state_version,
+                                        idempotency_key=(
+                                            "approval-wait:"
+                                            f"{pending.approval_id}:"
+                                            f"{run.state_version}"
+                                        ),
+                                        command="approval_wait",
+                                        allowed_statuses={"running"},
+                                        status="paused",
+                                        event_type="approval.waiting",
+                                        payload={
+                                            "approval_id": pending.approval_id,
+                                            "plan_version": pending.plan_version,
+                                            "step_id": pending.step_logical_id,
+                                            "risk_level": pending.risk_level,
+                                        },
+                                        require_idle=True,
+                                        checkpoint_reason=(
+                                            f"approval_waiting:{pending.approval_id}"
+                                        ),
+                                    )
+                            except Exception:
+                                if control is not None:
+                                    control.resume()
+                                raise
+                            if approval_created:
+                                yield _task_event(
+                                    approval_event,
+                                    conversation_id,
+                                )
+                            assert pending is not None
+                            yield _event(
+                                "approval_required",
+                                {
+                                    "approval_id": pending.approval_id,
+                                    "run_id": run_id,
+                                    "plan_version": pending.plan_version,
+                                    "step_id": pending.step_logical_id,
+                                    "tool": pending.tool_name,
+                                    "risk_level": pending.risk_level,
+                                    "expires_at": pending.expires_at,
+                                },
+                            )
+                            yield _event(
+                                "done",
+                                {
+                                    "conversation_id": conversation_id,
+                                    "run_id": run_id,
+                                    "run_status": "paused",
+                                    "last_sequence": approval_event.sequence,
+                                    "characters": characters_streamed,
+                                    "tool_calls": calls_used,
+                                    "tool_attempts": attempts_used,
+                                    "invalid_tool_calls": invalid_attempts_used,
+                                },
+                            )
+                            if control is None:
+                                return
+                            controlled_run = await _controlled_run_boundary(
+                                control,
+                                task_store,
+                                run,
+                                timeout_seconds=config.run_timeout_seconds,
+                            )
+                            if controlled_run is None:
+                                return
+                            run = controlled_run
+
+                attempts_used += 1
                 if attempts_used >= config.max_tool_calls:
                     tools_allowed = False
                     budget_exhausted = True
+                policy_payload = policy_decision.to_event_payload()
+                if approval_record is not None:
+                    policy_payload["approval"] = {
+                        "approval_id": approval_record.approval_id,
+                        "version": approval_record.version,
+                        "contract_hash": approval_record.tool_schema_hash,
+                        "parameter_hash": approval_record.parameter_summary_hash,
+                    }
+                try:
+                    start_result = await run_in_threadpool(
+                        task_store.start_invocation_with_event,
+                        run_id=run_id,
+                        expected_version=run.state_version,
+                        tool_call_id=call.id,
+                        tool_name=call.name,
+                        arguments=call_args,
+                        idempotency_key=idempotency_key,
+                        policy_decision=policy_payload,
+                        step_id=planned_step.step_id if planned_step is not None else None,
+                    )
+                    run, invocation, step_started_event, _created = start_result
+                except (sqlite3.Error, RuntimeError, ValueError) as exc:
+                    _log.error(
+                        "agent.persist_invocation_failed",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        tool=call.name,
+                        error=str(exc),
+                    )
+                    run, failed_event = await _transition_after_failure(
+                        task_store,
+                        run,
+                        event_type="run.failed",
+                        reason="invocation_persistence_failed",
+                        tool_calls=calls_used,
+                    )
+                    yield _task_event(failed_event, conversation_id)
+                    yield _event(
+                        "error",
+                        {
+                            "code": "persistence_failed",
+                            "message": "工具调用状态保存失败，请刷新后重试。",
+                            "retryable": True,
+                            "run_id": run_id,
+                        },
+                    )
+                    return
+                if step_started_event is not None:
+                    yield _task_event(step_started_event, conversation_id)
+                yield _event(
+                    "tool_start",
+                    {
+                        "id": call.id,
+                        "step_id": logical_step_id,
+                        "tool": call.name,
+                        "label": _TOOL_LABELS.get(call.name, call.name),
+                        # 人话参数摘要（14.5.3：涉及字段/筛选条件），执行卡默认展示
+                        "fields": fields,
+                        # 原始入参仅供“调整参数”表单预填
+                        "args_preview": _compact_json(call_args, 300),
+                    },
+                )
 
                 if feedback is not None:
                     run, _failed_invocation, failure_event = await run_in_threadpool(
@@ -2291,6 +2498,26 @@ async def _stream_agent_chat_inner(
                     deadline_at=(
                         datetime.now(UTC) + timedelta(seconds=operation_timeout)
                     ).isoformat(),
+                    approval_id=(
+                        approval_record.approval_id
+                        if approval_record is not None
+                        else None
+                    ),
+                    approval_version=(
+                        approval_record.version
+                        if approval_record is not None
+                        else None
+                    ),
+                    approval_contract_hash=(
+                        approval_record.tool_schema_hash
+                        if approval_record is not None
+                        else None
+                    ),
+                    approval_parameter_hash=(
+                        approval_record.parameter_summary_hash
+                        if approval_record is not None
+                        else None
+                    ),
                 )
                 execution = await _execute_tool(
                     registry,
@@ -4240,6 +4467,22 @@ def _parse_args(arguments: str) -> dict[str, Any]:
 def _normalized_argument_mapping(arguments: dict[str, Any]) -> str:
     """对 Host 补全后的最终参数做稳定排序，用于同计划版本的熔断。"""
     return json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _approval_expired(approval: ApprovalRecord) -> bool:
+    """对损坏或已过期的授权失败关闭。"""
+    normalized = (
+        approval.expires_at[:-1] + "+00:00"
+        if approval.expires_at.endswith("Z")
+        else approval.expires_at
+    )
+    try:
+        expires_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        return True
+    if expires_at.tzinfo is None:
+        return True
+    return expires_at.astimezone(UTC) <= datetime.now(UTC)
 
 
 def _title_from_message(message: str) -> str:

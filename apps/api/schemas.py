@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from packages.session.lineage import (
     LineageNodeStatus,
@@ -259,6 +259,60 @@ class ClarificationAnswerRequest(BaseModel):
         str,
         StringConstraints(strip_whitespace=True, min_length=16, max_length=200),
     ]
+
+
+class PlanRevisionRequest(BaseModel):
+    """用户在 paused 安全边界提交的完整不可变计划修订。"""
+
+    plan: dict[str, Any]
+    reason: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+    ]
+    skipped_step_ids: list[
+        Annotated[
+            str,
+            StringConstraints(
+                strip_whitespace=True,
+                min_length=1,
+                max_length=100,
+                pattern=r"^[a-z][a-z0-9_-]{0,63}$",
+            ),
+        ]
+    ] = Field(default_factory=list, max_length=24)
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """对一个固定版本 ApprovalRecord 做批准或拒绝决定。"""
+
+    expected_version: int = Field(ge=1)
+    decision: Literal["approved", "denied"]
+    reason: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+    ]
+
+
+class ApprovalResponse(BaseModel):
+    """浏览器可见的安全授权摘要，不包含主体内部字段或幂等哈希。"""
+
+    approval_id: str
+    run_id: str
+    plan_id: str
+    plan_version: int
+    step_id: str
+    tool_name: str
+    tool_schema_hash: str
+    parameter_summary_hash: str
+    risk_level: Literal["high", "critical"]
+    status: Literal["pending", "approved", "denied", "consumed", "revoked"]
+    version: int
+    expires_at: str
+    decision_reason: str | None
+    requested_at: str
+    updated_at: str
+    decided_at: str | None
+    consumed_at: str | None
 
 
 class UploadResponse(BaseModel):

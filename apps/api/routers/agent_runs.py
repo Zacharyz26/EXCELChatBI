@@ -15,7 +15,13 @@ from packages.governance.permissions import Principal
 from packages.models.gateway import ModelGateway
 from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
-from packages.session.task_models import TaskEvent, TaskRun
+from packages.session.task_models import (
+    ApprovalRecord,
+    TaskEvent,
+    TaskPlanRecord,
+    TaskRun,
+    TaskStepRecord,
+)
 from packages.session.task_store import (
     ControlConflict,
     IdempotencyConflict,
@@ -38,7 +44,12 @@ from apps.api.deps import (
     stats_tools_dep,
 )
 from apps.api.run_host import agent_run_manager, conversation_locks
-from apps.api.schemas import ClarificationAnswerRequest
+from apps.api.schemas import (
+    ApprovalDecisionRequest,
+    ApprovalResponse,
+    ClarificationAnswerRequest,
+    PlanRevisionRequest,
+)
 from apps.orchestrator.agent_loop import AgentLoopConfig, stream_agent_chat
 from apps.orchestrator.agent_tools import (
     AgentContext,
@@ -144,6 +155,11 @@ async def resume_agent_run(
     execution: _RunExecutionServices = Depends(_run_execution_services_dep),
 ) -> EventSourceResponse:
     tasks, run = await _writable_run(store, run_id, principal)
+    if await run_in_threadpool(tasks.has_valid_pending_approval, run_id):
+        raise HTTPException(
+            status_code=409,
+            detail="任务仍有待决定的高风险授权，不能恢复执行",
+        )
     has_active_host = agent_run_manager.control_for(run_id) is not None
     try:
         updated, event, created = await run_in_threadpool(
@@ -336,6 +352,124 @@ async def retry_agent_step(
     )
 
 
+@router.post("/{run_id}/plan/revisions")
+async def revise_agent_plan(
+    run_id: str,
+    req: PlanRevisionRequest,
+    idempotency_key: Annotated[
+        str,
+        Header(alias="Idempotency-Key", min_length=8, max_length=200),
+    ],
+    if_match: Annotated[str, Header(alias="If-Match")],
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> dict[str, object]:
+    """在 paused 安全边界创建不可变用户计划修订；不会自动恢复执行。"""
+    tasks, _run = await _writable_run(store, run_id, principal)
+    try:
+        updated, plan, steps, event, created = await run_in_threadpool(
+            tasks.revise_plan_by_user,
+            run_id,
+            expected_version=_state_version(if_match),
+            idempotency_key=idempotency_key,
+            plan=req.plan,
+            reason=req.reason,
+            skipped_step_ids=set(req.skipped_step_ids),
+        )
+    except (ControlConflict, IdempotencyConflict, StateVersionConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if created:
+        agent_run_manager.publish(
+            run_id,
+            _sse_task_event(event, updated.conversation_id),
+        )
+    return {
+        "run": _run_payload(updated),
+        "plan": _plan_payload(plan),
+        "steps": [_step_payload(step) for step in steps],
+        "event": _event_payload(event),
+        "replayed": not created,
+    }
+
+
+@router.get(
+    "/{run_id}/approvals",
+    response_model=list[ApprovalResponse],
+)
+async def list_agent_approvals(
+    run_id: str,
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> list[ApprovalResponse]:
+    """返回当前认证主体在该 TaskRun 中可见的 ApprovalRecord。"""
+    tasks = TaskStore(store.db_path)
+    run = await run_in_threadpool(tasks.get_run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    require_run_access(store, run, principal)
+    records = await run_in_threadpool(
+        tasks.list_approvals,
+        run_id,
+        tenant_id=principal.tenant_scope,
+        subject_user_id=principal.user_id,
+    )
+    return [
+        ApprovalResponse.model_validate(_approval_payload(record))
+        for record in records
+    ]
+
+
+@router.post(
+    "/{run_id}/approvals/{approval_id}/decision",
+)
+async def decide_agent_approval(
+    run_id: str,
+    approval_id: str,
+    req: ApprovalDecisionRequest,
+    idempotency_key: Annotated[
+        str,
+        Header(alias="Idempotency-Key", min_length=8, max_length=200),
+    ],
+    if_match: Annotated[str, Header(alias="If-Match")],
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> dict[str, object]:
+    """批准或拒绝固定版本授权；决定后任务仍保持 paused，需显式恢复。"""
+    tasks, _run = await _writable_run(store, run_id, principal)
+    approval = await run_in_threadpool(tasks.get_approval, approval_id)
+    if approval is None or approval.run_id != run_id:
+        raise HTTPException(status_code=404, detail="授权请求不存在")
+    try:
+        updated, decided, event, created = await run_in_threadpool(
+            tasks.decide_approval,
+            approval_id,
+            expected_run_version=_state_version(if_match),
+            expected_approval_version=req.expected_version,
+            idempotency_key=idempotency_key,
+            tenant_id=principal.tenant_scope,
+            actor_user_id=principal.user_id,
+            decision=req.decision,
+            reason=req.reason,
+        )
+    except (ControlConflict, IdempotencyConflict, StateVersionConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if created:
+        agent_run_manager.publish(
+            run_id,
+            _sse_task_event(event, updated.conversation_id),
+        )
+    return {
+        "run": _run_payload(updated),
+        "approval": _approval_payload(decided),
+        "event": _event_payload(event),
+        "replayed": not created,
+    }
+
+
 @router.get("/{run_id}")
 async def get_agent_run(
     run_id: str,
@@ -355,28 +489,11 @@ async def get_agent_run(
         "run": _run_payload(run),
         "contract": contract,
         "plan": (
-            {
-                "plan_id": plan.plan_id,
-                "version": plan.version,
-                "reason": plan.reason,
-                "definition": plan.plan,
-                "created_at": plan.created_at,
-            }
+            _plan_payload(plan)
             if plan is not None
             else None
         ),
-        "steps": [
-            {
-                "step_id": step.logical_id,
-                "persisted_step_id": step.step_id,
-                "position": step.position,
-                "status": step.status,
-                "definition": step.definition,
-                "started_at": step.started_at,
-                "completed_at": step.completed_at,
-            }
-            for step in steps
-        ],
+        "steps": [_step_payload(step) for step in steps],
         "state": snapshot,
     }
 
@@ -439,6 +556,50 @@ def _event_payload(event: TaskEvent) -> dict[str, object]:
     }
 
 
+def _plan_payload(plan: TaskPlanRecord) -> dict[str, object]:
+    return {
+        "plan_id": plan.plan_id,
+        "version": plan.version,
+        "reason": plan.reason,
+        "definition": plan.plan,
+        "created_at": plan.created_at,
+    }
+
+
+def _step_payload(step: TaskStepRecord) -> dict[str, object]:
+    return {
+        "step_id": step.logical_id,
+        "persisted_step_id": step.step_id,
+        "position": step.position,
+        "status": step.status,
+        "definition": step.definition,
+        "started_at": step.started_at,
+        "completed_at": step.completed_at,
+    }
+
+
+def _approval_payload(approval: ApprovalRecord) -> dict[str, object]:
+    return {
+        "approval_id": approval.approval_id,
+        "run_id": approval.run_id,
+        "plan_id": approval.plan_id,
+        "plan_version": approval.plan_version,
+        "step_id": approval.step_logical_id,
+        "tool_name": approval.tool_name,
+        "tool_schema_hash": approval.tool_schema_hash,
+        "parameter_summary_hash": approval.parameter_summary_hash,
+        "risk_level": approval.risk_level,
+        "status": approval.status,
+        "version": approval.version,
+        "expires_at": approval.expires_at,
+        "decision_reason": approval.decision_reason,
+        "requested_at": approval.requested_at,
+        "updated_at": approval.updated_at,
+        "decided_at": approval.decided_at,
+        "consumed_at": approval.consumed_at,
+    }
+
+
 async def _writable_run(
     store: SessionStore,
     run_id: str,
@@ -497,6 +658,7 @@ def _start_recovered_run(
         run_timeout_seconds=settings.agent_run_timeout_seconds,
         model_timeout_seconds=settings.agent_model_timeout_seconds,
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
+        approval_ttl_seconds=settings.agent_approval_ttl_seconds,
     )
     return agent_run_manager.start(
         run.run_id,

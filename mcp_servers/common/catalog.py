@@ -210,6 +210,8 @@ def tool_metadata(
         risk = "medium"
     elif risk_level == "high":
         risk = "high"
+    elif risk_level == "critical":
+        risk = "critical"
     else:
         raise ValueError(f"invalid risk level: {risk_level}")
     capabilities = (capability,) if isinstance(capability, str) else capability
