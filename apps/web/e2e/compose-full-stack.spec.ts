@@ -10,8 +10,19 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await page.getByRole("button", { name: "进入工作区" }).click();
   await expect(page.getByRole("button", { name: "我的分析项目" })).toBeVisible();
 
+  const uploadButton = page.getByRole("button", { name: "上传 Excel", exact: true });
+  await expect(uploadButton).toBeEnabled();
   const fixture = path.resolve("../../.data/e2e/sales.xlsx");
-  await page.locator('input[type="file"]').setInputFiles(fixture);
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await uploadButton.click();
+  const fileChooser = await fileChooserPromise;
+  const uploadResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith("/api/upload/excel")
+      && response.request().method() === "POST",
+  );
+  await fileChooser.setFiles(fixture);
+  const uploadResponse = await uploadResponsePromise;
+  expect(uploadResponse.ok()).toBeTruthy();
   await expect(page.getByText("已完成“sales.xlsx”的数据画像，共 3 行、3 列。")).toBeVisible({
     timeout: 30_000,
   });
