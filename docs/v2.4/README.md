@@ -25,8 +25,8 @@
 | [SSE 与任务控制协议](./SSE与任务控制协议.md) | v2 事件 envelope、事件顺序、旧事件兼容、暂停/恢复/取消接口 | 草案完成 |
 | [Planner 与 Verifier 评测设计](./Planner与Verifier评测设计.md) | 混合 Planner、确定性/语义 Verifier 边界、重复评测、go/no-go 规则 | 三轮及阶段 2 对照完成；商业回归保留，代表性盲评待补 |
 | [MCP 与 Docker ADR](./MCP与Docker架构决策.md) | MCP 版本/SDK/传输/上下文边界，以及镜像、Compose、卷和安全边界 | 双传输探针已通过；ADR 待 G7 评审接受 |
-| [MCP 与 Docker 全阶段演进](../MCP与Docker全阶段演进设计.md) | v2.5 阶段 3–6、安全项目和 v3.0 阶段 7–8 的扩展设计 | 总体设计完成；阶段 3A–3E 已关闭 |
-| [v2.5 实施入口](../v2.5/README.md) | 阶段 3–6 边界、评测纪律和当前实施入口 | 阶段 3A–3E 已关闭；下一入口为阶段 4A |
+| [MCP 与 Docker 全阶段演进](../MCP与Docker全阶段演进设计.md) | v2.5 阶段 3–6、安全项目和 v3.0 阶段 7–8 的扩展设计 | 总体设计完成；阶段 3 已关闭，4A/4B 已完成 |
+| [v2.5 实施入口](../v2.5/README.md) | 阶段 3–6 边界、评测纪律和当前实施入口 | 阶段 3 已关闭；下一入口为阶段 4C |
 | `scripts/agent_eval_set.jsonl` | 20 个机器可读行为场景 | 已冻结并完成三轮真实基线 |
 | `scripts/stage2_behavior_eval.py` | 同场景开启结构化计划控制面的阶段 2 成功率/终态对照 | 60-run 完成；成功 70.0%、终态如实 73.3%、越界 0，自动门禁 PASS |
 | `scripts/semantic_verifier_eval_set.jsonl` | 语义覆盖正反 fixture | v3 新 heldout 三轮实测完成，仍 NO_GO |

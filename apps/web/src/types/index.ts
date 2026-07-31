@@ -204,6 +204,159 @@ export interface ChatStreamEvent {
   data: Record<string, unknown>;
 }
 
+// ── v2.5 阶段 4：TaskRun 协作控制面 ──
+
+export type AgentRunStatus =
+  | "planning"
+  | "waiting_user"
+  | "running"
+  | "verifying"
+  | "paused"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "cancelled";
+
+export type AgentStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "blocked";
+
+export interface AgentRun {
+  run_id: string;
+  project_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  parent_run_id: string | null;
+  goal: string;
+  status: AgentRunStatus;
+  state_version: number;
+  plan_version: number;
+  budget: Record<string, unknown>;
+  usage: Record<string, unknown>;
+  terminal_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface AgentPlanStepDefinition {
+  step_id: string;
+  purpose: string;
+  capability: string;
+  dependencies: string[];
+  expected_evidence?: string[];
+  completion_conditions?: string[];
+  fallback?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface AgentPlanDefinition {
+  schema_version: number;
+  summary: string;
+  steps: AgentPlanStepDefinition[];
+  assumptions: unknown[];
+  clarifications: unknown[];
+  [key: string]: unknown;
+}
+
+export interface AgentPlan {
+  plan_id: string;
+  version: number;
+  reason: string | null;
+  definition: AgentPlanDefinition;
+  created_at: string;
+}
+
+export interface AgentTaskStep {
+  step_id: string;
+  persisted_step_id: string;
+  position: number;
+  status: AgentStepStatus;
+  definition: AgentPlanStepDefinition;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface AgentRunDetail {
+  run: AgentRun;
+  contract: Record<string, unknown> | null;
+  plan: AgentPlan | null;
+  steps: AgentTaskStep[];
+  state: Record<string, unknown> | null;
+}
+
+export type AgentApprovalStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "consumed"
+  | "revoked";
+
+export interface AgentApproval {
+  approval_id: string;
+  run_id: string;
+  plan_id: string;
+  plan_version: number;
+  step_id: string;
+  tool_name: string;
+  tool_schema_hash: string;
+  parameter_summary_hash: string;
+  risk_level: "high" | "critical";
+  status: AgentApprovalStatus;
+  version: number;
+  expires_at: string;
+  decision_reason: string | null;
+  requested_at: string;
+  updated_at: string;
+  decided_at: string | null;
+  consumed_at: string | null;
+}
+
+export interface AgentTaskEvent {
+  schema_version: "2.0";
+  event_id: string;
+  run_id: string;
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  occurred_at: string;
+}
+
+export interface AgentRunEventsResponse {
+  run_id: string;
+  events: AgentTaskEvent[];
+  last_sequence: number;
+}
+
+export interface AgentClarification {
+  question_id: string;
+  question: string;
+  reason: string;
+  about: string;
+  resume_token: string;
+  answer_schema: Record<string, unknown>;
+  sequence: number;
+}
+
+export interface AgentControlResponse {
+  run: AgentRun;
+  event: AgentTaskEvent;
+  replayed: boolean;
+}
+
+export interface AgentPlanRevisionResponse extends AgentControlResponse {
+  plan: AgentPlan;
+  steps: AgentTaskStep[];
+}
+
+export interface AgentApprovalDecisionResponse extends AgentControlResponse {
+  approval: AgentApproval;
+}
+
 // ── 对话式 Agent 实时轮次（阶段 3，SSE 事件 14.5.3 → 消息卡片）──
 
 /** 一次工具调用步骤（计划卡/执行卡合一渲染，随 tool_start/tool_end 更新）。 */

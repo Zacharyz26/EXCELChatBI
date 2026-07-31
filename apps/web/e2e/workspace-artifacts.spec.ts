@@ -9,7 +9,14 @@ interface MockWorkspaceState {
   messages: Array<Record<string, unknown>>;
   artifacts: Array<Record<string, unknown>>;
   kbDocuments: Array<Record<string, unknown>>;
+  agentRuns: Record<string, MockAgentRunState>;
   turn: number;
+}
+
+interface MockAgentRunState {
+  detail: Record<string, any>;
+  approvals: Array<Record<string, any>>;
+  events: Array<Record<string, any>>;
 }
 
 function profile(datasetRef: string): Record<string, unknown> {
@@ -102,6 +109,233 @@ function sse(frames: Array<[string, Record<string, unknown>]>): string {
     .join("");
 }
 
+function taskEvent(
+  runId: string,
+  sequence: number,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    schema_version: "2.0",
+    event_id: `${runId}-event-${sequence}`,
+    run_id: runId,
+    sequence,
+    event_type: eventType,
+    payload,
+    occurred_at: NOW,
+  };
+}
+
+function taskSse(
+  runId: string,
+  sequence: number,
+  eventType: string,
+  payload: Record<string, unknown>,
+): [string, Record<string, unknown>] {
+  return [eventType, {
+    schema_version: "2.0",
+    event_id: `${runId}-event-${sequence}`,
+    run_id: runId,
+    conversation_id: "conversation-1",
+    sequence,
+    occurred_at: NOW,
+    payload,
+  }];
+}
+
+function mockAgentRun(
+  runId: string,
+  goal: string,
+  status: string,
+  options: {
+    approvals?: Array<Record<string, any>>;
+    waitingPayload?: Record<string, unknown>;
+  } = {},
+): MockAgentRunState {
+  const definition = {
+    schema_version: 1,
+    summary: goal,
+    steps: [{
+      step_id: "prepare",
+      purpose: "准备并核对数据范围",
+      capability: "data.profile",
+      dependencies: [],
+      expected_evidence: ["范围摘要"],
+      completion_conditions: ["范围已确认"],
+      fallback: [{ when: "失败", action: "block" }],
+    }],
+    assumptions: [],
+    clarifications: [],
+  };
+  const stepStatus = status === "completed" ? "completed" : "pending";
+  const events = options.waitingPayload
+    ? [taskEvent(runId, 3, "waiting_user", options.waitingPayload)]
+    : [];
+  return {
+    detail: {
+      run: {
+        run_id: runId,
+        project_id: "project-1",
+        conversation_id: "conversation-1",
+        user_message_id: `${runId}-user`,
+        parent_run_id: null,
+        goal,
+        status,
+        state_version: 4,
+        plan_version: 1,
+        budget: { max_tool_calls: 4 },
+        usage: { tool_calls: 0 },
+        terminal_reason: null,
+        created_at: NOW,
+        updated_at: NOW,
+        finished_at: status === "completed" ? NOW : null,
+      },
+      contract: { goal },
+      plan: {
+        plan_id: `${runId}-plan-1`,
+        version: 1,
+        reason: "initial:template",
+        definition,
+        created_at: NOW,
+      },
+      steps: [{
+        step_id: "prepare",
+        persisted_step_id: `${runId}-step-1`,
+        position: 0,
+        status: stepStatus,
+        definition: definition.steps[0],
+        started_at: null,
+        completed_at: stepStatus === "completed" ? NOW : null,
+      }],
+      state: { last_sequence: 3 },
+    },
+    approvals: options.approvals ?? [],
+    events,
+  };
+}
+
+function persistCollaborationTurn(
+  state: MockWorkspaceState,
+  prompt: string,
+): { frames: Array<[string, Record<string, unknown>]> } {
+  const suffix = String(++state.turn);
+  const runId = `collaboration-run-${suffix}`;
+  const userId = `${runId}-user`;
+  const assistantId = `${runId}-assistant`;
+  state.messages.push(
+    message(userId, "user", prompt),
+    message(assistantId, "assistant", "任务已进入协作安全边界。"),
+  );
+
+  if (prompt.includes("选择指标")) {
+    const waitingPayload = {
+      question_id: "metric",
+      question: "请选择本次分析指标：销售额或订单量。",
+      reason: "不同指标会改变分析结果。",
+      about: "metric",
+      answer_schema: { type: "string", minLength: 1 },
+      resume_token: "resume-token-metric-0001",
+      plan_id: `${runId}-plan-1`,
+      plan_version: 1,
+    };
+    state.agentRuns[runId] = mockAgentRun(
+      runId,
+      prompt,
+      "waiting_user",
+      { waitingPayload },
+    );
+    return {
+      frames: [
+        ["meta", { run_id: runId, conversation_id: "conversation-1" }],
+        taskSse(runId, 2, "plan.created", {
+          plan_id: `${runId}-plan-1`,
+          plan_version: 1,
+          summary: prompt,
+          steps: [],
+        }),
+        taskSse(runId, 3, "waiting_user", waitingPayload),
+        ["text.delta", { delta: waitingPayload.question }],
+        ["done", {
+          run_id: runId,
+          conversation_id: "conversation-1",
+          run_status: "waiting_user",
+          last_sequence: 3,
+        }],
+      ],
+    };
+  }
+
+  const approvals = prompt.includes("高风险")
+    ? [{
+      approval_id: "a".repeat(32),
+      run_id: runId,
+      plan_id: `${runId}-plan-1`,
+      plan_version: 1,
+      step_id: "prepare",
+      tool_name: "high_risk_export",
+      tool_schema_hash: "b".repeat(64),
+      parameter_summary_hash: "c".repeat(64),
+      risk_level: "high",
+      status: "pending",
+      version: 1,
+      expires_at: "2026-07-31T12:00:00Z",
+      decision_reason: null,
+      requested_at: NOW,
+      updated_at: NOW,
+      decided_at: null,
+      consumed_at: null,
+    }]
+    : [];
+  state.agentRuns[runId] = mockAgentRun(runId, prompt, "paused", { approvals });
+  if (approvals.length > 0) {
+    state.agentRuns[runId].events.push(
+      taskEvent(runId, 4, "approval.requested", {
+        approval_id: approvals[0].approval_id,
+      }),
+    );
+  }
+  return {
+    frames: [
+      ["meta", { run_id: runId, conversation_id: "conversation-1" }],
+      taskSse(runId, 2, "plan.created", {
+        plan_id: `${runId}-plan-1`,
+        plan_version: 1,
+        summary: prompt,
+        steps: [{
+          step_id: "prepare",
+          purpose: "准备并核对数据范围",
+          capability: "data.profile",
+          dependencies: [],
+          status: "pending",
+        }],
+      }),
+      ...(approvals.length > 0 ? [
+        taskSse(runId, 4, "approval.requested", {
+          approval_id: approvals[0].approval_id,
+          plan_version: 1,
+          step_id: "prepare",
+          risk_level: "high",
+        }),
+        ["approval_required", {
+          approval_id: approvals[0].approval_id,
+          run_id: runId,
+          plan_version: 1,
+          step_id: "prepare",
+          tool: "high_risk_export",
+          risk_level: "high",
+          expires_at: approvals[0].expires_at,
+        }] as [string, Record<string, unknown>],
+      ] : []),
+      ["done", {
+        run_id: runId,
+        conversation_id: "conversation-1",
+        run_status: "paused",
+        last_sequence: approvals.length > 0 ? 4 : 2,
+      }],
+    ],
+  };
+}
+
 async function json(route: Route, body: unknown, status = 200): Promise<void> {
   await route.fulfill({
     status,
@@ -110,10 +344,49 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
   });
 }
 
+function appendTaskEvent(
+  run: MockAgentRunState,
+  runId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Record<string, any> {
+  const sequence = Number(run.detail.state.last_sequence ?? 0) + 1;
+  const event = taskEvent(runId, sequence, eventType, payload);
+  run.events.push(event);
+  run.detail.state.last_sequence = sequence;
+  return event;
+}
+
+function eventToSse(
+  event: Record<string, any>,
+): [string, Record<string, unknown>] {
+  return [String(event.event_type), {
+    ...event,
+    conversation_id: "conversation-1",
+  }];
+}
+
+async function fulfillTaskStream(
+  route: Route,
+  runId: string,
+  frames: Array<[string, Record<string, unknown>]>,
+): Promise<void> {
+  await route.fulfill({
+    status: 200,
+    contentType: "text/event-stream; charset=utf-8",
+    headers: {
+      "Cache-Control": "no-cache",
+      "X-ChatBI-Run-ID": runId,
+    },
+    body: sse(frames),
+  });
+}
+
 function persistChartTurn(state: MockWorkspaceState, prompt: string): {
   frames: Array<[string, Record<string, unknown>]>;
 } {
   const suffix = String(++state.turn);
+  const runId = `run-${suffix}`;
   const userId = `chart-user-${suffix}`;
   const toolMessageId = `chart-tool-message-${suffix}`;
   const callId = `chart-call-${suffix}`;
@@ -160,6 +433,11 @@ function persistChartTurn(state: MockWorkspaceState, prompt: string): {
     message(`chart-final-${suffix}`, "assistant", "趋势图已生成。"),
   );
   state.artifacts.push(chart);
+  state.agentRuns[runId] = mockAgentRun(
+    runId,
+    "生成月度销售趋势图",
+    "completed",
+  );
 
   return {
     frames: [
@@ -173,7 +451,7 @@ function persistChartTurn(state: MockWorkspaceState, prompt: string): {
       ["plan.created", {
         schema_version: "2.0",
         event_id: `plan-event-${suffix}`,
-        run_id: `run-${suffix}`,
+        run_id: runId,
         conversation_id: "conversation-1",
         sequence: 2,
         occurred_at: NOW,
@@ -396,6 +674,7 @@ async function installMockApi(
     messages: [],
     artifacts: [],
     kbDocuments: [],
+    agentRuns: {},
     turn: 0,
   };
 
@@ -500,18 +779,277 @@ async function installMockApi(
       });
       return;
     }
+    const runDetailMatch = path.match(/^\/agent\/runs\/([^/]+)$/);
+    if (method === "GET" && runDetailMatch) {
+      const run = state.agentRuns[decodeURIComponent(runDetailMatch[1])];
+      await json(route, run?.detail ?? { detail: "TaskRun 不存在" }, run ? 200 : 404);
+      return;
+    }
+    const runApprovalsMatch = path.match(/^\/agent\/runs\/([^/]+)\/approvals$/);
+    if (method === "GET" && runApprovalsMatch) {
+      const run = state.agentRuns[decodeURIComponent(runApprovalsMatch[1])];
+      await json(route, run?.approvals ?? []);
+      return;
+    }
+    const runEventsMatch = path.match(/^\/agent\/runs\/([^/]+)\/events$/);
+    if (method === "GET" && runEventsMatch) {
+      const runId = decodeURIComponent(runEventsMatch[1]);
+      const run = state.agentRuns[runId];
+      await json(route, {
+        run_id: runId,
+        events: run?.events ?? [],
+        last_sequence: Number(run?.detail.state.last_sequence ?? 0),
+      });
+      return;
+    }
+    const approvalDecisionMatch = path.match(
+      /^\/agent\/runs\/([^/]+)\/approvals\/([^/]+)\/decision$/,
+    );
+    if (method === "POST" && approvalDecisionMatch) {
+      const runId = decodeURIComponent(approvalDecisionMatch[1]);
+      const approvalId = decodeURIComponent(approvalDecisionMatch[2]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      const body = request.postDataJSON() as {
+        expected_version: number;
+        decision: "approved" | "denied";
+        reason: string;
+      };
+      const approval = run.approvals.find(
+        (item) => item.approval_id === approvalId,
+      );
+      if (!approval || approval.version !== body.expected_version) {
+        await json(route, { detail: "ApprovalRecord 版本冲突" }, 409);
+        return;
+      }
+      approval.status = body.decision;
+      approval.version += 1;
+      approval.decision_reason = body.reason;
+      approval.decided_at = NOW;
+      approval.updated_at = NOW;
+      run.detail.run.state_version += 1;
+      run.detail.run.updated_at = NOW;
+      const event = appendTaskEvent(run, runId, "approval.decided", {
+        approval_id: approvalId,
+        decision: body.decision,
+        approval_version: approval.version,
+      });
+      await json(route, {
+        run: run.detail.run,
+        approval,
+        event,
+        replayed: false,
+      });
+      return;
+    }
+    const planRevisionMatch = path.match(
+      /^\/agent\/runs\/([^/]+)\/plan\/revisions$/,
+    );
+    if (method === "POST" && planRevisionMatch) {
+      const runId = decodeURIComponent(planRevisionMatch[1]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      const body = request.postDataJSON() as {
+        plan: Record<string, any>;
+        reason: string;
+        skipped_step_ids: string[];
+      };
+      const nextPlanVersion = run.detail.run.plan_version + 1;
+      run.detail.run.plan_version = nextPlanVersion;
+      run.detail.run.state_version += 1;
+      run.detail.run.updated_at = NOW;
+      run.detail.plan = {
+        plan_id: `${runId}-plan-${nextPlanVersion}`,
+        version: nextPlanVersion,
+        reason: body.reason,
+        definition: body.plan,
+        created_at: NOW,
+      };
+      run.detail.steps = body.plan.steps.map(
+        (definition: Record<string, any>, position: number) => ({
+          step_id: definition.step_id,
+          persisted_step_id: `${runId}-step-${nextPlanVersion}-${position + 1}`,
+          position,
+          status: body.skipped_step_ids.includes(definition.step_id)
+            ? "skipped"
+            : "pending",
+          definition,
+          started_at: null,
+          completed_at: body.skipped_step_ids.includes(definition.step_id)
+            ? NOW
+            : null,
+        }),
+      );
+      const event = appendTaskEvent(run, runId, "plan.revised", {
+        plan_id: run.detail.plan.plan_id,
+        plan_version: nextPlanVersion,
+        reason: body.reason,
+      });
+      await json(route, {
+        run: run.detail.run,
+        plan: run.detail.plan,
+        steps: run.detail.steps,
+        event,
+        replayed: false,
+      });
+      return;
+    }
+    const clarificationMatch = path.match(
+      /^\/agent\/runs\/([^/]+)\/clarifications\/([^/]+)\/answer\/stream$/,
+    );
+    if (method === "POST" && clarificationMatch) {
+      const runId = decodeURIComponent(clarificationMatch[1]);
+      const questionId = decodeURIComponent(clarificationMatch[2]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      const body = request.postDataJSON() as {
+        answer: unknown;
+        resume_token: string;
+      };
+      if (body.resume_token !== "resume-token-metric-0001") {
+        await json(route, { detail: "恢复令牌无效" }, 409);
+        return;
+      }
+      run.detail.run.status = "completed";
+      run.detail.run.state_version += 1;
+      run.detail.run.finished_at = NOW;
+      run.detail.run.updated_at = NOW;
+      run.detail.steps[0].status = "completed";
+      run.detail.steps[0].completed_at = NOW;
+      const answered = appendTaskEvent(run, runId, "clarification.answered", {
+        question_id: questionId,
+        answer: body.answer,
+      });
+      const completed = appendTaskEvent(run, runId, "run.completed", {
+        terminal_reason: null,
+      });
+      state.messages.push(
+        message(`${runId}-answer`, "user", String(body.answer)),
+        message(`${runId}-completed`, "assistant", "已按所选指标完成任务。"),
+      );
+      await fulfillTaskStream(route, runId, [
+        eventToSse(answered),
+        eventToSse(completed),
+        ["text.delta", { delta: "已按所选指标完成任务。" }],
+        ["done", {
+          run_id: runId,
+          conversation_id: "conversation-1",
+          run_status: "completed",
+          last_sequence: completed.sequence,
+        }],
+      ]);
+      return;
+    }
+    const resumeMatch = path.match(/^\/agent\/runs\/([^/]+)\/resume\/stream$/);
+    if (method === "POST" && resumeMatch) {
+      const runId = decodeURIComponent(resumeMatch[1]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      if (run.approvals.some((approval) => approval.status === "pending")) {
+        await json(route, { detail: "仍有待决定授权" }, 409);
+        return;
+      }
+      run.detail.run.status = "completed";
+      run.detail.run.state_version += 1;
+      run.detail.run.finished_at = NOW;
+      run.detail.run.updated_at = NOW;
+      run.detail.steps.forEach((step) => {
+        if (step.status === "pending") {
+          step.status = "completed";
+          step.completed_at = NOW;
+        }
+      });
+      const resumed = appendTaskEvent(run, runId, "run.resumed", {});
+      const streamEvents: Array<[string, Record<string, unknown>]> = [
+        eventToSse(resumed),
+      ];
+      for (const approval of run.approvals) {
+        if (approval.status !== "approved") continue;
+        approval.status = "consumed";
+        approval.version += 1;
+        approval.consumed_at = NOW;
+        approval.updated_at = NOW;
+        streamEvents.push(eventToSse(appendTaskEvent(
+          run,
+          runId,
+          "approval.consumed",
+          { approval_id: approval.approval_id },
+        )));
+      }
+      const completed = appendTaskEvent(run, runId, "run.completed", {
+        terminal_reason: null,
+      });
+      streamEvents.push(
+        eventToSse(completed),
+        ["done", {
+          run_id: runId,
+          conversation_id: "conversation-1",
+          run_status: "completed",
+          last_sequence: completed.sequence,
+        }],
+      );
+      state.messages.push(
+        message(`${runId}-completed`, "assistant", "任务已在授权边界内完成。"),
+      );
+      await fulfillTaskStream(route, runId, streamEvents);
+      return;
+    }
     if (method === "POST" && path === "/chat/stream") {
       const body = request.postDataJSON() as { message?: string };
       const prompt = body.message ?? "";
-      const turn = prompt.includes("报告")
+      const turn = (
+        prompt.includes("高风险")
+        || prompt.includes("修改计划")
+        || prompt.includes("选择指标")
+      )
+        ? persistCollaborationTurn(state, prompt)
+        : prompt.includes("报告")
         ? persistReportTurn(state, prompt)
         : prompt.includes("定义") || prompt.includes("口径")
           ? persistKnowledgeTurn(state, prompt)
           : persistChartTurn(state, prompt);
+      const runId = turn.frames
+        .map(([, data]) => data.run_id)
+        .find((value): value is string => typeof value === "string");
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream; charset=utf-8",
-        headers: { "Cache-Control": "no-cache" },
+        headers: {
+          "Cache-Control": "no-cache",
+          ...(runId ? { "X-ChatBI-Run-ID": runId } : {}),
+        },
         body: sse(turn.frames),
       });
       return;
@@ -633,4 +1171,69 @@ test("知识库问答生成并持久化来源引用卡", async ({ page }) => {
 
   await page.reload();
   await expect(page.locator(".citation-artifact")).toContainText("指标口径.md");
+});
+
+test("高风险审批只记录决定，用户显式继续后才执行", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请执行高风险导出");
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel).toContainText("high_risk_export");
+  await expect(panel.getByRole("button", { name: "继续执行" })).toBeDisabled();
+
+  await panel.getByLabel("授权原因 high_risk_export").fill("仅允许本轮导出");
+  await panel.getByRole("button", { name: "批准一次" }).click();
+
+  await expect(panel).toContainText("显式点击“继续执行”");
+  await expect(panel).toContainText("已批准");
+  await expect(panel.getByRole("button", { name: "继续执行" })).toBeEnabled();
+  await panel.getByRole("button", { name: "继续执行" }).click();
+
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
+  await expect(panel).toContainText("已消费");
+});
+
+test("暂停态可以提交不可变计划新版本", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请暂停并修改计划");
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await panel.getByRole("button", { name: "修改计划" }).click();
+  await panel.getByLabel("计划摘要").fill("先核对范围，再生成结果");
+  await panel.getByLabel("步骤目的").fill("核对销售数据范围与统计口径");
+  await panel.getByLabel("修改原因").fill("用户要求先确认统计口径");
+  await panel.getByRole("button", { name: "保存新版本" }).click();
+
+  await expect(panel).toContainText("计划已保存为不可变新版本");
+  await expect(panel).toContainText("先核对范围，再生成结果");
+  await expect(panel).toContainText("计划 v2");
+  await expect(panel.locator(".agent-status")).toHaveText("已暂停");
+});
+
+test("阻塞澄清提交答案后继续同一个 TaskRun", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请让我选择指标");
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel).toContainText("请选择本次分析指标");
+  await panel.getByRole("textbox", { name: "澄清答案" }).fill("销售额");
+  await panel.getByRole("button", { name: "提交答案并继续" }).click();
+
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
+  await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
 });

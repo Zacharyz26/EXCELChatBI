@@ -56,6 +56,9 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   且批准只能被完全匹配的执行一次性消费；
 - 阶段 4A API 已提供计划修订、当前主体授权列表和批准/拒绝；所有写操作使用
   `If-Match` 与 `Idempotency-Key`，成功后任务保持暂停并写入事件、快照和 Checkpoint；
+- 阶段 4B React 任务协作面板已接入真实 TaskRun：展示状态/版本/计划/步骤/风险摘要，
+  支持结构化澄清、暂停/显式恢复/取消、计划不可变修订、单步重试及 ApprovalRecord
+  批准/拒绝；批准本身不会恢复任务，浏览器按钮不作为授权依据；
 - `high/critical` 工具在 ToolInvocation 和 MCP 调用前原子暂停；显式恢复后只消费与当前
   subject、计划、步骤、契约和参数完全匹配的批准，已消费绑定由 MCP Client Gateway 与
   MCP Server 双重校验；当前未启用新的高风险生产工具；
@@ -94,7 +97,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ### 当前缺口
 
 - 依赖图调度、Observation 自动重规划、结构化澄清回答和用户触发的单步重试已实现；
-  计划编辑、审批及 Executor/Gateway/Server 执行链已实现，但尚未接入 React；
+  计划编辑、审批及 Executor/Gateway/Server 执行链已接入 React；SSE 游标重连、
+  API/代理重启恢复和 Compose 协作浏览器 E2E 留待 4C；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
 - 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
@@ -107,7 +111,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
 - 单机生产结构 Compose 已提供；多实例外置状态、对象存储、Milvus 根 profile 和重型工具
   CPU/GPU profile 尚未完成；
-- 前端能展示阻塞澄清文本，但尚无结构化澄清控件、计划编辑、审批、暂停/续跑和自主等级；
+- 前端已提供结构化澄清、计划编辑、审批和暂停/续跑；工具来源/权限/健康完整视图、
+  SSE 重连和自主等级尚未实现；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
@@ -117,8 +122,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
 - **v2.5**：阶段 3A–3E 已完成并通过真实 Docker/Compose CI，阶段 3 正式关闭；
-  阶段 4A-1/4A-2 后端协作与审批执行链已完成，下一入口为可干预前端，之后仍需
-  领域语义、自主探索和多数据集分析；
+  阶段 4A 后端协作/审批执行链与 4B React 协作交互已完成，下一入口为 4C 重连恢复和
+  Compose 协作 E2E，之后仍需领域语义、自主探索和多数据集分析；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -153,9 +158,9 @@ v2.5 阶段 3E（已完成，Docker/Compose CI 全绿）
   SQLite v6 不可变 Dataset 锚点 + 五阶段只读来源图 + 安全 React 血缘面板
   领域中立质量门禁 + readiness/备份 hash + API 重启/离线恢复图一致性
 
-v2.5 阶段 4A（开发中；4A-1/4A-2 后端链路已完成）
+v2.5 阶段 4（开发中；4A 后端链路、4B React 协作交互已完成）
   SQLite v7 + 计划干预/审批授权边界 + Executor/Gateway/Server 双重校验
-  → 结构化澄清与任务控制前端
+  React TaskRun/计划/澄清/审批/任务控制 → 4C 重连恢复与 Compose 协作 E2E
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证
@@ -173,7 +178,9 @@ v3.0
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
 v2.4 详细设计与阶段 1–2E 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
 v2.5 当前入口、阶段 3 交付记录与
-[阶段 4A 实施记录](./docs/v2.5/阶段4A实施记录.md)见 [`docs/v2.5/README.md`](./docs/v2.5/README.md)。
+[阶段 4A](./docs/v2.5/阶段4A实施记录.md)/
+[阶段 4B](./docs/v2.5/阶段4B实施记录.md)实施记录见
+[`docs/v2.5/README.md`](./docs/v2.5/README.md)。
 v2.4 之后各阶段的 MCP/Docker 演进见
 [`docs/MCP与Docker全阶段演进设计.md`](./docs/MCP与Docker全阶段演进设计.md)。
 

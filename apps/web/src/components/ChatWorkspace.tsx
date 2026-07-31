@@ -5,6 +5,7 @@ import {
   kbOverview,
   rebuildKnowledgeBase,
 } from "@/api/client";
+import { AgentControlPanel } from "@/components/AgentControlPanel";
 import { ChatPanel } from "@/components/ChatPanel";
 import { LineagePanel } from "@/components/LineagePanel";
 import { MemoryGovernancePanel } from "@/components/MemoryGovernancePanel";
@@ -24,6 +25,10 @@ export function ChatWorkspace() {
   const artifacts = useWorkspaceStore((state) => state.artifacts);
   const activeProjectId = useWorkspaceStore((state) => state.activeProjectId);
   const activeConversationId = useWorkspaceStore((state) => state.activeConversationId);
+  const activeRunId = useWorkspaceStore((state) => state.activeRunId);
+  const activeRun = useWorkspaceStore((state) => state.activeRun);
+  const approvals = useWorkspaceStore((state) => state.approvals);
+  const pendingClarification = useWorkspaceStore((state) => state.pendingClarification);
   const selectProject = useWorkspaceStore((state) => state.selectProject);
   const selectConversation = useWorkspaceStore((state) => state.selectConversation);
   const addProject = useWorkspaceStore((state) => state.addProject);
@@ -44,6 +49,7 @@ export function ChatWorkspace() {
   const [datasetNameDraft, setDatasetNameDraft] = useState("");
   const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [lineagePanelOpen, setLineagePanelOpen] = useState(false);
+  const [agentControlOpen, setAgentControlOpen] = useState(false);
 
   // 本对话正在使用的数据集：以对话工件的 dataset_ref 为事实来源
   const usedDatasetRefs = new Set(
@@ -65,6 +71,8 @@ export function ChatWorkspace() {
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const busy = loading || uploading || streaming;
+  const taskNeedsAttention = !!pendingClarification
+    || approvals.some((approval) => approval.status === "pending");
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -312,6 +320,15 @@ export function ChatWorkspace() {
           <div className="conversation-header__controls">
             <button
               type="button"
+              className={`conversation-header__agent${taskNeedsAttention ? " conversation-header__agent--attention" : ""}`}
+              onClick={() => setAgentControlOpen(true)}
+              disabled={!activeRunId}
+            >
+              任务协作
+              {taskNeedsAttention && <span aria-label="任务需要处理" />}
+            </button>
+            <button
+              type="button"
               className="conversation-header__lineage"
               onClick={() => setLineagePanelOpen(true)}
               disabled={!activeProject}
@@ -329,7 +346,13 @@ export function ChatWorkspace() {
           </div>
           <div className="conversation-header__status">
             <span className={`connection-dot${streaming ? " connection-dot--busy" : ""}`} />
-            {streaming ? "正在生成" : datasets.length > 0 ? `${datasets.length} 个数据集` : "未上传数据"}
+            {streaming
+              ? "正在生成"
+              : activeRun
+                ? runStatusText(activeRun.run.status)
+                : datasets.length > 0
+                  ? `${datasets.length} 个数据集`
+                  : "未上传数据"}
           </div>
         </header>
 
@@ -366,8 +389,26 @@ export function ChatWorkspace() {
           onClose={() => setLineagePanelOpen(false)}
         />
       )}
+      {agentControlOpen && (
+        <AgentControlPanel onClose={() => setAgentControlOpen(false)} />
+      )}
     </div>
   );
+}
+
+function runStatusText(status: string): string {
+  const labels: Record<string, string> = {
+    planning: "任务规划中",
+    waiting_user: "等待你的回答",
+    running: "任务执行中",
+    verifying: "正在验证",
+    paused: "任务已暂停",
+    completed: "任务已完成",
+    blocked: "任务已阻塞",
+    failed: "任务失败",
+    cancelled: "任务已取消",
+  };
+  return labels[status] ?? status;
 }
 
 function DatasetContext({

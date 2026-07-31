@@ -1,19 +1,35 @@
 import { create, type StoreApi } from "zustand";
 import {
+  answerAgentClarification,
+  cancelAgentRun,
   createConversation as createConversationRequest,
   createProject as createProjectRequest,
+  decideAgentApproval,
   deleteConversation as deleteConversationRequest,
   deleteDataset as deleteDatasetRequest,
+  getAgentRun,
+  getAgentRunEvents,
   getConversation,
+  listAgentApprovals,
   listConversations,
   listDatasets,
   listProjects,
+  pauseAgentRun,
+  resumeAgentRun,
+  retryAgentStep,
+  reviseAgentPlan,
   streamChat,
   updateConversation as updateConversationRequest,
   updateDataset as updateDatasetRequest,
   uploadExcel,
 } from "@/api/client";
 import type {
+  AgentApproval,
+  AgentClarification,
+  AgentPlanDefinition,
+  AgentRunDetail,
+  AgentRunStatus,
+  AgentTaskEvent,
   ChatStreamEvent,
   LiveTurnItem,
   ToolStep,
@@ -39,6 +55,12 @@ interface WorkspaceState {
   activeConversationId: string | null;
   /** 正在流式进行的 Agent 轮次卡片（理解/执行/工件/正文）；结束后并入 messages。 */
   liveTurn: LiveTurnItem[];
+  /** 当前对话最近一次已知 TaskRun；runId 在收到响应头时即建立，详情按需刷新。 */
+  activeRunId: string | null;
+  activeRun: AgentRunDetail | null;
+  approvals: AgentApproval[];
+  pendingClarification: AgentClarification | null;
+  collaborationBusy: string | null;
   initialize: () => Promise<void>;
   selectProject: (projectId: string) => Promise<void>;
   addProject: (name: string) => Promise<void>;
@@ -54,6 +76,22 @@ interface WorkspaceState {
   removeDataset: (datasetRef: string, force?: boolean) => Promise<string | null>;
   uploadFile: (file: File) => Promise<void>;
   sendMessage: (message: string) => Promise<void>;
+  refreshActiveRun: (runId?: string) => Promise<void>;
+  pauseActiveRun: () => Promise<void>;
+  resumeActiveRun: () => Promise<void>;
+  cancelActiveRun: () => Promise<void>;
+  answerClarification: (answer: unknown) => Promise<void>;
+  retryActiveStep: (stepId: string) => Promise<void>;
+  reviseActivePlan: (
+    plan: AgentPlanDefinition,
+    reason: string,
+    skippedStepIds: string[],
+  ) => Promise<void>;
+  decideApproval: (
+    approvalId: string,
+    decision: "approved" | "denied",
+    reason: string,
+  ) => Promise<void>;
   clearError: () => void;
 }
 
@@ -80,6 +118,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activeConversationId: null,
   activeDatasetRef: null,
   liveTurn: [],
+  activeRunId: null,
+  activeRun: null,
+  approvals: [],
+  pendingClarification: null,
+  collaborationBusy: null,
 
   initialize: async () => {
     if (get().initialized || get().loading) return;
@@ -111,6 +154,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       messages: [],
       artifacts: [],
       liveTurn: [],
+      activeRunId: null,
+      activeRun: null,
+      approvals: [],
+      pendingClarification: null,
       loading: true,
       error: null,
     });
@@ -135,6 +182,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         messages: detail.messages,
         artifacts: detail.artifacts,
       });
+      const rememberedRunId = rememberedRun(conversationId);
+      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -169,6 +218,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         messages: [],
         artifacts: [],
         liveTurn: [],
+        activeRunId: null,
+        activeRun: null,
+        approvals: [],
+        pendingClarification: null,
       }));
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
@@ -189,6 +242,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       messages: [],
       artifacts: [],
       liveTurn: [],
+      activeRunId: null,
+      activeRun: null,
+      approvals: [],
+      pendingClarification: null,
       loading: true,
       error: null,
     });
@@ -196,6 +253,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const detail = await getConversation(conversationId);
       if (requestSequence !== navigationSequence) return;
       set({ messages: detail.messages, artifacts: detail.artifacts });
+      const rememberedRunId = rememberedRun(conversationId);
+      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -264,7 +323,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
     // 删的是当前对话：切到最近一条；一条不剩则新建（项目内始终有可用对话）
     const requestSequence = ++navigationSequence;
-    set({ activeConversationId: null, messages: [], artifacts: [], liveTurn: [], loading: true });
+    set({
+      activeConversationId: null,
+      messages: [],
+      artifacts: [],
+      liveTurn: [],
+      activeRunId: null,
+      activeRun: null,
+      approvals: [],
+      pendingClarification: null,
+      loading: true,
+    });
     try {
       let next = remaining[0];
       if (!next && projectId) {
@@ -280,6 +349,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         messages: detail.messages,
         artifacts: detail.artifacts,
       });
+      const rememberedRunId = rememberedRun(next.id);
+      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -345,12 +416,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       messages: [...state.messages, pendingUser],
       streaming: true,
       liveTurn: [],
+      activeRunId: null,
+      activeRun: null,
+      approvals: [],
+      pendingClarification: null,
       error: null,
     }));
 
     try {
       await streamChat(conversationId, content, (event) => {
         if (get().activeConversationId !== conversationId) return;
+        applyCollaborationEvent(event, conversationId, set);
         if (event.event === "meta") {
           applyMetaEvent(event, temporaryUserId, conversationId, set);
         } else if (event.event === "error") {
@@ -362,6 +438,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         } else {
           applyTurnEvent(event, set);
         }
+      }, (runId) => {
+        if (get().activeConversationId !== conversationId) return;
+        rememberRun(conversationId, runId);
+        set({ activeRunId: runId });
       });
       if (!terminalEventReceived) {
         streamError = "流式连接意外中断，请重试。";
@@ -378,13 +458,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         listDatasets(projectId),
       ]);
       if (get().activeConversationId === conversationId) {
+        const runId = get().activeRunId;
         set({
           messages: detail.messages,
           artifacts: detail.artifacts,
           conversations,
           datasets,
+          liveTurn: [],
           error: streamError,
         });
+        if (runId) await get().refreshActiveRun(runId);
       }
     } catch (error) {
       set({ error: streamError ?? errorMessage(error) });
@@ -393,10 +476,410 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
+  refreshActiveRun: async (requestedRunId) => {
+    const runId = requestedRunId ?? get().activeRunId;
+    const conversationId = get().activeConversationId;
+    if (!runId || !conversationId) return;
+    const ownsBusy = get().collaborationBusy === null;
+    if (ownsBusy) set({ collaborationBusy: "refresh", error: null });
+    try {
+      const [detail, approvals, events] = await Promise.all([
+        getAgentRun(runId),
+        listAgentApprovals(runId),
+        getAgentRunEvents(runId),
+      ]);
+      if (
+        get().activeConversationId !== conversationId
+        || detail.run.conversation_id !== conversationId
+      ) return;
+      rememberRun(conversationId, runId);
+      set({
+        activeRunId: runId,
+        activeRun: detail,
+        approvals,
+        pendingClarification: pendingClarification(detail, events.events),
+      });
+    } catch (error) {
+      if (requestedRunId && rememberedRun(conversationId) === requestedRunId) {
+        forgetRun(conversationId);
+      }
+      set({ error: errorMessage(error) });
+    } finally {
+      if (ownsBusy && get().collaborationBusy === "refresh") {
+        set({ collaborationBusy: null });
+      }
+    }
+  },
+
+  pauseActiveRun: async () => {
+    const runId = get().activeRunId;
+    if (!runId || get().collaborationBusy) return;
+    set({ collaborationBusy: "pause", error: null });
+    try {
+      const fresh = await getAgentRun(runId);
+      const response = await pauseAgentRun(runId, fresh.run.state_version);
+      set({
+        activeRun: { ...fresh, run: response.run },
+        pendingClarification: null,
+      });
+      await get().refreshActiveRun(runId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    } finally {
+      set({ collaborationBusy: null });
+    }
+  },
+
+  resumeActiveRun: async () => {
+    await continueActiveRun(
+      get,
+      set,
+      "resume",
+      async (fresh, onEvent) => {
+        await resumeAgentRun(
+          fresh.run.run_id,
+          fresh.run.state_version,
+          onEvent,
+        );
+      },
+    );
+  },
+
+  cancelActiveRun: async () => {
+    const runId = get().activeRunId;
+    if (!runId || get().collaborationBusy) return;
+    set({ collaborationBusy: "cancel", error: null });
+    try {
+      const fresh = await getAgentRun(runId);
+      const response = await cancelAgentRun(runId, fresh.run.state_version);
+      set({
+        activeRun: { ...fresh, run: response.run },
+        pendingClarification: null,
+      });
+      await get().refreshActiveRun(runId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+    } finally {
+      set({ collaborationBusy: null });
+    }
+  },
+
+  answerClarification: async (answer) => {
+    const clarification = get().pendingClarification;
+    if (!clarification) return;
+    await continueActiveRun(
+      get,
+      set,
+      "clarification",
+      async (fresh, onEvent) => {
+        await answerAgentClarification(
+          fresh.run.run_id,
+          fresh.run.state_version,
+          clarification.question_id,
+          clarification.resume_token,
+          answer,
+          onEvent,
+        );
+      },
+    );
+  },
+
+  retryActiveStep: async (stepId) => {
+    await continueActiveRun(
+      get,
+      set,
+      "retry",
+      async (fresh, onEvent) => {
+        await retryAgentStep(
+          fresh.run.run_id,
+          fresh.run.state_version,
+          stepId,
+          onEvent,
+        );
+      },
+    );
+  },
+
+  reviseActivePlan: async (plan, reason, skippedStepIds) => {
+    const runId = get().activeRunId;
+    if (!runId || get().collaborationBusy) return;
+    set({ collaborationBusy: "plan", error: null });
+    try {
+      const fresh = await getAgentRun(runId);
+      const response = await reviseAgentPlan(
+        runId,
+        fresh.run.state_version,
+        plan,
+        reason,
+        skippedStepIds,
+      );
+      set({
+        activeRun: {
+          ...fresh,
+          run: response.run,
+          plan: response.plan,
+          steps: response.steps,
+        },
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      throw error;
+    } finally {
+      set({ collaborationBusy: null });
+    }
+  },
+
+  decideApproval: async (approvalId, decision, reason) => {
+    const runId = get().activeRunId;
+    if (!runId || get().collaborationBusy) return;
+    set({ collaborationBusy: `approval-${decision}`, error: null });
+    try {
+      const [fresh, currentApprovals] = await Promise.all([
+        getAgentRun(runId),
+        listAgentApprovals(runId),
+      ]);
+      const approval = currentApprovals.find(
+        (item) => item.approval_id === approvalId,
+      );
+      if (!approval) throw new Error("授权请求已不存在或当前主体无权查看。");
+      const response = await decideAgentApproval(
+        runId,
+        fresh.run.state_version,
+        approvalId,
+        approval.version,
+        decision,
+        reason,
+      );
+      set({
+        activeRun: { ...fresh, run: response.run },
+        approvals: currentApprovals.map((item) => (
+          item.approval_id === approvalId ? response.approval : item
+        )),
+      });
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      throw error;
+    } finally {
+      set({ collaborationBusy: null });
+    }
+  },
+
   clearError: () => set({ error: null }),
 }));
 
 type WorkspaceSetter = StoreApi<WorkspaceState>["setState"];
+type WorkspaceGetter = StoreApi<WorkspaceState>["getState"];
+
+async function continueActiveRun(
+  get: WorkspaceGetter,
+  set: WorkspaceSetter,
+  operation: string,
+  execute: (
+    fresh: AgentRunDetail,
+    onEvent: (event: ChatStreamEvent) => void,
+  ) => Promise<void>,
+): Promise<void> {
+  const runId = get().activeRunId;
+  const conversationId = get().activeConversationId;
+  const projectId = get().activeProjectId;
+  if (
+    !runId
+    || !conversationId
+    || !projectId
+    || get().collaborationBusy
+    || get().uploading
+  ) return;
+
+  let streamError: string | null = null;
+  set({
+    collaborationBusy: operation,
+    streaming: true,
+    liveTurn: [],
+    error: null,
+  });
+  try {
+    const fresh = await getAgentRun(runId);
+    if (fresh.run.conversation_id !== conversationId) {
+      throw new Error("当前 TaskRun 不属于活动对话。");
+    }
+    set({ activeRun: fresh });
+    await execute(fresh, (event) => {
+      if (get().activeConversationId !== conversationId) return;
+      applyCollaborationEvent(event, conversationId, set);
+      if (event.event === "error") {
+        streamError = stringValue(event.data.message)
+          || "任务继续执行失败，请刷新状态后重试。";
+        set({ error: streamError });
+      } else if (event.event !== "meta" && event.event !== "done") {
+        applyTurnEvent(event, set);
+      }
+    });
+  } catch (error) {
+    streamError = errorMessage(error);
+  }
+
+  try {
+    const [detail, conversations, datasets] = await Promise.all([
+      getConversation(conversationId),
+      listConversations(projectId),
+      listDatasets(projectId),
+    ]);
+    if (get().activeConversationId === conversationId) {
+      set({
+        messages: detail.messages,
+        artifacts: detail.artifacts,
+        conversations,
+        datasets,
+        liveTurn: [],
+        error: streamError,
+      });
+      await get().refreshActiveRun(runId);
+    }
+  } catch (error) {
+    set({ error: streamError ?? errorMessage(error) });
+  } finally {
+    set({
+      streaming: false,
+      liveTurn: [],
+      collaborationBusy: null,
+    });
+  }
+}
+
+function applyCollaborationEvent(
+  event: ChatStreamEvent,
+  conversationId: string,
+  set: WorkspaceSetter,
+): void {
+  const runId = stringValue(event.data.run_id);
+  if (runId) rememberRun(conversationId, runId);
+  const payload = objectValue(event.data.payload);
+  const nextStatus = runStatusForEvent(event);
+  const clarification = event.event === "waiting_user"
+    ? clarificationFromPayload(payload, numberValue(event.data.sequence) ?? 0)
+    : undefined;
+
+  set((state) => {
+    const activeRunId = runId || state.activeRunId;
+    const activeRun = (
+      state.activeRun
+      && activeRunId === state.activeRun.run.run_id
+      && nextStatus
+    )
+      ? {
+        ...state.activeRun,
+        run: { ...state.activeRun.run, status: nextStatus },
+      }
+      : state.activeRun;
+    return {
+      activeRunId,
+      activeRun,
+      pendingClarification: event.event === "clarification.answered"
+        ? null
+        : clarification ?? state.pendingClarification,
+    };
+  });
+}
+
+function runStatusForEvent(event: ChatStreamEvent): AgentRunStatus | undefined {
+  if (event.event === "done" || event.event === "error") {
+    const status = stringValue(event.data.run_status);
+    return isRunStatus(status) ? status : undefined;
+  }
+  const statuses: Record<string, AgentRunStatus> = {
+    "run.created": "planning",
+    "run.started": "running",
+    "run.resumed": "running",
+    "run.paused": "paused",
+    "approval.requested": "paused",
+    "approval.waiting": "paused",
+    waiting_user: "waiting_user",
+    "clarification.answered": "planning",
+    "verification.started": "verifying",
+    "run.completed": "completed",
+    "run.blocked": "blocked",
+    "run.failed": "failed",
+    "run.cancelled": "cancelled",
+  };
+  return statuses[event.event];
+}
+
+function isRunStatus(value: string): value is AgentRunStatus {
+  return [
+    "planning",
+    "waiting_user",
+    "running",
+    "verifying",
+    "paused",
+    "completed",
+    "blocked",
+    "failed",
+    "cancelled",
+  ].includes(value);
+}
+
+function pendingClarification(
+  detail: AgentRunDetail,
+  events: AgentTaskEvent[],
+): AgentClarification | null {
+  if (detail.run.status !== "waiting_user") return null;
+  const waiting = [...events].reverse().find(
+    (event) => event.event_type === "waiting_user",
+  );
+  return waiting
+    ? clarificationFromPayload(waiting.payload, waiting.sequence) ?? null
+    : null;
+}
+
+function clarificationFromPayload(
+  payload: Record<string, unknown>,
+  sequence: number,
+): AgentClarification | undefined {
+  const questionId = stringValue(payload.question_id);
+  const question = stringValue(payload.question);
+  const resumeToken = stringValue(payload.resume_token);
+  if (!questionId || !question || !resumeToken) return undefined;
+  return {
+    question_id: questionId,
+    question,
+    reason: stringValue(payload.reason),
+    about: stringValue(payload.about),
+    resume_token: resumeToken,
+    answer_schema: objectValue(payload.answer_schema),
+    sequence,
+  };
+}
+
+function runStorageKey(conversationId: string): string {
+  return `chatbi.agentRun.${conversationId}`;
+}
+
+function rememberRun(conversationId: string, runId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(runStorageKey(conversationId), runId);
+  } catch {
+    /* 无存储权限时保留当前内存状态。 */
+  }
+}
+
+function rememberedRun(conversationId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage.getItem(runStorageKey(conversationId));
+  } catch {
+    return null;
+  }
+}
+
+function forgetRun(conversationId: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(runStorageKey(conversationId));
+  } catch {
+    /* 忽略不可写存储。 */
+  }
+}
 
 function applyMetaEvent(
   event: ChatStreamEvent,

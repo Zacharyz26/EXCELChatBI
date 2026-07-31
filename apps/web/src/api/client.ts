@@ -1,5 +1,12 @@
 // 后端 API 客户端
 import type {
+  AgentApproval,
+  AgentApprovalDecisionResponse,
+  AgentControlResponse,
+  AgentPlanDefinition,
+  AgentPlanRevisionResponse,
+  AgentRunDetail,
+  AgentRunEventsResponse,
   ChatStreamEvent,
   ConversationDetail,
   IngestResponse,
@@ -265,6 +272,196 @@ function operationKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+/** 读取一个 TaskRun 的当前计划、步骤、状态版本和快照。 */
+export async function getAgentRun(runId: string): Promise<AgentRunDetail> {
+  const resp = await apiFetch(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}`);
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 读取 TaskRun 事件，用于恢复当前阻塞澄清。 */
+export async function getAgentRunEvents(runId: string): Promise<AgentRunEventsResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events?limit=1000`,
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 读取当前认证主体可见的高风险授权摘要。 */
+export async function listAgentApprovals(runId: string): Promise<AgentApproval[]> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/approvals`,
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 在无活动工具调用的安全边界暂停 TaskRun。 */
+export async function pauseAgentRun(
+  runId: string,
+  stateVersion: number,
+): Promise<AgentControlResponse> {
+  return runControlRequest(runId, "pause", stateVersion, "pause");
+}
+
+/** 取消 TaskRun；终态任务由服务端拒绝。 */
+export async function cancelAgentRun(
+  runId: string,
+  stateVersion: number,
+): Promise<AgentControlResponse> {
+  return runControlRequest(runId, "cancel", stateVersion, "cancel");
+}
+
+async function runControlRequest(
+  runId: string,
+  action: "pause" | "cancel",
+  stateVersion: number,
+  keyPrefix: string,
+): Promise<AgentControlResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/${action}`,
+    {
+      method: "POST",
+      headers: {
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey(`run-${keyPrefix}`),
+      },
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 显式恢复 paused TaskRun，并消费恢复后的 SSE。 */
+export async function resumeAgentRun(
+  runId: string,
+  stateVersion: number,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/resume/stream`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("run-resume"),
+      },
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  await consumeEventStream(resp, onEvent);
+}
+
+/** 回答一个服务端持久化的阻塞澄清，并继续原 TaskRun。 */
+export async function answerAgentClarification(
+  runId: string,
+  stateVersion: number,
+  questionId: string,
+  resumeToken: string,
+  answer: unknown,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/clarifications/`
+      + `${encodeURIComponent(questionId)}/answer/stream`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("clarification-answer"),
+      },
+      body: JSON.stringify({ answer, resume_token: resumeToken }),
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  await consumeEventStream(resp, onEvent);
+}
+
+/** 从 paused 边界只重试一个失败/阻塞步骤，并继续原 TaskRun。 */
+export async function retryAgentStep(
+  runId: string,
+  stateVersion: number,
+  stepId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/steps/`
+      + `${encodeURIComponent(stepId)}/retry/stream`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("step-retry"),
+      },
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  await consumeEventStream(resp, onEvent);
+}
+
+/** 提交完整计划新版本；服务端继续验证 capability 与已完成步骤边界。 */
+export async function reviseAgentPlan(
+  runId: string,
+  stateVersion: number,
+  plan: AgentPlanDefinition,
+  reason: string,
+  skippedStepIds: string[],
+): Promise<AgentPlanRevisionResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/plan/revisions`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("plan-revision"),
+      },
+      body: JSON.stringify({
+        plan,
+        reason,
+        skipped_step_ids: skippedStepIds,
+      }),
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 对固定版本 ApprovalRecord 做批准或拒绝；决定本身不会恢复任务。 */
+export async function decideAgentApproval(
+  runId: string,
+  stateVersion: number,
+  approvalId: string,
+  approvalVersion: number,
+  decision: "approved" | "denied",
+  reason: string,
+): Promise<AgentApprovalDecisionResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/approvals/`
+      + `${encodeURIComponent(approvalId)}/decision`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("approval-decision"),
+      },
+      body: JSON.stringify({
+        expected_version: approvalVersion,
+        decision,
+        reason,
+      }),
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
 /**
  * 通过 fetch 消费 POST SSE。原生 EventSource 不支持 POST，因此在这里解析事件帧；
  * 支持代理常见的 CRLF、分块边界和多行 data。
@@ -273,6 +470,7 @@ export async function streamChat(
   conversationId: string,
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
+  onOpen?: (runId: string) => void,
 ): Promise<void> {
   const resp = await apiFetch(`${API_BASE}/chat/stream`, {
     method: "POST",
@@ -280,6 +478,15 @@ export async function streamChat(
     body: JSON.stringify({ conversation_id: conversationId, message }),
   });
   if (!resp.ok) return asError(resp);
+  const runId = resp.headers.get("X-ChatBI-Run-ID");
+  if (runId) onOpen?.(runId);
+  await consumeEventStream(resp, onEvent);
+}
+
+async function consumeEventStream(
+  resp: Response,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
   if (!resp.body) throw new Error("浏览器未提供可读取的流式响应");
 
   const reader = resp.body.getReader();
