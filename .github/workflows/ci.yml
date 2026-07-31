@@ -42,12 +42,13 @@ jobs:
           --registry config/models.example.yaml --validate-only
 
       - name: Run deterministic conversation compaction quality gate
+        id: compaction_quality
         run: >-
           uv run --frozen python scripts/compaction_quality_eval.py
           --enforce --json-output .data/compaction-quality.json
 
       - name: Upload conversation compaction quality report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compaction_quality.outcome != 'skipped' }}
         uses: actions/upload-artifact@v5
         with:
           name: compaction-quality
@@ -56,12 +57,13 @@ jobs:
           retention-days: 30
 
       - name: Run deterministic reference resolution quality gate
+        id: coref_quality
         run: >-
           uv run --frozen python scripts/coref_quality_eval.py
           --enforce --json-output .data/coref-quality.json
 
       - name: Upload reference resolution quality report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.coref_quality.outcome != 'skipped' }}
         uses: actions/upload-artifact@v5
         with:
           name: coref-quality
@@ -70,12 +72,13 @@ jobs:
           retention-days: 30
 
       - name: Run fixed-reference MCP transport equivalence probe
+        id: coref_mcp_transport
         run: >-
           uv run --frozen python scripts/mcp_transport_probe.py
           --output .data/coref-mcp-transport.json
 
       - name: Upload fixed-reference MCP transport report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.coref_mcp_transport.outcome != 'skipped' }}
         uses: actions/upload-artifact@v5
         with:
           name: coref-mcp-transport
@@ -84,6 +87,7 @@ jobs:
           retention-days: 30
 
       - name: Run deterministic knowledge quality gate
+        id: kb_quality
         run: >-
           uv run --frozen python scripts/kb_eval.py
           --enforce --profile baseline --json-output .data/kb-eval.json
@@ -94,7 +98,7 @@ jobs:
           RAG_MIN_RELEVANCE: "0.0"
 
       - name: Upload knowledge evaluation report
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.kb_quality.outcome != 'skipped' }}
         uses: actions/upload-artifact@v5
         with:
           name: kb-evaluation

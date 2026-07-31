@@ -69,6 +69,7 @@ from sse_starlette.sse import AppStatus  # noqa: E402
 
 _DATASET_REF = "d" * 32
 _REPORT_ID = "e" * 32
+_TIMEOUT_TEST_RUN_BUDGET_SECONDS = 30
 
 
 class ScriptedGateway:
@@ -1030,7 +1031,8 @@ async def test_model_timeout_persists_failed_terminal_state(
     gateway = ScriptedGateway([{"delay": 0.2, "deltas": ["太晚了"]}])
     config = AgentLoopConfig(
         model_timeout_seconds=0.01,  # type: ignore[arg-type]
-        run_timeout_seconds=1,
+        # 隔离模型超时语义，避免上下文准备耗时与整轮超时竞争。
+        run_timeout_seconds=_TIMEOUT_TEST_RUN_BUDGET_SECONDS,
     )
 
     events = await _run_loop(
@@ -1074,7 +1076,8 @@ async def test_tool_timeout_is_unknown_and_blocks_automatic_retry(
     )
     config = AgentLoopConfig(
         tool_timeout_seconds=0.01,  # type: ignore[arg-type]
-        run_timeout_seconds=1,
+        # 隔离工具超时语义，给 unknown/blocked 终态留出持久化余量。
+        run_timeout_seconds=_TIMEOUT_TEST_RUN_BUDGET_SECONDS,
     )
 
     events = await _run_loop(
