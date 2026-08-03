@@ -139,6 +139,21 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     ]
 
 
+def test_tool_audit_metadata_comes_from_routed_contract() -> None:
+    metadata = _registry().audit_metadata_for_tool("generate_report")
+
+    assert metadata["service_name"] == "agent-tools"
+    assert metadata["tool_name"] == "generate_report"
+    assert metadata["tool_version"] == "1.0.0"
+    assert metadata["risk_level"] == "medium"
+    assert metadata["required_permissions"] == ["analysis:execute"]
+    assert metadata["artifact_types"] == ["report"]
+    assert metadata["read_only"] is False
+    assert metadata["idempotent"] is False
+    assert isinstance(metadata["contract_hash"], str)
+    assert len(cast(str, metadata["contract_hash"])) == 64
+
+
 # ── execute 入口 ──
 
 

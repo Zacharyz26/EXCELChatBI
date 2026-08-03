@@ -116,6 +116,191 @@ def test_task_run_events_transition_and_optimistic_version(tmp_path: Path) -> No
         )
 
 
+def test_latest_conversation_run_is_server_authoritative(tmp_path: Path) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    first_contract = build_minimal_contract(
+        run_id="latest-run-first",
+        user_text="第一次分析",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    first, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=first_contract,
+        budget={"max_tool_calls": 2},
+    )
+    _, second_message = session.start_user_turn(
+        conversation_id=conversation_id,
+        content="第二次分析",
+        suggested_title="第二次分析",
+    )
+    second_contract = build_minimal_contract(
+        run_id="latest-run-second",
+        user_text="第二次分析",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    second, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=second_message.id,
+        contract=second_contract,
+        budget={"max_tool_calls": 2},
+    )
+    empty_conversation = session.create_conversation(project_id)
+
+    assert tasks.get_latest_run_for_conversation(conversation_id) == second
+    assert tasks.get_latest_run_for_conversation(conversation_id) != first
+    assert tasks.get_latest_run_for_conversation(empty_conversation.id) is None
+
+
+def test_terminal_run_feedback_and_analysis_branch_are_append_only(
+    tmp_path: Path,
+) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    parent_contract = build_minimal_contract(
+        run_id="parent-analysis-run",
+        user_text="完成基线分析",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    parent, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=parent_contract,
+        budget={"max_tool_calls": 2, "autonomy_mode": "read_only"},
+    )
+
+    with pytest.raises(ControlConflict, match="终态"):
+        tasks.record_user_feedback(
+            parent.run_id,
+            expected_version=parent.state_version,
+            idempotency_key="feedback-before-terminal",
+            subject_user_id="user-a",
+            rating="helpful",
+            comment=None,
+        )
+
+    parent, _ = tasks.transition(
+        parent.run_id,
+        expected_version=parent.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    parent, _ = tasks.transition(
+        parent.run_id,
+        expected_version=parent.state_version,
+        status="verifying",
+        event_type="verification.started",
+        payload={},
+    )
+    parent, _ = tasks.transition(
+        parent.run_id,
+        expected_version=parent.state_version,
+        status="completed",
+        event_type="run.completed",
+        payload={},
+    )
+    assert parent.autonomy_mode == "read_only"
+
+    feedback_run, feedback_event, created = tasks.record_user_feedback(
+        parent.run_id,
+        expected_version=parent.state_version,
+        idempotency_key="feedback-terminal-parent",
+        subject_user_id="user-a",
+        rating="not_helpful",
+        comment="请改用稳健趋势方法",
+    )
+    replayed_run, replayed_event, replayed_created = tasks.record_user_feedback(
+        parent.run_id,
+        expected_version=parent.state_version,
+        idempotency_key="feedback-terminal-parent",
+        subject_user_id="user-a",
+        rating="not_helpful",
+        comment="请改用稳健趋势方法",
+    )
+    assert created is True and replayed_created is False
+    assert replayed_run == feedback_run
+    assert replayed_event == feedback_event
+    assert feedback_event.event_type == "user.feedback"
+    assert feedback_event.payload["rating"] == "not_helpful"
+    assert "control" in feedback_event.payload
+    assert tasks.list_recent_events_by_type(
+        parent.run_id,
+        "user.feedback",
+        limit=1,
+    ) == [feedback_event]
+
+    with pytest.raises(IdempotencyConflict):
+        tasks.record_user_feedback(
+            parent.run_id,
+            expected_version=feedback_run.state_version,
+            idempotency_key="feedback-terminal-parent",
+            subject_user_id="user-b",
+            rating="not_helpful",
+            comment="请改用稳健趋势方法",
+        )
+    with pytest.raises(ControlConflict, match="Evidence"):
+        tasks.record_user_feedback(
+            parent.run_id,
+            expected_version=feedback_run.state_version,
+            idempotency_key="feedback-invalid-evidence",
+            subject_user_id="user-a",
+            rating="helpful",
+            comment=None,
+            evidence_ids=("missing-evidence",),
+        )
+
+    _, child_message = session.start_user_turn(
+        conversation_id=conversation_id,
+        content="创建稳健趋势分支",
+        suggested_title="创建稳健趋势分支",
+    )
+    child_contract = build_minimal_contract(
+        run_id="child-analysis-run",
+        user_text="创建稳健趋势分支",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    child, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=child_message.id,
+        contract=child_contract,
+        budget={"max_tool_calls": 2, "autonomy_mode": "autonomous"},
+        parent_run_id=parent.run_id,
+    )
+    assert child.parent_run_id == parent.run_id
+    assert child.autonomy_mode == "autonomous"
+    assert [item.run_id for item in tasks.list_runs_for_conversation(conversation_id)][
+        :2
+    ] == [child.run_id, parent.run_id]
+
+    with pytest.raises(ControlConflict, match="终态"):
+        tasks.create_run(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            user_message_id=child_message.id,
+            contract=build_minimal_contract(
+                run_id="grandchild-analysis-run",
+                user_text="不允许从活动分支继续分叉",
+                chart_required=False,
+                report_required=False,
+                pdf_required=False,
+            ),
+            budget={"max_tool_calls": 2},
+            parent_run_id=child.run_id,
+        )
+
+
 def test_task_plan_and_steps_are_versioned_and_persisted_atomically(
     tmp_path: Path,
 ) -> None:

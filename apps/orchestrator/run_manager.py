@@ -151,12 +151,20 @@ class AgentRunManager:
         return True
 
     def resume(self, run_id: str) -> AsyncGenerator[SseItem, None] | None:
+        subscription = self.subscribe(run_id)
+        if subscription is None:
+            return None
+        entry = self._runs[run_id]
+        entry.control.resume()
+        return subscription
+
+    def subscribe(self, run_id: str) -> AsyncGenerator[SseItem, None] | None:
+        """只订阅活动 producer，不改变暂停、澄清或取消控制状态。"""
         entry = self._runs.get(run_id)
         if entry is None or entry.finished:
             return None
         queue: asyncio.Queue[object] = asyncio.Queue()
         entry.subscribers.add(queue)
-        entry.control.resume()
         return self._subscription(run_id, entry, queue)
 
     def answer(

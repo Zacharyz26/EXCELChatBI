@@ -10,6 +10,12 @@ interface MockWorkspaceState {
   artifacts: Array<Record<string, unknown>>;
   kbDocuments: Array<Record<string, unknown>>;
   agentRuns: Record<string, MockAgentRunState>;
+  chatRequests: Array<{
+    message: string;
+    autonomy_mode: string;
+    parent_run_id: string | null;
+  }>;
+  reconnectCursors: string[];
   turn: number;
 }
 
@@ -150,6 +156,8 @@ function mockAgentRun(
   options: {
     approvals?: Array<Record<string, any>>;
     waitingPayload?: Record<string, unknown>;
+    autonomyMode?: string;
+    parentRunId?: string | null;
   } = {},
 ): MockAgentRunState {
   const definition = {
@@ -178,17 +186,21 @@ function mockAgentRun(
         project_id: "project-1",
         conversation_id: "conversation-1",
         user_message_id: `${runId}-user`,
-        parent_run_id: null,
+        parent_run_id: options.parentRunId ?? null,
         goal,
         status,
         state_version: 4,
         plan_version: 1,
-        budget: { max_tool_calls: 4 },
+        budget: {
+          max_tool_calls: 4,
+          autonomy_mode: options.autonomyMode ?? "autonomous",
+        },
         usage: { tool_calls: 0 },
         terminal_reason: null,
         created_at: NOW,
         updated_at: NOW,
         finished_at: status === "completed" ? NOW : null,
+        autonomy_mode: options.autonomyMode ?? "autonomous",
       },
       contract: { goal },
       plan: {
@@ -207,11 +219,21 @@ function mockAgentRun(
         started_at: null,
         completed_at: stepStatus === "completed" ? NOW : null,
       }],
+      tool_audits: [],
+      related_runs: [],
+      feedback: [],
       state: { last_sequence: 3 },
     },
     approvals: options.approvals ?? [],
     events,
   };
+}
+
+function refreshRelatedRuns(state: MockWorkspaceState): void {
+  const related = Object.values(state.agentRuns).map((item) => item.detail.run);
+  for (const item of Object.values(state.agentRuns)) {
+    item.detail.related_runs = related;
+  }
 }
 
 function persistCollaborationTurn(
@@ -332,6 +354,44 @@ function persistCollaborationTurn(
         run_status: "paused",
         last_sequence: approvals.length > 0 ? 4 : 2,
       }],
+    ],
+  };
+}
+
+function persistReconnectTurn(
+  state: MockWorkspaceState,
+  prompt: string,
+): { frames: Array<[string, Record<string, unknown>]> } {
+  const suffix = String(++state.turn);
+  const runId = `reconnect-run-${suffix}`;
+  const planPayload = {
+    plan_id: `${runId}-plan-1`,
+    plan_version: 1,
+    summary: "断线恢复分析",
+    steps: [{
+      step_id: "prepare",
+      purpose: "完成可恢复分析",
+      capability: "data.profile",
+      dependencies: [],
+      status: "pending",
+    }],
+  };
+  const run = mockAgentRun(runId, prompt, "completed");
+  run.events = [
+    taskEvent(runId, 2, "plan.created", planPayload),
+    taskEvent(runId, 3, "run.completed", { terminal_reason: null }),
+  ];
+  run.detail.state.last_sequence = 3;
+  state.agentRuns[runId] = run;
+  state.messages.push(
+    message(`${runId}-user`, "user", prompt),
+    message(`${runId}-assistant`, "assistant", "断线后已从持久事件恢复完成。"),
+  );
+  return {
+    // 故意在 seq=2 后无 done 结束，客户端必须从只读重连端点继续，不能重放 POST。
+    frames: [
+      ["meta", { run_id: runId, conversation_id: "conversation-1" }],
+      taskSse(runId, 2, "plan.created", planPayload),
     ],
   };
 }
@@ -675,6 +735,8 @@ async function installMockApi(
     artifacts: [],
     kbDocuments: [],
     agentRuns: {},
+    chatRequests: [],
+    reconnectCursors: [],
     turn: 0,
   };
 
@@ -781,8 +843,62 @@ async function installMockApi(
     }
     const runDetailMatch = path.match(/^\/agent\/runs\/([^/]+)$/);
     if (method === "GET" && runDetailMatch) {
+      refreshRelatedRuns(state);
       const run = state.agentRuns[decodeURIComponent(runDetailMatch[1])];
       await json(route, run?.detail ?? { detail: "TaskRun 不存在" }, run ? 200 : 404);
+      return;
+    }
+    const runFeedbackMatch = path.match(/^\/agent\/runs\/([^/]+)\/feedback$/);
+    if (method === "POST" && runFeedbackMatch) {
+      const runId = decodeURIComponent(runFeedbackMatch[1]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      const body = request.postDataJSON() as {
+        rating: "helpful" | "not_helpful";
+        comment: string | null;
+        evidence_ids: string[];
+        artifact_ids: string[];
+      };
+      run.detail.run.state_version += 1;
+      run.detail.run.updated_at = NOW;
+      const event = appendTaskEvent(run, runId, "user.feedback", {
+        feedback_id: `${runId}-feedback-${run.detail.feedback.length + 1}`,
+        subject_user_id: "e2e-user",
+        ...body,
+      });
+      const feedback = {
+        feedback_id: event.payload.feedback_id,
+        event_id: event.event_id,
+        sequence: event.sequence,
+        rating: body.rating,
+        comment: body.comment,
+        evidence_ids: body.evidence_ids,
+        artifact_ids: body.artifact_ids,
+        created_at: NOW,
+      };
+      run.detail.feedback.push(feedback);
+      await json(route, {
+        run: run.detail.run,
+        event,
+        feedback,
+        replayed: false,
+      });
+      return;
+    }
+    const latestRunMatch = path.match(
+      /^\/agent\/runs\/by-conversation\/([^/]+)\/latest$/,
+    );
+    if (method === "GET" && latestRunMatch) {
+      const latest = Object.values(state.agentRuns).at(-1);
+      await json(route, { run: latest?.detail.run ?? null });
       return;
     }
     const runApprovalsMatch = path.match(/^\/agent\/runs\/([^/]+)\/approvals$/);
@@ -1026,10 +1142,51 @@ async function installMockApi(
       await fulfillTaskStream(route, runId, streamEvents);
       return;
     }
+    const reconnectMatch = path.match(/^\/agent\/runs\/([^/]+)\/stream$/);
+    if (method === "GET" && reconnectMatch) {
+      const runId = decodeURIComponent(reconnectMatch[1]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const cursor = request.headers()["last-event-id"] ?? "";
+      state.reconnectCursors.push(cursor);
+      const completed = run.events.find(
+        (event) => event.event_type === "run.completed",
+      );
+      // 包含一个边界重复事件，验证浏览器自身也按 sequence/event_id 抑制重复。
+      await fulfillTaskStream(route, runId, [
+        eventToSse(run.events[0]),
+        ...(completed ? [eventToSse(completed)] : []),
+        ["done", {
+          run_id: runId,
+          conversation_id: "conversation-1",
+          run_status: run.detail.run.status,
+          last_sequence: Number(run.detail.state.last_sequence),
+        }],
+      ]);
+      return;
+    }
     if (method === "POST" && path === "/chat/stream") {
-      const body = request.postDataJSON() as { message?: string };
+      const body = request.postDataJSON() as {
+        message?: string;
+        autonomy_mode?: string;
+        parent_run_id?: string | null;
+      };
       const prompt = body.message ?? "";
-      const turn = (
+      const autonomyMode = body.autonomy_mode ?? "autonomous";
+      const parentRunId = body.parent_run_id ?? null;
+      state.chatRequests.push({
+        message: prompt,
+        autonomy_mode: autonomyMode,
+        parent_run_id: parentRunId,
+      });
+      const turn = autonomyMode === "assisted" && parentRunId === null
+        ? persistCollaborationTurn(state, prompt)
+        : prompt.includes("断线恢复")
+        ? persistReconnectTurn(state, prompt)
+        : (
         prompt.includes("高风险")
         || prompt.includes("修改计划")
         || prompt.includes("选择指标")
@@ -1043,6 +1200,13 @@ async function installMockApi(
       const runId = turn.frames
         .map(([, data]) => data.run_id)
         .find((value): value is string => typeof value === "string");
+      const run = runId ? state.agentRuns[runId] : undefined;
+      if (run) {
+        run.detail.run.parent_run_id = parentRunId;
+        run.detail.run.autonomy_mode = autonomyMode;
+        run.detail.run.budget.autonomy_mode = autonomyMode;
+        refreshRelatedRuns(state);
+      }
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream; charset=utf-8",
@@ -1236,4 +1400,104 @@ test("阻塞澄清提交答案后继续同一个 TaskRun", async ({ page }) => {
 
   await expect(panel.locator(".agent-status")).toHaveText("已完成");
   await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
+});
+
+test("清空浏览器 Run 缓存后仍从服务端恢复最近 TaskRun", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请暂停并修改计划");
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  await expect(page.getByRole("dialog", { name: "任务协作" })).toContainText(
+    "请暂停并修改计划",
+  );
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+
+  await page.evaluate(() => {
+    for (const key of Object.keys(window.sessionStorage)) {
+      if (key.startsWith("chatbi.agentRun.")) window.sessionStorage.removeItem(key);
+    }
+  });
+  await page.reload();
+
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  const restored = page.getByRole("dialog", { name: "任务协作" });
+  await expect(restored.locator(".agent-status")).toHaveText("已暂停");
+  await expect(restored).toContainText("请暂停并修改计划");
+});
+
+test("SSE 中断后携带游标续接并抑制边界重复事件", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请验证断线恢复");
+
+  await expect(page.getByText("断线后已从持久事件恢复完成。", { exact: true })).toBeVisible();
+  await expect.poll(() => state.reconnectCursors).toEqual(["reconnect-run-1:2"]);
+  await expect(
+    page.getByText("断线后已从持久事件恢复完成。", { exact: true }),
+  ).toHaveCount(1);
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  await expect(
+    page.getByRole("dialog", { name: "任务协作" }).locator(".agent-status"),
+  ).toHaveText("已完成");
+});
+
+test("4D 自主等级、反馈和分析分支形成可追踪闭环", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("radio", { name: "辅助模式" }).click();
+  await send(page, "请执行辅助模式验收");
+
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await controlButton.click();
+  let panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.locator(".agent-status")).toHaveText("已暂停");
+  await expect(panel).toContainText("辅助模式");
+  await panel.getByRole("button", { name: "确认计划并执行" }).click();
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
+
+  await panel.getByRole("radio", { name: "需改进" }).click();
+  await panel.getByRole("textbox", { name: "反馈说明" }).fill("请改用不同假设并比较结果");
+  await panel.getByRole("button", { name: "提交反馈" }).click();
+  await expect(panel).toContainText("请改用不同假设并比较结果");
+  await expect(panel.getByLabel("结果反馈")).toContainText("1 条");
+
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+  await page.getByRole("radio", { name: "自主模式" }).click();
+  await controlButton.click();
+  panel = page.getByRole("dialog", { name: "任务协作" });
+  await panel.getByRole("textbox", { name: "新分支目标" }).fill(
+    "改用稳健趋势方法并与原结果对比",
+  );
+  await panel.getByRole("button", { name: "创建分析分支" }).click();
+
+  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+  await controlButton.click();
+  panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.getByLabel("分支对比")).toContainText("2 个相关 Run");
+  await expect(panel.getByLabel("分支对比")).toContainText("自主模式");
+  await panel.getByRole("button", { name: /查看分支/ }).click();
+  await expect(panel).toContainText("请执行辅助模式验收");
+  await expect(panel.getByLabel("结果反馈")).toContainText(
+    "请改用不同假设并比较结果",
+  );
+  expect(state.chatRequests).toEqual([
+    {
+      message: "请执行辅助模式验收",
+      autonomy_mode: "assisted",
+      parent_run_id: null,
+    },
+    {
+      message: "改用稳健趋势方法并与原结果对比",
+      autonomy_mode: "autonomous",
+      parent_run_id: "collaboration-run-1",
+    },
+  ]);
 });

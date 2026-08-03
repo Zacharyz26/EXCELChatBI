@@ -234,6 +234,20 @@ class MCPGatewayRegistry(FakeRegistry):
     def execute(self, name: str, arguments_json: str) -> Any:
         raise AssertionError("production loop must not call compatibility execute")
 
+    def audit_metadata_for_tool(self, tool_name: str) -> dict[str, Any]:
+        assert tool_name == "get_data_profile"
+        return {
+            "service_name": "data-tools",
+            "tool_name": tool_name,
+            "tool_version": "1.0.0",
+            "risk_level": "low",
+            "required_permissions": ["analysis:execute"],
+            "artifact_types": ["profile"],
+            "read_only": True,
+            "idempotent": True,
+            "contract_hash": "a" * 64,
+        }
+
 
 class HighRiskMCPGatewayRegistry(MCPGatewayRegistry):
     """声明 high 风险的画像工具，用于验证审批恢复执行链。"""
@@ -263,6 +277,33 @@ class HighRiskMCPGatewayRegistry(MCPGatewayRegistry):
         )
 
 
+class WriteMCPGatewayRegistry(MCPGatewayRegistry):
+    """将画像工具声明为写操作，用于验证标准只读自主等级。"""
+
+    def mcp_descriptor_for_tool(
+        self,
+        tool_name: str,
+    ) -> MCPToolDescriptor | None:
+        if tool_name != "get_data_profile":
+            return None
+        return MCPToolDescriptor(
+            name=tool_name,
+            description="模拟带副作用的数据画像",
+            input_schema={
+                "type": "object",
+                "properties": {"dataset_ref": {"type": "string"}},
+                "required": ["dataset_ref"],
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object"},
+            metadata=ToolCapabilityMetadata(
+                capabilities=("data.profile",),
+                risk_level="medium",
+                read_only=False,
+            ),
+        )
+
+
 def _events(raw: list[dict[str, str]]) -> list[tuple[str, dict[str, Any]]]:
     return [(item["event"], json.loads(item["data"])) for item in raw]
 
@@ -277,6 +318,8 @@ async def _run_loop(
     policy: ToolPolicyGateway | None = None,
     planner_gateway: Any | None = None,
     enforce_plan: bool | None = None,
+    autonomy_mode: str = "autonomous",
+    parent_run_id: str | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     raw = [
         item
@@ -292,6 +335,8 @@ async def _run_loop(
             policy=policy,
             planner_gateway=planner_gateway,
             enforce_plan=(planner_gateway is not None if enforce_plan is None else enforce_plan),
+            autonomy_mode=cast(Any, autonomy_mode),
+            parent_run_id=parent_run_id,
         )
     ]
     return _events(raw)
@@ -505,6 +550,117 @@ async def test_tool_round_emits_transparency_events_and_persists(
 
 
 @pytest.mark.asyncio
+async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    events = await _run_loop(
+        store,
+        conversation,
+        ScriptedGateway([]),
+        FakeRegistry(
+            {"get_data_profile": lambda _: {"profile": {"row_count": 3}}}
+        ),
+        user_text="查看数据画像",
+        enforce_plan=True,
+        autonomy_mode="assisted",
+    )
+
+    names = [name for name, _ in events]
+    assert names[-2:] == ["autonomy.plan_review_requested", "done"]
+    assert "run.started" not in names
+    meta = dict(events)["meta"]
+    assert meta["autonomy_mode"] == "assisted"
+    tasks = TaskStore(store.db_path)
+    run = tasks.get_run(cast(str, meta["run_id"]))
+    assert run is not None
+    assert run.status == "paused"
+    assert run.autonomy_mode == "assisted"
+    assert tasks.list_invocations(run.run_id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("descriptor_mode", ["missing", "write"])
+async def test_read_only_mode_persists_policy_denial_without_executing_write_tool(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_mode: str,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    result = {
+        "profile": {"row_count": 3, "column_count": 2},
+        "quality": {"duplicate_rows": 0},
+    }
+    registry = (
+        WriteMCPGatewayRegistry(result)
+        if descriptor_mode == "write"
+        else MCPGatewayRegistry(result)
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["尝试执行写操作"],
+                "tool_calls": [
+                    ToolCall(
+                        id="read-only-write-call",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["标准只读模式已阻止该操作。"], "tool_calls": []},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="验证标准只读边界",
+        autonomy_mode="read_only",
+    )
+
+    assert registry.contexts == []
+    meta = dict(events)["meta"]
+    assert meta["autonomy_mode"] == "read_only"
+    tasks = TaskStore(store.db_path)
+    run_id = cast(str, meta["run_id"])
+    run = tasks.get_run(run_id)
+    assert run is not None and run.autonomy_mode == "read_only"
+    invocations = tasks.list_invocations(run_id)
+    assert len(invocations) == 1
+    assert invocations[0].status == "failed"
+    snapshot = tasks.get_snapshot(run_id)
+    assert snapshot is not None
+    assert snapshot["last_observation"]["code"] == "autonomy_write_denied"
+    assert any(
+        name == "tool_end"
+        and payload.get("message", "").startswith("未执行：标准只读模式")
+        for name, payload in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
     store: SessionStore,
     conversation: Conversation,
@@ -694,6 +850,21 @@ async def test_executor_uses_mcp_context_and_transports_have_equivalent_evidence
     assert evidence[0].source["mcp_execution"] == "canonical_gateway"
     assert evidence[0].source["mcp_gateway_health"] == "healthy"
     assert evidence[0].source["mcp_gateway_generation"] == 1
+    assert evidence[0].source["tool_contract"] == {
+        "service_name": "data-tools",
+        "tool_name": "get_data_profile",
+        "tool_version": "1.0.0",
+        "risk_level": "low",
+        "required_permissions": ["analysis:execute"],
+        "artifact_types": ["profile"],
+        "read_only": True,
+        "idempotent": True,
+        "contract_hash": "a" * 64,
+    }
+    started = next(payload for name, payload in events if name == "step.started")
+    assert started["payload"]["policy"]["tool_contract"] == evidence[0].source[
+        "tool_contract"
+    ]
 
     http_conversation = store.create_conversation(conversation.project_id)
     http_registry = MCPGatewayRegistry(
@@ -2918,6 +3089,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     ], events
     meta = events[0][1]
     done = events[-1][1]
+    assert meta["autonomy_mode"] == "read_only"
     assert response.headers["x-chatbi-run-id"] == meta["run_id"]
     assert meta["conversation_id"] == chat_harness.conversation.id
     assert meta["message_id"] == done["message_id"]

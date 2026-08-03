@@ -4,6 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker CLI is required for the Compose recovery gate." >&2
+  exit 127
+fi
+
 project_name="${CHATBI_COMPOSE_PROJECT_NAME:-chatbi-e2e}"
 image_tag="${CHATBI_IMAGE_TAG:-local}"
 compose=(docker compose -p "$project_name" -f compose.yaml -f compose.e2e.yaml)
@@ -98,9 +103,12 @@ pnpm --dir apps/web test:e2e:compose
 
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
-"${compose[@]}" restart api report-tools
-wait_for_application "API/report-tools restart"
+"${compose[@]}" restart api report-tools web
+wait_for_application "Web/API/report-tools restart"
 verify_original_run
+CHATBI_COMPOSE_RECOVERY_ONLY=1 \
+  CHATBI_COMPOSE_RECOVERY_RUN_ID="$run_id" \
+  pnpm --dir apps/web test:e2e:compose
 
 probe_output="$(
   "${compose[@]}" exec -T api \

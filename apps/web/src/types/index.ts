@@ -200,6 +200,7 @@ export interface ConversationDetail {
 }
 
 export interface ChatStreamEvent {
+  id?: string;
   event: string;
   data: Record<string, unknown>;
 }
@@ -216,6 +217,8 @@ export type AgentRunStatus =
   | "blocked"
   | "failed"
   | "cancelled";
+
+export type AgentAutonomyMode = "assisted" | "read_only" | "autonomous";
 
 export type AgentStepStatus =
   | "pending"
@@ -241,6 +244,7 @@ export interface AgentRun {
   created_at: string;
   updated_at: string;
   finished_at: string | null;
+  autonomy_mode: AgentAutonomyMode;
 }
 
 export interface AgentPlanStepDefinition {
@@ -286,7 +290,55 @@ export interface AgentRunDetail {
   contract: Record<string, unknown> | null;
   plan: AgentPlan | null;
   steps: AgentTaskStep[];
+  tool_audits: AgentToolAudit[];
+  related_runs: AgentRun[];
+  feedback: AgentRunFeedback[];
   state: Record<string, unknown> | null;
+}
+
+export interface AgentRunFeedback {
+  feedback_id: string;
+  event_id: string;
+  sequence: number;
+  rating: "helpful" | "not_helpful";
+  comment: string | null;
+  evidence_ids: string[];
+  artifact_ids: string[];
+  created_at: string;
+}
+
+export interface AgentRunFeedbackResponse extends AgentControlResponse {
+  feedback: AgentRunFeedback;
+}
+
+export interface AgentToolAudit {
+  invocation_id: string;
+  step_id: string | null;
+  tool_name: string;
+  status: "running" | "succeeded" | "failed" | "unknown";
+  service_name: string | null;
+  tool_version: string | null;
+  risk_level: "low" | "medium" | "high" | "critical" | null;
+  required_permissions: string[];
+  read_only: boolean | null;
+  idempotent: boolean | null;
+  contract_hash: string | null;
+  policy_allowed: boolean | null;
+  policy_code: string | null;
+  permission_snapshot_id: string | null;
+  transport: string | null;
+  gateway_health: string | null;
+  gateway_generation: number | null;
+  degraded: boolean | null;
+  evidence_id: string | null;
+  evidence_result_hash: string | null;
+  artifact_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface LatestAgentRunResponse {
+  run: AgentRun | null;
 }
 
 export type AgentApprovalStatus =

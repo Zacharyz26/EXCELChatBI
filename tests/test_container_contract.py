@@ -23,7 +23,10 @@ def test_web_image_is_non_root_and_preserves_sse_and_download_proxy() -> None:
     assert "nginx-unprivileged" in dockerfile and "USER 101:101" in dockerfile
     assert "location /api/" in nginx
     assert "proxy_pass http://api:8000/;" in nginx
+    assert "proxy_set_header Last-Event-ID $http_last_event_id;" in nginx
     assert "proxy_buffering off;" in nginx
+    assert "location = /mcp" in nginx
+    assert "location ^~ /mcp/" in nginx
     assert "try_files /index.html =503;" in nginx
 
 

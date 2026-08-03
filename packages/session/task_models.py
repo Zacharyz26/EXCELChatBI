@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from packages.session.models import JsonObject
 
@@ -18,6 +18,8 @@ RunStatus = Literal[
     "failed",
     "cancelled",
 ]
+AutonomyMode = Literal["assisted", "read_only", "autonomous"]
+DEFAULT_AUTONOMY_MODE: AutonomyMode = "autonomous"
 InvocationStatus = Literal["running", "succeeded", "failed", "unknown"]
 ObservationSource = Literal["tool", "user", "policy", "system"]
 ObservationStatus = Literal["ok", "error", "partial"]
@@ -43,6 +45,13 @@ class TaskRun:
     created_at: str
     updated_at: str
     finished_at: str | None
+
+    @property
+    def autonomy_mode(self) -> AutonomyMode:
+        value = self.budget.get("autonomy_mode")
+        if value in {"assisted", "read_only", "autonomous"}:
+            return cast(AutonomyMode, value)
+        return DEFAULT_AUTONOMY_MODE
 
 
 @dataclass(frozen=True, slots=True)

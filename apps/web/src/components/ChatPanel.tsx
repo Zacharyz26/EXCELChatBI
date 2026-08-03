@@ -12,6 +12,7 @@ import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
+  AgentAutonomyMode,
   LiveTurnItem,
   ToolStep,
   WorkspaceArtifact,
@@ -29,6 +30,8 @@ export function ChatPanel() {
   const streaming = useWorkspaceStore((state) => state.streaming);
   const error = useWorkspaceStore((state) => state.error);
   const sendMessage = useWorkspaceStore((state) => state.sendMessage);
+  const autonomyMode = useWorkspaceStore((state) => state.autonomyMode);
+  const setAutonomyMode = useWorkspaceStore((state) => state.setAutonomyMode);
   const uploadFile = useWorkspaceStore((state) => state.uploadFile);
   const clearError = useWorkspaceStore((state) => state.clearError);
   const [draft, setDraft] = useState("");
@@ -160,6 +163,23 @@ export function ChatPanel() {
             <button type="button" onClick={clearError} aria-label="关闭错误提示">×</button>
           </div>
         )}
+        <div className="autonomy-selector" role="radiogroup" aria-label="自主等级">
+          {AUTONOMY_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={autonomyMode === option.value}
+              className={autonomyMode === option.value ? "autonomy-option autonomy-option--active" : "autonomy-option"}
+              onClick={() => setAutonomyMode(option.value)}
+              disabled={busy}
+              title={option.description}
+            >
+              {option.label}
+            </button>
+          ))}
+          <span>{AUTONOMY_OPTIONS.find((item) => item.value === autonomyMode)?.description}</span>
+        </div>
         <div className="quick-commands" role="toolbar" aria-label="快捷指令">
           {QUICK_COMMANDS.map((command) => (
             <button
@@ -222,6 +242,28 @@ export function ChatPanel() {
     </section>
   );
 }
+
+const AUTONOMY_OPTIONS: Array<{
+  value: AgentAutonomyMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "assisted",
+    label: "辅助模式",
+    description: "先生成计划，确认后才开始执行工具",
+  },
+  {
+    value: "read_only",
+    label: "标准只读",
+    description: "自动执行只读分析，禁止写入型工具",
+  },
+  {
+    value: "autonomous",
+    label: "自主模式",
+    description: "自动执行低/中风险工具，高风险仍需审批",
+  },
+];
 
 // ── 快捷指令条（14.4：注入模板仍走对话链路，不退化成菜单表单）──
 

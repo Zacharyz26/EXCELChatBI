@@ -7,7 +7,7 @@ const repositoryRoot = path.resolve(webRoot, "../..");
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: ["compose-full-stack.spec.ts"],
+  testMatch: ["compose-full-stack.spec.ts", "compose-recovery.spec.ts"],
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,

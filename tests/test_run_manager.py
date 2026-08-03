@@ -77,6 +77,35 @@ async def test_pause_resume_and_duplicate_answer_are_cooperative() -> None:
 
 
 @pytest.mark.asyncio
+async def test_passive_subscription_does_not_resume_paused_producer() -> None:
+    manager = AgentRunManager()
+    paused = asyncio.Event()
+    resumed = asyncio.Event()
+
+    async def source(control: ManagedRunControl) -> AsyncIterator[SseItem]:
+        control.pause()
+        paused.set()
+        assert await control.wait_until_runnable()
+        resumed.set()
+        yield {"event": "done", "data": '{"run_status":"completed"}'}
+
+    initial = manager.start("run-passive", source)
+    await paused.wait()
+    passive = manager.subscribe("run-passive")
+    assert passive is not None
+    await asyncio.sleep(0)
+    assert not resumed.is_set()
+
+    active = manager.resume("run-passive")
+    assert active is not None
+    assert (await asyncio.wait_for(anext(passive), timeout=1))["event"] == "done"
+    assert resumed.is_set()
+    await passive.aclose()
+    await active.aclose()
+    await initial.aclose()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_and_forgets_background_producers() -> None:
     manager = AgentRunManager()
     started = asyncio.Event()

@@ -90,15 +90,17 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   pause/resume/cancel 和单步 retry 均使用项目写权限、`If-Match` 与幂等键；
 - pause/等待澄清会原子写入 Checkpoint；API 宿主丢失后可在同一 `run_id` 上恢复
   Contract、活动计划、预算和已完成步骤，结果未知的活动工具调用禁止自动重试；
+- 浏览器按服务端最近 TaskRun 恢复，SSE 使用 `Last-Event-ID` 游标续接并按事件 ID/sequence
+  去重；工具服务、版本、权限、执行时健康及 Evidence/Artifact 在协作面板保持同源展示；
 - React 对话工作区、SSE 理解/执行/图表/表格/报告/引用卡；
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
 - 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
 ### 当前缺口
 
-- 依赖图调度、Observation 自动重规划、结构化澄清回答和用户触发的单步重试已实现；
-  计划编辑、审批及 Executor/Gateway/Server 执行链已接入 React；SSE 游标重连、
-  API/代理重启恢复和 Compose 协作浏览器 E2E 留待 4C；
+- 依赖图调度、Observation 自动重规划、结构化澄清回答、单步重试、SSE 游标重连和
+  服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁代码已补齐，仍待带 Docker
+  的 CI/主机完成真实 Compose 验证；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
 - 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
@@ -111,8 +113,9 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
 - 单机生产结构 Compose 已提供；多实例外置状态、对象存储、Milvus 根 profile 和重型工具
   CPU/GPU profile 尚未完成；
-- 前端已提供结构化澄清、计划编辑、审批和暂停/续跑；工具来源/权限/健康完整视图、
-  SSE 重连和自主等级尚未实现；
+- 前端已提供结构化澄清、计划编辑、审批、暂停/续跑、工具来源/权限/健康审计视图、
+  SSE 重连、三档自主等级、分析分支对比和追加式反馈闭环；4D 本地门禁已通过，真实
+  Compose 发布关闭仍待 Docker runner 验证；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
@@ -122,8 +125,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
 - **v2.5**：阶段 3A–3E 已完成并通过真实 Docker/Compose CI，阶段 3 正式关闭；
-  阶段 4A 后端协作/审批执行链与 4B React 协作交互已完成，下一入口为 4C 重连恢复和
-  Compose 协作 E2E，之后仍需领域语义、自主探索和多数据集分析；
+  阶段 4A–4D 功能与本地回归已完成，4C/4D 的真实 Compose 发布门禁待验证；关闭后进入
+  阶段 5，之后仍需领域语义、自主探索和多数据集分析；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -158,9 +161,9 @@ v2.5 阶段 3E（已完成，Docker/Compose CI 全绿）
   SQLite v6 不可变 Dataset 锚点 + 五阶段只读来源图 + 安全 React 血缘面板
   领域中立质量门禁 + readiness/备份 hash + API 重启/离线恢复图一致性
 
-v2.5 阶段 4（开发中；4A 后端链路、4B React 协作交互已完成）
+v2.5 阶段 4（开发中；4A–4D 功能完成，Compose 发布门禁待验证）
   SQLite v7 + 计划干预/审批授权边界 + Executor/Gateway/Server 双重校验
-  React TaskRun/计划/澄清/审批/任务控制 → 4C 重连恢复与 Compose 协作 E2E
+  React 协作 → 服务端恢复/SSE 重连/工具审计 → 自主等级/分支/反馈 → Compose 关闭门禁
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证

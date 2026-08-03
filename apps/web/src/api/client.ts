@@ -2,16 +2,19 @@
 import type {
   AgentApproval,
   AgentApprovalDecisionResponse,
+  AgentAutonomyMode,
   AgentControlResponse,
   AgentPlanDefinition,
   AgentPlanRevisionResponse,
   AgentRunDetail,
   AgentRunEventsResponse,
+  AgentRunFeedbackResponse,
   ChatStreamEvent,
   ConversationDetail,
   IngestResponse,
   KBOverview,
   LineageGraphResponse,
+  LatestAgentRunResponse,
   MemoryListResponse,
   MemoryMutationResponse,
   MemoryRevisionInput,
@@ -279,10 +282,29 @@ export async function getAgentRun(runId: string): Promise<AgentRunDetail> {
   return resp.json();
 }
 
-/** 读取 TaskRun 事件，用于恢复当前阻塞澄清。 */
-export async function getAgentRunEvents(runId: string): Promise<AgentRunEventsResponse> {
+/** 读取对话在服务端的最近 TaskRun；浏览器存储不是恢复事实源。 */
+export async function getLatestAgentRun(
+  conversationId: string,
+): Promise<LatestAgentRunResponse> {
   const resp = await apiFetch(
-    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events?limit=1000`,
+    `${API_BASE}/agent/runs/by-conversation/`
+      + `${encodeURIComponent(conversationId)}/latest`,
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+/** 读取 TaskRun 事件，用于恢复当前阻塞澄清。 */
+export async function getAgentRunEvents(
+  runId: string,
+  afterSequence = 0,
+): Promise<AgentRunEventsResponse> {
+  const query = new URLSearchParams({
+    after_sequence: String(Math.max(0, Math.trunc(afterSequence))),
+    limit: "1000",
+  });
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events?${query}`,
   );
   if (!resp.ok) return asError(resp);
   return resp.json();
@@ -351,7 +373,7 @@ export async function resumeAgentRun(
     },
   );
   if (!resp.ok) return asError(resp);
-  await consumeEventStream(resp, onEvent);
+  await consumeTaskStream(resp, runId, onEvent);
 }
 
 /** 回答一个服务端持久化的阻塞澄清，并继续原 TaskRun。 */
@@ -378,7 +400,7 @@ export async function answerAgentClarification(
     },
   );
   if (!resp.ok) return asError(resp);
-  await consumeEventStream(resp, onEvent);
+  await consumeTaskStream(resp, runId, onEvent);
 }
 
 /** 从 paused 边界只重试一个失败/阻塞步骤，并继续原 TaskRun。 */
@@ -401,7 +423,7 @@ export async function retryAgentStep(
     },
   );
   if (!resp.ok) return asError(resp);
-  await consumeEventStream(resp, onEvent);
+  await consumeTaskStream(resp, runId, onEvent);
 }
 
 /** 提交完整计划新版本；服务端继续验证 capability 与已完成步骤边界。 */
@@ -471,16 +493,126 @@ export async function streamChat(
   message: string,
   onEvent: (event: ChatStreamEvent) => void,
   onOpen?: (runId: string) => void,
+  options: {
+    autonomyMode?: AgentAutonomyMode;
+    parentRunId?: string;
+  } = {},
 ): Promise<void> {
   const resp = await apiFetch(`${API_BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ conversation_id: conversationId, message }),
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      message,
+      autonomy_mode: options.autonomyMode ?? "read_only",
+      parent_run_id: options.parentRunId ?? null,
+    }),
   });
   if (!resp.ok) return asError(resp);
   const runId = resp.headers.get("X-ChatBI-Run-ID");
   if (runId) onOpen?.(runId);
-  await consumeEventStream(resp, onEvent);
+  if (runId) {
+    await consumeTaskStream(resp, runId, onEvent);
+  } else {
+    await consumeEventStream(resp, onEvent);
+  }
+}
+
+/** 为终态 TaskRun 追加反馈；Evidence/Artifact 引用由服务端再次校验归属。 */
+export async function recordAgentRunFeedback(
+  runId: string,
+  stateVersion: number,
+  rating: "helpful" | "not_helpful",
+  comment: string | null,
+  evidenceIds: string[],
+  artifactIds: string[],
+): Promise<AgentRunFeedbackResponse> {
+  const resp = await apiFetch(
+    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/feedback`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "If-Match": String(stateVersion),
+        "Idempotency-Key": operationKey("run-feedback"),
+      },
+      body: JSON.stringify({
+        rating,
+        comment,
+        evidence_ids: evidenceIds,
+        artifact_ids: artifactIds,
+      }),
+    },
+  );
+  if (!resp.ok) return asError(resp);
+  return resp.json();
+}
+
+const STREAM_RECONNECT_DELAYS_MS = [200, 400, 800, 1_200, 2_000, 2_000, 2_000, 2_000];
+
+/**
+ * POST SSE 断开后不重放控制 POST，而以持久 sequence 通过只读 GET 流续接。
+ * 服务端与这里都按 event_id/sequence 去重，查询/实时拼接竞态不会重复驱动 UI。
+ */
+async function consumeTaskStream(
+  initialResponse: Response,
+  runId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  let cursor = 0;
+  let terminal = false;
+  let lastError: unknown = null;
+  const seenEventIds = new Set<string>();
+  const dispatch = (event: ChatStreamEvent) => {
+    const eventRunId = stringField(event.data.run_id);
+    if (eventRunId && eventRunId !== runId) return;
+    const eventId = event.id ?? stringField(event.data.event_id);
+    const sequence = numericField(event.data.sequence)
+      ?? sequenceFromEventId(eventId, runId);
+    if (eventId && seenEventIds.has(eventId)) return;
+    if (eventId && sequence !== null && sequence <= cursor) return;
+    if (eventId) seenEventIds.add(eventId);
+    if (sequence !== null) cursor = Math.max(cursor, sequence);
+    const lastSequence = numericField(event.data.last_sequence);
+    if (lastSequence !== null) cursor = Math.max(cursor, lastSequence);
+    if (event.event === "done" || event.event === "error") terminal = true;
+    onEvent(event);
+  };
+
+  try {
+    await consumeEventStream(initialResponse, dispatch);
+  } catch (error) {
+    lastError = error;
+  }
+  if (terminal) return;
+
+  for (const delayMs of STREAM_RECONNECT_DELAYS_MS) {
+    await delay(delayMs);
+    try {
+      const response = await apiFetch(
+        `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/stream`,
+        {
+          headers: {
+            Accept: "text/event-stream",
+            "Last-Event-ID": `${runId}:${cursor}`,
+          },
+        },
+      );
+      if (!response.ok) {
+        if (response.status < 500) return asError(response);
+        lastError = new Error(`任务重连暂不可用（${response.status}）`);
+        continue;
+      }
+      await consumeEventStream(response, dispatch);
+      if (terminal) return;
+      lastError = new Error("任务重连流在终态事件前中断");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("任务流连接中断，自动重连未能恢复。");
 }
 
 async function consumeEventStream(
@@ -511,10 +643,12 @@ async function consumeEventStream(
 }
 
 function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void): void {
+  let eventId: string | undefined;
   let eventName = "message";
   const dataLines: string[] = [];
   for (const line of block.split("\n")) {
     if (line.startsWith(":")) continue;
+    if (line.startsWith("id:")) eventId = line.slice(3).trim();
     if (line.startsWith("event:")) eventName = line.slice(6).trim();
     if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
@@ -530,7 +664,27 @@ function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void):
   } catch {
     data = { value: raw };
   }
-  onEvent({ event: eventName, data });
+  onEvent({ id: eventId, event: eventName, data });
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function numericField(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function sequenceFromEventId(eventId: string | undefined, runId: string): number | null {
+  if (!eventId?.startsWith(`${runId}:`)) return null;
+  const value = Number(eventId.slice(runId.length + 1));
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 /** 通过带认证的 fetch 下载工件，避免普通链接丢失 Authorization header。 */

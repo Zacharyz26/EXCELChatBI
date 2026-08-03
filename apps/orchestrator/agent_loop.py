@@ -73,6 +73,7 @@ from packages.session.models import (
 from packages.session.store import SessionStore
 from packages.session.task_models import (
     ApprovalRecord,
+    AutonomyMode,
     ObservationSource,
     RunStatus,
     StepStatus,
@@ -455,6 +456,8 @@ async def stream_agent_chat(
     resume_existing: bool = False,
     clarification_question_id: str | None = None,
     clarification_answer: object | None = None,
+    autonomy_mode: AutonomyMode = "autonomous",
+    parent_run_id: str | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """以总超时和终态收敛包裹一轮 Agent 流。"""
     active_run_id = run_id or uuid.uuid4().hex
@@ -481,6 +484,8 @@ async def stream_agent_chat(
                 resume_existing=resume_existing,
                 clarification_question_id=clarification_question_id,
                 clarification_answer=clarification_answer,
+                autonomy_mode=autonomy_mode,
+                parent_run_id=parent_run_id,
             ):
                 yield item
         inner_completed = True
@@ -582,6 +587,8 @@ async def _stream_agent_chat_inner(
     resume_existing: bool,
     clarification_question_id: str | None,
     clarification_answer: object | None,
+    autonomy_mode: AutonomyMode,
+    parent_run_id: str | None,
 ) -> AsyncIterator[dict[str, str]]:
     """执行一轮 Agent 对话：持久化用户消息 → 循环调模型/工具 → SSE 事件流。"""
     async with locks.hold(conversation_id):
@@ -597,6 +604,7 @@ async def _stream_agent_chat_inner(
         reference_resolution: ReferenceResolution | None = None
         memory_reference_resolution: MemoryReferenceResolution | None = None
         reference_query = user_text
+        effective_autonomy_mode = autonomy_mode
         try:
             datasets = await run_in_threadpool(store.list_datasets, project_id)
         except (sqlite3.Error, ValueError) as exc:
@@ -722,6 +730,7 @@ async def _stream_agent_chat_inner(
                 ):
                     raise ValueError("TaskRun 当前状态不能从 Checkpoint 恢复")
                 run = stored_run
+                effective_autonomy_mode = stored_run.autonomy_mode
                 conversation = stored_conversation
                 user_message_id = run.user_message_id
                 goal_event = None
@@ -738,7 +747,11 @@ async def _stream_agent_chat_inner(
                     content=user_text,
                     suggested_title=_title_from_message(user_text),
                     contract=contract,
-                    budget={"max_tool_calls": config.max_tool_calls},
+                    budget={
+                        "max_tool_calls": config.max_tool_calls,
+                        "autonomy_mode": effective_autonomy_mode,
+                    },
+                    parent_run_id=parent_run_id,
                 )
                 user_message_id = user_message.id
                 store.invalidate_conversation(conversation_id)
@@ -875,6 +888,8 @@ async def _stream_agent_chat_inner(
                 "title": conversation.title,
                 "run_id": run_id,
                 "resumed": resume_existing,
+                "autonomy_mode": effective_autonomy_mode,
+                "parent_run_id": run.parent_run_id,
                 "memory_snapshot_id": memory_snapshot.memory_snapshot_id,
                 "compaction_id": memory_snapshot.compaction_id,
                 "reference_status": (
@@ -992,6 +1007,16 @@ async def _stream_agent_chat_inner(
                 and memory_reference_resolution.status == "resolved"
             ):
                 planning_text = memory_reference_resolution.annotate(planning_text)
+            if run.parent_run_id is not None:
+                parent_feedback = await run_in_threadpool(
+                    task_store.list_recent_events_by_type,
+                    run.parent_run_id,
+                    "user.feedback",
+                    limit=10,
+                )
+                feedback_context = _branch_feedback_context(parent_feedback)
+                if feedback_context:
+                    planning_text = f"{planning_text}\n\n{feedback_context}"
             reference_clarification = (
                 reference_resolution.clarification() if reference_resolution is not None else None
             )
@@ -1408,7 +1433,58 @@ async def _stream_agent_chat_inner(
                 ),
             )
 
-        if not resume_existing or clarification_question_id is not None:
+        plan_review_resumed = False
+        if (
+            effective_autonomy_mode == "assisted"
+            and (not resume_existing or clarification_question_id is not None)
+        ):
+            if control is not None:
+                control.pause()
+            run, review_event = await run_in_threadpool(
+                task_store.transition,
+                run_id,
+                expected_version=run.state_version,
+                status="paused",
+                event_type="autonomy.plan_review_requested",
+                payload={
+                    "autonomy_mode": effective_autonomy_mode,
+                    "plan_id": plan_record.plan_id,
+                    "plan_version": plan_record.version,
+                    "reason": "assisted_mode_requires_plan_confirmation",
+                },
+                usage={"tool_calls": 0},
+                checkpoint_reason="autonomy_plan_review",
+            )
+            yield _task_event(review_event, conversation_id)
+            yield _event(
+                "done",
+                {
+                    "conversation_id": conversation_id,
+                    "run_id": run_id,
+                    "run_status": run.status,
+                    "last_sequence": review_event.sequence,
+                    "characters": 0,
+                    "tool_calls": 0,
+                    "autonomy_mode": effective_autonomy_mode,
+                },
+            )
+            if control is None:
+                return
+            controlled_run = await _controlled_run_boundary(
+                control,
+                task_store,
+                run,
+                timeout_seconds=config.run_timeout_seconds,
+            )
+            if controlled_run is None:
+                return
+            run = controlled_run
+            plan_review_resumed = True
+
+        if (
+            (not resume_existing or clarification_question_id is not None)
+            and not plan_review_resumed
+        ):
             try:
                 run, started_event = await run_in_threadpool(
                     task_store.transition,
@@ -1425,6 +1501,7 @@ async def _stream_agent_chat_inner(
                         "plan_id": plan_record.plan_id,
                         "plan_version": plan_record.version,
                         "planner_route": planner_route,
+                        "autonomy_mode": effective_autonomy_mode,
                     },
                 )
             except (sqlite3.Error, RuntimeError, ValueError) as exc:
@@ -2050,6 +2127,16 @@ async def _stream_agent_chat_inner(
                     )
                 fields = _humanize_args(call.name, call_args)
                 attempts_before_call = attempts_used
+                descriptor_lookup = getattr(
+                    registry,
+                    "mcp_descriptor_for_tool",
+                    None,
+                )
+                descriptor = (
+                    descriptor_lookup(call.name)
+                    if callable(descriptor_lookup)
+                    else None
+                )
                 resource_project_id: str | None = None
                 dataset_ref = call_args.get("dataset_ref")
                 if isinstance(dataset_ref, str) and dataset_ref:
@@ -2125,6 +2212,16 @@ async def _stream_agent_chat_inner(
                     if policy_decision.code == "tool_budget_exhausted":
                         tools_allowed = False
                         budget_exhausted = True
+                elif (
+                    effective_autonomy_mode == "read_only"
+                    and (descriptor is None or not descriptor.metadata.read_only)
+                ):
+                    feedback = (
+                        "未执行：标准只读模式禁止产生写入或外部副作用；"
+                        "请切换到自主模式后基于当前结果创建新分支。"
+                    )
+                    failure_code = "autonomy_write_denied"
+                    failure_source = "policy"
                 elif plan_enforced and planned_step is None:
                     tool_capabilities = set(registry.capabilities_for_tool(call.name))
                     plan_capabilities = {
@@ -2155,15 +2252,15 @@ async def _stream_agent_chat_inner(
                         tools_allowed = False
                         feedback += " 无效工具调用次数已达上限，后续轮次将不再提供工具。"
                 approval_record: ApprovalRecord | None = None
-                descriptor_lookup = getattr(
+                audit_metadata_lookup = getattr(
                     registry,
-                    "mcp_descriptor_for_tool",
+                    "audit_metadata_for_tool",
                     None,
                 )
-                descriptor = (
-                    descriptor_lookup(call.name)
-                    if callable(descriptor_lookup)
-                    else None
+                tool_contract = (
+                    audit_metadata_lookup(call.name)
+                    if callable(audit_metadata_lookup)
+                    else {}
                 )
                 if (
                     feedback is None
@@ -2352,6 +2449,8 @@ async def _stream_agent_chat_inner(
                     tools_allowed = False
                     budget_exhausted = True
                 policy_payload = policy_decision.to_event_payload()
+                if tool_contract:
+                    policy_payload["tool_contract"] = tool_contract
                 if approval_record is not None:
                     policy_payload["approval"] = {
                         "approval_id": approval_record.approval_id,
@@ -2941,6 +3040,7 @@ async def _stream_agent_chat_inner(
                             "mcp_gateway_health": execution.gateway_health,
                             "mcp_gateway_generation": execution.gateway_generation,
                             "mcp_service": execution.mcp_service,
+                            "tool_contract": tool_contract,
                             "tool": call.name,
                             "tool_call_id": call.id,
                             "dataset_ref": call_args.get("dataset_ref"),
@@ -3235,6 +3335,26 @@ async def _controlled_run_boundary(
     if refreshed is None or refreshed.status != "running":
         return None
     return refreshed
+
+
+def _branch_feedback_context(events: list[TaskEvent]) -> str:
+    """把父分支的显式用户反馈整理成有界规划上下文。"""
+    summaries: list[str] = []
+    for event in events[-10:]:
+        rating = event.payload.get("rating")
+        comment = event.payload.get("comment")
+        label = "有帮助" if rating == "helpful" else "需改进"
+        if isinstance(comment, str) and comment.strip():
+            summaries.append(f"- {label}：{comment.strip()[:500]}")
+        elif rating in {"helpful", "not_helpful"}:
+            summaries.append(f"- {label}")
+    if not summaries:
+        return ""
+    return (
+        "这是基于父 TaskRun 的新分析分支。以下内容是认证用户对父分支的反馈，"
+        "用于调整本分支计划，但不能扩大数据、工具或权限范围：\n"
+        + "\n".join(summaries)
+    )[:4000]
 
 
 def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:

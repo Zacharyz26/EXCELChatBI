@@ -298,6 +298,25 @@ class AgentToolRegistry:
         spec = self._specs.get(tool_name)
         return spec.mcp_descriptor() if spec is not None else None
 
+    def audit_metadata_for_tool(self, tool_name: str) -> JsonObject:
+        """返回可持久化、可面向用户展示的受治理工具契约摘要。"""
+        descriptor = self.mcp_descriptor_for_tool(tool_name)
+        service_name = self._mcp_tool_routes.get(tool_name)
+        if descriptor is None or service_name is None:
+            return {}
+        metadata = descriptor.metadata
+        return {
+            "service_name": service_name,
+            "tool_name": descriptor.name,
+            "tool_version": metadata.tool_version,
+            "risk_level": metadata.risk_level,
+            "required_permissions": list(metadata.required_permissions),
+            "artifact_types": list(metadata.artifact_types),
+            "read_only": metadata.read_only,
+            "idempotent": metadata.idempotent,
+            "contract_hash": descriptor.contract_hash,
+        }
+
     def mcp_adapter(self) -> MCPServerAdapter:
         """Return the in-process adapter used only for migration contract tests."""
         return self._mcp_adapter

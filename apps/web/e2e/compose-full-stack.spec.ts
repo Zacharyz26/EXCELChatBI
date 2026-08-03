@@ -4,6 +4,11 @@ import { expect, test } from "@playwright/test";
 
 const E2E_TOKEN = "chatbi-local-e2e-token-00000001";
 
+test.skip(
+  process.env.CHATBI_COMPOSE_RECOVERY_ONLY === "1",
+  "恢复阶段复用初始阶段创建的持久化工作区",
+);
+
 test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("访问令牌").fill(E2E_TOKEN);
@@ -27,6 +32,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
     timeout: 30_000,
   });
 
+  await page.getByRole("radio", { name: "自主模式" }).click();
   await page.getByLabel("消息内容").fill(
     "请把本次对话已完成的数据画像组装成一份报告，附要点解读，并导出 PDF。",
   );
@@ -92,6 +98,20 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
     run: { status: string };
   };
   expect(detail.run.status).toBe("completed");
+
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  const auditSection = page.getByRole("region", { name: "工具执行审计" });
+  const reportAudit = auditSection.locator(".agent-tool-audit", {
+    hasText: "generate_report",
+  });
+  await expect(reportAudit).toContainText("report-tools");
+  await expect(reportAudit).toContainText("analysis:execute");
+  await expect(reportAudit).toContainText("healthy");
+  await expect(reportAudit).toContainText("Evidence");
+  await expect(reportAudit).toContainText("Artifact");
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
 
   const pdfUrl = await page.getByRole("button", { name: "下载 PDF" }).evaluate(
     (button) => button.closest(".report-artifact")?.textContent ? "present" : "",

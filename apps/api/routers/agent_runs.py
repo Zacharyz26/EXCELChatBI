@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -17,10 +17,12 @@ from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
 from packages.session.task_models import (
     ApprovalRecord,
+    EvidenceRecord,
     TaskEvent,
     TaskPlanRecord,
     TaskRun,
     TaskStepRecord,
+    ToolInvocation,
 )
 from packages.session.task_store import (
     ControlConflict,
@@ -31,7 +33,7 @@ from packages.session.task_store import (
 from sse_starlette.sse import EventSourceResponse
 
 from apps.api.auth import current_principal_dep
-from apps.api.authz import require_run_access
+from apps.api.authz import require_conversation_access, require_run_access
 from apps.api.deps import (
     chart_tools_dep,
     dataset_ops_tools_dep,
@@ -49,6 +51,7 @@ from apps.api.schemas import (
     ApprovalResponse,
     ClarificationAnswerRequest,
     PlanRevisionRequest,
+    RunFeedbackRequest,
 )
 from apps.orchestrator.agent_loop import AgentLoopConfig, stream_agent_chat
 from apps.orchestrator.agent_tools import (
@@ -470,6 +473,26 @@ async def decide_agent_approval(
     }
 
 
+@router.get("/by-conversation/{conversation_id}/latest")
+async def get_latest_conversation_run(
+    conversation_id: str,
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> dict[str, object]:
+    """返回当前主体可见对话的最近 TaskRun，供刷新和新浏览器会话恢复。"""
+    await run_in_threadpool(
+        require_conversation_access,
+        store,
+        conversation_id,
+        principal,
+    )
+    run = await run_in_threadpool(
+        TaskStore(store.db_path).get_latest_run_for_conversation,
+        conversation_id,
+    )
+    return {"run": _run_payload(run) if run is not None else None}
+
+
 @router.get("/{run_id}")
 async def get_agent_run(
     run_id: str,
@@ -485,6 +508,24 @@ async def get_agent_run(
     snapshot = await run_in_threadpool(tasks.get_snapshot, run_id)
     plan = await run_in_threadpool(tasks.get_active_plan, run_id)
     steps = await run_in_threadpool(tasks.list_plan_steps, run_id)
+    invocations = await run_in_threadpool(tasks.list_invocations, run_id)
+    evidence = await run_in_threadpool(tasks.list_evidence, run_id)
+    started_events = await run_in_threadpool(
+        tasks.list_events_by_type,
+        run_id,
+        "step.started",
+    )
+    related_runs = await run_in_threadpool(
+        tasks.list_runs_for_conversation,
+        run.conversation_id,
+        limit=50,
+    )
+    feedback_events = await run_in_threadpool(
+        tasks.list_recent_events_by_type,
+        run_id,
+        "user.feedback",
+        limit=100,
+    )
     return {
         "run": _run_payload(run),
         "contract": contract,
@@ -494,7 +535,56 @@ async def get_agent_run(
             else None
         ),
         "steps": [_step_payload(step) for step in steps],
+        "tool_audits": _tool_audit_payloads(
+            invocations,
+            evidence,
+            started_events,
+        ),
+        "related_runs": [_run_payload(item) for item in related_runs],
+        "feedback": [_feedback_payload(event) for event in feedback_events],
         "state": snapshot,
+    }
+
+
+@router.post("/{run_id}/feedback")
+async def record_agent_run_feedback(
+    run_id: str,
+    req: RunFeedbackRequest,
+    idempotency_key: Annotated[
+        str,
+        Header(alias="Idempotency-Key", min_length=8, max_length=200),
+    ],
+    if_match: Annotated[str, Header(alias="If-Match")],
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> dict[str, object]:
+    tasks, _run = await _writable_run(store, run_id, principal)
+    try:
+        updated, event, created = await run_in_threadpool(
+            tasks.record_user_feedback,
+            run_id,
+            expected_version=_state_version(if_match),
+            idempotency_key=idempotency_key,
+            subject_user_id=principal.user_id,
+            rating=req.rating,
+            comment=req.comment,
+            evidence_ids=tuple(req.evidence_ids),
+            artifact_ids=tuple(req.artifact_ids),
+        )
+    except (ControlConflict, IdempotencyConflict, StateVersionConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if created:
+        agent_run_manager.publish(
+            run_id,
+            _sse_task_event(event, updated.conversation_id),
+        )
+    return {
+        "run": _run_payload(updated),
+        "event": _event_payload(event),
+        "feedback": _feedback_payload(event),
+        "replayed": not created,
     }
 
 
@@ -524,6 +614,33 @@ async def get_agent_run_events(
     }
 
 
+@router.get("/{run_id}/stream", response_class=EventSourceResponse)
+async def reconnect_agent_run_stream(
+    run_id: str,
+    after_sequence: int | None = Query(default=None, ge=0),
+    last_event_id: Annotated[
+        str | None,
+        Header(alias="Last-Event-ID", max_length=200),
+    ] = None,
+    store: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> EventSourceResponse:
+    """回放游标后的持久事件，再无控制副作用地接续当前 producer。"""
+    tasks = TaskStore(store.db_path)
+    run = await run_in_threadpool(tasks.get_run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    require_run_access(store, run, principal)
+    cursor = _reconnect_cursor(run_id, after_sequence, last_event_id)
+    # 先订阅再查询，查询窗口内新提交的事件会同时出现在队列与数据库，生成器按 sequence 去重。
+    subscription = agent_run_manager.subscribe(run_id)
+    return EventSourceResponse(
+        _replay_and_subscribe(tasks, run, cursor, subscription),
+        ping=15,
+        headers={"X-ChatBI-Run-ID": run_id},
+    )
+
+
 def _run_payload(run: TaskRun) -> dict[str, object]:
     return {
         "run_id": run.run_id,
@@ -541,7 +658,101 @@ def _run_payload(run: TaskRun) -> dict[str, object]:
         "created_at": run.created_at,
         "updated_at": run.updated_at,
         "finished_at": run.finished_at,
+        "autonomy_mode": run.autonomy_mode,
     }
+
+
+def _reconnect_cursor(
+    run_id: str,
+    after_sequence: int | None,
+    last_event_id: str | None,
+) -> int:
+    header_cursor: int | None = None
+    if last_event_id:
+        raw_run_id, separator, raw_sequence = last_event_id.rpartition(":")
+        if not separator or raw_run_id != run_id:
+            raise HTTPException(status_code=400, detail="Last-Event-ID 不属于当前任务")
+        try:
+            header_cursor = int(raw_sequence)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Last-Event-ID 事件游标无效") from exc
+        if header_cursor < 0:
+            raise HTTPException(status_code=400, detail="Last-Event-ID 事件游标无效")
+    if (
+        after_sequence is not None
+        and header_cursor is not None
+        and after_sequence != header_cursor
+    ):
+        raise HTTPException(status_code=400, detail="事件游标参数冲突")
+    return after_sequence if after_sequence is not None else (header_cursor or 0)
+
+
+async def _replay_and_subscribe(
+    tasks: TaskStore,
+    original_run: TaskRun,
+    cursor: int,
+    subscription: AsyncGenerator[dict[str, str], None] | None,
+) -> AsyncIterator[dict[str, str]]:
+    """无缝拼接持久日志与实时队列；重复的持久 TaskEvent 只交付一次。"""
+    delivered = cursor
+    try:
+        while True:
+            events = await run_in_threadpool(
+                tasks.list_events,
+                original_run.run_id,
+                after_sequence=delivered,
+                limit=1000,
+            )
+            for event in events:
+                delivered = event.sequence
+                yield _sse_task_event(event, original_run.conversation_id)
+            if len(events) < 1000:
+                break
+
+        current = await run_in_threadpool(tasks.get_run, original_run.run_id)
+        if current is None:
+            return
+        if current.status not in {"planning", "running", "verifying"}:
+            yield _sse_done(current, delivered)
+            return
+        if subscription is None:
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {
+                        "code": "run_host_unavailable",
+                        "message": "任务执行宿主不可用，请刷新状态后从 Checkpoint 恢复。",
+                        "retryable": False,
+                        "run_id": current.run_id,
+                        "run_status": current.status,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            return
+
+        async for item in subscription:
+            sequence = _sse_item_sequence(item, original_run.run_id)
+            if sequence is not None:
+                if sequence <= delivered:
+                    continue
+                delivered = sequence
+            yield item
+    finally:
+        if subscription is not None:
+            await subscription.aclose()
+
+
+def _sse_item_sequence(item: dict[str, str], run_id: str) -> int | None:
+    event_id = item.get("id", "")
+    raw_run_id, separator, raw_sequence = event_id.rpartition(":")
+    if not separator or raw_run_id != run_id:
+        return None
+    try:
+        sequence = int(raw_sequence)
+    except ValueError:
+        return None
+    return sequence if sequence >= 0 else None
 
 
 def _event_payload(event: TaskEvent) -> dict[str, object]:
@@ -576,6 +787,115 @@ def _step_payload(step: TaskStepRecord) -> dict[str, object]:
         "started_at": step.started_at,
         "completed_at": step.completed_at,
     }
+
+
+def _feedback_payload(event: TaskEvent) -> dict[str, object]:
+    payload = event.payload
+    return {
+        "feedback_id": payload.get("feedback_id"),
+        "event_id": event.event_id,
+        "sequence": event.sequence,
+        "rating": payload.get("rating"),
+        "comment": payload.get("comment"),
+        "evidence_ids": payload.get("evidence_ids", []),
+        "artifact_ids": payload.get("artifact_ids", []),
+        "created_at": event.occurred_at,
+    }
+
+
+def _tool_audit_payloads(
+    invocations: list[ToolInvocation],
+    evidence: list[EvidenceRecord],
+    started_events: list[TaskEvent],
+) -> list[dict[str, object]]:
+    """用持久 Invocation、策略事件和 Evidence 生成一致的只读审计投影。"""
+    evidence_by_invocation = {item.invocation_id: item for item in evidence}
+    started_by_invocation: dict[str, TaskEvent] = {}
+    for event in started_events:
+        invocation_id = event.payload.get("invocation_id")
+        if isinstance(invocation_id, str):
+            started_by_invocation[invocation_id] = event
+
+    payloads: list[dict[str, object]] = []
+    for invocation in invocations:
+        started = started_by_invocation.get(invocation.invocation_id)
+        policy = _object_field(started.payload if started is not None else {}, "policy")
+        contract = _object_field(policy, "tool_contract")
+        record = evidence_by_invocation.get(invocation.invocation_id)
+        source = record.source if record is not None else {}
+        evidence_contract = _object_field(source, "tool_contract")
+        if evidence_contract:
+            contract = evidence_contract
+        payloads.append(
+            {
+                "invocation_id": invocation.invocation_id,
+                "step_id": invocation.step_id,
+                "tool_name": invocation.tool_name,
+                "status": invocation.status,
+                "service_name": _string_field(contract, "service_name"),
+                "tool_version": _string_field(contract, "tool_version"),
+                "risk_level": _string_field(contract, "risk_level"),
+                "required_permissions": _string_list_field(
+                    contract,
+                    "required_permissions",
+                ),
+                "read_only": _bool_field(contract, "read_only"),
+                "idempotent": _bool_field(contract, "idempotent"),
+                "contract_hash": _string_field(contract, "contract_hash"),
+                "policy_allowed": _bool_field(policy, "allowed"),
+                "policy_code": _string_field(policy, "code"),
+                "permission_snapshot_id": _string_field(
+                    policy,
+                    "permission_snapshot_id",
+                ),
+                "transport": _string_field(source, "transport"),
+                "gateway_health": _string_field(source, "mcp_gateway_health"),
+                "gateway_generation": _int_field(
+                    source,
+                    "mcp_gateway_generation",
+                ),
+                "degraded": _bool_field(source, "mcp_degraded"),
+                "evidence_id": record.evidence_id if record is not None else None,
+                "evidence_result_hash": (
+                    record.result_hash if record is not None else None
+                ),
+                "artifact_id": invocation.artifact_id,
+                "started_at": invocation.started_at,
+                "completed_at": invocation.completed_at,
+            }
+        )
+    return payloads
+
+
+def _object_field(value: object, key: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    item = value.get(key)
+    if not isinstance(item, dict):
+        return {}
+    return {str(name): field for name, field in item.items()}
+
+
+def _string_field(value: dict[str, object], key: str) -> str | None:
+    item = value.get(key)
+    return item if isinstance(item, str) and item else None
+
+
+def _string_list_field(value: dict[str, object], key: str) -> list[str]:
+    item = value.get(key)
+    if not isinstance(item, list):
+        return []
+    return [field for field in item if isinstance(field, str)]
+
+
+def _bool_field(value: dict[str, object], key: str) -> bool | None:
+    item = value.get(key)
+    return item if isinstance(item, bool) else None
+
+
+def _int_field(value: dict[str, object], key: str) -> int | None:
+    item = value.get(key)
+    return item if isinstance(item, int) and not isinstance(item, bool) else None
 
 
 def _approval_payload(approval: ApprovalRecord) -> dict[str, object]:

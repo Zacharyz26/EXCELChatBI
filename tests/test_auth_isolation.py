@@ -178,6 +178,11 @@ def test_task_control_write_is_project_scoped_and_idempotent(
         contract=contract,
         budget={"max_tool_calls": 2},
     )
+    detail_path = f"/agent/runs/{run.run_id}"
+    detail = alice.get(detail_path)
+    assert detail.status_code == 200
+    assert detail.json()["tool_audits"] == []
+    assert bob.get(detail_path).status_code == 404
     headers = {
         "Idempotency-Key": "cancel-private-run",
         "If-Match": str(run.state_version),
@@ -208,3 +213,58 @@ def test_task_control_write_is_project_scoped_and_idempotent(
             if event.event_type == "run.cancelled"
         ]
     ) == 1
+
+    feedback_path = f"/agent/runs/{run.run_id}/feedback"
+    feedback_headers = {
+        "Idempotency-Key": "feedback-private-run",
+        "If-Match": str(cancelled.json()["run"]["state_version"]),
+    }
+    feedback_body = {
+        "rating": "helpful",
+        "comment": "结果符合预期",
+        "evidence_ids": [],
+        "artifact_ids": [],
+    }
+    assert bob.post(
+        feedback_path,
+        headers=feedback_headers,
+        json=feedback_body,
+    ).status_code == 404
+    feedback = alice.post(
+        feedback_path,
+        headers=feedback_headers,
+        json=feedback_body,
+    )
+    feedback_replay = alice.post(
+        feedback_path,
+        headers=feedback_headers,
+        json=feedback_body,
+    )
+    assert feedback.status_code == 200
+    assert feedback.json()["feedback"]["rating"] == "helpful"
+    assert feedback.json()["replayed"] is False
+    assert feedback_replay.status_code == 200
+    assert feedback_replay.json()["replayed"] is True
+    refreshed_detail = alice.get(detail_path).json()
+    assert refreshed_detail["feedback"] == [feedback.json()["feedback"]]
+    assert refreshed_detail["related_runs"][0]["run_id"] == run.run_id
+
+    latest_path = f"/agent/runs/by-conversation/{conversation['id']}/latest"
+    latest = alice.get(latest_path)
+    assert latest.status_code == 200
+    assert latest.json()["run"]["run_id"] == run.run_id
+    assert bob.get(latest_path).status_code == 404
+
+    reconnect_path = f"/agent/runs/{run.run_id}/stream"
+    assert bob.get(reconnect_path).status_code == 404
+    reconnect = alice.get(
+        reconnect_path,
+        headers={"Last-Event-ID": f"{run.run_id}:1"},
+    )
+    assert reconnect.status_code == 200
+    assert reconnect.text.count("event: run.cancelled") == 1
+    assert reconnect.text.count("event: done") == 1
+    assert alice.get(
+        reconnect_path,
+        headers={"Last-Event-ID": "another-run:1"},
+    ).status_code == 400

@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
   AgentApproval,
+  AgentAutonomyMode,
   AgentPlanDefinition,
   AgentRunStatus,
   AgentStepStatus,
   AgentTaskStep,
+  AgentToolAudit,
 } from "@/types";
 
 const RUN_STATUS_LABELS: Record<AgentRunStatus, string> = {
@@ -36,6 +38,12 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
   "cancelled",
 ]);
 
+const AUTONOMY_LABELS: Record<AgentAutonomyMode, string> = {
+  assisted: "辅助模式",
+  read_only: "标准只读",
+  autonomous: "自主模式",
+};
+
 /** v2.5 4B：真实 TaskRun、计划、澄清、审批和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
@@ -52,6 +60,9 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const retryStep = useWorkspaceStore((state) => state.retryActiveStep);
   const revisePlan = useWorkspaceStore((state) => state.reviseActivePlan);
   const decideApproval = useWorkspaceStore((state) => state.decideApproval);
+  const submitRunFeedback = useWorkspaceStore((state) => state.submitActiveRunFeedback);
+  const startBranch = useWorkspaceStore((state) => state.startBranch);
+  const autonomyMode = useWorkspaceStore((state) => state.autonomyMode);
   const [clarificationDraft, setClarificationDraft] = useState("");
   const [editingPlan, setEditingPlan] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
@@ -60,6 +71,9 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const [skippedStepIds, setSkippedStepIds] = useState<Set<string>>(new Set());
   const [approvalReasons, setApprovalReasons] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("");
+  const [feedbackRating, setFeedbackRating] = useState<"helpful" | "not_helpful" | null>(null);
+  const [feedbackComment, setFeedbackComment] = useState("");
+  const [branchDraft, setBranchDraft] = useState("");
 
   useEffect(() => {
     if (activeRunId) void refresh(activeRunId);
@@ -85,6 +99,16 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   );
   const run = detail?.run;
   const canCancel = !!run && !TERMINAL_STATUSES.has(run.status);
+  const comparisonRuns = useMemo(() => {
+    if (!detail) return [];
+    const parentId = detail.run.parent_run_id;
+    return detail.related_runs.filter((candidate) => (
+      candidate.run_id === detail.run.run_id
+      || candidate.run_id === parentId
+      || candidate.parent_run_id === detail.run.run_id
+      || (!!parentId && candidate.parent_run_id === parentId)
+    )).slice(0, 8);
+  }, [detail]);
 
   function beginPlanEdit() {
     if (!detail?.plan) return;
@@ -157,6 +181,28 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function submitFeedback(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!feedbackRating || busy) return;
+    try {
+      await submitRunFeedback(feedbackRating, feedbackComment.trim() || null);
+      setFeedbackRating(null);
+      setFeedbackComment("");
+      setNotice("反馈已绑定当前 Run 的 Evidence/Artifact，并会用于后续分支规划。");
+    } catch {
+      /* 共享错误区域展示版本或引用冲突。 */
+    }
+  }
+
+  async function submitBranch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const goal = branchDraft.trim();
+    if (!detail || !goal || busy) return;
+    setBranchDraft("");
+    onClose();
+    await startBranch(detail.run.run_id, goal);
+  }
+
   return (
     <div className="agent-control-backdrop" role="presentation">
       <aside
@@ -205,6 +251,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
               <h3>{detail.run.goal}</h3>
               <p>
                 Run {shortHash(detail.run.run_id)} · 计划 v{detail.run.plan_version}
+                {` · ${AUTONOMY_LABELS[detail.run.autonomy_mode]}`}
                 {detail.run.terminal_reason && ` · ${detail.run.terminal_reason}`}
               </p>
               <div className="agent-run-actions">
@@ -225,7 +272,11 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                     disabled={busy !== null || pendingApprovals.length > 0}
                     title={pendingApprovals.length > 0 ? "请先决定待处理授权" : ""}
                   >
-                    {busy === "resume" ? "恢复中…" : "继续执行"}
+                    {busy === "resume"
+                      ? "恢复中…"
+                      : detail.run.autonomy_mode === "assisted"
+                        ? "确认计划并执行"
+                        : "继续执行"}
                   </button>
                 )}
                 {canCancel && (
@@ -307,6 +358,137 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                 </>
               ) : (
                 <p className="agent-section__empty">计划尚未生成。</p>
+              )}
+            </section>
+
+            <section className="agent-section" aria-label="工具执行审计">
+              <div className="agent-section__title">
+                <span>工具、权限与证据</span>
+                <small>{detail.tool_audits.length} 次调用</small>
+              </div>
+              {detail.tool_audits.length === 0 ? (
+                <p className="agent-section__empty">当前任务还没有工具调用。</p>
+              ) : (
+                <div className="agent-tool-audits">
+                  {detail.tool_audits.map((audit) => (
+                    <ToolAudit key={audit.invocation_id} audit={audit} />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="agent-section" aria-label="分支对比">
+              <div className="agent-section__title">
+                <span>分析分支对比</span>
+                <small>{comparisonRuns.length} 个相关 Run</small>
+              </div>
+              <div className="agent-branch-grid">
+                {comparisonRuns.map((candidate) => (
+                  <article
+                    key={candidate.run_id}
+                    className={candidate.run_id === detail.run.run_id
+                      ? "agent-branch-card agent-branch-card--active"
+                      : "agent-branch-card"}
+                  >
+                    <div>
+                      <strong>{candidate.run_id === detail.run.run_id ? "当前" : "分支"}</strong>
+                      <span>{RUN_STATUS_LABELS[candidate.status]}</span>
+                    </div>
+                    <p>{candidate.goal}</p>
+                    <small>
+                      {shortHash(candidate.run_id)} · v{candidate.plan_version}
+                      {` · ${AUTONOMY_LABELS[candidate.autonomy_mode]}`}
+                      {` · ${Number(candidate.usage.tool_calls ?? 0)} 次工具`}
+                    </small>
+                    {candidate.run_id !== detail.run.run_id && (
+                      <button
+                        type="button"
+                        onClick={() => void refresh(candidate.run_id)}
+                        disabled={busy !== null}
+                        aria-label={`查看分支 ${shortHash(candidate.run_id)}`}
+                      >
+                        查看计划、证据与反馈
+                      </button>
+                    )}
+                  </article>
+                ))}
+              </div>
+              {TERMINAL_STATUSES.has(detail.run.status) && (
+                <form className="agent-branch-form" onSubmit={(event) => void submitBranch(event)}>
+                  <label>
+                    新分支目标
+                    <textarea
+                      value={branchDraft}
+                      onChange={(event) => setBranchDraft(event.target.value)}
+                      maxLength={20_000}
+                      placeholder="说明要调整的假设、方法或交付结果"
+                      aria-label="新分支目标"
+                      required
+                    />
+                  </label>
+                  <p>将使用当前选择的“{AUTONOMY_LABELS[autonomyMode]}”，并继承本 Run 的反馈作为规划上下文。</p>
+                  <button type="submit" disabled={!branchDraft.trim() || busy !== null}>
+                    创建分析分支
+                  </button>
+                </form>
+              )}
+            </section>
+
+            <section className="agent-section" aria-label="结果反馈">
+              <div className="agent-section__title">
+                <span>结果反馈闭环</span>
+                <small>{detail.feedback.length} 条</small>
+              </div>
+              {TERMINAL_STATUSES.has(detail.run.status) ? (
+                <form className="agent-feedback-form" onSubmit={(event) => void submitFeedback(event)}>
+                  <div role="radiogroup" aria-label="结果评分">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={feedbackRating === "helpful"}
+                      className={feedbackRating === "helpful" ? "is-selected" : ""}
+                      onClick={() => setFeedbackRating("helpful")}
+                    >
+                      有帮助
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={feedbackRating === "not_helpful"}
+                      className={feedbackRating === "not_helpful" ? "is-selected" : ""}
+                      onClick={() => setFeedbackRating("not_helpful")}
+                    >
+                      需改进
+                    </button>
+                  </div>
+                  <label>
+                    补充说明
+                    <textarea
+                      value={feedbackComment}
+                      onChange={(event) => setFeedbackComment(event.target.value)}
+                      maxLength={1000}
+                      placeholder="哪些假设、方法或结果需要保留或调整？"
+                      aria-label="反馈说明"
+                    />
+                  </label>
+                  <button type="submit" disabled={!feedbackRating || busy !== null}>
+                    {busy === "feedback" ? "提交中…" : "提交反馈"}
+                  </button>
+                </form>
+              ) : (
+                <p className="agent-section__empty">任务进入终态后可提交反馈。</p>
+              )}
+              {detail.feedback.length > 0 && (
+                <div className="agent-feedback-history">
+                  {[...detail.feedback].reverse().slice(0, 5).map((feedback) => (
+                    <article key={feedback.feedback_id}>
+                      <strong>{feedback.rating === "helpful" ? "有帮助" : "需改进"}</strong>
+                      <span>{formatDate(feedback.created_at)}</span>
+                      {feedback.comment && <p>{feedback.comment}</p>}
+                      <small>{feedback.evidence_ids.length} Evidence · {feedback.artifact_ids.length} Artifact</small>
+                    </article>
+                  ))}
+                </div>
               )}
             </section>
 
@@ -457,6 +639,50 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
       </aside>
     </div>
   );
+}
+
+function ToolAudit({ audit }: { audit: AgentToolAudit }) {
+  const health = audit.gateway_health
+    ? `${audit.gateway_health}${audit.gateway_generation === null ? "" : ` · g${audit.gateway_generation}`}`
+    : audit.status === "running" ? "等待执行结果" : "未记录";
+  return (
+    <article className="agent-tool-audit">
+      <div className="agent-tool-audit__heading">
+        <div>
+          <strong>{audit.service_name ?? "受治理工具服务"}</strong>
+          <span>{audit.tool_name}{audit.tool_version && ` v${audit.tool_version}`}</span>
+        </div>
+        <span className={`agent-step-status agent-step-status--${toolStatusClass(audit.status)}`}>
+          {toolStatusLabel(audit.status)}
+        </span>
+      </div>
+      <dl>
+        <div><dt>风险</dt><dd>{audit.risk_level ?? "未记录"}</dd></div>
+        <div><dt>权限</dt><dd>{audit.required_permissions.join("、") || "未记录"}</dd></div>
+        <div><dt>Gateway</dt><dd>{health}{audit.degraded ? " · 降级" : ""}</dd></div>
+        <div><dt>传输</dt><dd>{audit.transport ?? "未记录"}</dd></div>
+      </dl>
+      <p>
+        {audit.evidence_id
+          ? `Evidence ${shortHash(audit.evidence_id)}`
+          : "Evidence 尚未生成"}
+        {audit.artifact_id && ` · Artifact ${shortHash(audit.artifact_id)}`}
+      </p>
+    </article>
+  );
+}
+
+function toolStatusClass(status: AgentToolAudit["status"]): AgentStepStatus {
+  if (status === "succeeded") return "completed";
+  if (status === "running") return "running";
+  return "failed";
+}
+
+function toolStatusLabel(status: AgentToolAudit["status"]): string {
+  if (status === "succeeded") return "已验证";
+  if (status === "running") return "执行中";
+  if (status === "unknown") return "结果未知";
+  return "失败";
 }
 
 function PlanStep({

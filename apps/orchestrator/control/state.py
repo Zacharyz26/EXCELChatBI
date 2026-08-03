@@ -12,7 +12,7 @@ TERMINAL_STATUSES: frozenset[RunStatus] = frozenset(
 )
 
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
-    "planning": frozenset({"running", "waiting_user", "failed", "cancelled"}),
+    "planning": frozenset({"running", "waiting_user", "paused", "failed", "cancelled"}),
     "waiting_user": frozenset({"planning", "running", "cancelled", "failed"}),
     "running": frozenset(
         {

@@ -65,6 +65,7 @@ class TaskStore:
         user_message_id: str,
         contract: TaskContract,
         budget: JsonObject,
+        parent_run_id: str | None = None,
     ) -> tuple[TaskRun, TaskEvent]:
         now = _utc_now()
         run, event, snapshot = _new_run_records(
@@ -73,6 +74,7 @@ class TaskStore:
             user_message_id=user_message_id,
             contract=contract,
             budget=budget,
+            parent_run_id=parent_run_id,
             now=now,
         )
         with self._connection() as connection, connection:
@@ -89,6 +91,7 @@ class TaskStore:
         suggested_title: str,
         contract: TaskContract,
         budget: JsonObject,
+        parent_run_id: str | None = None,
     ) -> tuple[Conversation, Message, TaskRun, TaskEvent]:
         """Atomically create the user message, run, contract, goal and snapshot."""
         clean_content = _required_text(content, "消息内容")
@@ -108,6 +111,7 @@ class TaskStore:
             user_message_id=message.id,
             contract=contract,
             budget=budget,
+            parent_run_id=parent_run_id,
             now=now,
         )
         with self._connection() as connection, connection:
@@ -166,6 +170,48 @@ class TaskStore:
                 "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
         return _run_from_row(row) if row is not None else None
+
+    def get_latest_run_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> TaskRun | None:
+        """返回对话最近创建的 TaskRun；相同时间戳以 SQLite 插入顺序稳定决胜。"""
+        clean_conversation_id = _required_text(
+            conversation_id,
+            "conversation_id",
+        )
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM task_runs
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (clean_conversation_id,),
+            ).fetchone()
+        return _run_from_row(row) if row is not None else None
+
+    def list_runs_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[TaskRun]:
+        """返回同一对话的最近 TaskRun，供受控分支比较。"""
+        clean_conversation_id = _required_text(conversation_id, "conversation_id")
+        bounded_limit = min(max(limit, 1), 100)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_runs
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (clean_conversation_id, bounded_limit),
+            ).fetchall()
+        return [_run_from_row(row) for row in rows]
 
     def terminate_active_run(
         self,
@@ -2193,6 +2239,155 @@ class TaskStore:
             ).fetchall()
         return [_event_from_row(row) for row in rows]
 
+    def list_events_by_type(self, run_id: str, event_type: str) -> list[TaskEvent]:
+        """读取某类持久事件；用于服务端审计投影，不受浏览器分页窗口影响。"""
+        clean_type = _required_text(event_type, "事件类型")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, run_id, sequence, event_type, payload_json, occurred_at
+                FROM task_events
+                WHERE run_id = ? AND event_type = ?
+                ORDER BY sequence
+                """,
+                (run_id, clean_type),
+            ).fetchall()
+        return [_event_from_row(row) for row in rows]
+
+    def list_recent_events_by_type(
+        self,
+        run_id: str,
+        event_type: str,
+        *,
+        limit: int = 100,
+    ) -> list[TaskEvent]:
+        """按时间正序返回最近一段同类事件，避免反馈投影无界增长。"""
+        clean_type = _required_text(event_type, "事件类型")
+        bounded_limit = min(max(limit, 1), 1000)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, run_id, sequence, event_type, payload_json, occurred_at
+                FROM task_events
+                WHERE run_id = ? AND event_type = ?
+                ORDER BY sequence DESC
+                LIMIT ?
+                """,
+                (run_id, clean_type, bounded_limit),
+            ).fetchall()
+        return [_event_from_row(row) for row in reversed(rows)]
+
+    def record_user_feedback(
+        self,
+        run_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        subject_user_id: str,
+        rating: Literal["helpful", "not_helpful"],
+        comment: str | None,
+        evidence_ids: tuple[str, ...] = (),
+        artifact_ids: tuple[str, ...] = (),
+    ) -> tuple[TaskRun, TaskEvent, bool]:
+        """为终态 Run 追加可幂等反馈，不改写历史 Evidence 或 Artifact。"""
+        clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
+        clean_subject = _required_text(subject_user_id, "反馈主体")[:200]
+        if rating not in {"helpful", "not_helpful"}:
+            raise ValueError("反馈评分无效")
+        clean_comment = comment.strip()[:1000] if comment and comment.strip() else None
+        clean_evidence_ids = tuple(dict.fromkeys(evidence_ids))
+        clean_artifact_ids = tuple(dict.fromkeys(artifact_ids))
+        request_payload: JsonObject = {
+            "rating": rating,
+            "comment": clean_comment,
+            "evidence_ids": list(clean_evidence_ids),
+            "artifact_ids": list(clean_artifact_ids),
+        }
+        request_hash = _control_request_hash(
+            "record_user_feedback",
+            {**request_payload, "subject_user_id": clean_subject},
+        )
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current = _run_from_row(row)
+            replay = _control_replay(
+                connection,
+                run_id=run_id,
+                idempotency_key=clean_key,
+                command="record_user_feedback",
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                return current, replay, False
+            if current.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current.state_version}"
+                )
+            if current.status not in {"completed", "blocked", "failed", "cancelled"}:
+                raise ControlConflict("只能对终态 TaskRun 提交反馈")
+            _validate_feedback_references(
+                connection,
+                run_id=run_id,
+                evidence_ids=clean_evidence_ids,
+                artifact_ids=clean_artifact_ids,
+            )
+            next_version = current.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs SET state_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (next_version, now, run_id, current.state_version),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="user.feedback",
+                payload={
+                    "feedback_id": uuid.uuid4().hex,
+                    "subject_user_id": clean_subject,
+                    **request_payload,
+                    "control": {
+                        "command": "record_user_feedback",
+                        "idempotency_key": clean_key,
+                        "request_hash": request_hash,
+                    },
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            assert updated_row is not None
+            updated = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "last_feedback_id": event.payload["feedback_id"],
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated, event, True
+
     def transition(
         self,
         run_id: str,
@@ -3240,6 +3435,53 @@ def invocation_idempotency_key(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _validate_parent_run(connection: sqlite3.Connection, run: TaskRun) -> None:
+    if run.parent_run_id is None:
+        return
+    if run.parent_run_id == run.run_id:
+        raise ValueError("TaskRun 不能引用自身作为父分支")
+    row = connection.execute(
+        "SELECT project_id, conversation_id, status FROM task_runs WHERE run_id = ?",
+        (run.parent_run_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("父 TaskRun 不存在")
+    if (
+        str(row["project_id"]) != run.project_id
+        or str(row["conversation_id"]) != run.conversation_id
+    ):
+        raise ValueError("父 TaskRun 不属于当前项目和对话")
+    if str(row["status"]) not in {"completed", "blocked", "failed", "cancelled"}:
+        raise ControlConflict("只能从终态 TaskRun 创建分析分支")
+
+
+def _validate_feedback_references(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    evidence_ids: tuple[str, ...],
+    artifact_ids: tuple[str, ...],
+) -> None:
+    if evidence_ids:
+        placeholders = ",".join("?" for _ in evidence_ids)
+        rows = connection.execute(
+            f"SELECT evidence_id FROM evidence "
+            f"WHERE run_id = ? AND evidence_id IN ({placeholders})",
+            (run_id, *evidence_ids),
+        ).fetchall()
+        if {str(row["evidence_id"]) for row in rows} != set(evidence_ids):
+            raise ControlConflict("反馈引用了不属于当前 Run 的 Evidence")
+    if artifact_ids:
+        placeholders = ",".join("?" for _ in artifact_ids)
+        rows = connection.execute(
+            f"SELECT DISTINCT artifact_id FROM tool_invocations "
+            f"WHERE run_id = ? AND artifact_id IN ({placeholders})",
+            (run_id, *artifact_ids),
+        ).fetchall()
+        if {str(row["artifact_id"]) for row in rows} != set(artifact_ids):
+            raise ControlConflict("反馈引用了不属于当前 Run 的 Artifact")
+
+
 def _new_run_records(
     *,
     project_id: str,
@@ -3247,6 +3489,7 @@ def _new_run_records(
     user_message_id: str,
     contract: TaskContract,
     budget: JsonObject,
+    parent_run_id: str | None,
     now: str,
 ) -> tuple[TaskRun, TaskEvent, JsonObject]:
     run = TaskRun(
@@ -3254,7 +3497,7 @@ def _new_run_records(
         project_id=project_id,
         conversation_id=conversation_id,
         user_message_id=user_message_id,
-        parent_run_id=None,
+        parent_run_id=parent_run_id,
         goal=contract.goal,
         status="planning",
         state_version=1,
@@ -3284,19 +3527,21 @@ def _insert_run_records(
     event: TaskEvent,
     snapshot: JsonObject,
 ) -> None:
+    _validate_parent_run(connection, run)
     connection.execute(
         """
         INSERT INTO task_runs(
             run_id, project_id, conversation_id, user_message_id, parent_run_id,
             goal, status, state_version, plan_version, budget_json, usage_json,
             terminal_reason, created_at, updated_at, finished_at
-        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
         """,
         (
             run.run_id,
             run.project_id,
             run.conversation_id,
             run.user_message_id,
+            run.parent_run_id,
             run.goal,
             run.status,
             run.state_version,

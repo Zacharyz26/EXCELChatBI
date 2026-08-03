@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from mcp_servers.common.base_server import MCPServer
 from packages.common.config import Settings
@@ -17,10 +17,11 @@ from packages.governance.permissions import Principal
 from packages.models.gateway import ModelGateway
 from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
+from packages.session.task_store import TaskStore
 from sse_starlette.sse import EventSourceResponse
 
 from apps.api.auth import current_principal_dep
-from apps.api.authz import require_conversation_access
+from apps.api.authz import require_conversation_access, require_run_access
 from apps.api.deps import (
     chart_tools_dep,
     dataset_ops_tools_dep,
@@ -69,6 +70,21 @@ async def chat_stream(
         principal,
         write=True,
     )
+    if req.parent_run_id is not None:
+        parent = await run_in_threadpool(
+            TaskStore(store.db_path).get_run,
+            req.parent_run_id,
+        )
+        if parent is None:
+            raise HTTPException(status_code=404, detail="父任务不存在")
+        require_run_access(store, parent, principal)
+        if (
+            parent.project_id != conversation.project_id
+            or parent.conversation_id != conversation.id
+        ):
+            raise HTTPException(status_code=404, detail="父任务不存在")
+        if parent.status not in {"completed", "blocked", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="只能从终态任务创建分析分支")
 
     registry = build_registry(
         excel=excel,
@@ -115,6 +131,8 @@ async def chat_stream(
             principal=principal,
             run_id=run_id,
             control=control,
+            autonomy_mode=req.autonomy_mode,
+            parent_run_id=req.parent_run_id,
         ),
     )
     return EventSourceResponse(

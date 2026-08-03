@@ -873,6 +873,39 @@ select {
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff 20%);
 }
 
+.autonomy-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 8px;
+}
+
+.autonomy-option {
+  padding: 5px 8px;
+  color: #7b8699;
+  font-size: 9px;
+  font-weight: 700;
+  background: #f5f6f8;
+  border: 1px solid #e2e5eb;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.autonomy-option--active {
+  color: #4f62c8;
+  background: #edf0ff;
+  border-color: #cfd6fb;
+}
+
+.autonomy-selector > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #929baa;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-composer,
 .chat-error,
 .composer-hint {
@@ -2150,6 +2183,211 @@ select {
   color: #929baa;
   font-size: 10.5px;
   text-align: center;
+}
+
+.agent-tool-audits {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.agent-tool-audit {
+  padding: 11px;
+  background: #f8f9fb;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+}
+
+.agent-tool-audit__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-tool-audit__heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-tool-audit__heading strong {
+  color: #344056;
+  font-size: 10.5px;
+}
+
+.agent-tool-audit__heading span:not(.agent-step-status) {
+  color: #788397;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.agent-tool-audit dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 10px 0 0;
+}
+
+.agent-tool-audit dl > div {
+  min-width: 0;
+}
+
+.agent-tool-audit dt {
+  color: #9aa3b1;
+  font-size: 8.5px;
+}
+
+.agent-tool-audit dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: #526076;
+  font-size: 9.5px;
+}
+
+.agent-tool-audit > p {
+  margin: 9px 0 0;
+  color: #7b8799;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8.5px;
+}
+
+.agent-branch-grid,
+.agent-feedback-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.agent-branch-card,
+.agent-feedback-history article {
+  padding: 10px;
+  background: #f8f9fb;
+  border: 1px solid #e5e8ee;
+  border-radius: 8px;
+}
+
+.agent-branch-card--active {
+  background: #f2f4ff;
+  border-color: #cfd6fb;
+}
+
+.agent-branch-card > div,
+.agent-feedback-history article > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-branch-card strong,
+.agent-feedback-history strong {
+  color: #45526a;
+  font-size: 9.5px;
+}
+
+.agent-branch-card span,
+.agent-feedback-history span {
+  color: #929baa;
+  font-size: 8.5px;
+}
+
+.agent-branch-card p,
+.agent-feedback-history p {
+  margin: 7px 0;
+  color: #59667b;
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.agent-branch-card small,
+.agent-feedback-history small {
+  color: #8f99a8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+}
+
+.agent-branch-card > button {
+  margin-top: 8px;
+  padding: 5px 7px;
+  color: #596bc9;
+  font-size: 8.5px;
+  font-weight: 700;
+  background: #fff;
+  border: 1px solid #dbe0f4;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.agent-branch-card > button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.agent-branch-form,
+.agent-feedback-form {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e8ebf0;
+}
+
+.agent-branch-form label,
+.agent-feedback-form label {
+  display: grid;
+  gap: 5px;
+  color: #69758a;
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.agent-branch-form textarea,
+.agent-feedback-form textarea {
+  width: 100%;
+  min-height: 66px;
+  padding: 8px 9px;
+  color: #334055;
+  background: #fff;
+  border: 1px solid #dce1e8;
+  border-radius: 7px;
+  resize: vertical;
+}
+
+.agent-branch-form > p {
+  margin: 0;
+  color: #8c96a6;
+  font-size: 8.5px;
+}
+
+.agent-branch-form > button,
+.agent-feedback-form > button,
+.agent-feedback-form [role="radiogroup"] button {
+  padding: 7px 10px;
+  color: #526076;
+  font-size: 9.5px;
+  font-weight: 700;
+  background: #f5f6f8;
+  border: 1px solid #e0e4ea;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.agent-branch-form > button,
+.agent-feedback-form > button {
+  justify-self: end;
+  color: #fff;
+  background: #586bd8;
+  border-color: #586bd8;
+}
+
+.agent-feedback-form [role="radiogroup"] {
+  display: flex;
+  gap: 7px;
+}
+
+.agent-feedback-form [role="radiogroup"] button.is-selected {
+  color: #4f62c8;
+  background: #edf0ff;
+  border-color: #cfd6fb;
 }
 
 .agent-clarification-card {

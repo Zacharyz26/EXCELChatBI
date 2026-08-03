@@ -10,11 +10,13 @@ import {
   getAgentRun,
   getAgentRunEvents,
   getConversation,
+  getLatestAgentRun,
   listAgentApprovals,
   listConversations,
   listDatasets,
   listProjects,
   pauseAgentRun,
+  recordAgentRunFeedback,
   resumeAgentRun,
   retryAgentStep,
   reviseAgentPlan,
@@ -25,6 +27,7 @@ import {
 } from "@/api/client";
 import type {
   AgentApproval,
+  AgentAutonomyMode,
   AgentClarification,
   AgentPlanDefinition,
   AgentRunDetail,
@@ -61,6 +64,7 @@ interface WorkspaceState {
   approvals: AgentApproval[];
   pendingClarification: AgentClarification | null;
   collaborationBusy: string | null;
+  autonomyMode: AgentAutonomyMode;
   initialize: () => Promise<void>;
   selectProject: (projectId: string) => Promise<void>;
   addProject: (name: string) => Promise<void>;
@@ -75,7 +79,17 @@ interface WorkspaceState {
   /** 删除数据集；被引用时不删除并返回后端的影响面警告文案（由调用方二次确认后 force） */
   removeDataset: (datasetRef: string, force?: boolean) => Promise<string | null>;
   uploadFile: (file: File) => Promise<void>;
-  sendMessage: (message: string) => Promise<void>;
+  setAutonomyMode: (mode: AgentAutonomyMode) => void;
+  sendMessage: (
+    message: string,
+    options?: { parentRunId?: string },
+  ) => Promise<void>;
+  startBranch: (parentRunId: string, message: string) => Promise<void>;
+  submitActiveRunFeedback: (
+    rating: "helpful" | "not_helpful",
+    comment: string | null,
+  ) => Promise<void>;
+  restoreLatestRun: (conversationId: string) => Promise<void>;
   refreshActiveRun: (runId?: string) => Promise<void>;
   pauseActiveRun: () => Promise<void>;
   resumeActiveRun: () => Promise<void>;
@@ -123,6 +137,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   approvals: [],
   pendingClarification: null,
   collaborationBusy: null,
+  autonomyMode: initialAutonomyMode(),
 
   initialize: async () => {
     if (get().initialized || get().loading) return;
@@ -182,8 +197,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         messages: detail.messages,
         artifacts: detail.artifacts,
       });
-      const rememberedRunId = rememberedRun(conversationId);
-      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
+      await get().restoreLatestRun(conversationId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -253,8 +267,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const detail = await getConversation(conversationId);
       if (requestSequence !== navigationSequence) return;
       set({ messages: detail.messages, artifacts: detail.artifacts });
-      const rememberedRunId = rememberedRun(conversationId);
-      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
+      await get().restoreLatestRun(conversationId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -313,6 +326,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const projectId = get().activeProjectId;
     try {
       await deleteConversationRequest(conversationId);
+      forgetRun(conversationId);
     } catch (error) {
       set({ error: errorMessage(error) });
       return;
@@ -349,8 +363,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         messages: detail.messages,
         artifacts: detail.artifacts,
       });
-      const rememberedRunId = rememberedRun(next.id);
-      if (rememberedRunId) await get().refreshActiveRun(rememberedRunId);
+      await get().restoreLatestRun(next.id);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
     } finally {
@@ -388,7 +401,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  sendMessage: async (message) => {
+  setAutonomyMode: (mode) => {
+    window.sessionStorage.setItem("chatbi.autonomyMode", mode);
+    set({ autonomyMode: mode });
+  },
+
+  sendMessage: async (message, options = {}) => {
     const content = message.trim();
     const projectId = get().activeProjectId;
     const conversationId = get().activeConversationId;
@@ -442,6 +460,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         if (get().activeConversationId !== conversationId) return;
         rememberRun(conversationId, runId);
         set({ activeRunId: runId });
+      }, {
+        autonomyMode: get().autonomyMode,
+        parentRunId: options.parentRunId,
       });
       if (!terminalEventReceived) {
         streamError = "流式连接意外中断，请重试。";
@@ -476,6 +497,65 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
+  startBranch: async (parentRunId, message) => {
+    await get().sendMessage(message, { parentRunId });
+  },
+
+  submitActiveRunFeedback: async (rating, comment) => {
+    const runId = get().activeRunId;
+    if (!runId || get().collaborationBusy) return;
+    set({ collaborationBusy: "feedback", error: null });
+    try {
+      const fresh = await getAgentRun(runId);
+      const evidenceIds = fresh.tool_audits
+        .map((audit) => audit.evidence_id)
+        .filter((value): value is string => !!value);
+      const artifactIds = fresh.tool_audits
+        .map((audit) => audit.artifact_id)
+        .filter((value): value is string => !!value);
+      await recordAgentRunFeedback(
+        runId,
+        fresh.run.state_version,
+        rating,
+        comment,
+        [...new Set(evidenceIds)],
+        [...new Set(artifactIds)],
+      );
+      await get().refreshActiveRun(runId);
+    } catch (error) {
+      set({ error: errorMessage(error) });
+      throw error;
+    } finally {
+      if (get().collaborationBusy === "feedback") {
+        set({ collaborationBusy: null });
+      }
+    }
+  },
+
+  restoreLatestRun: async (conversationId) => {
+    try {
+      const response = await getLatestAgentRun(conversationId);
+      if (get().activeConversationId !== conversationId) return;
+      if (!response.run) {
+        forgetRun(conversationId);
+        set({
+          activeRunId: null,
+          activeRun: null,
+          approvals: [],
+          pendingClarification: null,
+        });
+        return;
+      }
+      rememberRun(conversationId, response.run.run_id);
+      set({ activeRunId: response.run.run_id });
+      await get().refreshActiveRun(response.run.run_id);
+    } catch (error) {
+      if (get().activeConversationId === conversationId) {
+        set({ error: errorMessage(error) });
+      }
+    }
+  },
+
   refreshActiveRun: async (requestedRunId) => {
     const runId = requestedRunId ?? get().activeRunId;
     const conversationId = get().activeConversationId;
@@ -483,10 +563,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const ownsBusy = get().collaborationBusy === null;
     if (ownsBusy) set({ collaborationBusy: "refresh", error: null });
     try {
-      const [detail, approvals, events] = await Promise.all([
-        getAgentRun(runId),
+      const detail = await getAgentRun(runId);
+      const latestSequence = numberValue(detail.state?.last_sequence) ?? 0;
+      const [approvals, events] = await Promise.all([
         listAgentApprovals(runId),
-        getAgentRunEvents(runId),
+        getAgentRunEvents(runId, Math.max(0, latestSequence - 1000)),
       ]);
       if (
         get().activeConversationId !== conversationId
@@ -791,6 +872,7 @@ function runStatusForEvent(event: ChatStreamEvent): AgentRunStatus | undefined {
     "run.started": "running",
     "run.resumed": "running",
     "run.paused": "paused",
+    "autonomy.plan_review_requested": "paused",
     "approval.requested": "paused",
     "approval.waiting": "paused",
     waiting_user: "waiting_user",
@@ -852,6 +934,12 @@ function clarificationFromPayload(
 
 function runStorageKey(conversationId: string): string {
   return `chatbi.agentRun.${conversationId}`;
+}
+
+function initialAutonomyMode(): AgentAutonomyMode {
+  if (typeof window === "undefined") return "read_only";
+  const value = window.sessionStorage.getItem("chatbi.autonomyMode");
+  return value === "assisted" || value === "autonomous" ? value : "read_only";
 }
 
 function rememberRun(conversationId: string, runId: string): void {

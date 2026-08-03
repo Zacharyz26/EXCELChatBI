@@ -249,6 +249,27 @@ class ChatStreamRequest(BaseModel):
 
     conversation_id: ConversationId
     message: ChatMessageText
+    autonomy_mode: Literal["assisted", "read_only", "autonomous"] = "read_only"
+    parent_run_id: Annotated[
+        str,
+        StringConstraints(pattern=r"^[0-9a-f]{32}$"),
+    ] | None = None
+
+
+class RunFeedbackRequest(BaseModel):
+    """对固定终态 TaskRun 的追加式用户反馈。"""
+
+    rating: Literal["helpful", "not_helpful"]
+    comment: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+    ] | None = None
+    evidence_ids: list[
+        Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    ] = Field(default_factory=list, max_length=100)
+    artifact_ids: list[
+        Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+    ] = Field(default_factory=list, max_length=100)
 
 
 class ClarificationAnswerRequest(BaseModel):
