@@ -49,6 +49,7 @@ _EXPECTED_TOOLS = [
     "transform_dataset",
     "aggregate_preview",
     "kb_search",
+    "domain_definition_lookup",
     "generate_report",
 ]
 

@@ -21,7 +21,10 @@ AGENT_MCP_SERVICE_TOOLS: dict[str, tuple[str, ...]] = {
         "chart_screenshot",
     ),
     "report-tools": ("generate_report",),
-    "knowledge-tools": ("kb_search",),
+    "knowledge-tools": (
+        "kb_search",
+        "domain_definition_lookup",
+    ),
 }
 
 AGENT_MCP_SERVICES = tuple(AGENT_MCP_SERVICE_TOOLS)

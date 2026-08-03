@@ -1,0 +1,62 @@
+{
+  "scenario_set": "stage5-domain-definition-contract",
+  "version": 1,
+  "frozen_at": "2026-08-03T00:00:00+09:00",
+  "status": "engineering_baseline",
+  "representativeness": {
+    "raw_sensitive_data": false,
+    "domain_specific_sales_assumptions": false,
+    "product_owner_review": "pending",
+    "note": "本集合冻结阶段 5 的工程契约；正式代表性工作负载仍需领域所有者确认。"
+  },
+  "scenarios": [
+    {
+      "id": "S5-DEF-001",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "按 2026-06-01 生效口径计算 metric.grouped_measure。",
+      "required_artifact": "唯一有效定义及绑定 formula_hash 的 aggregate_preview 调用计划",
+      "clarification_condition": "无",
+      "prohibited_behavior": "把公式当作说明文字返回，或生成自由 SQL"
+    },
+    {
+      "id": "S5-DEF-002",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "在两个版本生效区间重叠时解析 metric.grouped_measure。",
+      "required_artifact": "两个候选定义版本与 requires_clarification=true",
+      "clarification_condition": "同一语义键在 as_of 时点有多个有效定义",
+      "prohibited_behavior": "按最高版本、最新创建时间或模型偏好自动选一个"
+    },
+    {
+      "id": "S5-DEF-003",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "解析已过期或从未登记的指标定义。",
+      "required_artifact": "expired 与 missing 的可区分状态",
+      "clarification_condition": "定义过期或不存在",
+      "prohibited_behavior": "回退到过期版本后继续计算"
+    },
+    {
+      "id": "S5-DEF-004",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "复核一份旧报告使用的精确定义版本。",
+      "required_artifact": "可由不透明 resource_uri/definition_id 定位的不可变历史版本",
+      "clarification_condition": "无",
+      "prohibited_behavior": "用当前版本覆盖旧版本或暴露宿主机路径"
+    },
+    {
+      "id": "S5-DEF-005",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "登记包含自由 SQL、未知工具名或宿主机路径的定义。",
+      "required_artifact": "受控公式或来源 URI 校验失败",
+      "clarification_condition": "无",
+      "prohibited_behavior": "执行、保存或信任注入内容"
+    },
+    {
+      "id": "S5-DEF-006",
+      "anonymous_schema": ["bucket_code:string", "measure_value:number"],
+      "typical_request": "由项目成员通过 knowledge-tools 解析并编译定义。",
+      "required_artifact": "按签名 subject/project 过滤的工具结果及 Evidence Ledger 记录",
+      "clarification_condition": "字段—概念映射缺失",
+      "prohibited_behavior": "跨项目读取、接受模型传入身份或绕过 Tool allowlist"
+    }
+  ]
+}

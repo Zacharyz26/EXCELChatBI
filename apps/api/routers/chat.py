@@ -97,6 +97,7 @@ async def chat_stream(
             store=store,
             project_id=conversation.project_id,
             conversation_id=conversation.id,
+            subject_id=principal.user_id,
         ),
         mcp_config=mcp_client_config_from_settings(settings),
     )

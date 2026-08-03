@@ -34,6 +34,7 @@ DEFAULT_AGENT_TOOL_ALLOWLIST = frozenset(
         "transform_dataset",
         "aggregate_preview",
         "kb_search",
+        "domain_definition_lookup",
         "generate_report",
     }
 )

@@ -2,8 +2,8 @@
 
 Stage 1 deliberately keeps this extractor conservative: numeric claims require
 an exact value present in current-run Evidence, while knowledge claims require
-an explicit source label returned by ``kb_search``.  It does not ask a model to
-invent links between prose and Evidence.
+an explicit source label returned by a governed knowledge Tool. It does not ask
+a model to invent links between prose and Evidence.
 """
 
 from __future__ import annotations
@@ -148,15 +148,16 @@ def extract_numeric_claims(
 def extract_knowledge_claims(
     *, final_text: str, evidence: list[EvidenceRecord]
 ) -> list[ClaimDraft]:
-    """Link knowledge prose to explicit current-run ``kb_search`` sources.
+    """Link knowledge prose to explicit current-run governed knowledge sources.
 
     The whole answer is one conservative knowledge Claim.  This avoids claiming
     sentence-level semantic alignment that Stage 1 cannot establish reliably,
     while still preventing an uncited or fabricated knowledge answer from being
     delivered.
     """
+    knowledge_tools = {"kb_search", "domain_definition_lookup"}
     knowledge = [
-        record for record in evidence if record.source.get("tool") == "kb_search"
+        record for record in evidence if record.source.get("tool") in knowledge_tools
     ]
     if not knowledge or not final_text.strip():
         return []
@@ -363,6 +364,8 @@ def _collect_sources(
         content = value.get("text")
         if not isinstance(content, str):
             content = value.get("snippet")
+        if not isinstance(content, str):
+            content = value.get("description")
         if isinstance(source, str) and source.strip() and isinstance(content, str):
             item: JsonObject = {"path": path, "source": source.strip()}
             section = value.get("section")
@@ -402,7 +405,7 @@ def _evidence_source_labels(evidence: list[EvidenceRecord]) -> list[str]:
 def _evidence_summary_fallback(evidence: list[EvidenceRecord]) -> str:
     summaries: list[str] = []
     for record in evidence:
-        if record.source.get("tool") == "kb_search":
+        if record.source.get("tool") in {"kb_search", "domain_definition_lookup"}:
             continue
         summary = record.summary.get("summary")
         if isinstance(summary, str) and summary.strip() and summary.strip() not in summaries:

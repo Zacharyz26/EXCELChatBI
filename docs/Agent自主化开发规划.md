@@ -1,7 +1,7 @@
 # ChatBI Agent 自主化开发规划
 
 > 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-03
-> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现，最新 Compose/容器 CI 全绿
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；阶段 4D Compose 竞态已修复、待重跑
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 代表性盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
@@ -20,7 +20,10 @@
 > Executor/MCP Gateway/MCP Server 审批执行链；4B React 协作交互已完成；4C 的 SSE
 > 重连、服务端恢复和工具审计已由提交 `2f2771f` 的真实 Compose CI 验证关闭；4D 已实现
 > 自主等级、分析分支和反馈闭环，并补齐反馈进入 LLM Planner、辅助确认和标准只读副作用
-> 拒绝的 Compose 场景。新增门禁因当前主机无 Docker，待更新提交的 CI 验证。
+> 拒绝的 Compose 场景。提交 `f06587e` 的 backend/frontend job 成功，但 Compose browser
+> gate 因 Run 首次持久化可见性 404 的测试竞态失败；该竞态已本地修复，阶段 4 仍待新 CI
+> 关闭。阶段 5A 已并行启动不依赖该结果的版本化定义、受控公式和 Evidence 工程切片，
+> 正式阶段入口仍待 4D 全绿与代表性签字。
 
 ## 1. 总目标
 

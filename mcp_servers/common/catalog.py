@@ -172,6 +172,28 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
     "kb_search": _object(
         {"is_empty": {"type": "boolean"}, "hits": _ARRAY}, "is_empty", "hits"
     ),
+    "domain_definition_lookup": _object(
+        {
+            "status": _STRING,
+            "is_empty": {"type": "boolean"},
+            "requires_clarification": {"type": "boolean"},
+            "semantic_key": _STRING,
+            "as_of": _STRING,
+            "definition": {"type": ["object", "null"]},
+            "candidates": _ARRAY,
+            "compilation_status": _STRING,
+            "compiled_invocation": {"type": ["object", "null"]},
+        },
+        "status",
+        "is_empty",
+        "requires_clarification",
+        "semantic_key",
+        "as_of",
+        "definition",
+        "candidates",
+        "compilation_status",
+        "compiled_invocation",
+    ),
     "generate_report": _object(
         {
             "report_id": _STRING,

@@ -26,6 +26,7 @@ from packages.session.migrations import (
     v5,
     v6,
     v7,
+    v8,
 )
 from packages.session.models import (
     Artifact,
@@ -164,11 +165,14 @@ class SessionStore:
                 "conversation_compaction_items",
                 "approval_records",
                 "approval_operations",
+                "domain_definitions",
+                "domain_field_mappings",
             }
             rows = connection.execute(
                 """
                 SELECT name FROM sqlite_master
-                WHERE type = 'table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                WHERE type = 'table'
+                  AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(sorted(required_tables)),
             ).fetchall()
@@ -178,9 +182,9 @@ class SessionStore:
             migrations = connection.execute(
                 """
                 SELECT version, name, checksum FROM schema_migrations
-                WHERE version IN (?, ?, ?, ?)
+                WHERE version IN (?, ?, ?, ?, ?)
                 """,
-                (v4.VERSION, v5.VERSION, v6.VERSION, v7.VERSION),
+                (v4.VERSION, v5.VERSION, v6.VERSION, v7.VERSION, v8.VERSION),
             ).fetchall()
             actual_migrations = {
                 int(row["version"]): (str(row["name"]), str(row["checksum"]))
@@ -191,6 +195,7 @@ class SessionStore:
                 v5.VERSION: (v5.NAME, v5.CHECKSUM),
                 v6.VERSION: (v6.NAME, v6.CHECKSUM),
                 v7.VERSION: (v7.NAME, v7.CHECKSUM),
+                v8.VERSION: (v8.NAME, v8.CHECKSUM),
             }
             if actual_migrations != expected_migrations:
                 raise RuntimeError("SQLite v2.5 migration checksum 不匹配")
@@ -204,6 +209,7 @@ class SessionStore:
             "compaction_control_plane": "ready",
             "lineage_control_plane": "ready",
             "collaboration_control_plane": "ready",
+            "domain_definition_control_plane": "ready",
         }
 
     # ── Project ──

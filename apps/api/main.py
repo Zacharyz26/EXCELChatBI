@@ -25,6 +25,7 @@ from apps.api.routers import (
     analyze,
     auth_config,
     chat,
+    domain_definitions,
     health,
     kb,
     lineage,
@@ -105,6 +106,7 @@ def create_app() -> FastAPI:
     app.include_router(report.router)
     app.include_router(kb.router)
     app.include_router(chat.router)
+    app.include_router(domain_definitions.router)
     app.include_router(agent_runs.router)
     app.include_router(workspace.router)
     app.include_router(memories.router)

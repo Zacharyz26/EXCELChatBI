@@ -15,6 +15,7 @@ from apps.orchestrator.agent_tools import (
 )
 from packages.common.config import Settings, get_settings
 from packages.common.logging import get_logger
+from packages.knowledge.domain_store import DomainDefinitionStore
 from packages.rag.embedding import BGEEmbedder, Embedder, HashingEmbedder
 from packages.rag.rerank import BGEReranker, LexicalReranker, Reranker
 from packages.rag.retriever import HybridRetriever
@@ -56,6 +57,7 @@ class AgentServiceRuntime:
             cache_size=settings.conversation_cache_size,
             read_only=True,
         )
+        self.definitions = DomainDefinitionStore(self.store, read_only=True)
         self.excel = build_excel_server()
         self.stats = build_stats_server()
         self.chart = build_chart_server()
@@ -112,8 +114,9 @@ class AgentServiceRuntime:
                 store=self.store,
                 project_id=request_context.project_id,
                 conversation_id=request_context.conversation_id,
+                subject_id=request_context.subject_id,
             )
-            if self.service_name == "report-tools"
+            if self.service_name in {"report-tools", "knowledge-tools"}
             else None
         )
         registry = self._registry(context=agent_context)
@@ -173,6 +176,7 @@ class AgentServiceRuntime:
             retriever=self.retriever,
             context=context,
             mcp_config=MCPClientConfig(),
+            definition_store=self.definitions,
         )
 
     def _build_retriever(self) -> HybridRetriever:

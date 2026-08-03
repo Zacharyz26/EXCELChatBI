@@ -953,6 +953,7 @@ def _start_recovered_run(
             store=store,
             project_id=run.project_id,
             conversation_id=run.conversation_id,
+            subject_id=principal.user_id,
         ),
         mcp_config=mcp_client_config_from_settings(execution.settings),
     )

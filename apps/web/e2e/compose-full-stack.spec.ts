@@ -13,6 +13,7 @@ const BRANCH_GOAL = (
 const READ_ONLY_GOAL = (
   "COMPOSE_4D_READ_ONLY：请基于已有数据画像重新生成一份报告并导出 PDF。"
 );
+const RUN_NOT_VISIBLE = "run_not_visible";
 
 interface RunDetailPayload {
   run: {
@@ -32,6 +33,12 @@ interface RunDetailPayload {
   feedback: Array<{ rating: string; comment: string | null }>;
 }
 
+interface RunStatusResponse {
+  status(): number;
+  ok(): boolean;
+  json(): Promise<unknown>;
+}
+
 async function getRunDetail(page: Page, runId: string): Promise<RunDetailPayload> {
   const response = await page.request.get(
     `/api/agent/runs/${encodeURIComponent(runId)}`,
@@ -41,10 +48,52 @@ async function getRunDetail(page: Page, runId: string): Promise<RunDetailPayload
   return response.json() as Promise<RunDetailPayload>;
 }
 
+async function getRunStatusForPolling(page: Page, runId: string): Promise<string> {
+  const response = await page.request.get(
+    `/api/agent/runs/${encodeURIComponent(runId)}`,
+    { headers: AUTH_HEADERS },
+  );
+  return runStatusFromResponse(response);
+}
+
+async function runStatusFromResponse(response: RunStatusResponse): Promise<string> {
+  // Streaming response headers expose the run ID before the worker has necessarily
+  // committed the first run row. Treat only that short 404 window as retryable.
+  if (response.status() === 404) {
+    return RUN_NOT_VISIBLE;
+  }
+  expect(response.ok()).toBeTruthy();
+  const detail = await response.json() as RunDetailPayload;
+  return detail.run.status;
+}
+
 test.skip(
   process.env.CHATBI_COMPOSE_RECOVERY_ONLY === "1",
   "恢复阶段复用初始阶段创建的持久化工作区",
 );
+
+test("Run 状态轮询仅重试持久化可见性窗口", async () => {
+  const responses: RunStatusResponse[] = [
+    {
+      status: () => 404,
+      ok: () => false,
+      json: async () => ({ detail: "TaskRun 不存在" }),
+    },
+    {
+      status: () => 200,
+      ok: () => true,
+      json: async () => ({ run: { status: "blocked" } }),
+    },
+  ];
+
+  await expect.poll(async () => runStatusFromResponse(responses.shift()!)).toBe("blocked");
+  expect(responses).toHaveLength(0);
+  await expect(runStatusFromResponse({
+    status: () => 500,
+    ok: () => false,
+    json: async () => ({ detail: "unexpected" }),
+  })).rejects.toThrow();
+});
 
 test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", async ({ page }) => {
   await page.goto("/");
@@ -172,7 +221,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   const assistedRunId = await branchResponse.headerValue("x-chatbi-run-id");
   expect(assistedRunId).toBeTruthy();
   await expect.poll(
-    async () => (await getRunDetail(page, assistedRunId!)).run.status,
+    async () => getRunStatusForPolling(page, assistedRunId!),
     { timeout: 60_000 },
   ).toBe("paused");
 
@@ -210,7 +259,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   const resumeResponse = await resumeResponsePromise;
   expect(resumeResponse.ok()).toBeTruthy();
   await expect.poll(
-    async () => (await getRunDetail(page, assistedRunId!)).run.status,
+    async () => getRunStatusForPolling(page, assistedRunId!),
     { timeout: 120_000 },
   ).toBe("completed");
   await expect(page.getByText(
@@ -248,7 +297,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   const readOnlyRunId = await readOnlyResponse.headerValue("x-chatbi-run-id");
   expect(readOnlyRunId).toBeTruthy();
   await expect.poll(
-    async () => (await getRunDetail(page, readOnlyRunId!)).run.status,
+    async () => getRunStatusForPolling(page, readOnlyRunId!),
     { timeout: 120_000 },
   ).toMatch(/^(blocked|failed)$/);
 

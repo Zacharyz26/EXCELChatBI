@@ -1727,6 +1727,63 @@ async def test_kb_search_persists_traceable_citation_artifact(
 
 
 @pytest.mark.asyncio
+async def test_domain_definition_lookup_joins_the_evidence_ledger(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    result = {
+        "status": "resolved",
+        "is_empty": False,
+        "requires_clarification": False,
+        "semantic_key": "metric.grouped_measure",
+        "as_of": "2026-06-01T00:00:00Z",
+        "definition": {
+            "version": 1,
+            "source": "urn:domain-definition:grouped-measure:v1",
+        },
+        "candidates": [],
+        "compilation_status": "not_requested",
+        "compiled_invocation": None,
+    }
+    registry = FakeRegistry({"domain_definition_lookup": lambda args: result})
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["我先解析项目中的版本化指标定义。"],
+                "tool_calls": [
+                    ToolCall(
+                        id="definition-call",
+                        name="domain_definition_lookup",
+                        arguments='{"semantic_key":"metric.grouped_measure"}',
+                    )
+                ],
+            },
+            {
+                "deltas": [
+                    "已解析版本 1（来源：urn:domain-definition:grouped-measure:v1）。"
+                ]
+            },
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="metric.grouped_measure 怎么定义？",
+    )
+
+    artifact_event = next(payload for name, payload in events if name == "artifact")
+    assert artifact_event["type"] == "citations"
+    artifact = store.list_artifacts(conversation.id)[0]
+    assert artifact.source_tool == "domain_definition_lookup"
+    run_id = cast(str, events[-1][1]["run_id"])
+    evidence = TaskStore(store.db_path).list_evidence(run_id)
+    assert len(evidence) == 1
+    assert evidence[0].source["tool"] == "domain_definition_lookup"
+
+
+@pytest.mark.asyncio
 async def test_kb_answer_without_source_is_revised_before_delivery(
     store: SessionStore, conversation: Conversation
 ) -> None:

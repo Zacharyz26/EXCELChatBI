@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8
 
 
 @pytest.fixture
@@ -60,6 +60,8 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "dataset_lineage_anchors",
         "approval_records",
         "approval_operations",
+        "domain_definitions",
+        "domain_field_mappings",
     } <= tables
 
 
@@ -82,6 +84,7 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         "compaction_control_plane": "ready",
         "lineage_control_plane": "ready",
         "collaboration_control_plane": "ready",
+        "domain_definition_control_plane": "ready",
     }
     with sqlite3.connect(db_path) as connection:
         connection.execute(
@@ -122,6 +125,18 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         connection.execute(
             "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
             (v7.VERSION,),
+        )
+
+    with pytest.raises(RuntimeError, match="checksum"):
+        store.readiness_status()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+            (v7.CHECKSUM, v7.VERSION),
+        )
+        connection.execute(
+            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
+            (v8.VERSION,),
         )
 
     with pytest.raises(RuntimeError, match="checksum"):

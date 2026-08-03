@@ -243,6 +243,43 @@ def test_empty_knowledge_result_only_supports_an_honest_no_result_answer() -> No
     assert fabricated[0].value_refs[0]["supported"] is False
 
 
+def test_domain_definition_source_is_linked_as_knowledge_evidence() -> None:
+    evidence = EvidenceRecord(
+        evidence_id="domain-definition-1",
+        run_id="run-1",
+        invocation_id="invocation-1",
+        artifact_id=None,
+        kind="tool_result",
+        source={"tool": "domain_definition_lookup"},
+        result_hash="hash",
+        summary=build_evidence_summary(
+            summary="已解析指标定义",
+            result={
+                "status": "resolved",
+                "is_empty": False,
+                "definition": {
+                    "source": "urn:domain-definition:grouped-measure:v1",
+                    "title": "匿名分组度量",
+                    "description": "按匿名分组汇总匿名度量。",
+                },
+            },
+            artifact_id=None,
+        ),
+        created_at="now",
+    )
+
+    claims = extract_knowledge_claims(
+        final_text=(
+            "该指标按受控分组聚合定义"
+            "（来源：urn:domain-definition:grouped-measure:v1）。"
+        ),
+        evidence=[evidence],
+    )
+
+    assert claims[0].evidence_ids == ("domain-definition-1",)
+    assert claims[0].value_refs[0]["supported"] is True
+
+
 def test_explicit_limitation_is_persistable_claim_metadata() -> None:
     claims = extract_claims(
         final_text="结论仅供参考，样本不足是主要局限。",

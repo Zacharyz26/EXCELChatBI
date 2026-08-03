@@ -1,0 +1,11 @@
+{
+  "manifest_version": 1,
+  "scenario_file": "domain_definition_contract_v1.json",
+  "scenario_sha256": "2c6fcb36d61ea09b01d9cc1343c64e98e458b4f1ea7214de83987d5818520397",
+  "scoring_contract": {
+    "deterministic_contract_repetitions": 1,
+    "required_scenarios": 6,
+    "pass_rule": "all_required_contract_assertions",
+    "commercial_regression_suite": "separate"
+  }
+}
