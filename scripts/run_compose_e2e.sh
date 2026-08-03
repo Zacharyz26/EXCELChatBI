@@ -101,6 +101,28 @@ CHATBI_IMAGE_TAG="$image_tag" "${compose[@]}" up -d --no-build
 wait_for_application "initial startup"
 pnpm --dir apps/web test:e2e:compose
 
+model_audit="$(
+  "${compose[@]}" exec -T model-stub \
+    python -c \
+    'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/audit", timeout=5).read().decode())'
+)"
+printf '%s\n' "$model_audit" > .data/e2e/model-fixture-audit.json
+MODEL_AUDIT_JSON="$model_audit" node -e '
+const audit = JSON.parse(process.env.MODEL_AUDIT_JSON);
+if (audit.planner_calls < 1) {
+  throw new Error("4D branch did not reach the LLM Planner boundary");
+}
+if (audit.feedback_marker_seen_in_planner !== true) {
+  throw new Error("bounded parent feedback did not reach the LLM Planner request");
+}
+if (audit.branch_profile_tool_calls !== 1) {
+  throw new Error(`branch profile tool was requested ${audit.branch_profile_tool_calls} times`);
+}
+if (audit.read_only_report_attempts < 1) {
+  throw new Error("read-only side-effect denial scenario did not attempt report generation");
+}
+'
+
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
 "${compose[@]}" restart api report-tools web

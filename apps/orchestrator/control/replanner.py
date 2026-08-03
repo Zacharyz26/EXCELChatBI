@@ -147,6 +147,7 @@ async def create_replan(
     )
     generated = await generate_plan(
         gateway,
+        planning_request=contract.goal,
         contract=contract.to_dict(),
         context=context,
         capability_catalog=registry.capability_catalog(),

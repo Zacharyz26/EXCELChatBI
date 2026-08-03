@@ -124,6 +124,7 @@ class PlannerAwareGateway(ScriptedGateway):
         super().__init__(turns)
         self.planner_plan = planner_plan
         self.planner_calls = 0
+        self.planner_messages: list[list[ModelMessage]] = []
 
     async def complete(
         self,
@@ -136,6 +137,7 @@ class PlannerAwareGateway(ScriptedGateway):
         assert params is not None
         assert messages
         self.planner_calls += 1
+        self.planner_messages.append(list(messages))
         return ModelResponse(
             content=json.dumps(self.planner_plan, ensure_ascii=False),
             model="eligible-planner",
@@ -587,6 +589,84 @@ async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
     assert run.status == "paused"
     assert run.autonomy_mode == "assisted"
     assert tasks.list_invocations(run.run_id) == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    parent_events = await _run_loop(
+        store,
+        conversation,
+        ScriptedGateway([{"deltas": ["基线答复已完成。"]}]),
+        FakeRegistry({"get_data_profile": lambda _: {}}),
+        user_text="完成基线答复",
+        enforce_plan=False,
+    )
+    parent_run_id = cast(str, dict(parent_events)["meta"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    parent = tasks.get_run(parent_run_id)
+    assert parent is not None and parent.status == "completed"
+    tasks.record_user_feedback(
+        parent_run_id,
+        expected_version=parent.state_version,
+        idempotency_key="branch-feedback-planner-context",
+        subject_user_id="local-user",
+        rating="not_helpful",
+        comment="COMPOSE_4D_FEEDBACK 请保留原始数据，只重新核对字段",
+    )
+    planner_plan = {
+        "schema_version": 1,
+        "summary": "重新核对画像",
+        "steps": [
+            {
+                "step_id": "profile_feedback_branch",
+                "purpose": "重新核对字段与规模",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像工具成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    gateway = PlannerAwareGateway([], planner_plan)
+
+    child_events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        FakeRegistry({"get_data_profile": lambda _: {}}),
+        user_text="COMPOSE_4D_BRANCH 请深入分析当前数据画像",
+        planner_gateway=gateway,
+        autonomy_mode="assisted",
+        parent_run_id=parent_run_id,
+    )
+
+    assert gateway.planner_calls == 1
+    request = json.loads(gateway.planner_messages[0][-1].content)
+    planning_request = request["planning_request"]
+    assert "COMPOSE_4D_BRANCH" in planning_request
+    assert "COMPOSE_4D_FEEDBACK" in planning_request
+    assert "不能扩大数据、工具或权限范围" in planning_request
+    assert request["contract"]["goal"] == "COMPOSE_4D_BRANCH 请深入分析当前数据画像"
+    assert [name for name, _ in child_events][-2:] == [
+        "autonomy.plan_review_requested",
+        "done",
+    ]
 
 
 @pytest.mark.asyncio

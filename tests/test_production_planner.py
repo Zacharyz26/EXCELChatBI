@@ -502,9 +502,14 @@ async def test_complex_route_uses_llm_and_records_only_hashes_and_usage() -> Non
         "clarifications": [],
     }
     gateway = _PlannerGateway(plan)
+    planning_request = (
+        contract.goal
+        + "\n\n这是基于父 TaskRun 的新分析分支。"
+        + "\n- 需改进：COMPOSE_4D_FEEDBACK 请保留原始数据并重新核对字段"
+    )
 
     result = await create_production_plan(
-        user_text=contract.goal,
+        user_text=planning_request,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
@@ -521,3 +526,4 @@ async def test_complex_route_uses_llm_and_records_only_hashes_and_usage() -> Non
     assert len(gateway.calls) == 1
     request_payload = gateway.calls[0][-1].content
     assert "SECRET-ROW" not in request_payload
+    assert json.loads(request_payload)["planning_request"] == planning_request

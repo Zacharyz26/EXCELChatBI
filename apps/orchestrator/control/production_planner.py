@@ -131,6 +131,7 @@ async def create_production_plan(
     if requested_route == "llm" and gateway is not None:
         generated = await generate_plan(
             gateway,
+            planning_request=user_text,
             contract=contract.to_dict(),
             context=context,
             capability_catalog=capability_catalog,

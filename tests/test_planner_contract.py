@@ -65,6 +65,7 @@ async def test_generate_plan_uses_strict_json_and_shared_contract() -> None:
 
     result = await generate_plan(
         gateway,
+        planning_request="检查质量",
         contract={
             "goal": "检查质量",
             "success_criteria": [{"criterion_id": "goal.coverage"}],
@@ -89,6 +90,7 @@ async def test_generate_plan_uses_strict_json_and_shared_contract() -> None:
     }
     payload = json.loads(gateway.calls[0][1][1].content)
     assert payload["task_plan_schema"]["additionalProperties"] is False
+    assert payload["planning_request"] == "检查质量"
     assert "rows" not in payload["context"]
 
 
@@ -98,6 +100,7 @@ async def test_generate_plan_repairs_once_and_aggregates_usage() -> None:
 
     result = await generate_plan(
         gateway,
+        planning_request="检查质量",
         contract={"goal": "检查质量", "success_criteria": []},
         context={},
         capability_catalog=[
@@ -122,6 +125,7 @@ async def test_generate_plan_fails_closed_after_one_repair() -> None:
     with pytest.raises(PlannerProtocolError, match="一次修复"):
         await generate_plan(
             gateway,
+            planning_request="检查质量",
             contract={"goal": "检查质量", "success_criteria": []},
             context={},
             capability_catalog=[

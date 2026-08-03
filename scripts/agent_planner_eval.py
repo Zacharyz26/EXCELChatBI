@@ -437,6 +437,7 @@ async def _evaluate_case(
         if route == "llm":
             generated = await generate_plan(
                 gateway,
+                planning_request=str(case["request"]),
                 contract=build_contract(case),
                 context=cast(JsonObject, case["context"]),
                 capability_catalog=list(CAPABILITY_CATALOG),
