@@ -3,11 +3,13 @@ import { expect, test } from "@playwright/test";
 const E2E_TOKEN = "chatbi-local-e2e-token-00000001";
 const recoveryOnly = process.env.CHATBI_COMPOSE_RECOVERY_ONLY === "1";
 const runId = process.env.CHATBI_COMPOSE_RECOVERY_RUN_ID ?? "";
+const latestRunId = process.env.CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID ?? "";
 
 test.skip(!recoveryOnly, "仅在 Compose 服务重启后的恢复阶段执行");
 
 test("全新浏览器从服务端恢复 TaskRun 与报告，且 MCP 不暴露", async ({ page }) => {
   expect(runId).not.toBe("");
+  expect(latestRunId).not.toBe("");
 
   await page.goto("/");
   await page.getByLabel("访问令牌").fill(E2E_TOKEN);
@@ -18,6 +20,12 @@ test("全新浏览器从服务端恢复 TaskRun 与报告，且 MCP 不暴露", 
   await expect(controlButton).toBeEnabled({ timeout: 30_000 });
   await controlButton.click();
   const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.locator(".agent-status")).toHaveText("已阻塞");
+  await expect(panel).toContainText(`Run ${latestRunId.slice(0, 10)}`);
+  await expect(panel).toContainText("标准只读");
+  await panel.getByRole("button", {
+    name: `查看分支 ${runId.slice(0, 10)}…`,
+  }).click();
   await expect(panel.locator(".agent-status")).toHaveText("已完成");
   await expect(panel).toContainText(`Run ${runId.slice(0, 10)}`);
   const reportAudit = panel.locator(".agent-tool-audit", {

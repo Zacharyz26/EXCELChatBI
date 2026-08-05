@@ -125,11 +125,13 @@ if (audit.read_only_report_attempts < 1) {
 
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
+latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.read_only_run_id)")"
 "${compose[@]}" restart api report-tools web
 wait_for_application "Web/API/report-tools restart"
 verify_original_run
 CHATBI_COMPOSE_RECOVERY_ONLY=1 \
   CHATBI_COMPOSE_RECOVERY_RUN_ID="$run_id" \
+  CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID="$latest_run_id" \
   pnpm --dir apps/web test:e2e:compose
 
 probe_output="$(

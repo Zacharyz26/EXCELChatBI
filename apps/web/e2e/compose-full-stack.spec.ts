@@ -273,6 +273,13 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
     expect.objectContaining({ tool_name: "get_data_profile", status: "succeeded" }),
   ]));
   await expect(panel.getByLabel("分支对比")).toContainText("2 个相关 Run");
+
+  // 回到原报告 Run，再从它创建标准只读分支，使重启后的最新 Run 仍可追溯到报告。
+  await panel.getByRole("button", {
+    name: `查看分支 ${runId!.slice(0, 10)}…`,
+  }).click();
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
+  await expect(panel).toContainText(`Run ${runId!.slice(0, 10)}`);
   await page.getByRole("button", { name: "关闭任务协作" }).click();
 
   // 标准只读模式必须让 generate_report 在 Host 策略层失败，且不新增报告 Artifact。
@@ -286,12 +293,15 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   ).filter((artifact) => artifact.type === "report").length;
 
   await page.getByRole("radio", { name: "标准只读" }).click();
-  await page.getByLabel("消息内容").fill(READ_ONLY_GOAL);
+  await controlButton.click();
+  panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel).toContainText(`Run ${runId!.slice(0, 10)}`);
+  await panel.getByRole("textbox", { name: "新分支目标" }).fill(READ_ONLY_GOAL);
   const readOnlyResponsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/chat/stream")
       && response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "发送消息" }).click();
+  await panel.getByRole("button", { name: "创建分析分支" }).click();
   const readOnlyResponse = await readOnlyResponsePromise;
   expect(readOnlyResponse.ok()).toBeTruthy();
   const readOnlyRunId = await readOnlyResponse.headerValue("x-chatbi-run-id");
@@ -302,6 +312,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   ).toMatch(/^(blocked|failed)$/);
 
   const readOnlyDetail = await getRunDetail(page, readOnlyRunId!);
+  expect(readOnlyDetail.run.parent_run_id).toBe(runId);
   expect(readOnlyDetail.run.autonomy_mode).toBe("read_only");
   const reportAttempts = readOnlyDetail.tool_audits.filter(
     (audit) => audit.tool_name === "generate_report",
