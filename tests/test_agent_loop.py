@@ -1738,6 +1738,8 @@ async def test_domain_definition_lookup_joins_the_evidence_ledger(
         "as_of": "2026-06-01T00:00:00Z",
         "definition": {
             "version": 1,
+            "title": "匿名分组度量",
+            "description": "按匿名分组汇总匿名度量。",
             "source": "urn:domain-definition:grouped-measure:v1",
         },
         "candidates": [],

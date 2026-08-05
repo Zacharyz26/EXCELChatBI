@@ -17,7 +17,7 @@ from apps.api.routers import agent_runs
 from apps.orchestrator.control.contracts import build_minimal_contract
 from fastapi import Header
 from packages.governance.permissions import Principal
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v7
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v7, v8
 from packages.session.store import SessionStore
 from packages.session.task_store import (
     ControlConflict,
@@ -189,6 +189,16 @@ def test_v6_database_is_backed_up_and_migrated_to_collaboration_schema(
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v8.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v8.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v8.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v8.VERSION,),
+        )
         for trigger in v7.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v7.ADDED_INDEXES:

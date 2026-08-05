@@ -11,7 +11,7 @@ from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.governance.audit import AuditEvent
 from packages.governance.permissions import Principal
 from packages.session.lineage import LineageAccessDenied, LineageStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7, v8
 from packages.session.models import ArtifactDraft
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
@@ -219,6 +219,16 @@ def test_v5_database_is_backed_up_and_backfills_lineage_anchors(
     )
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v8.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v8.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v8.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v8.VERSION,),
+        )
         for trigger in v7.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v7.ADDED_INDEXES:
