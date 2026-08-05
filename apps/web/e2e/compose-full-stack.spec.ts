@@ -325,12 +325,19 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
       JSON.stringify(event.payload).includes("autonomy_write_denied")
     )),
   ).toBeTruthy();
-  expect(
-    readOnlyEvents.events.some(
-      (event) => event.event_type === "step.completed"
-        && event.payload.tool === "generate_report",
-    ),
-  ).toBeFalsy();
+  const deniedReportStep = readOnlyEvents.events.find(
+    (event) => event.event_type === "step.completed"
+      && event.payload.tool === "generate_report"
+      && event.payload.status === "failed",
+  );
+  expect(deniedReportStep).toBeDefined();
+  expect(deniedReportStep?.payload.evidence_ids).toEqual([]);
+  expect(deniedReportStep?.payload.artifact_ids).toEqual([]);
+  expect(readOnlyEvents.events.some(
+    (event) => event.event_type === "step.completed"
+      && event.payload.tool === "generate_report"
+      && event.payload.status === "completed",
+  )).toBeFalsy();
 
   const conversationAfter = await page.request.get(
     `/api/conversations/${encodeURIComponent(detail.run.conversation_id)}`,
