@@ -12,6 +12,8 @@ from __future__ import annotations
 import abc
 import hashlib
 import math
+import os
+from pathlib import Path
 
 from packages.rag.tokenizer import tokenize
 
@@ -91,7 +93,13 @@ class BGEEmbedder(Embedder):
     - 构造期加载模型（fail-fast）：依赖/权重缺失在启动时报错，而非首次检索 500。
     """
 
-    def __init__(self, model_name: str, device: str = "auto") -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "auto",
+        cache_dir: str | None = None,
+    ) -> None:
+        configure_model_cache(cache_dir)
         try:
             from FlagEmbedding import BGEM3FlagModel
         except ImportError as exc:
@@ -123,3 +131,13 @@ class BGEEmbedder(Embedder):
             for weights in out["lexical_weights"]
         ]
         return dense, sparse
+
+
+def configure_model_cache(cache_dir: str | None) -> None:
+    """Route downloaded model artifacts to the explicitly rebuildable cache tree."""
+    if not cache_dir:
+        return
+    root = Path(cache_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(root / "huggingface"))
+    os.environ.setdefault("HF_HUB_CACHE", str(root / "huggingface" / "hub"))

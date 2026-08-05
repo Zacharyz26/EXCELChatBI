@@ -3297,6 +3297,77 @@ class TaskStore:
             raise ValueError(f"TaskRun 不存在: {run_id}")
         return int(row[1])
 
+    def resolve_definition_execution(
+        self,
+        run_id: str,
+        *,
+        tool_name: str,
+        arguments: JsonObject,
+    ) -> JsonObject | None:
+        """Match a data call to a prior immutable definition Evidence record.
+
+        Once the current run has compiled a definition for the requested Tool,
+        altered arguments fail closed instead of silently becoming an unbound
+        model-authored calculation. Repeated resolution of the same immutable
+        version is harmless; two distinct matching versions require clarification.
+        """
+        arguments_hash = invocation_arguments_hash(arguments)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT evidence_id, source_json
+                FROM evidence
+                WHERE run_id = ?
+                ORDER BY created_at, rowid
+                """,
+                (run_id,),
+            ).fetchall()
+        candidates: list[JsonObject] = []
+        compiled_for_tool = False
+        for row in rows:
+            source = _load_object(str(row["source_json"]))
+            compiled = source.get("compiled_invocation")
+            resource = source.get("definition_resource")
+            if not isinstance(compiled, dict) or not isinstance(resource, dict):
+                continue
+            if compiled.get("tool_name") != tool_name:
+                continue
+            compiled_for_tool = True
+            if (
+                compiled.get("definition_match") is not True
+                or compiled.get("definition_id") != resource.get("definition_id")
+                or compiled.get("definition_version")
+                != resource.get("definition_version")
+                or compiled.get("formula_hash") != resource.get("formula_hash")
+            ):
+                continue
+            if compiled.get("arguments_hash") != arguments_hash:
+                continue
+            binding = _definition_execution_binding(
+                resource,
+                definition_evidence_id=str(row["evidence_id"]),
+                compiled_tool_name=tool_name,
+                compiled_arguments_hash=arguments_hash,
+            )
+            if binding is not None:
+                candidates.append(binding)
+        unique = {
+            (
+                str(item["definition_id"]),
+                int(item["definition_version"]),
+                str(item["formula_hash"]),
+                str(item["resource_uri"]),
+            ): item
+            for item in candidates
+        }
+        if len(unique) > 1:
+            raise ControlConflict("数据调用同时匹配多个领域定义版本，必须先澄清")
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        if compiled_for_tool:
+            raise ControlConflict("数据调用与已解析领域公式或定义版本不一致")
+        return None
+
     def replace_claims(
         self, run_id: str, claims: list[ClaimDraft]
     ) -> list[ClaimRecord]:
@@ -3908,6 +3979,11 @@ def _dump_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def invocation_arguments_hash(arguments: JsonObject) -> str:
+    """Use the same canonical hash as persisted ToolInvocation arguments."""
+    return _hash_text(_dump_json(arguments))
+
+
 def _dump_json_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -3921,6 +3997,44 @@ def _load_object(value: str) -> JsonObject:
 
 def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _definition_execution_binding(
+    resource: JsonObject,
+    *,
+    definition_evidence_id: str,
+    compiled_tool_name: str,
+    compiled_arguments_hash: str,
+) -> JsonObject | None:
+    definition_id = resource.get("definition_id")
+    version = resource.get("definition_version")
+    formula_hash = resource.get("formula_hash")
+    resource_uri = resource.get("resource_uri")
+    semantic_key = resource.get("semantic_key")
+    source_ref = resource.get("source_ref")
+    if (
+        not isinstance(definition_id, str)
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+        or not isinstance(formula_hash, str)
+        or not isinstance(resource_uri, str)
+        or resource_uri != f"chatbi://domain-definitions/{definition_id}"
+        or not isinstance(semantic_key, str)
+        or not isinstance(source_ref, str)
+    ):
+        return None
+    return {
+        "definition_evidence_id": definition_evidence_id,
+        "definition_id": definition_id,
+        "definition_version": version,
+        "semantic_key": semantic_key,
+        "formula_hash": formula_hash,
+        "resource_uri": resource_uri,
+        "source_ref": source_ref,
+        "compiled_tool_name": compiled_tool_name,
+        "compiled_arguments_hash": compiled_arguments_hash,
+    }
 
 
 def _optional_text(value: Any) -> str | None:

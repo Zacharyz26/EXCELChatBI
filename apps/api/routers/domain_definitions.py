@@ -32,6 +32,8 @@ from apps.api.domain_schemas import (
     DomainDefinitionResponse,
     DomainFieldMappingCreate,
     DomainFieldMappingResponse,
+    ReportDefinitionBindingResponse,
+    ReportDefinitionReviewResponse,
 )
 
 router = APIRouter(
@@ -203,6 +205,53 @@ def list_field_mappings(
     except (DomainAccessDenied, ValueError) as exc:
         raise _domain_error(exc) from exc
     return [_mapping_response(item) for item in mappings]
+
+
+@router.get(
+    "/reports/{report_id}/lineage",
+    response_model=ReportDefinitionReviewResponse,
+)
+def review_report_definition_lineage(
+    project_id: str,
+    report_id: str,
+    session: SessionStore = Depends(session_store_dep),
+    principal: Principal = Depends(current_principal_dep),
+) -> ReportDefinitionReviewResponse:
+    """Review an old report against its exact Resource version and Claims."""
+    try:
+        review = DomainDefinitionStore(session).review_report_definition_lineage(
+            project_id=project_id,
+            report_id=report_id,
+            principal=principal,
+        )
+    except (DomainAccessDenied, ValueError) as exc:
+        raise _domain_error(exc) from exc
+    if review is None:
+        raise HTTPException(status_code=404, detail="报告领域血缘不存在")
+    return ReportDefinitionReviewResponse(
+        project_id=review.project_id,
+        report_id=review.report_id,
+        report_artifact_id=review.report_artifact_id,
+        status=review.status,
+        bindings=[
+            ReportDefinitionBindingResponse(
+                analysis_id=item.analysis_id,
+                data_artifact_id=item.data_artifact_id,
+                data_invocation_id=item.data_invocation_id,
+                data_evidence_id=item.data_evidence_id,
+                definition_evidence_id=item.definition_evidence_id,
+                claim_ids=list(item.claim_ids),
+                definition_id=item.definition_id,
+                definition_version=item.definition_version,
+                semantic_key=item.semantic_key,
+                formula_hash=item.formula_hash,
+                resource_uri=item.resource_uri,
+                source_ref=item.source_ref,
+            )
+            for item in review.bindings
+        ],
+        issues=list(review.issues),
+    )
 
 
 @router.get("/{definition_id}", response_model=DomainDefinitionResponse)

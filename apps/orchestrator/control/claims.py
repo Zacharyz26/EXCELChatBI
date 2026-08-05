@@ -87,6 +87,7 @@ def extract_numeric_claims(
         if (normalized := _normalize_number(token)) is not None
     }
     evidence_values = _evidence_values(evidence)
+    evidence_by_id = {item.evidence_id: item for item in evidence}
     claims: list[ClaimDraft] = []
     for raw_statement in _split_statements(final_text):
         statement = _LEADING_LIST_MARKER.sub("", raw_statement).strip()
@@ -134,6 +135,14 @@ def extract_numeric_claims(
                 if candidate_id not in linked_ids:
                     linked_ids.append(candidate_id)
         if refs:
+            definition_refs, definition_evidence_ids = _definition_lineage_refs(
+                linked_ids,
+                evidence_by_id,
+            )
+            refs.extend(definition_refs)
+            for definition_evidence_id in definition_evidence_ids:
+                if definition_evidence_id not in linked_ids:
+                    linked_ids.append(definition_evidence_id)
             claims.append(
                 ClaimDraft(
                     statement=statement,
@@ -143,6 +152,62 @@ def extract_numeric_claims(
                 )
             )
     return claims
+
+
+def _definition_lineage_refs(
+    linked_evidence_ids: list[str],
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> tuple[list[JsonObject], list[str]]:
+    refs: list[JsonObject] = []
+    definition_evidence_ids: list[str] = []
+    for data_evidence_id in linked_evidence_ids:
+        data_evidence = evidence_by_id.get(data_evidence_id)
+        if data_evidence is None:
+            continue
+        binding = data_evidence.source.get("definition_execution")
+        if not isinstance(binding, dict):
+            continue
+        definition_evidence_id = binding.get("definition_evidence_id")
+        definition_evidence = (
+            evidence_by_id.get(definition_evidence_id)
+            if isinstance(definition_evidence_id, str)
+            else None
+        )
+        resource = (
+            definition_evidence.source.get("definition_resource")
+            if definition_evidence is not None
+            else None
+        )
+        supported = isinstance(resource, dict) and all(
+            resource.get(resource_key) == binding.get(binding_key)
+            for resource_key, binding_key in (
+                ("definition_id", "definition_id"),
+                ("definition_version", "definition_version"),
+                ("semantic_key", "semantic_key"),
+                ("formula_hash", "formula_hash"),
+                ("resource_uri", "resource_uri"),
+                ("source_ref", "source_ref"),
+            )
+        )
+        ref: JsonObject = {
+            "kind": "definition_execution",
+            "supported": supported,
+            "data_evidence_id": data_evidence_id,
+            "definition_id": binding.get("definition_id"),
+            "definition_version": binding.get("definition_version"),
+            "semantic_key": binding.get("semantic_key"),
+            "formula_hash": binding.get("formula_hash"),
+            "resource_uri": binding.get("resource_uri"),
+            "source_ref": binding.get("source_ref"),
+        }
+        if isinstance(definition_evidence_id, str):
+            ref["evidence_id"] = definition_evidence_id
+            if supported and definition_evidence_id not in definition_evidence_ids:
+                definition_evidence_ids.append(definition_evidence_id)
+        if not supported:
+            ref["reason"] = "definition_evidence_mismatch"
+        refs.append(ref)
+    return refs, definition_evidence_ids
 
 
 def extract_knowledge_claims(

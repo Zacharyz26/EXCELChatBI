@@ -118,3 +118,31 @@ class DomainFieldMappingResponse(BaseModel):
     field_name: str
     source_ref: str
     created_at: str
+
+
+class ReportDefinitionBindingResponse(BaseModel):
+    """One safe report → data invocation → definition → Claim binding."""
+
+    analysis_id: str
+    data_artifact_id: str
+    data_invocation_id: str
+    data_evidence_id: str
+    definition_evidence_id: str
+    claim_ids: list[str]
+    definition_id: str
+    definition_version: int
+    semantic_key: str
+    formula_hash: str
+    resource_uri: str
+    source_ref: str
+
+
+class ReportDefinitionReviewResponse(BaseModel):
+    """Deterministic historical report definition-lineage review."""
+
+    project_id: str
+    report_id: str
+    report_artifact_id: str
+    status: Literal["verified", "degraded", "not_applicable"]
+    bindings: list[ReportDefinitionBindingResponse]
+    issues: list[str]

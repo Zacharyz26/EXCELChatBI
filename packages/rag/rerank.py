@@ -15,18 +15,14 @@ class Reranker(abc.ABC):
     """对召回结果按 query 相关性重排。"""
 
     @abc.abstractmethod
-    def rerank(
-        self, query: str, candidates: list[str], top_k: int = 5
-    ) -> list[tuple[int, float]]:
+    def rerank(self, query: str, candidates: list[str], top_k: int = 5) -> list[tuple[int, float]]:
         """返回 (候选下标, 分数) 列表，按分数降序取 top_k。"""
 
 
 class LexicalReranker(Reranker):
     """中文词项重叠重排（确定性，无需模型）。"""
 
-    def rerank(
-        self, query: str, candidates: list[str], top_k: int = 5
-    ) -> list[tuple[int, float]]:
+    def rerank(self, query: str, candidates: list[str], top_k: int = 5) -> list[tuple[int, float]]:
         q_terms = set(tokenize(query))
         scored: list[tuple[int, float]] = []
         for i, text in enumerate(candidates):
@@ -51,7 +47,15 @@ class BGEReranker(Reranker):
     - 构造期加载模型（fail-fast）：依赖/权重缺失在启动时报错，而非首次检索 500。
     """
 
-    def __init__(self, model_name: str, device: str = "auto") -> None:
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "auto",
+        cache_dir: str | None = None,
+    ) -> None:
+        from packages.rag.embedding import configure_model_cache
+
+        configure_model_cache(cache_dir)
         try:
             from FlagEmbedding import FlagReranker
         except ImportError as exc:
@@ -63,21 +67,15 @@ class BGEReranker(Reranker):
 
         resolved = resolve_device(device)
         try:
-            self._model = FlagReranker(
-                model_name, use_fp16=(resolved == "cuda"), device=resolved
-            )
+            self._model = FlagReranker(model_name, use_fp16=(resolved == "cuda"), device=resolved)
         except TypeError:
             # 旧版 FlagEmbedding 无 device 入参：退化为库内默认设备选择
             self._model = FlagReranker(model_name, use_fp16=(resolved == "cuda"))
 
-    def rerank(
-        self, query: str, candidates: list[str], top_k: int = 5
-    ) -> list[tuple[int, float]]:
+    def rerank(self, query: str, candidates: list[str], top_k: int = 5) -> list[tuple[int, float]]:
         if not candidates:
             return []
-        scores = self._model.compute_score(
-            [[query, text] for text in candidates], normalize=True
-        )
+        scores = self._model.compute_score([[query, text] for text in candidates], normalize=True)
         if isinstance(scores, int | float):  # 单候选时库返回标量
             scores = [scores]
         ranked = sorted(

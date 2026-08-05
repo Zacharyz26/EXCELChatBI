@@ -33,12 +33,20 @@ DEFAULT_QUERIES = (
 def _build_retriever() -> HybridRetriever:
     settings = get_settings()
     embedder: Embedder = (
-        BGEEmbedder(settings.embedding_model, device=settings.embedding_device)
+        BGEEmbedder(
+            settings.embedding_model,
+            device=settings.embedding_device,
+            cache_dir=settings.model_cache_dir,
+        )
         if settings.rag_embedder == "bge"
         else HashingEmbedder(dim=settings.embedding_dim)
     )
     reranker: Reranker = (
-        BGEReranker(settings.rerank_model, device=settings.embedding_device)
+        BGEReranker(
+            settings.rerank_model,
+            device=settings.embedding_device,
+            cache_dir=settings.model_cache_dir,
+        )
         if settings.rag_reranker == "bge"
         else LexicalReranker()
     )
@@ -87,12 +95,7 @@ def main() -> int:
     parser.add_argument("--allow-empty", action="store_true")
     parser.add_argument("--json-output", help="报告路径；'-' 表示 stdout", default="-")
     args = parser.parse_args()
-    if (
-        args.requests < 1
-        or args.concurrency < 1
-        or args.warmup < 0
-        or args.max_p95_ms <= 0
-    ):
+    if args.requests < 1 or args.concurrency < 1 or args.warmup < 0 or args.max_p95_ms <= 0:
         parser.error("requests、concurrency、max-p95-ms 必须大于 0，warmup 不得小于 0")
 
     retriever = _build_retriever()
@@ -107,9 +110,7 @@ def main() -> int:
         warmup_latencies: list[float] = []
         for index in range(args.warmup):
             try:
-                warmup_result = _query_once(
-                    retriever, queries[index % len(queries)]
-                )
+                warmup_result = _query_once(retriever, queries[index % len(queries)])
                 warmup_latencies.append(float(warmup_result["latency_ms"]))
             except Exception as exc:
                 errors.append(type(exc).__name__)
@@ -141,9 +142,7 @@ def main() -> int:
             "concurrency": args.concurrency,
             "warmup": {
                 "requests": args.warmup,
-                "max_ms": round(max(warmup_latencies), 3)
-                if warmup_latencies
-                else None,
+                "max_ms": round(max(warmup_latencies), 3) if warmup_latencies else None,
             },
             "empty_count": empty_count,
             "error_count": len(errors),

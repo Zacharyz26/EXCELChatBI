@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.common.config import Settings, get_settings  # noqa: E402
+from packages.rag.source_store import SourceDocumentStore  # noqa: E402
 from packages.rag.store import KnowledgeStore, LocalKnowledgeStore  # noqa: E402
 
 
@@ -35,18 +36,38 @@ def _store(settings: Settings) -> KnowledgeStore:
 
 
 def _offline_files(settings: Settings) -> tuple[str, list[tuple[str, Path]]]:
+    source_dir = Path(settings.kb_source_dir)
+    source_files = [
+        ("sources/manifest.json", source_dir / "manifest.json"),
+        *[
+            (f"sources/documents/{path.name}", path)
+            for path in sorted((source_dir / "documents").glob("*.txt"))
+        ],
+    ]
     if settings.rag_store == "local":
-        return "local", [("index.json", Path(settings.kb_index_dir) / "index.json")]
+        index_dir = Path(settings.kb_index_dir)
+        files = [
+            ("index.json", index_dir / "index.json"),
+            ("active.json", index_dir / "active.json"),
+            *[
+                (f"generations/{path.name}", path)
+                for path in sorted((index_dir / "generations").glob("index-*.json"))
+            ],
+            *source_files,
+        ]
+        return "local", files
     parsed = urlsplit(settings.milvus_uri)
     if parsed.scheme and parsed.scheme != "file":
         raise RuntimeError(
             "Standalone 备份/恢复请使用官方 milvus-backup；本命令只处理 Local/Milvus Lite"
         )
     database = Path(parsed.path if parsed.scheme == "file" else settings.milvus_uri)
-    pointer = database.with_name(
-        f"{database.name}.{settings.milvus_collection}.active.json"
-    )
-    return "milvus_lite", [(database.name, database), (pointer.name, pointer)]
+    pointer = database.with_name(f"{database.name}.{settings.milvus_collection}.active.json")
+    return "milvus_lite", [
+        (database.name, database),
+        (pointer.name, pointer),
+        *source_files,
+    ]
 
 
 def _sha256(path: Path) -> str:
@@ -59,14 +80,21 @@ def _sha256(path: Path) -> str:
 
 def _require_offline_ack(args: argparse.Namespace) -> None:
     if not args.service_stopped:
-        raise RuntimeError(
-            "备份/恢复前必须停止 API/Milvus Lite 进程，并显式传入 --service-stopped"
-        )
+        raise RuntimeError("备份/恢复前必须停止 API/Milvus Lite 进程，并显式传入 --service-stopped")
 
 
 def _backup(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
     _require_offline_ack(args)
     backend, files = _offline_files(settings)
+    if backend in {"local", "milvus_lite"}:
+        managed_sources = {
+            path.resolve() for path in SourceDocumentStore(settings.kb_source_dir).managed_files()
+        }
+        files = [
+            (name, path)
+            for name, path in files
+            if not name.startswith("sources/documents/") or path.resolve() in managed_sources
+        ]
     existing = [(name, path) for name, path in files if path.exists()]
     if not existing:
         raise FileNotFoundError("当前配置下没有可备份的知识库索引")
@@ -76,15 +104,22 @@ def _backup(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
     records: list[dict[str, object]] = []
     for name, source in existing:
         target = output / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         records.append(
-            {"name": name, "size": target.stat().st_size, "sha256": _sha256(target)}
+            {
+                "name": name,
+                "role": "source" if name.startswith("sources/") else "index",
+                "size": target.stat().st_size,
+                "sha256": _sha256(target),
+            }
         )
     manifest: dict[str, object] = {
-        "format": 1,
+        "format": 2,
         "backend": backend,
         "collection": settings.milvus_collection,
         "created_at": datetime.now(UTC).isoformat(),
+        "model_cache_included": False,
         "files": records,
     }
     (output / "manifest.json").write_text(
@@ -101,7 +136,7 @@ def _restore(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
     manifest_path = source_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     backend, targets = _offline_files(settings)
-    if manifest.get("format") != 1 or manifest.get("backend") != backend:
+    if manifest.get("format") not in {1, 2} or manifest.get("backend") != backend:
         raise RuntimeError("备份格式或后端类型与当前配置不匹配")
     target_by_name = {name: path for name, path in targets}
     validated: list[tuple[str, Path, Path]] = []
@@ -110,7 +145,7 @@ def _restore(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
             raise RuntimeError("备份 manifest.files 格式错误")
         name = str(record.get("name", ""))
         source = source_dir / name
-        target = target_by_name.get(name)
+        target = target_by_name.get(name) or _restore_target(settings, backend, name)
         if target is None or not source.is_file():
             raise RuntimeError(f"备份文件不受当前配置管理或不存在: {name}")
         if _sha256(source) != record.get("sha256"):
@@ -118,9 +153,19 @@ def _restore(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
         validated.append((name, source, target))
 
     restored_names = {name for name, _, _ in validated}
-    required_name = targets[0][0]
-    if required_name not in restored_names:
-        raise RuntimeError(f"备份缺少主索引文件: {required_name}")
+    backup_names = {
+        str(record.get("name", ""))
+        for record in manifest.get("files", [])
+        if isinstance(record, dict)
+    }
+    if backend == "local" and backup_names & {"index.json", "active.json"}:
+        required_name = "active.json" if "active.json" in backup_names else "index.json"
+        if required_name not in restored_names:
+            raise RuntimeError(f"备份缺少主索引文件: {required_name}")
+    elif backend == "milvus_lite":
+        required_name = targets[0][0]
+        if required_name not in restored_names:
+            raise RuntimeError(f"备份缺少主索引文件: {required_name}")
 
     restored: list[str] = []
     for name, source, target in validated:
@@ -132,10 +177,43 @@ def _restore(settings: Settings, args: argparse.Namespace) -> dict[str, object]:
 
     # Lite 的活动集合指针是可选文件；旧环境残留的指针不能穿透到新恢复的数据。
     if backend == "milvus_lite":
-        for name, target in targets[1:]:
-            if name not in restored_names:
-                target.unlink(missing_ok=True)
+        pointer_name, pointer_target = targets[1]
+        if pointer_name not in restored_names:
+            pointer_target.unlink(missing_ok=True)
+    elif "index.json" in restored_names and "active.json" not in restored_names:
+        # A format-1 Local backup only contains index.json. Remove a newer pointer,
+        # otherwise reopening would ignore the restored legacy index.
+        (Path(settings.kb_index_dir) / "active.json").unlink(missing_ok=True)
+    if "sources/manifest.json" in restored_names:
+        restored_blobs = {
+            Path(name).name for name in restored_names if name.startswith("sources/documents/")
+        }
+        for path in (Path(settings.kb_source_dir) / "documents").glob("*.txt"):
+            if path.name not in restored_blobs:
+                path.unlink()
     return {"status": "restored", "backend": backend, "files": restored}
+
+
+def _restore_target(settings: Settings, backend: str, name: str) -> Path | None:
+    """Resolve only explicitly managed relative paths from a backup manifest."""
+    if backend not in {"local", "milvus_lite"}:
+        return None
+    path = Path(name)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    if len(path.parts) == 2 and path.parts[0] == "generations":
+        filename = path.parts[1]
+        if filename.startswith("index-") and filename.endswith(".json"):
+            return Path(settings.kb_index_dir) / "generations" / filename
+    if path.parts == ("sources", "manifest.json"):
+        return Path(settings.kb_source_dir) / "manifest.json"
+    if (
+        len(path.parts) == 3
+        and path.parts[:2] == ("sources", "documents")
+        and path.parts[2].endswith(".txt")
+    ):
+        return Path(settings.kb_source_dir) / "documents" / path.parts[2]
+    return None
 
 
 def _print(payload: dict[str, object]) -> None:
@@ -147,10 +225,10 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status", help="查看存储、活动集合与上一代状态")
 
-    rollback = subparsers.add_parser("rollback", help="切回上一代 Milvus 索引")
+    rollback = subparsers.add_parser("rollback", help="切回上一代 Local/Milvus 索引")
     rollback.add_argument("--yes", action="store_true", help="确认执行回滚")
 
-    cleanup = subparsers.add_parser("cleanup", help="清理过旧 Milvus 索引代际")
+    cleanup = subparsers.add_parser("cleanup", help="清理过旧 Local/Milvus 索引代际")
     cleanup.add_argument("--retain", type=int, default=2)
     cleanup.add_argument("--yes", action="store_true", help="确认执行清理")
 
@@ -176,7 +254,12 @@ def main() -> int:
         store = _store(settings)
         try:
             if args.command == "status":
-                _print(asdict(store.status()))
+                status: dict[str, object] = asdict(store.status())
+                status["source_store"] = asdict(
+                    SourceDocumentStore(settings.kb_source_dir).status()
+                )
+                status["model_cache_rebuildable"] = True
+                _print(status)
             elif args.command == "rollback":
                 if not args.yes:
                     raise RuntimeError("回滚会切换活动索引，确认后请传入 --yes")

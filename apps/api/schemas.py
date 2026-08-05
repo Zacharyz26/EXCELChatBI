@@ -453,7 +453,7 @@ class IngestResponse(BaseModel):
 
 
 class RebuildRequest(BaseModel):
-    """全量重建请求；未传路径时使用配置的知识库目录。"""
+    """全量重建请求；未传路径时使用持久原文事实源。"""
 
     path: str | None = Field(default=None, max_length=4096)
 

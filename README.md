@@ -11,16 +11,24 @@
 当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
 Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
-SSE 展示。SQLite schema v7 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+SSE 展示。SQLite schema v8 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
-幂等操作、不可变快照、资源关联、持久化对话压缩和 ApprovalRecord。阶段 3A 的离线一致备份/恢复、
+幂等操作、不可变快照、资源关联、持久化对话压缩、ApprovalRecord、版本化领域定义与字段映射。
+阶段 3A 的离线一致备份/恢复、
 Memory readiness 和 Compose 联合恢复门禁已经通过完整 CI；阶段 3B-1–3B-3
 与阶段 3C-1–3C-3 已由提交 `e3d51fd` 的真实 Docker/Compose CI 验证并关闭。
 阶段 3D 的项目记忆治理与阶段 3E 的完整血缘/恢复已由提交 `0b5980c` 的
 backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全部完成。
 阶段 4C 的恢复、SSE 重连与工具审计已由提交 `2f2771f` 的 GitHub Actions
 [run 30782321622](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/30782321622)
-验证关闭；4D 扩展 Compose 门禁代码已补齐，等待更新提交的 Docker runner 验证。
+验证关闭；4D 的竞态修复提交 `7f81fe2` 已由
+[run 30980088817](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/30980088817)
+确认 backend、frontend 与 Compose 三任务全绿，阶段 4 正式关闭。当前进入阶段 5B，5A 的
+版本化定义/受控公式/Evidence 已完成，5B-1 的项目与主体隔离 MCP Resource list/read 已实现；
+5B-2 已贯通定义 Resource、数据 Invocation/Evidence、Claim 与旧报告历史版本复核；5B-3 已
+补齐项目目录 Resource、签名分页游标、订阅/退订与版本化变更通知；5B-4 已实现 stdio/HTTP
+Resource 等价、断线重连自动重新订阅和 Compose 重启门禁，本地探针已通过，真实 Compose
+结果待提交后 CI 确认。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -113,11 +121,14 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、企业审计和完整审批策略尚未实现；
 - Agent Executor 已切到 MCP Client Gateway；支持 stdio/认证 Streamable HTTP、
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
-- 单机生产结构 Compose 已提供；多实例外置状态、对象存储、Milvus 根 profile 和重型工具
-  CPU/GPU profile 尚未完成；
+- 单机生产结构 Compose 与 Milvus CPU/GPU RAG profile 已提供；多实例外置状态、对象存储和
+  阶段 6 重型分析工具 profile 尚未完成；
 - 前端已提供结构化澄清、计划编辑、审批、暂停/续跑、工具来源/权限/健康审计视图、
   SSE 重连、三档自主等级、分析分支对比和追加式反馈闭环；辅助确认、反馈后 LLM 分支和
-  标准只读副作用拒绝的 Compose 场景已实现，仍待更新提交的 Docker runner 验证；
+  标准只读副作用拒绝的 Compose 场景已通过真实 Docker runner 验证；
+- SQLite v8 领域定义、字段映射、受控公式编译和 `domain_definition_lookup` 已接入 Evidence；
+  `knowledge-tools` 已提供按签名 project/subject/conversation 过滤的领域定义 Resource
+  `list/read`，共享服务 token 不作为用户身份；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
@@ -126,9 +137,9 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E 已完成并通过真实 Docker/Compose CI，阶段 3 正式关闭；
-  阶段 4A–4D 功能与本地回归已完成，4C 已由真实 Compose CI 关闭，4D 扩展门禁待验证；关闭后进入
-  阶段 5，之后仍需领域语义、自主探索和多数据集分析；
+- **v2.5**：阶段 3A–3E 和 4A–4D 已完成并通过真实 Compose CI；阶段 5A、5B-1～5 已
+  实现，5B-4/5 的真实 Compose 与 CPU/GPU semantic 等价待确认；后续仍需领域代表性签字、
+  自主探索和多数据集分析；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -163,9 +174,13 @@ v2.5 阶段 3E（已完成，Docker/Compose CI 全绿）
   SQLite v6 不可变 Dataset 锚点 + 五阶段只读来源图 + 安全 React 血缘面板
   领域中立质量门禁 + readiness/备份 hash + API 重启/离线恢复图一致性
 
-v2.5 阶段 4（开发中；4C 已关闭，4D 扩展 Compose 门禁待验证）
+v2.5 阶段 4（已完成；真实 Compose 门禁全绿）
   SQLite v7 + 计划干预/审批授权边界 + Executor/Gateway/Server 双重校验
   React 协作 → 服务端恢复/SSE 重连/工具审计 → 自主等级/分支/反馈 → Compose 关闭门禁
+
+v2.5 阶段 5（开发中；5A、5B-1–5B-4 已实现）
+  SQLite v8 版本化定义 + 受控公式 + Evidence → MCP Resource list/read
+  定义/数据 Claim + 旧报告复核 → 目录分页/订阅/通知 → 双传输/重连 → RAG 生命周期 → 代表性签字
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证
@@ -173,7 +188,7 @@ v2.5 阶段 4（开发中；4C 已关闭，4D 扩展 Compose 门禁待验证）
 
 v2.5 延伸
   MCP：记忆/Evidence 引用 → 前端审批 → 知识 Resource → 自主分析能力目录
-  Docker：状态恢复 → 代理 E2E → RAG 生命周期 → 重型工具资源 profile
+  Docker：状态恢复 → 代理 E2E → RAG CPU/GPU 生命周期 → 重型分析工具资源 profile
 
 v3.0
   数据连接器 + 主动任务 + 外部 MCP 治理/OAuth

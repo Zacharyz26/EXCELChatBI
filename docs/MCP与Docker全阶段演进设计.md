@@ -1,7 +1,7 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；阶段 3 与 4C 已关闭，4D Compose 竞态已修复待重跑；5A 工程切片已启动
-> · 更新日期：2026-08-03
+> 状态：总体设计已完成；阶段 3–4 已关闭，5A 已完成，当前开发入口为 5B
+> · 更新日期：2026-08-05
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
 ## 1. 文档定位
@@ -18,11 +18,14 @@ v2.4 阶段 2D 已把 Agent Executor 切到受治理 MCP Client Gateway，阶段
 独立工具服务、私网 Compose、分卷/secrets 和容器浏览器/重启门禁。本文描述的
 v2.5 阶段 3–4 的实际交付与证据见
 [`v2.5/README.md`](./v2.5/README.md)及其索引的实施记录；
-阶段 3 已由真实 CI 关闭，阶段 4A–4D 功能实现与本地回归已完成；4C 已由提交
-`2f2771f` 的真实 Compose CI 关闭；4D 更新提交 `f06587e` 的 Compose browser gate 失败，
-失败已定位为 Run 首次持久化可见性 404 的测试轮询竞态并完成本地修复，阶段 4 仍待新 CI
-关闭。阶段 5A 已启动版本化定义、受控公式 Tool 和 Evidence 工程切片；选择性 MCP Resource、
-订阅、RAG 生命周期及阶段 5–6 其余扩展仍是未来设计，不代表后续治理已经实现。
+阶段 3 已由真实 CI 关闭；阶段 4A–4D 已由提交 `7f81fe2` 的
+[run 30980088817](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/30980088817)
+完成 backend、frontend 与 Compose 三任务验证并正式关闭。阶段 5A 已完成版本化定义、
+受控公式 Tool 和 Evidence 工程切片；5B-1 已实现按签名 project/subject 过滤的选择性 MCP
+Resource list/read，5B-2 已贯通定义/数据 Claim 和旧报告复核，5B-3 已实现目录分页与
+Resource 订阅通知；5B-4 已实现 stdio/HTTP Resource 等价、断线重连重新订阅和 Compose
+重启门禁，本地双传输探针已通过，真实 Compose 结果待 CI 确认。RAG 生命周期及阶段 5–6
+其余扩展仍是未来交付，不代表后续治理已经实现。
 
 ## 2. 不随阶段变化的边界
 
@@ -134,6 +137,12 @@ v2.5 阶段 3–4 的实际交付与证据见
 
 ### MCP 设计
 
+> 当前实现：5B-1 已交付 opaque 领域定义 Resource、签名 Host 上下文、项目/主体/对话过滤及
+> SDK `list/read`；5B-2 已贯通定义版本、编译参数、数据 Evidence、Claim 和旧报告复核。
+> 5B-3 已交付项目目录、签名分页游标、订阅/退订与版本化通知；5B-4 已交付双传输等价、
+> Gateway 重新订阅及 Compose 重启门禁；5B-5 已交付原文/索引/模型缓存分离、Local/Milvus
+> 切代回滚和 CPU/GPU profile。真实 Compose/semantic 等价仍待 CI 与目标机器确认。
+
 - `knowledge-tools` 同时提供受控查询 Tool 和选择性只读 Resource。领域定义（业务指标只是
   其中一种）使用稳定 opaque URI，携带定义版本、生效时间、粒度、公式 hash、负责人和来源，
   不暴露宿主文件路径。
@@ -145,8 +154,8 @@ v2.5 阶段 3–4 的实际交付与证据见
 
 ### Docker 设计
 
-- `knowledge-tools` 独立于 API，按 `rag` profile 使用模型缓存、知识索引和 Milvus；只有该服务
-  获得知识索引写权限，其他分析服务通过受控引用读取结果。
+- `knowledge-tools` 独立于 API，按 `rag` profile 使用模型缓存和只读知识索引/Milvus 检索；
+  API 管理受权摄入、原文和索引发布，其他分析服务通过受控 Tool/Resource 读取结果。
 - 模型权重、索引和原始业务文档分别管理。权重可重建，索引可由原文重建，原文和口径版本属于
   需要备份的事实来源。
 - CPU/GPU profile 使用相同工具契约和评测集；切换设备不能改变 Resource URI、Evidence 格式

@@ -8,16 +8,22 @@ import json
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from packages.common.logging import get_logger
 from packages.session.models import ArtifactDraft
 
 from mcp_servers.common.adapter import MCPServerAdapter
 from mcp_servers.common.contracts import (
+    CHATBI_META_PREFIX,
+    MCP_RESOURCE_CONTRACT_VERSION,
     MCPCallResult,
     MCPProtocolError,
     MCPRequestContext,
+    MCPResourceContents,
+    MCPResourceDescriptor,
+    MCPResourceNotification,
+    MCPResourcePage,
     MCPToolDescriptor,
     ToolCapabilityMetadata,
     normalize_structured_result,
@@ -29,6 +35,7 @@ from mcp_servers.common.contracts import (
 _log = get_logger("mcp.client_gateway")
 
 MCPTransportName = Literal["in_process", "stdio", "streamable_http"]
+_ResourceResult = TypeVar("_ResourceResult")
 
 
 class MCPTransport(Protocol):
@@ -39,6 +46,34 @@ class MCPTransport(Protocol):
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: MCPRequestContext
     ) -> MCPCallResult: ...
+
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage: ...
+
+    async def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]: ...
+
+    async def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents: ...
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None: ...
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None: ...
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification: ...
 
     async def aclose(self) -> None: ...
 
@@ -60,8 +95,86 @@ class InProcessMCPTransport:
         # its worker boundary and cancellation semantics.
         return self._adapter.call_tool(name, arguments, context)
 
+    async def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:
+        return self._adapter.list_resources(context)
+
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        if cursor is not None:
+            raise MCPProtocolError(
+                "invalid_resource_cursor",
+                "进程内兼容传输不接受分页游标",
+            )
+        resources = self._adapter.list_resources(context)
+        return MCPResourcePage(
+            resources=resources,
+            catalog_version=self._adapter.resource_catalog_version(context),
+        )
+
+    async def read_resource(self, uri: str, context: MCPRequestContext) -> MCPResourceContents:
+        return self._adapter.read_resource(uri, context)
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        self._adapter.resource_subscription_snapshot(uri, context)
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        self._adapter.read_resource(uri, context)
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        del timeout_seconds
+        raise MCPProtocolError(
+            "resource_notifications_unavailable",
+            "进程内兼容传输不提供异步 Resource 通知",
+        )
+
     async def aclose(self) -> None:
         return None
+
+
+class MCPResourceNotificationBuffer:
+    """Collect and validate standard Resource notifications from one SDK session."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[MCPResourceNotification] = asyncio.Queue()
+
+    async def __call__(self, message: Any) -> None:
+        from mcp import types
+
+        if not isinstance(message, types.ServerNotification):
+            return
+        notification = message.root
+        if isinstance(notification, types.ResourceListChangedNotification):
+            metadata = _resource_notification_metadata(notification.params)
+            await self._queue.put(
+                _resource_notification_from_meta(
+                    kind="list_changed",
+                    uri=None,
+                    metadata=metadata,
+                )
+            )
+        elif isinstance(notification, types.ResourceUpdatedNotification):
+            metadata = _resource_notification_metadata(notification.params)
+            await self._queue.put(
+                _resource_notification_from_meta(
+                    kind="updated",
+                    uri=str(notification.params.uri),
+                    metadata=metadata,
+                )
+            )
+
+    async def next(self, *, timeout_seconds: float = 5.0) -> MCPResourceNotification:
+        if timeout_seconds <= 0:
+            raise ValueError("Resource notification timeout 必须大于 0")
+        async with asyncio.timeout(timeout_seconds):
+            return await self._queue.get()
 
 
 class OfficialSDKSessionTransport:
@@ -72,9 +185,11 @@ class OfficialSDKSessionTransport:
         session: Any,
         *,
         context_signing_key: str | None = None,
+        resource_notifications: MCPResourceNotificationBuffer | None = None,
     ) -> None:
         self._session = session
         self._context_signing_key = context_signing_key
+        self._resource_notifications = resource_notifications
 
     async def list_tools(self) -> tuple[MCPToolDescriptor, ...]:
         response = await self._session.list_tools()
@@ -126,6 +241,171 @@ class OfficialSDKSessionTransport:
         structured = normalize_structured_result(result.structuredContent)
         return MCPCallResult.success(name, structured)
 
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        from mcp import types
+        from mcp.shared.exceptions import McpError
+
+        request_meta = types.RequestParams.Meta(
+            **context.to_request_meta(signing_key=self._context_signing_key)
+        )
+        params = types.PaginatedRequestParams(cursor=cursor, _meta=request_meta)
+        try:
+            response = await self._session.list_resources(params=params)
+        except McpError as exc:
+            raise _resource_protocol_error(exc) from exc
+        descriptors: list[MCPResourceDescriptor] = []
+        for resource in response.resources:
+            meta = dict(resource.meta or {})
+            _validate_resource_contract(meta)
+            meta.pop(f"{CHATBI_META_PREFIX}contract-version", None)
+            descriptors.append(
+                MCPResourceDescriptor(
+                    uri=str(resource.uri),
+                    name=resource.name,
+                    title=resource.title or resource.name,
+                    description=resource.description or "",
+                    mime_type=resource.mimeType or "application/octet-stream",
+                    size=resource.size,
+                    metadata=meta,
+                )
+            )
+        response_meta = dict(response.meta or {})
+        _validate_resource_contract(response_meta)
+        catalog_version = response_meta.get(f"{CHATBI_META_PREFIX}catalog-version")
+        if not isinstance(catalog_version, str) or len(catalog_version) != 64:
+            raise MCPProtocolError(
+                "invalid_resource_output",
+                "MCP Resource 列表缺少目录版本",
+            )
+        return MCPResourcePage(
+            resources=tuple(descriptors),
+            catalog_version=catalog_version,
+            next_cursor=(str(response.nextCursor) if response.nextCursor is not None else None),
+        )
+
+    async def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:
+        resources: list[MCPResourceDescriptor] = []
+        seen_uris: set[str] = set()
+        cursor: str | None = None
+        catalog_version: str | None = None
+        for _ in range(10_000):
+            page = await self.list_resource_page(context, cursor=cursor)
+            if catalog_version is None:
+                catalog_version = page.catalog_version
+            elif page.catalog_version != catalog_version:
+                raise MCPProtocolError(
+                    "resource_catalog_changed",
+                    "MCP Resource 分页期间目录发生变化",
+                    retryable=True,
+                )
+            for descriptor in page.resources:
+                if descriptor.uri in seen_uris:
+                    raise MCPProtocolError(
+                        "invalid_resource_output",
+                        "MCP Resource 分页返回重复 URI",
+                    )
+                seen_uris.add(descriptor.uri)
+                resources.append(descriptor)
+            cursor = page.next_cursor
+            if cursor is None:
+                return tuple(resources)
+        raise MCPProtocolError(
+            "invalid_resource_output",
+            "MCP Resource 分页超过安全上限",
+        )
+
+    async def read_resource(self, uri: str, context: MCPRequestContext) -> MCPResourceContents:
+        # MCP SDK 1.28 的 read_resource 高层方法尚不能携带 _meta；直接构造
+        # 标准请求，避免把共享服务令牌错误地当成最终用户身份。
+        from mcp import types
+        from mcp.shared.exceptions import McpError
+        from pydantic import AnyUrl
+
+        request_meta = types.RequestParams.Meta(
+            **context.to_request_meta(signing_key=self._context_signing_key)
+        )
+        params = types.ReadResourceRequestParams(
+            uri=AnyUrl(uri),
+            _meta=request_meta,
+        )
+        try:
+            response = await self._session.send_request(
+                types.ClientRequest(types.ReadResourceRequest(params=params)),
+                types.ReadResourceResult,
+            )
+        except McpError as exc:
+            raise _resource_protocol_error(exc) from exc
+        if len(response.contents) != 1:
+            raise MCPProtocolError("invalid_resource_output", "MCP Resource 必须返回一个文本内容块")
+        content = response.contents[0]
+        text = getattr(content, "text", None)
+        if not isinstance(text, str) or str(content.uri) != uri:
+            raise MCPProtocolError("invalid_resource_output", "MCP Resource 返回内容无效")
+        meta = dict(content.meta or {})
+        _validate_resource_contract(meta)
+        meta.pop(f"{CHATBI_META_PREFIX}contract-version", None)
+        return MCPResourceContents(
+            uri=uri,
+            text=text,
+            mime_type=content.mimeType or "application/octet-stream",
+            metadata=meta,
+        )
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        from mcp import types
+        from mcp.shared.exceptions import McpError
+        from pydantic import AnyUrl
+
+        request_meta = types.RequestParams.Meta(
+            **context.to_request_meta(signing_key=self._context_signing_key)
+        )
+        request = types.SubscribeRequest(
+            params=types.SubscribeRequestParams(uri=AnyUrl(uri), _meta=request_meta)
+        )
+        try:
+            await self._session.send_request(
+                types.ClientRequest(request),
+                types.EmptyResult,
+            )
+        except McpError as exc:
+            raise _resource_protocol_error(exc) from exc
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        from mcp import types
+        from mcp.shared.exceptions import McpError
+        from pydantic import AnyUrl
+
+        request_meta = types.RequestParams.Meta(
+            **context.to_request_meta(signing_key=self._context_signing_key)
+        )
+        request = types.UnsubscribeRequest(
+            params=types.UnsubscribeRequestParams(uri=AnyUrl(uri), _meta=request_meta)
+        )
+        try:
+            await self._session.send_request(
+                types.ClientRequest(request),
+                types.EmptyResult,
+            )
+        except McpError as exc:
+            raise _resource_protocol_error(exc) from exc
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        if self._resource_notifications is None:
+            raise MCPProtocolError(
+                "resource_notifications_unavailable",
+                "当前 SDK Session 未配置 Resource 通知处理器",
+            )
+        return await self._resource_notifications.next(timeout_seconds=timeout_seconds)
+
     async def aclose(self) -> None:
         return None
 
@@ -166,6 +446,7 @@ class OfficialSDKClientTransport:
         self._config = config
         self._stack: AsyncExitStack | None = None
         self._session_transport: OfficialSDKSessionTransport | None = None
+        self._resource_notifications = MCPResourceNotificationBuffer()
 
     async def list_tools(self) -> tuple[MCPToolDescriptor, ...]:
         transport = await self._connected_transport()
@@ -177,11 +458,47 @@ class OfficialSDKClientTransport:
         transport = await self._connected_transport()
         return await transport.call_tool(name, arguments, context)
 
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        transport = await self._connected_transport()
+        return await transport.list_resource_page(context, cursor=cursor)
+
+    async def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:
+        transport = await self._connected_transport()
+        return await transport.list_resources(context)
+
+    async def read_resource(self, uri: str, context: MCPRequestContext) -> MCPResourceContents:
+        transport = await self._connected_transport()
+        return await transport.read_resource(uri, context)
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        transport = await self._connected_transport()
+        await transport.subscribe_resource(uri, context)
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        transport = await self._connected_transport()
+        await transport.unsubscribe_resource(uri, context)
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        transport = await self._connected_transport()
+        return await transport.next_resource_notification(
+            timeout_seconds=timeout_seconds
+        )
+
     async def aclose(self) -> None:
         stack, self._stack = self._stack, None
         self._session_transport = None
         if stack is not None:
             await stack.aclose()
+        self._resource_notifications = MCPResourceNotificationBuffer()
 
     async def _connected_transport(self) -> OfficialSDKSessionTransport:
         if self._session_transport is not None:
@@ -219,9 +536,7 @@ class OfficialSDKClientTransport:
                     env=dict(self._config.stdio_env) or None,
                     cwd=self._config.stdio_cwd,
                 )
-                read_stream, write_stream = await stack.enter_async_context(
-                    stdio_client(params)
-                )
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
             else:
                 if not self._config.http_url or not self._config.service_token:
                     raise MCPProtocolError(
@@ -245,7 +560,11 @@ class OfficialSDKClientTransport:
                 )
                 read_stream, write_stream, _get_session_id = streams
             session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
+                ClientSession(
+                    read_stream,
+                    write_stream,
+                    message_handler=self._resource_notifications,
+                )
             )
             initialized = await session.initialize()
             if str(initialized.protocolVersion) != MCP_PROTOCOL_VERSION:
@@ -260,10 +579,9 @@ class OfficialSDKClientTransport:
         self._session_transport = OfficialSDKSessionTransport(
             session,
             context_signing_key=(
-                self._config.context_signing_key
-                or self._config.service_token
-                or None
+                self._config.context_signing_key or self._config.service_token or None
             ),
+            resource_notifications=self._resource_notifications,
         )
 
 
@@ -379,6 +697,55 @@ class MCPClientGateway:
         )
         return MCPCallResult.success(name, structured)
 
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        self._require_healthy_resources()
+        return await self._transport.list_resource_page(context, cursor=cursor)
+
+    async def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]:
+        self._require_healthy_resources()
+        return await self._transport.list_resources(context)
+
+    async def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents:
+        self._require_healthy_resources()
+        return await self._transport.read_resource(uri, context)
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        self._require_healthy_resources()
+        await self._transport.subscribe_resource(uri, context)
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        self._require_healthy_resources()
+        await self._transport.unsubscribe_resource(uri, context)
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        self._require_healthy_resources()
+        return await self._transport.next_resource_notification(
+            timeout_seconds=timeout_seconds
+        )
+
+    def _require_healthy_resources(self) -> None:
+        if not self._healthy:
+            raise MCPProtocolError(
+                "mcp_server_unhealthy",
+                "MCP Server 尚未通过工具发现校验",
+            )
+
     async def aclose(self) -> None:
         await self._transport.aclose()
         self._healthy = False
@@ -453,11 +820,114 @@ class ManagedMCPClientGateway:
         self._gateway: MCPClientGateway | None = None
         self._fallback_gateway: MCPClientGateway | None = None
         self._lock = asyncio.Lock()
+        self._resource_subscriptions: dict[
+            tuple[str, str, str, str],
+            tuple[str, MCPRequestContext],
+        ] = {}
         self._health = GatewayHealth("cold", config.transport)
 
     @property
     def health(self) -> GatewayHealth:
         return self._health
+
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        return await self._run_resource_operation(
+            lambda gateway: gateway.list_resource_page(context, cursor=cursor)
+        )
+
+    async def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]:
+        return await self._run_resource_operation(
+            lambda gateway: gateway.list_resources(context)
+        )
+
+    async def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents:
+        return await self._run_resource_operation(
+            lambda gateway: gateway.read_resource(uri, context)
+        )
+
+    async def subscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        await self._run_resource_operation(
+            lambda gateway: gateway.subscribe_resource(uri, context)
+        )
+        key = self._resource_subscription_key(uri, context)
+        async with self._lock:
+            self._resource_subscriptions[key] = (uri, context)
+
+    async def unsubscribe_resource(self, uri: str, context: MCPRequestContext) -> None:
+        key = self._resource_subscription_key(uri, context)
+        async with self._lock:
+            self._resource_subscriptions.pop(key, None)
+        await self._run_resource_operation(
+            lambda gateway: gateway.unsubscribe_resource(uri, context)
+        )
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        attempts = 1 + self._config.max_reconnects
+        for attempt in range(attempts):
+            gateway: MCPClientGateway | None = None
+            try:
+                async with asyncio.timeout(self._config.connect_timeout_seconds):
+                    gateway = await self._ready_gateway()
+                return await gateway.next_resource_notification(
+                    timeout_seconds=timeout_seconds
+                )
+            except TimeoutError:
+                if gateway is None:
+                    await self._invalidate("mcp_transport_disconnected")
+                    if attempt + 1 < attempts:
+                        continue
+                    raise MCPProtocolError(
+                        "mcp_transport_disconnected",
+                        "MCP Resource 通知重连超时",
+                        retryable=True,
+                    ) from None
+                # A quiet subscription and a dead SDK reader both surface as an
+                # empty notification queue. Probe discovery before deciding: a
+                # healthy session preserves ordinary timeout semantics, while a
+                # dead one is rebuilt and all desired subscriptions are restored.
+                try:
+                    async with asyncio.timeout(
+                        self._config.connect_timeout_seconds
+                    ):
+                        await gateway.refresh()
+                except Exception as exc:
+                    await self._invalidate(_connection_error_code(exc))
+                    if attempt + 1 < attempts:
+                        continue
+                    raise MCPProtocolError(
+                        "mcp_transport_disconnected",
+                        "MCP Resource 通知连接中断",
+                        retryable=True,
+                    ) from exc
+                raise
+            except MCPProtocolError:
+                raise
+            except Exception as exc:
+                await self._invalidate(_connection_error_code(exc))
+                if attempt + 1 < attempts:
+                    continue
+                raise MCPProtocolError(
+                    _connection_error_code(exc),
+                    "MCP Resource 通知连接中断",
+                    retryable=True,
+                ) from exc
+        raise AssertionError("MCP Resource notification reconnect loop exhausted")
 
     async def execute(
         self,
@@ -515,9 +985,7 @@ class ManagedMCPClientGateway:
                 await self._invalidate("mcp_call_cancelled")
                 raise
             except TimeoutError as exc:
-                error_code = (
-                    "mcp_call_timeout" if call_started else "mcp_connect_timeout"
-                )
+                error_code = "mcp_call_timeout" if call_started else "mcp_connect_timeout"
                 await self._invalidate(error_code)
                 raise MCPGatewayExecutionError(
                     error_code,
@@ -574,8 +1042,7 @@ class ManagedMCPClientGateway:
                     )
                 raise MCPGatewayExecutionError(
                     error_code,
-                    "MCP 传输连接中断"
-                    + ("，调用结果状态未知。" if call_started else "。"),
+                    "MCP 传输连接中断" + ("，调用结果状态未知。" if call_started else "。"),
                     retryable=not call_started,
                     result_unknown=call_started,
                     transport=self._config.transport,
@@ -586,6 +1053,7 @@ class ManagedMCPClientGateway:
         async with self._lock:
             gateway, self._gateway = self._gateway, None
             fallback, self._fallback_gateway = self._fallback_gateway, None
+            self._resource_subscriptions.clear()
             self._health = GatewayHealth(
                 "closed",
                 self._config.transport,
@@ -613,6 +1081,9 @@ class ManagedMCPClientGateway:
             )
             try:
                 report = await gateway.refresh()
+                if report.healthy:
+                    for uri, context in self._resource_subscriptions.values():
+                        await gateway.subscribe_resource(uri, context)
             except BaseException:
                 await self._close_gateway(gateway)
                 raise
@@ -630,6 +1101,56 @@ class ManagedMCPClientGateway:
                 generation=self._health.generation + 1,
             )
             return gateway
+
+    async def _run_resource_operation(
+        self,
+        operation: Callable[[MCPClientGateway], Awaitable[_ResourceResult]],
+    ) -> _ResourceResult:
+        """Retry transport failures for read-only/idempotent Resource operations."""
+        attempts = 1 + self._config.max_reconnects
+        for attempt in range(attempts):
+            try:
+                async with asyncio.timeout(self._config.connect_timeout_seconds):
+                    return await operation(await self._ready_gateway())
+            except MCPProtocolError as exc:
+                # ChatBI server decisions always carry a namespaced stable code.
+                # A bare SDK Resource error has no reviewed server decision and
+                # commonly represents a stateful session that disappeared.
+                if exc.code != "mcp_resource_error":
+                    # Signed-context, cursor and authorization failures are
+                    # deterministic and must never reconnect.
+                    raise
+                await self._invalidate("mcp_transport_disconnected")
+                if attempt + 1 < attempts:
+                    continue
+                raise MCPProtocolError(
+                    "mcp_transport_disconnected",
+                    "MCP Resource 传输连接中断",
+                    retryable=True,
+                ) from exc
+            except Exception as exc:
+                error_code = _connection_error_code(exc)
+                await self._invalidate(error_code)
+                if attempt + 1 < attempts:
+                    continue
+                raise MCPProtocolError(
+                    error_code,
+                    "MCP Resource 传输连接中断",
+                    retryable=error_code != "mcp_authentication_failed",
+                ) from exc
+        raise AssertionError("MCP Resource reconnect loop exhausted")
+
+    @staticmethod
+    def _resource_subscription_key(
+        uri: str,
+        context: MCPRequestContext,
+    ) -> tuple[str, str, str, str]:
+        return (
+            context.subject_id,
+            context.project_id,
+            context.conversation_id,
+            uri,
+        )
 
     async def _execute_fallback(
         self,
@@ -755,12 +1276,8 @@ def client_config_from_json(
         ):
             raise ValueError("MCP stdio command 必须是非空 JSON 字符串数组")
         command = tuple(raw)
-    service_urls = _string_mapping_from_json(
-        service_urls_json, label="MCP 服务 URL"
-    )
-    service_tokens = _string_mapping_from_json(
-        service_tokens_json, label="MCP 服务令牌"
-    )
+    service_urls = _string_mapping_from_json(service_urls_json, label="MCP 服务 URL")
+    service_tokens = _string_mapping_from_json(service_tokens_json, label="MCP 服务令牌")
     return MCPClientConfig(
         transport=transport,
         stdio_command=command,
@@ -784,10 +1301,7 @@ def _string_mapping_from_json(raw: str, *, label: str) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"{label}必须是 JSON 对象") from exc
     if not isinstance(value, dict) or any(
-        not isinstance(key, str)
-        or not key.strip()
-        or not isinstance(item, str)
-        or not item.strip()
+        not isinstance(key, str) or not key.strip() or not isinstance(item, str) or not item.strip()
         for key, item in value.items()
     ):
         raise ValueError(f"{label}必须是非空字符串到非空字符串的 JSON 对象")
@@ -804,6 +1318,69 @@ def _connection_error_code(exc: Exception) -> str:
     if any(marker in text for marker in ("401 unauthorized", "403 forbidden")):
         return "mcp_authentication_failed"
     return "mcp_transport_disconnected"
+
+
+def _validate_resource_contract(meta: Mapping[str, Any]) -> None:
+    if meta.get(f"{CHATBI_META_PREFIX}contract-version") != MCP_RESOURCE_CONTRACT_VERSION:
+        raise MCPProtocolError(
+            "incompatible_resource_contract",
+            "MCP Resource 契约版本不受支持",
+        )
+
+
+def _resource_notification_metadata(params: Any) -> dict[str, Any]:
+    meta = getattr(params, "meta", None)
+    if meta is None:
+        return {}
+    if isinstance(meta, Mapping):
+        return dict(meta)
+    model_dump = getattr(meta, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(by_alias=True)
+        return dumped if isinstance(dumped, dict) else {}
+    return {}
+
+
+def _resource_notification_from_meta(
+    *,
+    kind: Literal["list_changed", "updated"],
+    uri: str | None,
+    metadata: Mapping[str, Any],
+) -> MCPResourceNotification:
+    _validate_resource_contract(metadata)
+    catalog_version = metadata.get(f"{CHATBI_META_PREFIX}catalog-version")
+    previous_catalog_version = metadata.get(
+        f"{CHATBI_META_PREFIX}previous-catalog-version"
+    )
+    if (
+        not isinstance(catalog_version, str)
+        or len(catalog_version) != 64
+        or not isinstance(previous_catalog_version, str)
+        or len(previous_catalog_version) != 64
+    ):
+        raise MCPProtocolError(
+            "invalid_resource_notification",
+            "MCP Resource 通知缺少目录版本",
+        )
+    return MCPResourceNotification(
+        kind=kind,
+        uri=uri,
+        catalog_version=catalog_version,
+        previous_catalog_version=previous_catalog_version,
+    )
+
+
+def _resource_protocol_error(exc: Any) -> MCPProtocolError:
+    error = getattr(exc, "error", None)
+    data = getattr(error, "data", None)
+    code = data.get("com.chatbi/error-code") if isinstance(data, dict) else None
+    retryable = data.get("com.chatbi/retryable") is True if isinstance(data, dict) else False
+    message = getattr(error, "message", None)
+    return MCPProtocolError(
+        code if isinstance(code, str) else "mcp_resource_error",
+        message if isinstance(message, str) else "MCP Resource 请求失败",
+        retryable=retryable,
+    )
 
 
 class MCPShadowComparator:

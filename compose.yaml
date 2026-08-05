@@ -26,15 +26,21 @@ x-mcp-environment: &mcp-environment
   MCP_HTTP_HOST: 0.0.0.0
   MCP_HTTP_PORT: "8000"
   MCP_CONTEXT_SIGNING_KEY_FILE: /run/secrets/mcp_context_signing_key
-  RAG_EMBEDDER: ${RAG_EMBEDDER:-hashing}
-  RAG_RERANKER: ${RAG_RERANKER:-lexical}
-  RAG_STORE: ${RAG_STORE:-local}
+  # Non-knowledge MCP services never load semantic RAG dependencies. The
+  # knowledge-tools service is selectively overridden by compose.rag.yaml.
+  RAG_EMBEDDER: hashing
+  RAG_RERANKER: lexical
+  RAG_STORE: local
+  RAG_RUNTIME_PROFILE: baseline
   CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
   WORKSPACE_BACKUP_DIR: /var/lib/chatbi/backups
   DATASET_DIR: /var/lib/chatbi/datasets
   REPORT_DIR: /var/lib/chatbi/artifacts
   KB_INDEX_DIR: /var/lib/chatbi/kb/index
+  KB_SOURCE_DIR: /var/lib/chatbi/kb/sources
   KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+  MODEL_CACHE_DIR: /var/cache/chatbi/models
+  HF_HOME: /var/cache/chatbi/models/huggingface
 
 x-mcp-service: &mcp-service
   <<: [*python-image, *runtime-hardening]
@@ -78,14 +84,19 @@ services:
       DATASET_DIR: /var/lib/chatbi/datasets
       REPORT_DIR: /var/lib/chatbi/artifacts
       KB_INDEX_DIR: /var/lib/chatbi/kb/index
+      KB_SOURCE_DIR: /var/lib/chatbi/kb/sources
       KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+      MODEL_CACHE_DIR: /var/cache/chatbi/models
     volumes:
       - chatbi-db:/var/lib/chatbi/db
       - chatbi-uploads:/var/lib/chatbi/uploads
       - chatbi-datasets:/var/lib/chatbi/datasets
       - chatbi-artifacts:/var/lib/chatbi/artifacts
       - chatbi-backups:/var/lib/chatbi/backups
-      - chatbi-kb:/var/lib/chatbi/kb
+      - chatbi-kb-index:/var/lib/chatbi/kb/index
+      - chatbi-kb-sources:/var/lib/chatbi/kb/sources
+      - chatbi-kb-backups:/var/lib/chatbi/kb/backups
+      - chatbi-model-cache:/var/cache/chatbi/models
     networks:
       - app
 
@@ -159,7 +170,8 @@ services:
       MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_knowledge_token
     volumes:
       - chatbi-db:/var/lib/chatbi/db
-      - chatbi-kb:/var/lib/chatbi/kb:ro
+      - chatbi-kb-index:/var/lib/chatbi/kb/index:ro
+      - chatbi-model-cache:/var/cache/chatbi/models
     secrets:
       - mcp_context_signing_key
       - mcp_knowledge_token
@@ -179,13 +191,17 @@ services:
       RAG_EMBEDDER: ${RAG_EMBEDDER:-hashing}
       RAG_RERANKER: ${RAG_RERANKER:-lexical}
       RAG_STORE: ${RAG_STORE:-local}
+      RAG_RUNTIME_PROFILE: ${RAG_RUNTIME_PROFILE:-baseline}
       CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
       WORKSPACE_BACKUP_DIR: /var/lib/chatbi/backups
       UPLOAD_DIR: /var/lib/chatbi/uploads
       DATASET_DIR: /var/lib/chatbi/datasets
       REPORT_DIR: /var/lib/chatbi/artifacts
       KB_INDEX_DIR: /var/lib/chatbi/kb/index
+      KB_SOURCE_DIR: /var/lib/chatbi/kb/sources
       KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
+      MODEL_CACHE_DIR: /var/cache/chatbi/models
+      HF_HOME: /var/cache/chatbi/models/huggingface
       AGENT_MCP_TRANSPORT: streamable_http
       AGENT_MCP_SERVER_URLS_JSON: '{"data-tools":"http://data-tools:8000/mcp/","stats-tools":"http://stats-tools:8000/mcp/","chart-tools":"http://chart-tools:8000/mcp/","report-tools":"http://report-tools:8000/mcp/","knowledge-tools":"http://knowledge-tools:8000/mcp/"}'
       AGENT_MCP_SERVICE_TOKEN_FILES_JSON: '{"data-tools":"/run/secrets/mcp_data_token","stats-tools":"/run/secrets/mcp_stats_token","chart-tools":"/run/secrets/mcp_chart_token","report-tools":"/run/secrets/mcp_report_token","knowledge-tools":"/run/secrets/mcp_knowledge_token"}'
@@ -197,7 +213,10 @@ services:
       - chatbi-datasets:/var/lib/chatbi/datasets
       - chatbi-artifacts:/var/lib/chatbi/artifacts
       - chatbi-backups:/var/lib/chatbi/backups
-      - chatbi-kb:/var/lib/chatbi/kb
+      - chatbi-kb-index:/var/lib/chatbi/kb/index
+      - chatbi-kb-sources:/var/lib/chatbi/kb/sources
+      - chatbi-kb-backups:/var/lib/chatbi/kb/backups
+      - chatbi-model-cache:/var/cache/chatbi/models
     networks:
       - edge
       - app
@@ -277,7 +296,10 @@ volumes:
   chatbi-datasets:
   chatbi-artifacts:
   chatbi-backups:
-  chatbi-kb:
+  chatbi-kb-index:
+  chatbi-kb-sources:
+  chatbi-kb-backups:
+  chatbi-model-cache:
 
 secrets:
   mcp_context_signing_key:

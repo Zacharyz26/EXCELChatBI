@@ -15,11 +15,12 @@ from apps.orchestrator.agent_tools import (
 )
 from packages.common.config import Settings, get_settings
 from packages.common.logging import get_logger
-from packages.knowledge.domain_store import DomainDefinitionStore
+from packages.knowledge.domain_models import DomainDefinition
+from packages.knowledge.domain_store import DomainAccessDenied, DomainDefinitionStore
 from packages.rag.embedding import BGEEmbedder, Embedder, HashingEmbedder
 from packages.rag.rerank import BGEReranker, LexicalReranker, Reranker
 from packages.rag.retriever import HybridRetriever
-from packages.rag.store import LocalKnowledgeStore
+from packages.rag.store import KnowledgeStore, LocalKnowledgeStore
 from packages.session.store import SessionStore
 
 from mcp_servers.chart.server import build_server as build_chart_server
@@ -28,6 +29,9 @@ from mcp_servers.common.client_gateway import MCPClientConfig
 from mcp_servers.common.contracts import (
     MCPProtocolError,
     MCPRequestContext,
+    MCPResourceContents,
+    MCPResourceDescriptor,
+    stable_hash,
 )
 from mcp_servers.common.sdk_adapter import run_adapter
 from mcp_servers.common.service_catalog import (
@@ -42,14 +46,87 @@ from mcp_servers.stats.server import build_server as build_stats_server
 _log = get_logger("mcp.agent_service")
 
 
+class DomainDefinitionResourceProvider:
+    """Expose versioned definitions without making the service token an identity."""
+
+    catalog_uri_prefix = "chatbi://domain-definitions/catalog/"
+
+    @classmethod
+    def catalog_uri(cls, project_id: str) -> str:
+        return f"{cls.catalog_uri_prefix}{project_id}"
+
+    def __init__(
+        self,
+        sessions: SessionStore,
+        definitions: DomainDefinitionStore,
+    ) -> None:
+        self._sessions = sessions
+        self._definitions = definitions
+
+    def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]:
+        self._require_conversation_scope(context)
+        definitions = self._definitions.list_definitions_for_subject(
+            project_id=context.project_id,
+            subject_id=context.subject_id,
+        )
+        return (
+            _definition_catalog_descriptor(context.project_id, definitions),
+            *(_definition_descriptor(item) for item in definitions),
+        )
+
+    def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents:
+        self._require_conversation_scope(context)
+        if uri == self.catalog_uri(context.project_id):
+            definitions = self._definitions.list_definitions_for_subject(
+                project_id=context.project_id,
+                subject_id=context.subject_id,
+            )
+            catalog_version = _definition_catalog_version(definitions)
+            return MCPResourceContents(
+                uri=self.catalog_uri(context.project_id),
+                text=_serialize_definition_catalog(
+                    context.project_id,
+                    definitions,
+                    catalog_version=catalog_version,
+                ),
+                metadata={
+                    "com.chatbi/resource-kind": "domain-definition-catalog",
+                    "com.chatbi/catalog-version": catalog_version,
+                },
+            )
+        definition = self._definitions.get_resource_for_subject(
+            project_id=context.project_id,
+            resource_uri=uri,
+            subject_id=context.subject_id,
+        )
+        if definition is None:
+            raise FileNotFoundError("领域定义 Resource 不存在")
+        return MCPResourceContents(
+            uri=definition.resource_uri,
+            text=_serialize_definition(definition),
+            metadata=_definition_resource_metadata(definition),
+        )
+
+    def _require_conversation_scope(self, context: MCPRequestContext) -> None:
+        project = self._sessions.get_project(context.project_id)
+        conversation = self._sessions.get_conversation(context.conversation_id)
+        if project is None or conversation is None or conversation.project_id != context.project_id:
+            raise DomainAccessDenied("领域定义项目不存在")
+
+
 class AgentServiceRuntime:
     """Own deterministic dependencies and enforce server-side resource scope."""
 
     def __init__(self, service_name: str, settings: Settings) -> None:
         if service_name not in AGENT_MCP_SERVICE_TOOLS:
-            raise RuntimeError(
-                f"MCP_AGENT_SERVICE 必须是: {', '.join(AGENT_MCP_SERVICES)}"
-            )
+            raise RuntimeError(f"MCP_AGENT_SERVICE 必须是: {', '.join(AGENT_MCP_SERVICES)}")
         self.service_name = service_name
         self.settings = settings
         self.store = SessionStore(
@@ -65,10 +142,7 @@ class AgentServiceRuntime:
         self.report = build_report_server()
         self.retriever = self._build_retriever()
         canonical = self._registry(context=None)
-        descriptors = {
-            descriptor.name: descriptor
-            for descriptor in canonical.mcp_descriptors()
-        }
+        descriptors = {descriptor.name: descriptor for descriptor in canonical.mcp_descriptors()}
         bindings = [
             MCPToolBinding(
                 descriptor=descriptors[tool_name],
@@ -76,7 +150,16 @@ class AgentServiceRuntime:
             )
             for tool_name in AGENT_MCP_SERVICE_TOOLS[service_name]
         ]
-        self.adapter = MCPServerAdapter(service_name, bindings)
+        resource_provider = (
+            DomainDefinitionResourceProvider(self.store, self.definitions)
+            if service_name == "knowledge-tools"
+            else None
+        )
+        self.adapter = MCPServerAdapter(
+            service_name,
+            bindings,
+            resource_provider=resource_provider,
+        )
 
     def _handler(
         self,
@@ -191,6 +274,7 @@ class AgentServiceRuntime:
             embedder: Embedder = BGEEmbedder(
                 settings.embedding_model,
                 device=settings.embedding_device,
+                cache_dir=settings.model_cache_dir,
             )
         else:
             embedder = HashingEmbedder(dim=settings.embedding_dim)
@@ -198,16 +282,23 @@ class AgentServiceRuntime:
             reranker: Reranker = BGEReranker(
                 settings.rerank_model,
                 device=settings.embedding_device,
+                cache_dir=settings.model_cache_dir,
             )
         else:
             reranker = LexicalReranker()
-        if settings.rag_store != "local":
-            raise RuntimeError(
-                "阶段 2E 默认服务入口仅启用 local RAG；Milvus profile 由后续阶段接入"
+        if settings.rag_store == "milvus":
+            from packages.rag.milvus_store import MilvusKnowledgeStore
+
+            store: KnowledgeStore = MilvusKnowledgeStore(
+                settings.milvus_uri,
+                collection=settings.milvus_collection,
+                token=settings.milvus_token,
             )
+        else:
+            store = LocalKnowledgeStore(settings.kb_index_dir)
         return HybridRetriever(
             embedder,
-            LocalKnowledgeStore(settings.kb_index_dir),
+            store,
             reranker,
             min_relevance=settings.rag_min_relevance,
         )
@@ -236,6 +327,124 @@ def _ensure_runtime_paths(runtime: AgentServiceRuntime) -> None:
         paths.append(Path(settings.kb_index_dir))
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _definition_descriptor(definition: DomainDefinition) -> MCPResourceDescriptor:
+    encoded = _serialize_definition(definition).encode("utf-8")
+    return MCPResourceDescriptor(
+        uri=definition.resource_uri,
+        name=f"{definition.semantic_key}.v{definition.version}",
+        title=definition.title,
+        description=definition.description,
+        size=len(encoded),
+        metadata=_definition_resource_metadata(definition),
+    )
+
+
+def _definition_catalog_descriptor(
+    project_id: str,
+    definitions: tuple[DomainDefinition, ...],
+) -> MCPResourceDescriptor:
+    catalog_version = _definition_catalog_version(definitions)
+    encoded = _serialize_definition_catalog(
+        project_id,
+        definitions,
+        catalog_version=catalog_version,
+    ).encode("utf-8")
+    return MCPResourceDescriptor(
+        uri=DomainDefinitionResourceProvider.catalog_uri(project_id),
+        name="domain-definitions",
+        title="领域定义目录",
+        description="当前项目可见的不可变领域定义版本目录。",
+        size=len(encoded),
+        metadata={
+            "com.chatbi/resource-kind": "domain-definition-catalog",
+            "com.chatbi/catalog-version": catalog_version,
+        },
+    )
+
+
+def _definition_catalog_version(
+    definitions: tuple[DomainDefinition, ...],
+) -> str:
+    return stable_hash(
+        [
+            {
+                "definition_id": item.definition_id,
+                "semantic_key": item.semantic_key,
+                "version": item.version,
+                "formula_hash": item.formula_hash,
+                "resource_uri": item.resource_uri,
+            }
+            for item in definitions
+        ]
+    )
+
+
+def _serialize_definition_catalog(
+    project_id: str,
+    definitions: tuple[DomainDefinition, ...],
+    *,
+    catalog_version: str,
+) -> str:
+    return json.dumps(
+        {
+            "resource_uri": DomainDefinitionResourceProvider.catalog_uri(project_id),
+            "project_id": project_id,
+            "catalog_version": catalog_version,
+            "definitions": [
+                {
+                    "definition_id": item.definition_id,
+                    "semantic_key": item.semantic_key,
+                    "version": item.version,
+                    "formula_hash": item.formula_hash,
+                    "resource_uri": item.resource_uri,
+                }
+                for item in definitions
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _definition_resource_metadata(definition: DomainDefinition) -> dict[str, Any]:
+    return {
+        "com.chatbi/definition-id": definition.definition_id,
+        "com.chatbi/semantic-key": definition.semantic_key,
+        "com.chatbi/definition-version": definition.version,
+        "com.chatbi/formula-hash": definition.formula_hash,
+    }
+
+
+def _serialize_definition(definition: DomainDefinition) -> str:
+    payload = {
+        "resource_uri": definition.resource_uri,
+        "definition_id": definition.definition_id,
+        "project_id": definition.project_id,
+        "semantic_key": definition.semantic_key,
+        "definition_kind": definition.definition_kind,
+        "version": definition.version,
+        "title": definition.title,
+        "description": definition.description,
+        "formula": definition.formula,
+        "formula_hash": definition.formula_hash,
+        "grain": list(definition.grain),
+        "scope": definition.scope,
+        "owner": definition.owner,
+        "source_ref": definition.source_ref,
+        "effective_from": definition.effective_from,
+        "effective_to": definition.effective_to,
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 if __name__ == "__main__":

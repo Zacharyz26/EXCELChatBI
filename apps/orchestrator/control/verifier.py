@@ -94,6 +94,8 @@ def verify_completion(
 
     evidence_by_invocation = {item.invocation_id for item in evidence}
     evidence_ids = {item.evidence_id for item in evidence}
+    evidence_by_id = {item.evidence_id: item for item in evidence}
+    invocations_by_id = {item.invocation_id: item for item in invocations}
     artifact_ids = {item.id for item in artifacts}
     for invocation in invocations:
         if invocation.status == "unknown":
@@ -143,6 +145,7 @@ def verify_completion(
             unsupported = [
                 str(ref.get("token", "?"))
                 for ref in claim.value_refs
+                if ref.get("kind") != "definition_execution"
                 if ref.get("supported") is not True
             ]
             if unsupported:
@@ -168,6 +171,15 @@ def verify_completion(
                         message="知识结论未引用当前检索来源，或在无结果时作了肯定回答",
                     )
                 )
+        if _invalid_definition_lineage(claim, evidence_by_id, invocations_by_id):
+            issues.append(
+                VerificationIssue(
+                    code="invalid_definition_lineage",
+                    message=(
+                        "Claim 未同时绑定领域定义 Resource 版本、定义 Evidence 与数据调用"
+                    ),
+                )
+            )
         linked = set(claim.evidence_ids)
         referenced = {
             str(ref["evidence_id"])
@@ -202,6 +214,84 @@ def verify_completion(
     if semantic_checker is not None:
         return semantic_checker.check(contract, final_text)
     return VerificationResult(verdict="PASS")
+
+
+def _invalid_definition_lineage(
+    claim: ClaimDraft,
+    evidence_by_id: dict[str, EvidenceRecord],
+    invocations_by_id: dict[str, ToolInvocation],
+) -> bool:
+    linked = set(claim.evidence_ids)
+    bound_data: dict[str, dict[str, object]] = {}
+    for evidence_id in linked:
+        record = evidence_by_id.get(evidence_id)
+        binding = (
+            record.source.get("definition_execution")
+            if record is not None
+            else None
+        )
+        if isinstance(binding, dict):
+            bound_data[evidence_id] = binding
+    refs = [
+        ref
+        for ref in claim.value_refs
+        if ref.get("kind") == "definition_execution"
+    ]
+    if not bound_data:
+        return bool(refs)
+    for data_evidence_id, binding in bound_data.items():
+        data_evidence = evidence_by_id[data_evidence_id]
+        invocation = invocations_by_id.get(data_evidence.invocation_id)
+        if invocation is not None and (
+            invocation.tool_name != binding.get("compiled_tool_name")
+            or invocation.args_hash != binding.get("compiled_arguments_hash")
+        ):
+            return True
+        definition_evidence_id = binding.get("definition_evidence_id")
+        if (
+            not isinstance(definition_evidence_id, str)
+            or definition_evidence_id not in linked
+        ):
+            return True
+        definition_evidence = evidence_by_id.get(definition_evidence_id)
+        resource = (
+            definition_evidence.source.get("definition_resource")
+            if definition_evidence is not None
+            else None
+        )
+        if not isinstance(resource, dict) or any(
+            resource.get(key) != binding.get(key)
+            for key in (
+                "definition_id",
+                "definition_version",
+                "semantic_key",
+                "formula_hash",
+                "resource_uri",
+                "source_ref",
+            )
+        ):
+            return True
+        matching_refs = [
+            ref
+            for ref in refs
+            if ref.get("data_evidence_id") == data_evidence_id
+            and ref.get("evidence_id") == definition_evidence_id
+            and ref.get("supported") is True
+            and all(
+                ref.get(key) == binding.get(key)
+                for key in (
+                    "definition_id",
+                    "definition_version",
+                    "semantic_key",
+                    "formula_hash",
+                    "resource_uri",
+                    "source_ref",
+                )
+            )
+        ]
+        if len(matching_refs) != 1:
+            return True
+    return len(refs) != len(bound_data)
 
 
 def _valid_artifact(artifact: Artifact, required_format: str | None) -> bool:

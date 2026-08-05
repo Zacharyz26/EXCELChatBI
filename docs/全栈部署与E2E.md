@@ -136,6 +136,7 @@ SQLite、文件卷、Nginx、SSE 和浏览器均为真实实现，不使用 `pag
 
 - SQLite 和进程内对话锁仍要求 API 单 worker、单实例；
 - API 重启可从 Checkpoint 恢复安全任务；活动且结果未知的副作用调用保持 fail-closed；
-- 知识索引仍是实例级共享资源，Milvus 根 profile 和租户级隔离留在后续阶段；
+- 知识索引仍是实例级共享资源；Milvus 根 CPU/GPU profile 已由 5B-5 提供，租户级隔离留在
+  后续阶段；
 - BGE/GPU、外置 PostgreSQL/对象存储、多副本和发布供应链不属于 v2.4 2E；
 - 前端 ECharts 主包仍约 1.38 MB，后续应动态拆包。

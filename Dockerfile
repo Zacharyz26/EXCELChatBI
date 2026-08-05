@@ -27,6 +27,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       --extra stats --extra report --extra rag-store --extra chart-screenshot --extra mcp
 
 
+# Optional semantic RAG builder. The baseline image stays lightweight and CI can
+# still build target=api without installing model runtimes.
+FROM python-builder AS python-rag-builder
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable \
+      --extra stats --extra report --extra rag --extra chart-screenshot --extra mcp
+
+
 FROM ${PYTHON_IMAGE} AS api
 
 ARG APP_UID=10001
@@ -57,8 +65,11 @@ RUN apt-get update \
       /var/lib/chatbi/datasets \
       /var/lib/chatbi/artifacts \
       /var/lib/chatbi/backups \
-      /var/lib/chatbi/kb \
-    && chown -R "${APP_UID}:${APP_GID}" /var/lib/chatbi
+      /var/lib/chatbi/kb/index \
+      /var/lib/chatbi/kb/sources \
+      /var/lib/chatbi/kb/backups \
+      /var/cache/chatbi/models \
+    && chown -R "${APP_UID}:${APP_GID}" /var/lib/chatbi /var/cache/chatbi
 
 WORKDIR /app
 COPY --from=python-builder /app/.venv /app/.venv
@@ -84,10 +95,17 @@ ENV PATH=/app/.venv/bin:$PATH \
     DATASET_DIR=/var/lib/chatbi/datasets \
     REPORT_DIR=/var/lib/chatbi/artifacts \
     KB_INDEX_DIR=/var/lib/chatbi/kb/index \
-    KB_BACKUP_DIR=/var/lib/chatbi/kb/backups
+    KB_SOURCE_DIR=/var/lib/chatbi/kb/sources \
+    KB_BACKUP_DIR=/var/lib/chatbi/kb/backups \
+    MODEL_CACHE_DIR=/var/cache/chatbi/models \
+    HF_HOME=/var/cache/chatbi/models/huggingface
 
 USER ${APP_UID}:${APP_GID}
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+
+FROM api AS api-rag
+COPY --from=python-rag-builder /app/.venv /app/.venv

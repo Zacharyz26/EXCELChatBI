@@ -52,9 +52,9 @@ class Settings(BaseSettings):
 
     # Agent 循环护栏（14.5.1 初值 6，2026-07-17 按真实使用调优为 12：
     # 多指标出图的常见计划是 3×统计 + 3×聚合 + 3×图表，6 次会把图表全部挡掉）
-    agent_max_tool_calls: int = 12         # 单轮对话工具调用总数上限
+    agent_max_tool_calls: int = 12  # 单轮对话工具调用总数上限
     agent_tool_result_max_chars: int = 6_000  # 工具结果回填模型前的截断上限
-    agent_registry_max_entries: int = 12   # 分析登记表全量条目上限，更旧的摘要化
+    agent_registry_max_entries: int = 12  # 分析登记表全量条目上限，更旧的摘要化
     agent_run_timeout_seconds: int = Field(default=300, ge=10, le=3600)
     agent_model_timeout_seconds: int = Field(default=90, ge=5, le=600)
     agent_tool_timeout_seconds: int = Field(default=120, ge=5, le=1800)
@@ -63,9 +63,7 @@ class Settings(BaseSettings):
 
     # v2.4 阶段 2D：Executor 的规范 MCP Client Gateway。
     # in_process 仅供兼容/测试；staging/production 强制 Streamable HTTP。
-    agent_mcp_transport: Literal[
-        "in_process", "stdio", "streamable_http"
-    ] = "in_process"
+    agent_mcp_transport: Literal["in_process", "stdio", "streamable_http"] = "in_process"
     agent_mcp_stdio_command_json: str = ""
     agent_mcp_stdio_cwd: str = ""
     agent_mcp_http_url: str = ""
@@ -97,8 +95,8 @@ class Settings(BaseSettings):
     # 本地数据集存储（切片用本地落盘代替 MinIO；生产切 MinIO，留 TODO）
     dataset_dir: str = ".data/datasets"
     upload_dir: str = ".data/uploads"
-    max_upload_mb: int = 50              # 上传文件大小上限（超限 413，防内存 DoS）
-    report_dir: str = ".data/reports"   # 报告与图表截图落盘目录
+    max_upload_mb: int = 50  # 上传文件大小上限（超限 413，防内存 DoS）
+    report_dir: str = ".data/reports"  # 报告与图表截图落盘目录
     report_temp_grace_seconds: int = Field(default=3600, ge=0)
 
     # 图表服务端截图（Playwright 无头 chromium）；留空则自动探测已安装的 chromium
@@ -114,7 +112,10 @@ class Settings(BaseSettings):
     rag_embedder: Literal["hashing", "bge"] = "hashing"
     rag_reranker: Literal["lexical", "bge"] = "lexical"
     rag_store: Literal["local", "milvus"] = "local"
-    milvus_uri: str = ".data/milvus_lite.db"  # 本地文件=Milvus Lite；http(s)://…=standalone（决策2）
+    rag_runtime_profile: Literal["auto", "baseline", "cpu", "gpu"] = "auto"
+    milvus_uri: str = (
+        ".data/milvus_lite.db"  # 本地文件=Milvus Lite；http(s)://…=standalone（决策2）
+    )
     milvus_token: str = ""  # Standalone 开启鉴权后使用 user:password；不得写入日志
     milvus_collection: str = Field(
         default="kb_chunks", min_length=1, max_length=200, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
@@ -123,8 +124,10 @@ class Settings(BaseSettings):
     rag_min_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
     embedding_dim: int = Field(default=256, gt=0)
     kb_index_dir: str = ".data/kb_index"  # 本地知识库索引落盘目录
-    kb_docs_dir: str = "docs/kb_samples"  # 默认摄入的样例文档目录
+    kb_docs_dir: str = "docs/kb_samples"  # 受信导入/初始种子目录，不是运行时事实源
+    kb_source_dir: str = ".data/kb_sources"  # 运行时原文事实源（独立备份）
     kb_backup_dir: str = ".data/kb_backups"
+    model_cache_dir: str = ".data/model_cache"  # 可删除并重新下载/侧载
     kb_max_files: int = Field(default=1_000, ge=1)
     kb_max_document_chars: int = Field(default=2_000_000, ge=1)
 
@@ -179,20 +182,33 @@ class Settings(BaseSettings):
             raise ValueError("默认认证主体和租户不能为空")
         if (self.rag_embedder == "bge") != (self.rag_store == "milvus"):
             raise ValueError("RAG_EMBEDDER=bge 必须与 RAG_STORE=milvus 配对")
+        if self.rag_runtime_profile == "baseline" and (
+            self.rag_embedder,
+            self.rag_reranker,
+            self.rag_store,
+        ) != ("hashing", "lexical", "local"):
+            raise ValueError("RAG_RUNTIME_PROFILE=baseline 必须使用 hashing/lexical/local")
+        if self.rag_runtime_profile in {"cpu", "gpu"} and (
+            self.rag_embedder,
+            self.rag_reranker,
+            self.rag_store,
+        ) != ("bge", "bge", "milvus"):
+            raise ValueError("RAG_RUNTIME_PROFILE=cpu/gpu 必须使用 bge/bge/milvus")
+        expected_device = {"cpu": "cpu", "gpu": "cuda"}.get(self.rag_runtime_profile)
+        if expected_device is not None and self.embedding_device != expected_device:
+            raise ValueError(
+                f"RAG_RUNTIME_PROFILE={self.rag_runtime_profile} 必须使用 "
+                f"EMBEDDING_DEVICE={expected_device}"
+            )
         if self.rag_embedder == "bge" and not self.embedding_model.strip():
             raise ValueError("启用 bge 时 EMBEDDING_MODEL 不能为空")
         if self.rag_reranker == "bge" and not self.rerank_model.strip():
             raise ValueError("启用 bge reranker 时 RERANK_MODEL 不能为空")
         if deployed_api and self.agent_mcp_transport != "streamable_http":
-            raise ValueError(
-                "staging/production 的 Agent Executor 必须使用 MCP Streamable HTTP"
-            )
+            raise ValueError("staging/production 的 Agent Executor 必须使用 MCP Streamable HTTP")
         if deployed_api and self.agent_mcp_allow_in_process_fallback:
             raise ValueError("staging/production 禁止降级到进程内工具执行")
-        if (
-            self.agent_mcp_transport == "stdio"
-            and not self.agent_mcp_stdio_command_json.strip()
-        ):
+        if self.agent_mcp_transport == "stdio" and not self.agent_mcp_stdio_command_json.strip():
             raise ValueError("AGENT_MCP_TRANSPORT=stdio 时必须配置 stdio command")
         if self.agent_mcp_stdio_command_json.strip():
             try:
@@ -202,10 +218,7 @@ class Settings(BaseSettings):
             if (
                 not isinstance(stdio_command, list)
                 or not stdio_command
-                or any(
-                    not isinstance(item, str) or not item.strip()
-                    for item in stdio_command
-                )
+                or any(not isinstance(item, str) or not item.strip() for item in stdio_command)
             ):
                 raise ValueError("MCP stdio command 必须是非空 JSON 字符串数组")
         if self.agent_mcp_transport == "streamable_http":
@@ -213,8 +226,7 @@ class Settings(BaseSettings):
                 validate_service_keys(service_urls, label="MCP URL")
                 validate_service_keys(direct_service_tokens, label="MCP 令牌")
                 if any(
-                    not url.startswith(("http://", "https://"))
-                    for url in service_urls.values()
+                    not url.startswith(("http://", "https://")) for url in service_urls.values()
                 ):
                     raise ValueError("MCP Streamable HTTP URL 必须使用 http(s)")
             else:
@@ -241,10 +253,7 @@ def _parse_string_mapping(raw: str, *, label: str) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"{label}必须是 JSON 对象") from exc
     if not isinstance(value, dict) or any(
-        not isinstance(key, str)
-        or not key.strip()
-        or not isinstance(item, str)
-        or not item.strip()
+        not isinstance(key, str) or not key.strip() or not isinstance(item, str) or not item.strip()
         for key, item in value.items()
     ):
         raise ValueError(f"{label}必须是字符串到非空字符串的 JSON 对象")

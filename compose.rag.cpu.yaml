@@ -1,0 +1,10 @@
+services:
+  knowledge-tools:
+    environment:
+      RAG_RUNTIME_PROFILE: cpu
+      EMBEDDING_DEVICE: cpu
+
+  api:
+    environment:
+      RAG_RUNTIME_PROFILE: cpu
+      EMBEDDING_DEVICE: cpu

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from apps.orchestrator.control.contracts import build_minimal_contract
 from mcp_servers.agent_service.server import AgentServiceRuntime
-from mcp_servers.common.contracts import MCPRequestContext
+from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
 from packages.common.config import Settings
 from packages.governance.permissions import Principal
 from packages.knowledge.domain_models import DomainDefinitionDraft
@@ -19,7 +21,10 @@ from packages.knowledge.domain_store import (
     DomainIdempotencyConflict,
     DomainMappingConflict,
 )
+from packages.session.models import ArtifactDraft
 from packages.session.store import SessionStore
+from packages.session.task_models import ClaimDraft
+from packages.session.task_store import TaskStore, invocation_arguments_hash
 
 _ALICE = Principal(user_id="alice", tenant_id="tenant-a")
 _BOB = Principal(user_id="bob", tenant_id="tenant-a")
@@ -325,6 +330,9 @@ def test_knowledge_service_filters_signed_subject_and_returns_compiled_plan(
             dataset_dir=str(tmp_path / "datasets"),
             report_dir=str(tmp_path / "reports"),
             kb_index_dir=str(tmp_path / "kb"),
+            rag_embedder="hashing",
+            rag_reranker="lexical",
+            rag_store="local",
         ),
     )
     context = _mcp_context(project_id, conversation.id, subject_id="alice")
@@ -340,9 +348,7 @@ def test_knowledge_service_filters_signed_subject_and_returns_compiled_plan(
     assert result.is_error is False
     assert result.structured_content is not None
     assert result.structured_content["status"] == "resolved"
-    assert result.structured_content["compiled_invocation"]["tool_name"] == (
-        "aggregate_preview"
-    )
+    assert result.structured_content["compiled_invocation"]["tool_name"] == ("aggregate_preview")
 
     denied = runtime.adapter.call_tool(
         "domain_definition_lookup",
@@ -350,6 +356,388 @@ def test_knowledge_service_filters_signed_subject_and_returns_compiled_plan(
         _mcp_context(project_id, conversation.id, subject_id="mallory"),
     )
     assert denied.is_error is True
+
+
+def test_knowledge_resources_are_project_and_subject_scoped(
+    workspace: tuple[SessionStore, DomainDefinitionStore, str],
+    tmp_path: Path,
+) -> None:
+    session, store, project_id = workspace
+    conversation = session.create_conversation(project_id, "领域定义 Resource")
+    definition = store.create_definition(
+        project_id=project_id,
+        principal=_ALICE,
+        draft=_draft(),
+        idempotency_key="resource-definition-v1",
+    ).definition
+    other_project = session.create_project(
+        "另一匿名项目",
+        owner_user_id=_ALICE.user_id,
+        tenant_id=_ALICE.tenant_scope,
+    )
+    other_conversation = session.create_conversation(other_project.id, "另一项目")
+    other_definition = store.create_definition(
+        project_id=other_project.id,
+        principal=_ALICE,
+        draft=_draft(),
+        idempotency_key="other-resource-definition-v1",
+    ).definition
+    runtime = AgentServiceRuntime(
+        "knowledge-tools",
+        Settings(
+            process_role="mcp_server",
+            chat_db_path=str(session.db_path),
+            dataset_dir=str(tmp_path / "datasets"),
+            report_dir=str(tmp_path / "reports"),
+            kb_index_dir=str(tmp_path / "kb"),
+            rag_embedder="hashing",
+            rag_reranker="lexical",
+            rag_store="local",
+        ),
+    )
+    alice_context = _mcp_context(
+        project_id,
+        conversation.id,
+        subject_id=_ALICE.user_id,
+    )
+
+    resources = runtime.adapter.list_resources(alice_context)
+    assert runtime.adapter.has_resources is True
+    assert [item.uri for item in resources] == [
+        f"chatbi://domain-definitions/catalog/{project_id}",
+        definition.resource_uri,
+    ]
+    assert resources[0].metadata is not None
+    assert resources[0].metadata["com.chatbi/resource-kind"] == (
+        "domain-definition-catalog"
+    )
+    assert len(str(resources[0].metadata["com.chatbi/catalog-version"])) == 64
+    assert resources[1].metadata == {
+        "com.chatbi/definition-id": definition.definition_id,
+        "com.chatbi/semantic-key": definition.semantic_key,
+        "com.chatbi/definition-version": 1,
+        "com.chatbi/formula-hash": definition.formula_hash,
+    }
+
+    bob_resources = runtime.adapter.list_resources(
+        _mcp_context(project_id, conversation.id, subject_id=_BOB.user_id)
+    )
+    assert [item.uri for item in bob_resources] == [
+        f"chatbi://domain-definitions/catalog/{project_id}",
+        definition.resource_uri,
+    ]
+    catalog = runtime.adapter.read_resource(
+        f"chatbi://domain-definitions/catalog/{project_id}",
+        alice_context,
+    )
+    catalog_payload = json.loads(catalog.text)
+    assert catalog_payload["project_id"] == project_id
+    assert catalog_payload["definitions"] == [
+        {
+            "definition_id": definition.definition_id,
+            "semantic_key": definition.semantic_key,
+            "version": 1,
+            "formula_hash": definition.formula_hash,
+            "resource_uri": definition.resource_uri,
+        }
+    ]
+    assert catalog_payload["catalog_version"] == catalog.metadata[
+        "com.chatbi/catalog-version"
+    ]
+    contents = runtime.adapter.read_resource(definition.resource_uri, alice_context)
+    payload = json.loads(contents.text)
+    assert payload["definition_id"] == definition.definition_id
+    assert payload["version"] == definition.version
+    assert payload["formula_hash"] == definition.formula_hash
+    assert "tenant_id" not in payload
+    assert "created_by_user_id" not in payload
+    assert "idempotency_key" not in payload
+    catalog_before = runtime.adapter.resource_subscription_snapshot(
+        f"chatbi://domain-definitions/catalog/{project_id}",
+        alice_context,
+    )
+    immutable_before = runtime.adapter.resource_subscription_snapshot(
+        definition.resource_uri,
+        alice_context,
+    )
+    assert catalog_before.catalog_version == catalog_payload["catalog_version"]
+
+    store.create_definition(
+        project_id=project_id,
+        principal=_ALICE,
+        draft=replace(
+            _draft(),
+            version=2,
+            title="匿名分组度量（目录更新）",
+            source_ref="urn:domain-definition:grouped-measure:v2",
+            effective_from="2027-01-01T00:00:00Z",
+        ),
+        idempotency_key="resource-definition-v2",
+    )
+    catalog_after = runtime.adapter.resource_subscription_snapshot(
+        f"chatbi://domain-definitions/catalog/{project_id}",
+        alice_context,
+    )
+    immutable_after = runtime.adapter.resource_subscription_snapshot(
+        definition.resource_uri,
+        alice_context,
+    )
+    assert catalog_after.catalog_version != catalog_before.catalog_version
+    assert catalog_after.content_hash != catalog_before.content_hash
+    assert immutable_after.content_hash == immutable_before.content_hash
+    assert immutable_after.catalog_version == catalog_after.catalog_version
+
+    with pytest.raises(MCPProtocolError) as cross_project:
+        runtime.adapter.read_resource(other_definition.resource_uri, alice_context)
+    assert cross_project.value.code == "resource_not_found"
+    with pytest.raises(MCPProtocolError) as cross_catalog:
+        runtime.adapter.read_resource(
+            f"chatbi://domain-definitions/catalog/{other_project.id}",
+            alice_context,
+        )
+    assert cross_catalog.value.code == "resource_not_found"
+    with pytest.raises(MCPProtocolError) as unknown_subject:
+        runtime.adapter.list_resources(
+            _mcp_context(project_id, conversation.id, subject_id="mallory")
+        )
+    assert unknown_subject.value.code == "resource_not_found"
+    with pytest.raises(MCPProtocolError) as crossed_conversation:
+        runtime.adapter.list_resources(
+            _mcp_context(project_id, other_conversation.id, subject_id=_ALICE.user_id)
+        )
+    assert crossed_conversation.value.code == "resource_not_found"
+
+
+def test_old_report_review_preserves_exact_definition_version(
+    workspace: tuple[SessionStore, DomainDefinitionStore, str],
+) -> None:
+    session, store, project_id = workspace
+    definition = store.create_definition(
+        project_id=project_id,
+        principal=_ALICE,
+        draft=_draft(),
+        idempotency_key="report-lineage-definition-v1",
+    ).definition
+    conversation = session.create_conversation(project_id, "历史报告口径复核")
+    _, user_message = session.start_user_turn(
+        conversation_id=conversation.id,
+        content="生成受控汇总报告",
+        suggested_title="历史报告口径复核",
+    )
+    tasks = TaskStore(session.db_path)
+    contract = build_minimal_contract(
+        run_id="report-definition-lineage-run",
+        user_text=user_message.content,
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+    planning, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        contract=contract,
+        budget={"max_tool_calls": 3},
+    )
+    run, _ = tasks.transition(
+        planning.run_id,
+        expected_version=planning.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    compiled_arguments = {
+        "dataset_ref": _DATASET_REF,
+        "group_col": "bucket_code",
+        "agg": "sum",
+        "value_col": "measure_value",
+        "sort": "group",
+        "limit": 100,
+    }
+    definition_resource = {
+        "definition_id": definition.definition_id,
+        "definition_version": definition.version,
+        "semantic_key": definition.semantic_key,
+        "formula_hash": definition.formula_hash,
+        "resource_uri": definition.resource_uri,
+        "source_ref": definition.source_ref,
+    }
+    definition_invocation, _ = tasks.start_invocation(
+        run_id=run.run_id,
+        tool_call_id="definition-call",
+        tool_name="domain_definition_lookup",
+        arguments={"semantic_key": definition.semantic_key},
+        idempotency_key="report-definition-call",
+    )
+    definition_message = session.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="解析受控口径",
+    )
+    run, _, definition_evidence, _, _, _ = tasks.commit_tool_success(
+        definition_invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=definition_message.id,
+        result={"status": "resolved"},
+        evidence_kind="tool_result",
+        evidence_source={
+            "tool": "domain_definition_lookup",
+            "definition_resource": definition_resource,
+            "compiled_invocation": {
+                "definition_id": definition.definition_id,
+                "definition_version": definition.version,
+                "formula_hash": definition.formula_hash,
+                "tool_name": "aggregate_preview",
+                "arguments_hash": invocation_arguments_hash(compiled_arguments),
+                "definition_match": True,
+            },
+        },
+        evidence_summary={"summary": "领域定义 v1 已解析"},
+        artifact_draft=None,
+    )
+    definition_execution = {
+        **definition_resource,
+        "definition_evidence_id": definition_evidence.evidence_id,
+        "compiled_tool_name": "aggregate_preview",
+        "compiled_arguments_hash": invocation_arguments_hash(compiled_arguments),
+    }
+    data_invocation, _ = tasks.start_invocation(
+        run_id=run.run_id,
+        tool_call_id="data-call",
+        tool_name="aggregate_preview",
+        arguments=compiled_arguments,
+        idempotency_key="report-data-call",
+    )
+    data_message = session.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="执行受控汇总",
+    )
+    run, _, data_evidence, data_artifact, _, _ = tasks.commit_tool_success(
+        data_invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=data_message.id,
+        result={"rows": [{"bucket_code": "A", "value": 25.0}]},
+        evidence_kind="tool_result",
+        evidence_source={
+            "tool": "aggregate_preview",
+            "definition_execution": definition_execution,
+        },
+        evidence_summary={
+            "summary": "受控汇总完成",
+            "value_index": [{"path": "$.rows[0].value", "value": "25"}],
+        },
+        artifact_draft=ArtifactDraft(
+            type="table",
+            payload={"rows": [{"bucket_code": "A", "value": 25.0}]},
+            file_ref=None,
+            source_tool="aggregate_preview",
+            params={"analysis_id": "controlled-analysis-v1"},
+            dataset_ref=_DATASET_REF,
+        ),
+    )
+    assert data_artifact is not None
+    claims = tasks.replace_claims(
+        run.run_id,
+        [
+            ClaimDraft(
+                statement="受控汇总值为 25。",
+                claim_kind="numeric",
+                value_refs=(
+                    {
+                        "token": "25",
+                        "supported": True,
+                        "evidence_id": data_evidence.evidence_id,
+                        "path": "$.rows[0].value",
+                    },
+                    {
+                        "kind": "definition_execution",
+                        "supported": True,
+                        "data_evidence_id": data_evidence.evidence_id,
+                        "evidence_id": definition_evidence.evidence_id,
+                        **definition_resource,
+                    },
+                ),
+                evidence_ids=(
+                    data_evidence.evidence_id,
+                    definition_evidence.evidence_id,
+                ),
+            )
+        ],
+    )
+    report_id = "e" * 32
+    report_invocation, _ = tasks.start_invocation(
+        run_id=run.run_id,
+        tool_call_id="report-call",
+        tool_name="generate_report",
+        arguments={"analysis_ids": ["controlled-analysis-v1"]},
+        idempotency_key="report-generation-call",
+    )
+    report_message = session.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="生成历史报告",
+    )
+    tasks.commit_tool_success(
+        report_invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=report_message.id,
+        result={"report_id": report_id, "md_url": "/reports/old.md"},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "generate_report"},
+        evidence_summary={"summary": "报告生成完成"},
+        artifact_draft=ArtifactDraft(
+            type="report",
+            payload={"report_id": report_id, "md_url": "/reports/old.md"},
+            file_ref="old.md",
+            source_tool="generate_report",
+            params={"analysis_ids": ["controlled-analysis-v1"]},
+            dataset_ref=None,
+        ),
+    )
+
+    review = store.review_report_definition_lineage(
+        project_id=project_id,
+        report_id=report_id,
+        principal=_ALICE,
+    )
+
+    assert review is not None
+    assert review.status == "verified"
+    assert review.issues == ()
+    assert len(review.bindings) == 1
+    binding = review.bindings[0]
+    assert binding.definition_id == definition.definition_id
+    assert binding.definition_version == 1
+    assert binding.formula_hash == definition.formula_hash
+    assert binding.claim_ids == (claims[0].claim_id,)
+
+    store.create_definition(
+        project_id=project_id,
+        principal=_ALICE,
+        draft=replace(
+            _draft(),
+            version=2,
+            title="匿名分组度量（新版本）",
+            source_ref="urn:domain-definition:grouped-measure:v2",
+            effective_from="2027-01-01T00:00:00Z",
+        ),
+        idempotency_key="report-lineage-definition-v2",
+    )
+    historical_review = store.review_report_definition_lineage(
+        project_id=project_id,
+        report_id=report_id,
+        principal=_ALICE,
+    )
+    assert historical_review is not None
+    assert historical_review.status == "verified"
+    assert historical_review.bindings[0].definition_version == 1
+    with pytest.raises(DomainAccessDenied):
+        store.review_report_definition_lineage(
+            project_id=project_id,
+            report_id=report_id,
+            principal=_OTHER_TENANT,
+        )
 
 
 def _mcp_context(

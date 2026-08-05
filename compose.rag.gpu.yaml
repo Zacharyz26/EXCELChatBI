@@ -1,0 +1,12 @@
+services:
+  knowledge-tools:
+    environment:
+      RAG_RUNTIME_PROFILE: gpu
+      EMBEDDING_DEVICE: cuda
+    gpus: all
+
+  api:
+    environment:
+      RAG_RUNTIME_PROFILE: gpu
+      EMBEDDING_DEVICE: cuda
+    gpus: all

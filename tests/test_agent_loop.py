@@ -1786,6 +1786,144 @@ async def test_domain_definition_lookup_joins_the_evidence_ledger(
 
 
 @pytest.mark.asyncio
+async def test_compiled_definition_binds_data_evidence_and_numeric_claim(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_inline(func: Any, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", run_inline)
+    _register_dataset(store, conversation)
+    definition_id = "a" * 32
+    formula_hash = "b" * 64
+    source_ref = "urn:domain-definition:grouped-measure:v1"
+    compiled_arguments = {
+        "dataset_ref": _DATASET_REF,
+        "group_col": "bucket_code",
+        "agg": "sum",
+        "value_col": "measure_value",
+        "sort": "group",
+        "limit": 100,
+    }
+    definition_result = {
+        "status": "resolved",
+        "is_empty": False,
+        "requires_clarification": False,
+        "semantic_key": "metric.grouped_measure",
+        "as_of": "2026-06-01T00:00:00Z",
+        "definition": {
+            "definition_id": definition_id,
+            "version": 1,
+            "title": "匿名分组度量",
+            "description": "按匿名分组汇总匿名度量。",
+            "formula_hash": formula_hash,
+            "resource_uri": f"chatbi://domain-definitions/{definition_id}",
+            "source": source_ref,
+        },
+        "candidates": [],
+        "compilation_status": "ready",
+        "compiled_invocation": {
+            "definition_id": definition_id,
+            "definition_version": 1,
+            "formula_hash": formula_hash,
+            "tool_name": "aggregate_preview",
+            "arguments": compiled_arguments,
+        },
+    }
+    registry = FakeRegistry(
+        {
+            "domain_definition_lookup": lambda _args: definition_result,
+            "aggregate_preview": lambda _args: {
+                "rows": [{"bucket_code": "A", "value": 25.0}],
+                "group_total": 1,
+                "agg": "sum",
+            },
+        }
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="definition-call",
+                        name="domain_definition_lookup",
+                        arguments=json.dumps(
+                            {
+                                "semantic_key": "metric.grouped_measure",
+                                "dataset_ref": _DATASET_REF,
+                            }
+                        ),
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="compiled-data-call",
+                        name="aggregate_preview",
+                        arguments=json.dumps(compiled_arguments),
+                    )
+                ]
+            },
+            {"deltas": [f"受控汇总值为 25（来源：{source_ref}）。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="按 metric.grouped_measure 汇总数据",
+    )
+
+    run_id = cast(str, dict(events)["done"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    evidence = tasks.list_evidence(run_id)
+    definition_evidence = next(
+        item for item in evidence if item.source["tool"] == "domain_definition_lookup"
+    )
+    data_evidence = next(
+        item for item in evidence if item.source["tool"] == "aggregate_preview"
+    )
+    assert definition_evidence.source["definition_resource"] == {
+        "definition_id": definition_id,
+        "definition_version": 1,
+        "semantic_key": "metric.grouped_measure",
+        "formula_hash": formula_hash,
+        "resource_uri": f"chatbi://domain-definitions/{definition_id}",
+        "source_ref": source_ref,
+    }
+    assert data_evidence.source["definition_execution"] == {
+        **definition_evidence.source["definition_resource"],
+        "definition_evidence_id": definition_evidence.evidence_id,
+        "compiled_tool_name": "aggregate_preview",
+        "compiled_arguments_hash": hashlib.sha256(
+            json.dumps(
+                compiled_arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+    numeric_claim = next(
+        claim for claim in tasks.list_claims(run_id) if claim.claim_kind == "numeric"
+    )
+    assert set(numeric_claim.evidence_ids) == {
+        definition_evidence.evidence_id,
+        data_evidence.evidence_id,
+    }
+    assert any(
+        ref.get("kind") == "definition_execution"
+        and ref.get("supported") is True
+        for ref in numeric_claim.value_refs
+    )
+
+
+@pytest.mark.asyncio
 async def test_kb_answer_without_source_is_revised_before_delivery(
     store: SessionStore, conversation: Conversation
 ) -> None:

@@ -14,7 +14,7 @@ import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
@@ -26,6 +26,7 @@ CHATBI_META_PREFIX = "com.chatbi/"
 CHATBI_CONTEXT_KEY = f"{CHATBI_META_PREFIX}context"
 CHATBI_CONTEXT_SIGNATURE_KEY = f"{CHATBI_META_PREFIX}context-signature"
 MCP_CONTRACT_VERSION = "chatbi-mcp-tool-v1"
+MCP_RESOURCE_CONTRACT_VERSION = "chatbi-mcp-resource-v2"
 POSTCONDITIONS_VERSION = "artifact-postconditions-v1"
 GENERIC_OBJECT_OUTPUT_SCHEMA: JsonObject = {"type": "object"}
 
@@ -85,16 +86,12 @@ class ToolCapabilityMetadata:
         permissions = _string_tuple(
             meta, f"{CHATBI_META_PREFIX}required-permissions", required=True
         )
-        artifact_types = _string_tuple(
-            meta, f"{CHATBI_META_PREFIX}artifact-types", required=False
-        )
+        artifact_types = _string_tuple(meta, f"{CHATBI_META_PREFIX}artifact-types", required=False)
         risk = meta.get(f"{CHATBI_META_PREFIX}risk-level")
         if risk not in {"low", "medium", "high", "critical"}:
             raise MCPProtocolError("invalid_tool_metadata", "MCP Tool 风险等级无效")
         tool_version = meta.get(f"{CHATBI_META_PREFIX}tool-version")
-        postconditions_version = meta.get(
-            f"{CHATBI_META_PREFIX}postconditions-version"
-        )
+        postconditions_version = meta.get(f"{CHATBI_META_PREFIX}postconditions-version")
         declared_idempotent = meta.get(f"{CHATBI_META_PREFIX}idempotent")
         if not isinstance(tool_version, str) or not tool_version:
             raise MCPProtocolError("invalid_tool_metadata", "MCP Tool 版本缺失")
@@ -315,6 +312,119 @@ class MCPRequestContext:
         return context
 
 
+@dataclass(frozen=True, slots=True)
+class MCPResourceDescriptor:
+    """Transport-neutral, context-filtered MCP Resource discovery record."""
+
+    uri: str
+    name: str
+    title: str
+    description: str
+    mime_type: str = "application/json"
+    size: int | None = None
+    metadata: JsonObject | None = None
+
+    def __post_init__(self) -> None:
+        if not self.uri.strip() or not self.name.strip() or not self.title.strip():
+            raise ValueError("MCP Resource 描述不完整")
+        if not self.mime_type.strip() or (self.size is not None and self.size < 0):
+            raise ValueError("MCP Resource 内容声明无效")
+        _validate_json_value(self.metadata or {})
+
+    def to_protocol_dict(self) -> JsonObject:
+        """Return SDK wire names while keeping ChatBI metadata namespaced."""
+        raw: JsonObject = {
+            "uri": self.uri,
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+            "mimeType": self.mime_type,
+            "_meta": {
+                **(self.metadata or {}),
+                f"{CHATBI_META_PREFIX}contract-version": MCP_RESOURCE_CONTRACT_VERSION,
+            },
+        }
+        if self.size is not None:
+            raw["size"] = self.size
+        return raw
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResourceContents:
+    """One authorized textual MCP Resource payload."""
+
+    uri: str
+    text: str
+    mime_type: str = "application/json"
+    metadata: JsonObject | None = None
+
+    def __post_init__(self) -> None:
+        if not self.uri.strip() or not self.mime_type.strip():
+            raise ValueError("MCP Resource 内容不完整")
+        _validate_json_value(self.metadata or {})
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResourcePage:
+    """One authenticated Resource page plus an opaque continuation cursor."""
+
+    resources: tuple[MCPResourceDescriptor, ...]
+    catalog_version: str
+    next_cursor: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _is_sha256(self.catalog_version):
+            raise ValueError("MCP Resource 目录版本无效")
+        if self.next_cursor is not None and not self.next_cursor.strip():
+            raise ValueError("MCP Resource 分页游标无效")
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResourceSubscriptionSnapshot:
+    """Authorized hashes watched by one stateful MCP Resource subscription."""
+
+    uri: str
+    catalog_version: str
+    content_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.uri.strip() or any(
+            not _is_sha256(value)
+            for value in (self.catalog_version, self.content_hash)
+        ):
+            raise ValueError("MCP Resource 订阅快照无效")
+
+
+ResourceNotificationKind = Literal["list_changed", "updated"]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPResourceNotification:
+    """Validated transport-neutral projection of a standard MCP notification."""
+
+    kind: ResourceNotificationKind
+    catalog_version: str
+    previous_catalog_version: str
+    uri: str | None = None
+
+    def __post_init__(self) -> None:
+        if any(
+            not _is_sha256(value)
+            for value in (self.catalog_version, self.previous_catalog_version)
+        ):
+            raise ValueError("MCP Resource 通知目录版本无效")
+        if self.kind == "updated" and (self.uri is None or not self.uri.strip()):
+            raise ValueError("MCP Resource 更新通知缺少 URI")
+
+
+class MCPResourceProvider(Protocol):
+    """Synchronous provider invoked behind the MCP SDK worker boundary."""
+
+    def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]: ...
+
+    def read_resource(self, uri: str, context: MCPRequestContext) -> MCPResourceContents: ...
+
+
 def validate_tool_approval(
     descriptor: MCPToolDescriptor,
     arguments: JsonObject,
@@ -357,9 +467,7 @@ class MCPCallResult:
         )
 
     @classmethod
-    def failure(
-        cls, tool_name: str, error: MCPProtocolError
-    ) -> MCPCallResult:
+    def failure(cls, tool_name: str, error: MCPProtocolError) -> MCPCallResult:
         return cls(
             tool_name=tool_name,
             structured_content=None,
@@ -396,6 +504,13 @@ def stable_hash(value: Any) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_json_value(value: Any) -> None:
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MCP Resource metadata 必须可序列化为 JSON") from exc
 
 
 def _normalize_json(value: Any) -> Any:

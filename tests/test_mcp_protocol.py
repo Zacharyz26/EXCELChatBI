@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 from collections.abc import AsyncIterator
@@ -12,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 import duckdb
 import httpx
 import pytest
@@ -32,6 +34,7 @@ from mcp_servers.common.client_gateway import (  # noqa: E402
     MCPClientConfig,
     MCPClientGateway,
     MCPGatewayExecutionError,
+    MCPResourceNotificationBuffer,
     MCPShadowComparator,
     OfficialSDKClientTransport,
     OfficialSDKSessionTransport,
@@ -41,6 +44,10 @@ from mcp_servers.common.contracts import (  # noqa: E402
     MCPCallResult,
     MCPProtocolError,
     MCPRequestContext,
+    MCPResourceContents,
+    MCPResourceDescriptor,
+    MCPResourceNotification,
+    MCPResourcePage,
     MCPToolDescriptor,
     stable_hash,
 )
@@ -103,6 +110,105 @@ def _adapter(*, bad_output: bool = False) -> MCPServerAdapter:
         else (lambda args: {"doubled": args["value"] * 2})
     )
     return MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+
+
+class _ResourceProvider:
+    uri = "chatbi://domain-definitions/definition-1"
+
+    def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:
+        if context.project_id != "project-1" or context.subject_id != "user-1":
+            raise PermissionError("not visible")
+        return (
+            MCPResourceDescriptor(
+                uri=self.uri,
+                name="metric.example.v1",
+                title="Example metric",
+                description="Versioned metric definition",
+                metadata={"com.chatbi/definition-version": 1},
+            ),
+        )
+
+    def read_resource(self, uri: str, context: MCPRequestContext) -> MCPResourceContents:
+        if context.project_id != "project-1" or context.subject_id != "user-1":
+            raise PermissionError("not visible")
+        if uri != self.uri:
+            raise FileNotFoundError(uri)
+        return MCPResourceContents(
+            uri=uri,
+            text='{"definition_id":"definition-1","version":1}',
+            metadata={"com.chatbi/definition-version": 1},
+        )
+
+
+class _MutableResourceProvider:
+    def __init__(self) -> None:
+        self.revision = 1
+        self.resource_count = 3
+
+    def publish(self) -> None:
+        self.revision += 1
+        self.resource_count += 1
+
+    def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]:
+        if context.project_id != "project-1" or context.subject_id != "user-1":
+            raise PermissionError("not visible")
+        return tuple(
+            MCPResourceDescriptor(
+                uri=f"chatbi://mutable/resource-{index}",
+                name=f"mutable-resource-{index}",
+                title=f"Mutable resource {index}",
+                description="Mutable protocol fixture",
+                metadata={
+                    "com.chatbi/revision": self.revision,
+                    "com.chatbi/index": index,
+                },
+            )
+            for index in range(1, self.resource_count + 1)
+        )
+
+    def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents:
+        if context.project_id != "project-1" or context.subject_id != "user-1":
+            raise PermissionError("not visible")
+        valid_uris = {
+            f"chatbi://mutable/resource-{index}"
+            for index in range(1, self.resource_count + 1)
+        }
+        if uri not in valid_uris:
+            raise FileNotFoundError(uri)
+        return MCPResourceContents(
+            uri=uri,
+            text=json.dumps(
+                {"uri": uri, "revision": self.revision},
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            metadata={"com.chatbi/revision": self.revision},
+        )
+
+
+def _mutable_resource_adapter(
+    provider: _MutableResourceProvider,
+) -> MCPServerAdapter:
+    return MCPServerAdapter(
+        "mutable-knowledge-resources",
+        [],
+        resource_provider=provider,
+    )
+
+
+def _resource_adapter() -> MCPServerAdapter:
+    return MCPServerAdapter(
+        "knowledge-resources",
+        [],
+        resource_provider=_ResourceProvider(),
+    )
 
 
 @asynccontextmanager
@@ -278,9 +384,7 @@ async def test_client_gateway_fails_closed_on_discovery_drift() -> None:
         ) -> Any:
             raise AssertionError("unhealthy discovery must block calls")
 
-    gateway = MCPClientGateway(
-        DriftTransport(), expected, allowed_tools=frozenset({"double"})
-    )
+    gateway = MCPClientGateway(DriftTransport(), expected, allowed_tools=frozenset({"double"}))
     report = await gateway.refresh()
     assert report.healthy is False and report.mismatched == ("double",)
     with pytest.raises(MCPProtocolError, match="尚未通过"):
@@ -350,6 +454,206 @@ async def test_official_sdk_tools_list_call_and_gateway_round_trip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_official_sdk_resource_list_read_require_signed_host_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_run_sync(function: Any, *args: Any, **_kwargs: Any) -> Any:
+        return function(*args)
+
+    # The production adapter retains its worker boundary. This protocol-focused
+    # test isolates request metadata/serialization from the runner's thread pool.
+    monkeypatch.setattr(anyio.to_thread, "run_sync", direct_run_sync)
+    signing_key = "resource-context-secret"
+    server = build_sdk_server(
+        _resource_adapter(),
+        context_signing_key=signing_key,
+        require_signed_context=True,
+    )
+    async with create_connected_server_and_client_session(server) as session:
+        unsigned = OfficialSDKSessionTransport(session)
+        with pytest.raises(MCPProtocolError) as denied:
+            await unsigned.list_resources(_context())
+        assert denied.value.code == "invalid_context_signature"
+
+        transport = OfficialSDKSessionTransport(
+            session,
+            context_signing_key=signing_key,
+        )
+        resources = await transport.list_resources(_context())
+        assert [item.uri for item in resources] == [_ResourceProvider.uri]
+        assert resources[0].metadata == {"com.chatbi/definition-version": 1}
+
+        gateway = MCPClientGateway(
+            transport,
+            (),
+            allowed_tools=frozenset(),
+        )
+        assert (await gateway.refresh()).healthy is True
+        gateway_resources = await gateway.list_resources(_context())
+        assert gateway_resources == resources
+
+        contents = await transport.read_resource(_ResourceProvider.uri, _context())
+        assert contents.uri == _ResourceProvider.uri
+        assert contents.metadata == {"com.chatbi/definition-version": 1}
+        assert '"version":1' in contents.text
+
+        with pytest.raises(MCPProtocolError) as missing:
+            await transport.read_resource(
+                "chatbi://domain-definitions/missing",
+                _context(),
+            )
+        assert missing.value.code == "resource_not_found"
+
+
+@pytest.mark.asyncio
+async def test_resource_pages_resume_safely_and_reject_catalog_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_run_sync(function: Any, *args: Any, **_kwargs: Any) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", direct_run_sync)
+    provider = _MutableResourceProvider()
+    signing_key = "resource-pagination-secret"
+    server = build_sdk_server(
+        _mutable_resource_adapter(provider),
+        context_signing_key=signing_key,
+        require_signed_context=True,
+        resource_page_size=1,
+    )
+    async with create_connected_server_and_client_session(server) as session:
+        transport = OfficialSDKSessionTransport(
+            session,
+            context_signing_key=signing_key,
+        )
+        first = await transport.list_resource_page(_context())
+        assert [item.name for item in first.resources] == ["mutable-resource-1"]
+        assert first.next_cursor is not None
+        assert len(first.catalog_version) == 64
+
+        resumed_context = _context(
+            run_id="run-after-reconnect",
+            invocation_id="invocation-after-reconnect",
+            idempotency_key="idempotency-after-reconnect",
+        )
+        second = await transport.list_resource_page(
+            resumed_context,
+            cursor=first.next_cursor,
+        )
+        assert [item.name for item in second.resources] == ["mutable-resource-2"]
+        assert second.catalog_version == first.catalog_version
+
+        assert first.next_cursor is not None
+        replacement = "0" if first.next_cursor[-1] != "0" else "1"
+        tampered_cursor = f"{first.next_cursor[:-1]}{replacement}"
+        with pytest.raises(MCPProtocolError) as tampered:
+            await transport.list_resource_page(
+                _context(),
+                cursor=tampered_cursor,
+            )
+        assert tampered.value.code == "invalid_resource_cursor"
+
+        with pytest.raises(MCPProtocolError) as crossed_scope:
+            await transport.list_resource_page(
+                _context(conversation_id="conversation-2"),
+                cursor=first.next_cursor,
+            )
+        assert crossed_scope.value.code == "invalid_resource_cursor"
+
+        provider.publish()
+        with pytest.raises(MCPProtocolError) as drifted:
+            await transport.list_resource_page(
+                _context(),
+                cursor=first.next_cursor,
+            )
+        assert drifted.value.code == "resource_catalog_changed"
+        assert drifted.value.retryable is True
+
+        all_resources = await transport.list_resources(_context())
+        assert [item.name for item in all_resources] == [
+            "mutable-resource-1",
+            "mutable-resource-2",
+            "mutable-resource-3",
+            "mutable-resource-4",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_resource_subscription_emits_versioned_notifications_and_unsubscribes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_run_sync(function: Any, *args: Any, **_kwargs: Any) -> Any:
+        return function(*args)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", direct_run_sync)
+    provider = _MutableResourceProvider()
+    signing_key = "resource-subscription-secret"
+    server = build_sdk_server(
+        _mutable_resource_adapter(provider),
+        context_signing_key=signing_key,
+        require_signed_context=True,
+        resource_poll_interval_seconds=0.01,
+    )
+    notifications = MCPResourceNotificationBuffer()
+    async with create_connected_server_and_client_session(
+        server,
+        message_handler=notifications,
+    ) as session:
+        capabilities = session.get_server_capabilities()
+        assert capabilities is not None and capabilities.resources is not None
+        assert capabilities.resources.subscribe is True
+        assert capabilities.resources.listChanged is True
+
+        unsigned = OfficialSDKSessionTransport(session)
+        with pytest.raises(MCPProtocolError) as denied:
+            await unsigned.subscribe_resource(
+                "chatbi://mutable/resource-1",
+                _context(),
+            )
+        assert denied.value.code == "invalid_context_signature"
+
+        transport = OfficialSDKSessionTransport(
+            session,
+            context_signing_key=signing_key,
+            resource_notifications=notifications,
+        )
+        with pytest.raises(MCPProtocolError) as crossed_subject:
+            await transport.subscribe_resource(
+                "chatbi://mutable/resource-1",
+                _context(subject_id="user-2"),
+            )
+        assert crossed_subject.value.code == "resource_not_found"
+        await transport.subscribe_resource(
+            "chatbi://mutable/resource-1",
+            _context(),
+        )
+        provider.publish()
+        list_changed = await transport.next_resource_notification(
+            timeout_seconds=1,
+        )
+        updated = await transport.next_resource_notification(
+            timeout_seconds=1,
+        )
+        assert list_changed.kind == "list_changed"
+        assert list_changed.uri is None
+        assert updated.kind == "updated"
+        assert updated.uri == "chatbi://mutable/resource-1"
+        assert list_changed.catalog_version == updated.catalog_version
+        assert list_changed.previous_catalog_version == (
+            updated.previous_catalog_version
+        )
+        assert list_changed.catalog_version != list_changed.previous_catalog_version
+
+        await transport.unsubscribe_resource(
+            "chatbi://mutable/resource-1",
+            _context(),
+        )
+        provider.publish()
+        with pytest.raises(TimeoutError):
+            await transport.next_resource_notification(timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_is_stateful_authenticated_and_fail_closed() -> None:
     token = "stage0-test-token"
     auth = {"Authorization": f"Bearer {token}"}
@@ -399,10 +703,7 @@ async def test_streamable_http_is_stateful_authenticated_and_fail_closed() -> No
                 )
                 assert unsigned.isError is True
                 assert unsigned.meta is not None
-                assert (
-                    unsigned.meta["com.chatbi/error-code"]
-                    == "invalid_context_signature"
-                )
+                assert unsigned.meta["com.chatbi/error-code"] == "invalid_context_signature"
                 called = await session.call_tool(
                     "double",
                     {"value": 7},
@@ -510,9 +811,7 @@ async def test_streamable_http_client_cancellation_keeps_session_usable() -> Non
         release.wait(timeout=2)
         return {"doubled": args["value"] * 2}
 
-    adapter = MCPServerAdapter(
-        "slow-tools", [MCPToolBinding(descriptor, slow_handler)]
-    )
+    adapter = MCPServerAdapter("slow-tools", [MCPToolBinding(descriptor, slow_handler)])
     token = "stage0-cancel-token"
     async with _http_client(adapter, token=token) as (client, url):
         auth = {
@@ -588,9 +887,7 @@ def test_every_project_server_exports_governed_mcp_metadata() -> None:
         build_report_server(),
     )
     descriptors = [
-        descriptor
-        for server in servers
-        for descriptor in server.as_mcp_adapter().list_tools()
+        descriptor for server in servers for descriptor in server.as_mcp_adapter().list_tools()
     ]
     assert len(descriptors) == 15
     assert all(descriptor.metadata.capabilities for descriptor in descriptors)
@@ -643,6 +940,82 @@ class _ScriptedTransport:
         self.closed = True
 
 
+class _ScriptedResourceTransport(_ScriptedTransport):
+    def __init__(
+        self,
+        descriptors: tuple[MCPToolDescriptor, ...],
+        *,
+        list_resources_error: Exception | None = None,
+    ) -> None:
+        super().__init__(descriptors)
+        self.list_resources_error = list_resources_error
+        self.subscriptions: list[tuple[str, MCPRequestContext]] = []
+
+    async def list_resource_page(
+        self,
+        context: MCPRequestContext,
+        *,
+        cursor: str | None = None,
+    ) -> MCPResourcePage:
+        if cursor is not None:
+            raise MCPProtocolError("invalid_resource_cursor", "cursor rejected")
+        resources = await self.list_resources(context)
+        return MCPResourcePage(
+            resources=resources,
+            catalog_version=stable_hash([item.uri for item in resources]),
+        )
+
+    async def list_resources(
+        self,
+        context: MCPRequestContext,
+    ) -> tuple[MCPResourceDescriptor, ...]:
+        del context
+        if self.list_resources_error is not None:
+            raise self.list_resources_error
+        return (
+            MCPResourceDescriptor(
+                uri="chatbi://mutable/resource-1",
+                name="mutable-resource-1",
+                title="Mutable resource 1",
+                description="Managed reconnect fixture",
+            ),
+        )
+
+    async def read_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> MCPResourceContents:
+        del context
+        return MCPResourceContents(uri=uri, text='{"revision":1}')
+
+    async def subscribe_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> None:
+        self.subscriptions.append((uri, context))
+
+    async def unsubscribe_resource(
+        self,
+        uri: str,
+        context: MCPRequestContext,
+    ) -> None:
+        self.subscriptions = [
+            item
+            for item in self.subscriptions
+            if item != (uri, context)
+        ]
+
+    async def next_resource_notification(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPResourceNotification:
+        del timeout_seconds
+        raise TimeoutError
+
+
 @pytest.mark.asyncio
 async def test_managed_gateway_reconnects_only_read_only_idempotent_calls() -> None:
     descriptor = _adapter().list_tools()[0]
@@ -659,18 +1032,49 @@ async def test_managed_gateway_reconnects_only_read_only_idempotent_calls() -> N
         transport_factory=lambda: next(transports),
     )
 
-    result = await gateway.execute(
-        "double", {"value": 4}, _context(), timeout_seconds=1
-    )
+    result = await gateway.execute("double", {"value": 4}, _context(), timeout_seconds=1)
 
     assert result.result == {"doubled": 8}
     assert result.transport == "stdio"
     assert result.health.state == "healthy"
     assert result.health.generation == 2
     assert disconnected.closed is True
-    assert disconnected.calls[0][2].idempotency_key == (
-        recovered.calls[0][2].idempotency_key
+    assert disconnected.calls[0][2].idempotency_key == (recovered.calls[0][2].idempotency_key)
+    await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_restores_resource_subscriptions_after_reconnect() -> None:
+    descriptor = _adapter().list_tools()[0]
+    disconnected = _ScriptedResourceTransport(
+        (descriptor,),
+        list_resources_error=MCPProtocolError(
+            "mcp_resource_error",
+            "resource session reset",
+        ),
     )
+    recovered = _ScriptedResourceTransport((descriptor,))
+    transports = iter((disconnected, recovered))
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="streamable_http", max_reconnects=1),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: next(transports),
+    )
+    context = _context()
+
+    await gateway.subscribe_resource("chatbi://mutable/resource-1", context)
+    resources = await gateway.list_resources(context)
+
+    assert [item.uri for item in resources] == ["chatbi://mutable/resource-1"]
+    assert disconnected.closed is True
+    assert [item[0] for item in disconnected.subscriptions] == [
+        "chatbi://mutable/resource-1"
+    ]
+    assert recovered.subscriptions == [
+        ("chatbi://mutable/resource-1", context)
+    ]
+    assert gateway.health.generation == 2
     await gateway.aclose()
 
 
@@ -705,9 +1109,7 @@ async def test_managed_gateway_does_not_retry_ambiguous_mutation() -> None:
     )
 
     with pytest.raises(MCPGatewayExecutionError) as captured:
-        await gateway.execute(
-            "double", {"value": 4}, _context(), timeout_seconds=1
-        )
+        await gateway.execute("double", {"value": 4}, _context(), timeout_seconds=1)
 
     assert captured.value.code == "mcp_transport_disconnected"
     assert captured.value.result_unknown is True
@@ -725,9 +1127,7 @@ async def test_managed_gateway_timeout_and_cancellation_invalidate_session() -> 
         transport_factory=lambda: timed_transport,
     )
     with pytest.raises(MCPGatewayExecutionError) as captured:
-        await timed_gateway.execute(
-            "double", {"value": 2}, _context(), timeout_seconds=0.01
-        )
+        await timed_gateway.execute("double", {"value": 2}, _context(), timeout_seconds=0.01)
     assert captured.value.code == "mcp_call_timeout"
     assert captured.value.result_unknown is True
     assert timed_transport.closed is True
@@ -741,9 +1141,7 @@ async def test_managed_gateway_timeout_and_cancellation_invalidate_session() -> 
         transport_factory=lambda: cancelled_transport,
     )
     task = asyncio.create_task(
-        cancelled_gateway.execute(
-            "double", {"value": 2}, _context(), timeout_seconds=10
-        )
+        cancelled_gateway.execute("double", {"value": 2}, _context(), timeout_seconds=10)
     )
     await cancelled_transport.call_started.wait()
     task.cancel()
@@ -772,9 +1170,7 @@ async def test_managed_gateway_fallback_is_explicit_read_only_and_fail_closed_on
         compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
     )
 
-    result = await gateway.execute(
-        "double", {"value": 5}, _context(), timeout_seconds=1
-    )
+    result = await gateway.execute("double", {"value": 5}, _context(), timeout_seconds=1)
 
     assert result.result == {"doubled": 10}
     assert result.transport == "in_process"
@@ -793,9 +1189,7 @@ async def test_managed_gateway_fallback_is_explicit_read_only_and_fail_closed_on
         compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
     )
     with pytest.raises(MCPGatewayExecutionError) as captured:
-        await fail_closed.execute(
-            "double", {"value": 5}, _context(), timeout_seconds=1
-        )
+        await fail_closed.execute("double", {"value": 5}, _context(), timeout_seconds=1)
     assert captured.value.code == "mcp_catalog_drift"
 
     class _AuthError(Exception):
@@ -816,9 +1210,7 @@ async def test_managed_gateway_fallback_is_explicit_read_only_and_fail_closed_on
         compatibility_transport_factory=lambda: InProcessMCPTransport(adapter),
     )
     with pytest.raises(MCPGatewayExecutionError) as auth_error:
-        await auth_fail_closed.execute(
-            "double", {"value": 5}, _context(), timeout_seconds=1
-        )
+        await auth_fail_closed.execute("double", {"value": 5}, _context(), timeout_seconds=1)
     assert auth_error.value.code == "mcp_authentication_failed"
 
 

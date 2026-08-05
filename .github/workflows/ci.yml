@@ -86,13 +86,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Run fixed-reference MCP transport equivalence probe
+      - name: Run MCP Tool and Resource transport equivalence probe
         id: coref_mcp_transport
         run: >-
           uv run --frozen python scripts/mcp_transport_probe.py
           --output .data/coref-mcp-transport.json
 
-      - name: Upload fixed-reference MCP transport report
+      - name: Upload MCP Tool and Resource transport report
         if: ${{ !cancelled() && steps.coref_mcp_transport.outcome != 'skipped' }}
         uses: actions/upload-artifact@v5
         with:
@@ -133,6 +133,15 @@ jobs:
         run: >-
           docker compose --env-file deploy/milvus/.env.example
           -f deploy/milvus/docker-compose.yml config --quiet
+
+      - name: Validate CPU and GPU RAG Compose profiles
+        run: |
+          docker compose -f compose.yaml -f compose.rag.yaml -f compose.rag.cpu.yaml --profile rag config --quiet
+          docker compose -f compose.yaml -f compose.rag.yaml -f compose.rag.gpu.yaml --profile rag config --quiet
+        env:
+          MILVUS_MINIO_ACCESS_KEY: ci-rag-access
+          MILVUS_MINIO_SECRET_KEY: ci-rag-secret-not-for-production
+          MILVUS_TOKEN: chatbi:ci-rag-password
 
   frontend:
     name: Frontend build and browser E2E

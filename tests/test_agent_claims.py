@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from apps.orchestrator.control.claims import (
     build_evidence_summary,
     extract_claims,
@@ -50,6 +52,109 @@ def test_numeric_claims_link_each_value_to_evidence_path() -> None:
         "$.profile.row_count",
         "$.quality.duplicate_rows",
     ]
+
+
+def test_numeric_claim_binds_exact_definition_resource_and_data_evidence() -> None:
+    definition_resource = {
+        "definition_id": "a" * 32,
+        "definition_version": 1,
+        "semantic_key": "metric.grouped_measure",
+        "formula_hash": "b" * 64,
+        "resource_uri": f"chatbi://domain-definitions/{'a' * 32}",
+        "source_ref": "urn:domain-definition:grouped-measure:v1",
+    }
+    definition_evidence = EvidenceRecord(
+        evidence_id="definition-evidence",
+        run_id="run-1",
+        invocation_id="definition-invocation",
+        artifact_id=None,
+        kind="tool_result",
+        source={
+            "tool": "domain_definition_lookup",
+            "definition_resource": definition_resource,
+        },
+        result_hash="definition-hash",
+        summary=build_evidence_summary(
+            summary="已解析指标定义",
+            result={"status": "resolved"},
+            artifact_id=None,
+        ),
+        created_at="now",
+    )
+    data_evidence = EvidenceRecord(
+        evidence_id="data-evidence",
+        run_id="run-1",
+        invocation_id="data-invocation",
+        artifact_id="data-artifact",
+        kind="tool_result",
+        source={
+            "tool": "aggregate_preview",
+            "definition_execution": {
+                **definition_resource,
+                "definition_evidence_id": definition_evidence.evidence_id,
+                "compiled_tool_name": "aggregate_preview",
+                "compiled_arguments_hash": "c" * 64,
+            },
+        },
+        result_hash="data-hash",
+        summary=build_evidence_summary(
+            summary="汇总完成",
+            result={"rows": [{"value": 25.0}]},
+            artifact_id="data-artifact",
+        ),
+        created_at="now",
+    )
+
+    claims = extract_numeric_claims(
+        final_text="受控汇总值为 25。",
+        goal="按领域定义汇总",
+        evidence=[definition_evidence, data_evidence],
+    )
+
+    assert len(claims) == 1
+    assert claims[0].evidence_ids == ("data-evidence", "definition-evidence")
+    definition_ref = next(
+        ref for ref in claims[0].value_refs if ref.get("kind") == "definition_execution"
+    )
+    assert definition_ref == {
+        "kind": "definition_execution",
+        "supported": True,
+        "data_evidence_id": "data-evidence",
+        "definition_id": "a" * 32,
+        "definition_version": 1,
+        "semantic_key": "metric.grouped_measure",
+        "formula_hash": "b" * 64,
+        "resource_uri": f"chatbi://domain-definitions/{'a' * 32}",
+        "source_ref": "urn:domain-definition:grouped-measure:v1",
+        "evidence_id": "definition-evidence",
+    }
+    contract = build_minimal_contract(
+        run_id="run-1",
+        user_text="按领域定义汇总",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    verified = verify_completion(
+        contract=contract,
+        final_text="受控汇总值为 25。",
+        artifacts=[],
+        invocations=[],
+        evidence=[definition_evidence, data_evidence],
+        claims=claims,
+    )
+    tampered = verify_completion(
+        contract=contract,
+        final_text="受控汇总值为 25。",
+        artifacts=[],
+        invocations=[],
+        evidence=[definition_evidence, data_evidence],
+        claims=[replace(claims[0], evidence_ids=("data-evidence",))],
+    )
+    assert verified.verdict == "PASS"
+    assert "invalid_definition_lineage" in {
+        issue.code for issue in tampered.issues
+    }
 
 
 def test_percentage_conversion_is_not_inferred_but_tool_display_value_can_link() -> None:

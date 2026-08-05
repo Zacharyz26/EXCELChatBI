@@ -21,6 +21,7 @@ from packages.models.registry import ModelRegistry
 from packages.rag.embedding import BGEEmbedder, Embedder, HashingEmbedder
 from packages.rag.rerank import BGEReranker, LexicalReranker, Reranker
 from packages.rag.retriever import HybridRetriever
+from packages.rag.source_store import SourceDocumentStore
 from packages.rag.store import KnowledgeStore, LocalKnowledgeStore
 from packages.session.store import SessionStore
 
@@ -80,12 +81,17 @@ def dataset_ops_tools_dep() -> MCPServer:
 
 # ── 知识库问答（RAG）组件，后端由 config 选择，模型名不硬编码 ──
 
+
 @lru_cache
 def embedder_dep() -> Embedder:
     """注入向量器（默认 hashing；bge-m3 需装 .[rag]，device 走配置）。"""
     s = get_settings()
     if s.rag_embedder == "bge":
-        return BGEEmbedder(s.embedding_model, device=s.embedding_device)
+        return BGEEmbedder(
+            s.embedding_model,
+            device=s.embedding_device,
+            cache_dir=s.model_cache_dir,
+        )
     return HashingEmbedder(dim=s.embedding_dim)
 
 
@@ -94,7 +100,11 @@ def reranker_dep() -> Reranker:
     """注入重排器（默认 lexical；bge 需装 .[rag]，device 走配置）。"""
     s = get_settings()
     if s.rag_reranker == "bge":
-        return BGEReranker(s.rerank_model, device=s.embedding_device)
+        return BGEReranker(
+            s.rerank_model,
+            device=s.embedding_device,
+            cache_dir=s.model_cache_dir,
+        )
     return LexicalReranker()
 
 
@@ -111,6 +121,12 @@ def kb_store_dep() -> KnowledgeStore:
             token=s.milvus_token,
         )
     return LocalKnowledgeStore(s.kb_index_dir)
+
+
+@lru_cache
+def kb_source_store_dep() -> SourceDocumentStore:
+    """Inject the persistent raw-document source of truth separately from indexes."""
+    return SourceDocumentStore(get_settings().kb_source_dir)
 
 
 @lru_cache

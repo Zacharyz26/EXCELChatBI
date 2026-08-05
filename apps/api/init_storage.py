@@ -16,9 +16,13 @@ def main() -> None:
         settings.report_dir,
         settings.workspace_backup_dir,
         settings.kb_index_dir,
+        settings.kb_source_dir,
         settings.kb_backup_dir,
+        settings.model_cache_dir,
     ):
         Path(raw_path).mkdir(parents=True, exist_ok=True)
+    (Path(settings.kb_index_dir) / "generations").mkdir(parents=True, exist_ok=True)
+    (Path(settings.kb_source_dir) / "documents").mkdir(parents=True, exist_ok=True)
     store = SessionStore(
         settings.chat_db_path,
         cache_size=settings.conversation_cache_size,

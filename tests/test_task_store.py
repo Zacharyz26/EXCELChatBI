@@ -17,6 +17,7 @@ from packages.session.task_store import (
     IdempotencyConflict,
     StateVersionConflict,
     TaskStore,
+    invocation_arguments_hash,
     invocation_idempotency_key,
 )
 
@@ -794,6 +795,100 @@ def test_invocation_is_idempotent_and_success_creates_evidence(tmp_path: Path) -
         ],
     )
     assert tasks.list_claims("run-2") == claims
+
+
+def test_definition_execution_requires_exact_compiled_arguments(tmp_path: Path) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="definition-binding-run",
+        user_text="按受控口径汇总",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    planning, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    running, _ = tasks.transition(
+        planning.run_id,
+        expected_version=planning.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    compiled_arguments = {
+        "dataset_ref": "d" * 32,
+        "group_col": "bucket_code",
+        "agg": "sum",
+        "value_col": "measure_value",
+        "sort": "group",
+        "limit": 100,
+    }
+    definition_id = "a" * 32
+    definition_resource = {
+        "definition_id": definition_id,
+        "definition_version": 1,
+        "semantic_key": "metric.grouped_measure",
+        "formula_hash": "b" * 64,
+        "resource_uri": f"chatbi://domain-definitions/{definition_id}",
+        "source_ref": "urn:domain-definition:grouped-measure:v1",
+    }
+    invocation, _ = tasks.start_invocation(
+        run_id=running.run_id,
+        tool_call_id="definition-call",
+        tool_name="domain_definition_lookup",
+        arguments={"semantic_key": "metric.grouped_measure"},
+        idempotency_key="definition-call-once",
+    )
+    assistant = session.append_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content="解析领域定义",
+    )
+    running, _, evidence, _, _, _ = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=running.state_version,
+        assistant_message_id=assistant.id,
+        result={"status": "resolved"},
+        evidence_kind="tool_result",
+        evidence_source={
+            "tool": "domain_definition_lookup",
+            "definition_resource": definition_resource,
+            "compiled_invocation": {
+                "definition_id": definition_id,
+                "definition_version": 1,
+                "formula_hash": "b" * 64,
+                "tool_name": "aggregate_preview",
+                "arguments_hash": invocation_arguments_hash(compiled_arguments),
+                "definition_match": True,
+            },
+        },
+        evidence_summary={"summary": "已解析指标定义"},
+        artifact_draft=None,
+    )
+
+    binding = tasks.resolve_definition_execution(
+        running.run_id,
+        tool_name="aggregate_preview",
+        arguments=compiled_arguments,
+    )
+
+    assert binding == {
+        **definition_resource,
+        "definition_evidence_id": evidence.evidence_id,
+        "compiled_tool_name": "aggregate_preview",
+        "compiled_arguments_hash": invocation_arguments_hash(compiled_arguments),
+    }
+    with pytest.raises(ControlConflict, match="与已解析领域公式或定义版本不一致"):
+        tasks.resolve_definition_execution(
+            running.run_id,
+            tool_name="aggregate_preview",
+            arguments={**compiled_arguments, "agg": "mean"},
+        )
 
 
 @pytest.mark.parametrize(

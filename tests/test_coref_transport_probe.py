@@ -29,3 +29,17 @@ def test_ci_runs_and_uploads_reference_transport_probe() -> None:
     assert "scripts/mcp_transport_probe.py" in workflow
     assert "--output .data/coref-mcp-transport.json" in workflow
     assert "name: coref-mcp-transport" in workflow
+
+
+def test_compose_gate_restarts_knowledge_service_during_resource_subscription() -> None:
+    compose = (_ROOT / "compose.e2e.yaml").read_text(encoding="utf-8")
+    gate = (_ROOT / "scripts" / "run_compose_e2e.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'MCP_RESOURCE_PAGE_SIZE: "2"' in compose
+    assert 'MCP_RESOURCE_POLL_INTERVAL_SECONDS: "0.25"' in compose
+    assert "apps.api.mcp_resource_reconnect_probe" in gate
+    assert 'restart knowledge-tools' in gate
+    assert '"status":"subscribed"' in gate
+    assert '"status":"passed"' in gate

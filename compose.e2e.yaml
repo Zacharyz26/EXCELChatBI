@@ -49,3 +49,8 @@ services:
     depends_on:
       model-stub:
         condition: service_healthy
+
+  knowledge-tools:
+    environment:
+      MCP_RESOURCE_PAGE_SIZE: "2"
+      MCP_RESOURCE_POLL_INTERVAL_SECONDS: "0.25"

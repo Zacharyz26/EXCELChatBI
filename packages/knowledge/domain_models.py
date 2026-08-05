@@ -10,6 +10,7 @@ from packages.session.models import JsonObject
 DefinitionKind = Literal["metric"]
 DefinitionResolutionStatus = Literal["resolved", "conflict", "expired", "missing"]
 DefinitionWriteOutcome = Literal["created", "conflict", "replayed"]
+ReportDefinitionReviewStatus = Literal["verified", "degraded", "not_applicable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,3 +108,33 @@ class CompiledInvocation:
     formula_hash: str
     tool_name: Literal["aggregate_preview"]
     arguments: JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class ReportDefinitionBinding:
+    """One report analysis traced through data and definition Evidence to Claims."""
+
+    analysis_id: str
+    data_artifact_id: str
+    data_invocation_id: str
+    data_evidence_id: str
+    definition_evidence_id: str
+    claim_ids: tuple[str, ...]
+    definition_id: str
+    definition_version: int
+    semantic_key: str
+    formula_hash: str
+    resource_uri: str
+    source_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReportDefinitionReview:
+    """Safe, deterministic review of an existing report's definition lineage."""
+
+    project_id: str
+    report_id: str
+    report_artifact_id: str
+    status: ReportDefinitionReviewStatus
+    bindings: tuple[ReportDefinitionBinding, ...]
+    issues: tuple[str, ...]

@@ -24,7 +24,11 @@ import httpx
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp_servers.common.contracts import MCPRequestContext, stable_hash
+from mcp_servers.common.client_gateway import (
+    MCPResourceNotificationBuffer,
+    OfficialSDKSessionTransport,
+)
+from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext, stable_hash
 from mcp_servers.common.sdk_adapter import MCP_PROTOCOL_VERSION
 from mcp_servers.dataset_ops.tools import aggregate_preview
 from packages.common.config import get_settings
@@ -45,6 +49,28 @@ _PRINCIPAL = Principal(user_id="probe-user", tenant_id="probe-tenant")
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceTransportResult:
+    result_hash: str
+    initial_catalog_version: str
+    published_catalog_version: str
+    page_count: int
+    notification_kinds: tuple[str, ...]
+    cross_scope_rejected: bool
+    unsubscribe_quiet: bool
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "result_hash": self.result_hash,
+            "initial_catalog_version": self.initial_catalog_version,
+            "published_catalog_version": self.published_catalog_version,
+            "page_count": self.page_count,
+            "notification_kinds": list(self.notification_kinds),
+            "cross_scope_rejected": self.cross_scope_rejected,
+            "unsubscribe_quiet": self.unsubscribe_quiet,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class TransportResult:
     name: str
     result_hash: str
@@ -54,6 +80,7 @@ class TransportResult:
     error_codes: dict[str, str]
     session_created: bool
     graceful_close: bool
+    resources: ResourceTransportResult
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +92,7 @@ class TransportResult:
             "error_codes": self.error_codes,
             "session_created": self.session_created,
             "graceful_close": self.graceful_close,
+            "resources": self.resources.public_dict(),
         }
 
 
@@ -122,6 +150,33 @@ def _write_dataset(
         "sort": "group",
     }
     return arguments
+
+
+def _write_resource_state(
+    path: Path,
+    *,
+    revision: int,
+    resource_count: int,
+) -> None:
+    temporary = path.with_name(f"{path.name}.next")
+    temporary.write_text(
+        json.dumps(
+            {"revision": revision, "resource_count": resource_count},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _publish_resource_state(path: Path) -> None:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    _write_resource_state(
+        path,
+        revision=int(raw["revision"]) + 1,
+        resource_count=int(raw["resource_count"]) + 1,
+    )
 
 
 def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]:
@@ -226,11 +281,111 @@ def _error_code(result: Any) -> str:
     return str(code) if code else "missing"
 
 
+async def _exercise_resources(
+    session: ClientSession,
+    notifications: MCPResourceNotificationBuffer,
+    *,
+    state_path: Path,
+    memory_snapshot_id: str,
+    project_id: str,
+    conversation_id: str,
+) -> ResourceTransportResult:
+    transport = OfficialSDKSessionTransport(
+        session,
+        context_signing_key=TOKEN,
+        resource_notifications=notifications,
+    )
+    context = _context(
+        memory_snapshot_id=memory_snapshot_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+    )
+    first = await transport.list_resource_page(context)
+    if len(first.resources) != 2 or first.next_cursor is None:
+        raise RuntimeError("MCP Resource 首分页未按固定页大小返回")
+    resumed = replace(
+        context,
+        run_id="probe-resource-resumed-run",
+        invocation_id="probe-resource-resumed-invocation",
+        idempotency_key="probe-resource-resumed-idempotency",
+    )
+    second = await transport.list_resource_page(
+        resumed,
+        cursor=first.next_cursor,
+    )
+    if len(second.resources) != 1 or second.next_cursor is not None:
+        raise RuntimeError("MCP Resource 跨 Run 分页恢复不一致")
+    if second.catalog_version != first.catalog_version:
+        raise RuntimeError("MCP Resource 分页目录版本漂移")
+
+    resources = (*first.resources, *second.resources)
+    contents = await transport.read_resource(resources[0].uri, context)
+    try:
+        await transport.list_resource_page(
+            replace(context, project_id="cross-project"),
+        )
+    except MCPProtocolError as exc:
+        cross_scope_rejected = exc.code == "resource_not_found"
+    else:
+        cross_scope_rejected = False
+    if not cross_scope_rejected:
+        raise RuntimeError("MCP Resource 跨项目发现未失败关闭")
+
+    await transport.subscribe_resource(resources[0].uri, context)
+    _publish_resource_state(state_path)
+    changed = await transport.next_resource_notification(timeout_seconds=2)
+    updated = await transport.next_resource_notification(timeout_seconds=2)
+    if (
+        changed.kind != "list_changed"
+        or updated.kind != "updated"
+        or updated.uri != resources[0].uri
+        or changed.catalog_version != updated.catalog_version
+        or changed.previous_catalog_version != first.catalog_version
+    ):
+        raise RuntimeError("MCP Resource 版本化通知不一致")
+
+    published = await transport.list_resource_page(context)
+    if published.catalog_version != changed.catalog_version:
+        raise RuntimeError("MCP Resource 通知目录版本与重新发现结果不一致")
+    await transport.unsubscribe_resource(resources[0].uri, context)
+    _publish_resource_state(state_path)
+    try:
+        await transport.next_resource_notification(timeout_seconds=0.25)
+    except TimeoutError:
+        unsubscribe_quiet = True
+    else:
+        unsubscribe_quiet = False
+    if not unsubscribe_quiet:
+        raise RuntimeError("MCP Resource 退订后仍收到通知")
+
+    return ResourceTransportResult(
+        result_hash=stable_hash(
+            {
+                "resources": [item.to_protocol_dict() for item in resources],
+                "contents": {
+                    "uri": contents.uri,
+                    "text": contents.text,
+                    "mime_type": contents.mime_type,
+                    "metadata": contents.metadata or {},
+                },
+            }
+        ),
+        initial_catalog_version=first.catalog_version,
+        published_catalog_version=published.catalog_version,
+        page_count=2,
+        notification_kinds=(changed.kind, updated.kind),
+        cross_scope_rejected=cross_scope_rejected,
+        unsubscribe_quiet=unsubscribe_quiet,
+    )
+
+
 async def _exercise_session(
     session: ClientSession,
+    notifications: MCPResourceNotificationBuffer,
     *,
     name: str,
     arguments: dict[str, Any],
+    resource_state_path: Path,
     session_created: bool,
     memory_snapshot_id: str,
     project_id: str,
@@ -308,6 +463,14 @@ async def _exercise_session(
     }
     if errors != expected:
         raise RuntimeError(f"{name} 异常映射不一致: {errors}")
+    resources = await _exercise_resources(
+        session,
+        notifications,
+        state_path=resource_state_path,
+        memory_snapshot_id=memory_snapshot_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+    )
     return TransportResult(
         name=name,
         result_hash=stable_hash(success.structuredContent),
@@ -317,21 +480,29 @@ async def _exercise_session(
         error_codes=errors,
         session_created=session_created,
         graceful_close=True,
+        resources=resources,
     )
 
 
 async def _probe_stdio(
     dataset_dir: Path,
+    resource_state_path: Path,
     arguments: dict[str, Any],
     memory_snapshot_id: str,
     project_id: str,
     conversation_id: str,
 ) -> TransportResult:
+    _write_resource_state(resource_state_path, revision=1, resource_count=3)
     env = {
         "DATASET_DIR": str(dataset_dir),
         "MCP_TRANSPORT": "stdio",
         "MCP_PROBE_DELAY_SECONDS": "0",
         "MCP_CONTEXT_SIGNING_KEY": TOKEN,
+        "MCP_PROBE_RESOURCE_STATE": str(resource_state_path),
+        "MCP_PROBE_PROJECT_ID": project_id,
+        "MCP_PROBE_SUBJECT_ID": _PRINCIPAL.user_id,
+        "MCP_RESOURCE_PAGE_SIZE": "2",
+        "MCP_RESOURCE_POLL_INTERVAL_SECONDS": "0.05",
     }
     params = StdioServerParameters(
         command=sys.executable,
@@ -342,11 +513,18 @@ async def _probe_stdio(
     with tempfile.TemporaryFile(mode="w+") as errlog:
         async with stdio_client(params, errlog=errlog) as streams:
             read_stream, write_stream = streams
-            async with ClientSession(read_stream, write_stream) as session:
+            notifications = MCPResourceNotificationBuffer()
+            async with ClientSession(
+                read_stream,
+                write_stream,
+                message_handler=notifications,
+            ) as session:
                 return await _exercise_session(
                     session,
+                    notifications,
                     name="stdio",
                     arguments=arguments,
+                    resource_state_path=resource_state_path,
                     session_created=False,
                     memory_snapshot_id=memory_snapshot_id,
                     project_id=project_id,
@@ -498,11 +676,13 @@ async def _cancel_http_call(
 
 async def _probe_http(
     dataset_dir: Path,
+    resource_state_path: Path,
     arguments: dict[str, Any],
     memory_snapshot_id: str,
     project_id: str,
     conversation_id: str,
 ) -> tuple[TransportResult, dict[str, bool], int | None]:
+    _write_resource_state(resource_state_path, revision=1, resource_count=3)
     port = _free_port()
     url = f"http://127.0.0.1:{port}/mcp/"
     env = {
@@ -516,6 +696,11 @@ async def _probe_http(
         "MCP_ALLOWED_HOSTS": "127.0.0.1:*",
         "MCP_ALLOWED_ORIGINS": "https://trusted.example",
         "MCP_PROBE_DELAY_SECONDS": "0.5",
+        "MCP_PROBE_RESOURCE_STATE": str(resource_state_path),
+        "MCP_PROBE_PROJECT_ID": project_id,
+        "MCP_PROBE_SUBJECT_ID": _PRINCIPAL.user_id,
+        "MCP_RESOURCE_PAGE_SIZE": "2",
+        "MCP_RESOURCE_POLL_INTERVAL_SECONDS": "0.05",
     }
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -537,11 +722,18 @@ async def _probe_http(
         ) as client:
             async with streamable_http_client(url, http_client=client) as streams:
                 read_stream, write_stream, get_session_id = streams
-                async with ClientSession(read_stream, write_stream) as session:
+                notifications = MCPResourceNotificationBuffer()
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    message_handler=notifications,
+                ) as session:
                     result = await _exercise_session(
                         session,
+                        notifications,
                         name="streamable_http",
                         arguments=arguments,
+                        resource_state_path=resource_state_path,
                         session_created=get_session_id() is not None,
                         memory_snapshot_id=memory_snapshot_id,
                         project_id=project_id,
@@ -588,6 +780,7 @@ async def run_probe(output: Path) -> dict[str, Any]:
             direct_hash = stable_hash(direct)
             stdio = await _probe_stdio(
                 dataset_dir,
+                Path(temp) / "resource-state.json",
                 arguments,
                 host_reference["memory_snapshot_id"],
                 host_reference["project_id"],
@@ -595,6 +788,7 @@ async def run_probe(output: Path) -> dict[str, Any]:
             )
             http_result, negative, exit_code = await _probe_http(
                 dataset_dir,
+                Path(temp) / "resource-state.json",
                 arguments,
                 host_reference["memory_snapshot_id"],
                 host_reference["project_id"],
@@ -614,13 +808,28 @@ async def run_probe(output: Path) -> dict[str, Any]:
         http_result.protocol_version,
     } != {MCP_PROTOCOL_VERSION}:
         raise RuntimeError("MCP 协议协商版本不符合固定版本")
+    resource_hashes = {
+        stdio.resources.result_hash,
+        http_result.resources.result_hash,
+    }
+    if len(resource_hashes) != 1:
+        raise RuntimeError("MCP Resource 在 stdio 与 HTTP 间输出不等价")
+    if (
+        stdio.resources.initial_catalog_version
+        != http_result.resources.initial_catalog_version
+        or stdio.resources.published_catalog_version
+        != http_result.resources.published_catalog_version
+    ):
+        raise RuntimeError("MCP Resource 在 stdio 与 HTTP 间目录版本不等价")
     report = {
-        "schema": "chatbi-mcp-transport-probe-v1",
+        "schema": "chatbi-mcp-transport-probe-v2",
         "generated_at": datetime.now(UTC).isoformat(),
         "sdk": {"package": "mcp", "version": version("mcp")},
         "protocol_version": MCP_PROTOCOL_VERSION,
         "tool": "aggregate_preview",
         "equivalent": True,
+        "resource_equivalent": True,
+        "resource_contract": "pagination-subscription-notification-v1",
         "host_reference": {
             "conversation_resolution_hash": host_reference[
                 "conversation_resolution_hash"

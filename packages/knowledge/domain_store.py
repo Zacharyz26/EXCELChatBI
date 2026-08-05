@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
+from packages.common.identifiers import validate_report_id
 from packages.governance.permissions import Principal
 from packages.knowledge.domain_models import (
     CompiledInvocation,
@@ -23,6 +24,9 @@ from packages.knowledge.domain_models import (
     DomainDefinitionDraft,
     DomainDefinitionWriteResult,
     DomainFieldMapping,
+    ReportDefinitionBinding,
+    ReportDefinitionReview,
+    ReportDefinitionReviewStatus,
 )
 from packages.knowledge.formula import (
     compile_formula,
@@ -69,9 +73,7 @@ class DomainDefinitionStore:
         if self._read_only:
             raise RuntimeError("只读领域定义存储禁止写入")
         prepared = _normalize_draft(draft)
-        clean_idempotency_key = _bounded_text(
-            idempotency_key, "幂等键", maximum=200
-        )
+        clean_idempotency_key = _bounded_text(idempotency_key, "幂等键", maximum=200)
         request_hash = _stable_hash(asdict(prepared))
         now = _utc_now()
         definition_id = uuid.uuid4().hex
@@ -208,9 +210,7 @@ class DomainDefinitionStore:
         semantic_key: str | None = None,
     ) -> tuple[DomainDefinition, ...]:
         """List all visible versions; no effective-date winner is implied."""
-        clean_key = (
-            normalize_semantic_key(semantic_key) if semantic_key is not None else None
-        )
+        clean_key = normalize_semantic_key(semantic_key) if semantic_key is not None else None
         with self._connection() as connection:
             self._require_project_role(
                 connection, project_id=project_id, principal=principal, write=False
@@ -234,6 +234,186 @@ class DomainDefinitionStore:
                     (principal.tenant_scope, project_id, clean_key),
                 ).fetchall()
         return tuple(_definition_from_row(row) for row in rows)
+
+    def list_definitions_for_subject(
+        self,
+        *,
+        project_id: str,
+        subject_id: str,
+    ) -> tuple[DomainDefinition, ...]:
+        """List versions for a signed MCP subject without accepting tenant input."""
+        principal = self._principal_for_subject(
+            project_id=project_id,
+            subject_id=subject_id,
+        )
+        return self.list_definitions(project_id=project_id, principal=principal)
+
+    def get_resource_for_subject(
+        self,
+        *,
+        project_id: str,
+        resource_uri: str,
+        subject_id: str,
+    ) -> DomainDefinition | None:
+        """Resolve an opaque MCP Resource URI inside one signed project scope."""
+        clean_uri = _bounded_text(resource_uri, "领域定义资源 URI", maximum=1000)
+        parsed = urlparse(clean_uri)
+        if (
+            parsed.scheme != "chatbi"
+            or parsed.netloc != "domain-definitions"
+            or not parsed.path.removeprefix("/")
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        principal = self._principal_for_subject(
+            project_id=project_id,
+            subject_id=subject_id,
+        )
+        with self._connection() as connection:
+            self._require_project_role(
+                connection,
+                project_id=project_id,
+                principal=principal,
+                write=False,
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM domain_definitions
+                WHERE tenant_id = ? AND project_id = ? AND resource_uri = ?
+                """,
+                (principal.tenant_scope, project_id, clean_uri),
+            ).fetchone()
+        return _definition_from_row(row) if row is not None else None
+
+    def review_report_definition_lineage(
+        self,
+        *,
+        project_id: str,
+        report_id: str,
+        principal: Principal,
+    ) -> ReportDefinitionReview | None:
+        """Rebuild an old report's definition/data/Claim chain from truth tables."""
+        clean_report_id = validate_report_id(report_id)
+        with self._connection() as connection:
+            self._require_project_role(
+                connection,
+                project_id=project_id,
+                principal=principal,
+                write=False,
+            )
+            report_rows = connection.execute(
+                """
+                SELECT artifact.*
+                FROM artifacts AS artifact
+                JOIN conversations AS conversation
+                  ON conversation.id = artifact.conversation_id
+                WHERE conversation.project_id = ? AND artifact.type = 'report'
+                ORDER BY artifact.created_at DESC, artifact.rowid DESC
+                """,
+                (project_id,),
+            ).fetchall()
+            report_row = next(
+                (
+                    row
+                    for row in report_rows
+                    if _json_object(row["payload_json"]).get("report_id")
+                    == clean_report_id
+                ),
+                None,
+            )
+            if report_row is None:
+                return None
+            report_artifact_id = str(report_row["id"])
+            report_params = _json_object(report_row["params_json"])
+            raw_analysis_ids = report_params.get("analysis_ids")
+            analysis_ids = (
+                tuple(
+                    item
+                    for item in raw_analysis_ids
+                    if isinstance(item, str) and item.strip()
+                )
+                if isinstance(raw_analysis_ids, list)
+                else ()
+            )
+            artifact_rows = connection.execute(
+                """
+                SELECT * FROM artifacts
+                WHERE conversation_id = ? AND id != ?
+                ORDER BY created_at, rowid
+                """,
+                (str(report_row["conversation_id"]), report_artifact_id),
+            ).fetchall()
+            artifacts_by_analysis_id: dict[str, list[sqlite3.Row]] = {}
+            for artifact_row in artifact_rows:
+                artifact_analysis_id = _artifact_analysis_id_from_row(artifact_row)
+                if artifact_analysis_id is not None:
+                    artifacts_by_analysis_id.setdefault(
+                        artifact_analysis_id, []
+                    ).append(artifact_row)
+            bindings: list[ReportDefinitionBinding] = []
+            issues: list[str] = []
+            seen_analysis_ids: set[str] = set()
+            for analysis_id in analysis_ids:
+                if analysis_id in seen_analysis_ids:
+                    issues.append(f"analysis_duplicate:{analysis_id}")
+                    continue
+                seen_analysis_ids.add(analysis_id)
+                matching_artifacts = artifacts_by_analysis_id.get(analysis_id, [])
+                if not matching_artifacts:
+                    issues.append(f"analysis_missing:{analysis_id}")
+                    continue
+                if len(matching_artifacts) != 1:
+                    issues.append(f"analysis_ambiguous:{analysis_id}")
+                    continue
+                artifact_row = matching_artifacts[0]
+                data_evidence_rows = connection.execute(
+                    "SELECT * FROM evidence WHERE artifact_id = ?",
+                    (str(artifact_row["id"]),),
+                ).fetchall()
+                if not data_evidence_rows:
+                    issues.append(f"data_evidence_missing:{analysis_id}")
+                    continue
+                if len(data_evidence_rows) != 1:
+                    issues.append(f"data_evidence_ambiguous:{analysis_id}")
+                    continue
+                data_evidence_row = data_evidence_rows[0]
+                data_source = _json_object(data_evidence_row["source_json"])
+                execution = data_source.get("definition_execution")
+                if not isinstance(execution, dict):
+                    continue
+                binding = self._review_definition_execution(
+                    connection,
+                    project_id=project_id,
+                    analysis_id=analysis_id,
+                    data_artifact_id=str(artifact_row["id"]),
+                    data_invocation_id=str(data_evidence_row["invocation_id"]),
+                    data_evidence_id=str(data_evidence_row["evidence_id"]),
+                    data_run_id=str(data_evidence_row["run_id"]),
+                    execution=cast(JsonObject, execution),
+                )
+                if isinstance(binding, str):
+                    issues.append(f"{binding}:{analysis_id}")
+                else:
+                    bindings.append(binding)
+                    if not binding.claim_ids:
+                        issues.append(f"claim_binding_missing:{analysis_id}")
+        status: ReportDefinitionReviewStatus = (
+            "degraded"
+            if issues
+            else "verified"
+            if bindings
+            else "not_applicable"
+        )
+        return ReportDefinitionReview(
+            project_id=project_id,
+            report_id=clean_report_id,
+            report_artifact_id=report_artifact_id,
+            status=status,
+            bindings=tuple(bindings),
+            issues=tuple(issues),
+        )
 
     def resolve(
         self,
@@ -281,9 +461,7 @@ class DomainDefinitionStore:
         as_of: str | None = None,
     ) -> DefinitionResolution:
         """Resolve from signed MCP subject context without accepting tenant arguments."""
-        principal = self._principal_for_subject(
-            project_id=project_id, subject_id=subject_id
-        )
+        principal = self._principal_for_subject(project_id=project_id, subject_id=subject_id)
         return self.resolve(
             project_id=project_id,
             semantic_key=semantic_key,
@@ -438,6 +616,136 @@ class DomainDefinitionStore:
             concept_fields={item.concept_key: item.field_name for item in mappings},
         )
 
+    def _review_definition_execution(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        project_id: str,
+        analysis_id: str,
+        data_artifact_id: str,
+        data_invocation_id: str,
+        data_evidence_id: str,
+        data_run_id: str,
+        execution: JsonObject,
+    ) -> ReportDefinitionBinding | str:
+        definition_evidence_id = execution.get("definition_evidence_id")
+        definition_id = execution.get("definition_id")
+        definition_version = execution.get("definition_version")
+        semantic_key = execution.get("semantic_key")
+        formula_hash_value = execution.get("formula_hash")
+        resource_uri = execution.get("resource_uri")
+        source_ref = execution.get("source_ref")
+        compiled_tool_name = execution.get("compiled_tool_name")
+        compiled_arguments_hash = execution.get("compiled_arguments_hash")
+        if (
+            not isinstance(definition_evidence_id, str)
+            or not isinstance(definition_id, str)
+            or not isinstance(definition_version, int)
+            or isinstance(definition_version, bool)
+            or not isinstance(semantic_key, str)
+            or not isinstance(formula_hash_value, str)
+            or not isinstance(resource_uri, str)
+            or not isinstance(source_ref, str)
+            or not isinstance(compiled_tool_name, str)
+            or not isinstance(compiled_arguments_hash, str)
+        ):
+            return "definition_binding_invalid"
+        data_invocation_row = connection.execute(
+            """
+            SELECT run_id, tool_name, args_hash
+            FROM tool_invocations WHERE invocation_id = ?
+            """,
+            (data_invocation_id,),
+        ).fetchone()
+        if data_invocation_row is None:
+            return "data_invocation_missing"
+        if (
+            str(data_invocation_row["run_id"]) != data_run_id
+            or str(data_invocation_row["tool_name"]) != compiled_tool_name
+            or str(data_invocation_row["args_hash"]) != compiled_arguments_hash
+        ):
+            return "data_invocation_binding_mismatch"
+        definition_evidence_row = connection.execute(
+            "SELECT run_id, source_json FROM evidence WHERE evidence_id = ?",
+            (definition_evidence_id,),
+        ).fetchone()
+        if definition_evidence_row is None:
+            return "definition_evidence_missing"
+        if str(definition_evidence_row["run_id"]) != data_run_id:
+            return "definition_evidence_run_mismatch"
+        definition_source = _json_object(definition_evidence_row["source_json"])
+        resource = definition_source.get("definition_resource")
+        compiled = definition_source.get("compiled_invocation")
+        if not isinstance(resource, dict) or any(
+            resource.get(key) != execution.get(key)
+            for key in (
+                "definition_id",
+                "definition_version",
+                "semantic_key",
+                "formula_hash",
+                "resource_uri",
+                "source_ref",
+            )
+        ):
+            return "definition_evidence_mismatch"
+        if (
+            not isinstance(compiled, dict)
+            or compiled.get("definition_match") is not True
+            or compiled.get("definition_id") != definition_id
+            or compiled.get("definition_version") != definition_version
+            or compiled.get("formula_hash") != formula_hash_value
+            or compiled.get("tool_name") != compiled_tool_name
+            or compiled.get("arguments_hash") != compiled_arguments_hash
+        ):
+            return "definition_compilation_mismatch"
+        definition_row = connection.execute(
+            """
+            SELECT version, semantic_key, formula_hash, resource_uri, source_ref
+            FROM domain_definitions
+            WHERE definition_id = ? AND project_id = ?
+            """,
+            (definition_id, project_id),
+        ).fetchone()
+        if definition_row is None or (
+            int(definition_row["version"]) != definition_version
+            or str(definition_row["semantic_key"]) != semantic_key
+            or str(definition_row["formula_hash"]) != formula_hash_value
+            or str(definition_row["resource_uri"]) != resource_uri
+            or str(definition_row["source_ref"]) != source_ref
+        ):
+            return "definition_version_drift"
+        claim_rows = connection.execute(
+            """
+            SELECT claim.claim_id
+            FROM claims AS claim
+            WHERE claim.run_id = ? AND EXISTS (
+                SELECT 1 FROM claim_evidence AS data_link
+                WHERE data_link.claim_id = claim.claim_id
+                  AND data_link.evidence_id = ?
+            ) AND EXISTS (
+                SELECT 1 FROM claim_evidence AS definition_link
+                WHERE definition_link.claim_id = claim.claim_id
+                  AND definition_link.evidence_id = ?
+            )
+            ORDER BY claim.created_at, claim.rowid
+            """,
+            (data_run_id, data_evidence_id, definition_evidence_id),
+        ).fetchall()
+        return ReportDefinitionBinding(
+            analysis_id=analysis_id,
+            data_artifact_id=data_artifact_id,
+            data_invocation_id=data_invocation_id,
+            data_evidence_id=data_evidence_id,
+            definition_evidence_id=definition_evidence_id,
+            claim_ids=tuple(str(row["claim_id"]) for row in claim_rows),
+            definition_id=definition_id,
+            definition_version=definition_version,
+            semantic_key=semantic_key,
+            formula_hash=formula_hash_value,
+            resource_uri=resource_uri,
+            source_ref=source_ref,
+        )
+
     def _principal_for_subject(self, *, project_id: str, subject_id: str) -> Principal:
         clean_subject = _bounded_text(subject_id, "调用主体", maximum=200)
         with self._connection() as connection:
@@ -554,9 +862,7 @@ def _normalize_draft(draft: DomainDefinitionDraft) -> DomainDefinitionDraft:
     )
     if effective_to is not None and effective_to <= effective_from:
         raise ValueError("领域定义生效终点必须晚于起点")
-    grain = tuple(
-        normalize_semantic_key(item, label="粒度概念") for item in draft.grain
-    )
+    grain = tuple(normalize_semantic_key(item, label="粒度概念") for item in draft.grain)
     if len(grain) > 20:
         raise ValueError("领域定义粒度概念超过上限 20")
     if len(set(grain)) != len(grain):
@@ -570,9 +876,7 @@ def _normalize_draft(draft: DomainDefinitionDraft) -> DomainDefinitionDraft:
         semantic_key=normalize_semantic_key(draft.semantic_key),
         version=draft.version,
         title=_bounded_text(draft.title, "定义标题", maximum=200),
-        description=_bounded_text(
-            draft.description, "定义说明", maximum=4000, allow_empty=True
-        ),
+        description=_bounded_text(draft.description, "定义说明", maximum=4000, allow_empty=True),
         formula=normalize_formula(draft.formula),
         grain=grain,
         scope=scope,
@@ -582,6 +886,24 @@ def _normalize_draft(draft: DomainDefinitionDraft) -> DomainDefinitionDraft:
         effective_to=effective_to,
         definition_kind="metric",
     )
+
+
+def _json_object(value: object) -> JsonObject:
+    if value is None:
+        return {}
+    parsed = json.loads(str(value))
+    if not isinstance(parsed, dict):
+        raise ValueError("领域血缘 JSON 结构损坏")
+    return cast(JsonObject, parsed)
+
+
+def _artifact_analysis_id_from_row(row: sqlite3.Row) -> str | None:
+    params = _json_object(row["params_json"])
+    analysis_id = params.get("analysis_id")
+    if isinstance(analysis_id, str) and analysis_id.strip():
+        return analysis_id
+    artifact_id = row["id"]
+    return str(artifact_id) if artifact_id is not None else None
 
 
 def _source_ref(value: str) -> str:
@@ -608,9 +930,7 @@ def _normalize_instant(value: str, label: str) -> str:
         raise ValueError(f"{label}不是合法 ISO 8601 时间") from exc
     if parsed.tzinfo is None:
         raise ValueError(f"{label}必须包含时区")
-    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _bounded_text(
@@ -697,9 +1017,7 @@ def _definition_from_row(row: sqlite3.Row) -> DomainDefinition:
         owner=str(row["owner"]),
         source_ref=str(row["source_ref"]),
         effective_from=str(row["effective_from"]),
-        effective_to=(
-            None if row["effective_to"] is None else str(row["effective_to"])
-        ),
+        effective_to=(None if row["effective_to"] is None else str(row["effective_to"])),
         resource_uri=str(row["resource_uri"]),
         created_by_user_id=str(row["created_by_user_id"]),
         created_at=str(row["created_at"]),

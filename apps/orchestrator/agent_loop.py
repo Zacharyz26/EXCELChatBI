@@ -81,7 +81,12 @@ from packages.session.task_models import (
     TaskRun,
     TaskStepRecord,
 )
-from packages.session.task_store import TaskStore, invocation_idempotency_key
+from packages.session.task_store import (
+    ControlConflict,
+    TaskStore,
+    invocation_arguments_hash,
+    invocation_idempotency_key,
+)
 
 from apps.orchestrator.agent_tools import AgentToolError, AgentToolRegistry
 from apps.orchestrator.control.claims import (
@@ -2130,6 +2135,17 @@ async def _stream_agent_chat_inner(
                         references=reference_resolution,
                         memory_references=memory_reference_resolution,
                     )
+                definition_execution: JsonObject | None = None
+                definition_execution_error: str | None = None
+                try:
+                    definition_execution = await run_in_threadpool(
+                        task_store.resolve_definition_execution,
+                        run_id,
+                        tool_name=call.name,
+                        arguments=call_args,
+                    )
+                except ControlConflict as exc:
+                    definition_execution_error = str(exc)
                 fields = _humanize_args(call.name, call_args)
                 attempts_before_call = attempts_used
                 descriptor_lookup = getattr(
@@ -2210,6 +2226,10 @@ async def _stream_agent_chat_inner(
                     failure_code = "invalid_tool_call_limit_exhausted"
                     failure_source = "policy"
                     tools_allowed = False
+                elif definition_execution_error is not None:
+                    feedback = f"未执行：{definition_execution_error}"
+                    failure_code = "definition_execution_mismatch"
+                    failure_source = "policy"
                 elif not policy_decision.allowed:
                     feedback = f"未执行：{policy_decision.reason}"
                     failure_code = policy_decision.code
@@ -2463,6 +2483,8 @@ async def _stream_agent_chat_inner(
                         "contract_hash": approval_record.tool_schema_hash,
                         "parameter_hash": approval_record.parameter_summary_hash,
                     }
+                if definition_execution is not None:
+                    policy_payload["definition_execution"] = definition_execution
                 try:
                     start_result = await run_in_threadpool(
                         task_store.start_invocation_with_event,
@@ -3049,6 +3071,12 @@ async def _stream_agent_chat_inner(
                             "tool": call.name,
                             "tool_call_id": call.id,
                             "dataset_ref": call_args.get("dataset_ref"),
+                            **_definition_result_evidence_fields(call.name, result),
+                            **(
+                                {"definition_execution": definition_execution}
+                                if definition_execution is not None
+                                else {}
+                            ),
                             **(
                                 shadow_comparison.evidence_fields()
                                 if shadow_comparison is not None
@@ -4298,6 +4326,63 @@ def _compare_mcp_error(
     if not callable(compare):
         return None
     return cast(ShadowComparison, compare(tool_name, error_code))
+
+
+def _definition_result_evidence_fields(tool_name: str, result: Any) -> JsonObject:
+    """Freeze a resolved Resource version and its compiled call in Evidence."""
+    if tool_name != "domain_definition_lookup" or not isinstance(result, dict):
+        return {}
+    definition = result.get("definition")
+    if result.get("status") != "resolved" or not isinstance(definition, dict):
+        return {}
+    definition_id = definition.get("definition_id")
+    version = definition.get("version")
+    semantic_key = result.get("semantic_key")
+    formula_hash = definition.get("formula_hash")
+    resource_uri = definition.get("resource_uri")
+    source_ref = definition.get("source")
+    if (
+        not isinstance(definition_id, str)
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version < 1
+        or not isinstance(semantic_key, str)
+        or not isinstance(formula_hash, str)
+        or not isinstance(resource_uri, str)
+        or resource_uri != f"chatbi://domain-definitions/{definition_id}"
+        or not isinstance(source_ref, str)
+    ):
+        return {}
+    fields: JsonObject = {
+        "definition_resource": {
+            "definition_id": definition_id,
+            "definition_version": version,
+            "semantic_key": semantic_key,
+            "formula_hash": formula_hash,
+            "resource_uri": resource_uri,
+            "source_ref": source_ref,
+        }
+    }
+    compiled = result.get("compiled_invocation")
+    if isinstance(compiled, dict):
+        compiled_tool_name = compiled.get("tool_name")
+        compiled_arguments = compiled.get("arguments")
+        if isinstance(compiled_tool_name, str) and isinstance(
+            compiled_arguments, dict
+        ):
+            fields["compiled_invocation"] = {
+                "definition_id": compiled.get("definition_id"),
+                "definition_version": compiled.get("definition_version"),
+                "formula_hash": compiled.get("formula_hash"),
+                "tool_name": compiled_tool_name,
+                "arguments_hash": invocation_arguments_hash(compiled_arguments),
+                "definition_match": (
+                    compiled.get("definition_id") == definition_id
+                    and compiled.get("definition_version") == version
+                    and compiled.get("formula_hash") == formula_hash
+                ),
+            }
+    return fields
 
 
 def _prepare_artifact(

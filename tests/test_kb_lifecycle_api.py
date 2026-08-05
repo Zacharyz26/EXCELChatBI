@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from apps.api.deps import embedder_dep, kb_store_dep, session_store_dep, settings_dep
+from apps.api.deps import (
+    embedder_dep,
+    kb_source_store_dep,
+    kb_store_dep,
+    session_store_dep,
+    settings_dep,
+)
 from apps.api.main import app
 from fastapi.testclient import TestClient
 from packages.common.config import Settings
 from packages.rag.embedding import HashingEmbedder
+from packages.rag.source_store import SourceDocumentStore
 from packages.rag.store import LocalKnowledgeStore
 
 
@@ -23,10 +30,14 @@ def test_ingest_update_rebuild_and_delete(tmp_path: Path) -> None:
         rag_embedder="hashing",
         rag_store="local",
         kb_docs_dir=str(docs),
+        kb_source_dir=str(tmp_path / "sources"),
     )
     app.dependency_overrides[settings_dep] = lambda: settings
     app.dependency_overrides[embedder_dep] = lambda: HashingEmbedder(dim=32)
     app.dependency_overrides[kb_store_dep] = lambda: store
+    app.dependency_overrides[kb_source_store_dep] = lambda: SourceDocumentStore(
+        settings.kb_source_dir
+    )
     client = TestClient(app)
     try:
         first = client.post("/kb/ingest", json={"path": str(docs)})
@@ -51,17 +62,22 @@ def test_ingest_update_rebuild_and_delete(tmp_path: Path) -> None:
         assert ready.status_code == 200
         assert ready.json()["knowledge_store"]["backend"] == "local"
 
-        inline = client.post(
-            "/kb/ingest", json={"text": "临时规则", "source": "temporary.md"}
-        )
+        inline = client.post("/kb/ingest", json={"text": "临时规则", "source": "temporary.md"})
         assert inline.status_code == 200
         rebuilt = client.post("/kb/rebuild", json={})
         assert rebuilt.status_code == 200, rebuilt.text
-        assert rebuilt.json()["deleted"] == ["temporary.md"]
+        assert rebuilt.json()["deleted"] == []
+        assert {item["source"] for item in client.get("/kb/overview").json()["documents"]} == {
+            "metrics.md",
+            "temporary.md",
+        }
 
-        document_id = client.get("/kb/overview").json()["documents"][0]["document_id"]
-        deleted = client.delete(f"/kb/documents/{document_id}")
-        assert deleted.status_code == 200
+        document_ids = [
+            item["document_id"] for item in client.get("/kb/overview").json()["documents"]
+        ]
+        for document_id in document_ids:
+            deleted = client.delete(f"/kb/documents/{document_id}")
+            assert deleted.status_code == 200
         assert client.get("/kb/overview").json()["documents"] == []
         assert client.delete(f"/kb/documents/{document_id}").status_code == 404
     finally:

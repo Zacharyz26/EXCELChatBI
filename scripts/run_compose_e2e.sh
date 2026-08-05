@@ -123,6 +123,38 @@ if (audit.read_only_report_attempts < 1) {
 }
 '
 
+resource_probe_log=".data/e2e/mcp-resource-reconnect.jsonl"
+"${compose[@]}" exec -T api \
+  python -m apps.api.mcp_resource_reconnect_probe \
+  >"$resource_probe_log" 2>&1 &
+resource_probe_pid=$!
+resource_probe_ready=0
+for attempt in $(seq 1 120); do
+  if grep -q '"status":"subscribed"' "$resource_probe_log"; then
+    resource_probe_ready=1
+    break
+  fi
+  if ! kill -0 "$resource_probe_pid" 2>/dev/null; then
+    wait "$resource_probe_pid" || true
+    cat "$resource_probe_log" >&2
+    echo "Compose MCP Resource probe exited before subscribing." >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [ "$resource_probe_ready" != "1" ]; then
+  cat "$resource_probe_log" >&2
+  echo "Compose MCP Resource probe did not subscribe in time." >&2
+  exit 1
+fi
+"${compose[@]}" restart knowledge-tools
+if ! wait "$resource_probe_pid"; then
+  cat "$resource_probe_log" >&2
+  echo "Compose MCP Resource reconnect probe failed." >&2
+  exit 1
+fi
+grep -q '"status":"passed"' "$resource_probe_log"
+
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
 latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.read_only_run_id)")"
@@ -258,4 +290,4 @@ recovery_json="$(verify_reference_recovery)"
 printf '%s\n' "$recovery_json" > .data/e2e/memory-recovery-verified.json
 verify_original_run
 
-echo "Compose E2E, restart, offline backup/restore and fixed reference recovery passed."
+echo "Compose E2E, MCP Resource reconnect, offline restore and fixed reference recovery passed."

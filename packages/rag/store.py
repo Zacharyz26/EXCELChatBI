@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -138,9 +139,7 @@ class KnowledgeStore(abc.ABC):
     def bm25_search(self, query_tokens: list[str], top_k: int) -> list[SearchHit]:
         """中文 BM25 稀疏检索（替身/本地后端的稀疏路）。"""
 
-    def sparse_search(
-        self, query_sparse: dict[str, float], top_k: int
-    ) -> list[SearchHit]:
+    def sparse_search(self, query_sparse: dict[str, float], top_k: int) -> list[SearchHit]:
         """bge-m3 稀疏向量检索；仅 supports_sparse=True 的后端实现。"""
         del query_sparse, top_k
         return []
@@ -214,10 +213,17 @@ class LocalKnowledgeStore(KnowledgeStore):
     def __init__(self, index_dir: str | None = None) -> None:
         self._dir = Path(index_dir or get_settings().kb_index_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._generations_dir = self._dir / "generations"
+        self._generations_dir.mkdir(parents=True, exist_ok=True)
+        self._pointer_path = self._dir / "active.json"
+        # index.json is a compatibility mirror. active.json + immutable generation
+        # files are authoritative for switching and rollback.
         self._path = self._dir / "index.json"
+        self._active_generation: str | None = None
+        self._previous_generation: str | None = None
         self._chunks: list[StoredChunk] = []
         # 写锁：摄入进线程池后并发 add/clear 会真并发，需串行化改列表与写盘
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._read_state = threading.local()
         self._load()
 
@@ -243,6 +249,7 @@ class LocalKnowledgeStore(KnowledgeStore):
             return added
 
     def count(self) -> int:
+        self._refresh_from_disk()
         return len(self._chunks_view())
 
     def clear(self) -> None:
@@ -251,6 +258,7 @@ class LocalKnowledgeStore(KnowledgeStore):
             self._chunks = []
 
     def sources(self) -> list[str]:
+        self._refresh_from_disk()
         out: list[str] = []
         for c in self._chunks:
             if c.source not in out:
@@ -258,6 +266,7 @@ class LocalKnowledgeStore(KnowledgeStore):
         return out
 
     def topics(self) -> list[str]:
+        self._refresh_from_disk()
         out: list[str] = []
         for c in self._chunks:
             if c.section and c.section not in out:
@@ -265,11 +274,13 @@ class LocalKnowledgeStore(KnowledgeStore):
         return out
 
     def documents(self) -> list[DocumentInfo]:
+        self._refresh_from_disk()
         return summarize_documents(self._chunks)
 
     @contextmanager
     def retrieval_snapshot(self) -> Iterator[None]:
         """用线程本地引用固定一次检索，发布新列表时无需阻塞读者。"""
+        self._refresh_from_disk()
         previous = getattr(self._read_state, "chunks", None)
         self._read_state.chunks = self._chunks
         try:
@@ -281,14 +292,61 @@ class LocalKnowledgeStore(KnowledgeStore):
                 self._read_state.chunks = previous
 
     def status(self) -> StoreStatus:
+        self._refresh_from_disk()
+        generations = tuple(
+            path.name for path in sorted(self._generations_dir.glob("index-*.json"), reverse=True)
+        )
+        active = self._active_generation or (self._path.name if self._path.exists() else None)
         return StoreStatus(
             backend="local",
             ready=True,
-            chunk_count=self.count(),
-            document_count=len(self.documents()),
-            active_collection=self._path.name,
-            generations=(self._path.name,),
+            chunk_count=len(self._chunks),
+            document_count=len(summarize_documents(self._chunks)),
+            active_collection=active,
+            previous_collection=self._previous_generation,
+            generations=generations or ((self._path.name,) if self._path.exists() else ()),
         )
+
+    def rollback(self) -> StoreStatus:
+        """Atomically point readers at the previous immutable local generation."""
+        with self._write_lock:
+            previous = self._previous_generation
+            if previous is None:
+                raise RuntimeError("没有可回滚的上一代知识库索引")
+            chunks = self._load_generation(previous)
+            current = self._active_generation
+            self._write_compatibility_mirror(chunks)
+            self._write_pointer(active=previous, previous=current)
+            self._active_generation = previous
+            self._previous_generation = current
+            self._chunks = chunks
+            return self.status()
+
+    def cleanup_generations(self, retain: int = 2) -> int:
+        """Delete unreferenced local generations while keeping rollback safe."""
+        if retain < 2:
+            raise ValueError("retain 必须至少为 2，以保留活动和回滚代际")
+        with self._write_lock:
+            generations = sorted(
+                self._generations_dir.glob("index-*.json"),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+            keep = {
+                name
+                for name in (self._active_generation, self._previous_generation)
+                if name is not None
+            }
+            for path in generations:
+                if len(keep) >= retain:
+                    break
+                keep.add(path.name)
+            removed = 0
+            for path in generations:
+                if path.name not in keep:
+                    path.unlink()
+                    removed += 1
+            return removed
 
     def replace_documents(
         self,
@@ -354,6 +412,19 @@ class LocalKnowledgeStore(KnowledgeStore):
     def _chunks_view(self) -> list[StoredChunk]:
         return getattr(self._read_state, "chunks", self._chunks)
 
+    def _refresh_from_disk(self) -> None:
+        """Follow an atomic pointer switched by another process/container."""
+        if not self._pointer_path.exists():
+            return
+        with self._write_lock:
+            active, previous = self._read_pointer()
+            if active == self._active_generation:
+                return
+            chunks = self._load_generation(active)
+            self._active_generation = active
+            self._previous_generation = previous
+            self._chunks = chunks
+
     def _top_hits(
         self,
         scores: np.ndarray,
@@ -383,16 +454,26 @@ class LocalKnowledgeStore(KnowledgeStore):
 
     def _persist(self, chunks: list[StoredChunk] | None = None) -> None:
         target = self._chunks if chunks is None else chunks
-        data = [asdict(c) for c in target]
-        tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp_path, self._path)
+        previous = self._active_generation
+        if previous is None and self._path.exists():
+            # Migrate a legacy single-file index into an immutable rollback generation.
+            previous = self._write_generation(self._chunks)
+        active = self._write_generation(target)
+        self._write_compatibility_mirror(target)
+        self._write_pointer(active=active, previous=previous)
+        self._active_generation = active
+        self._previous_generation = previous
 
     def _load(self) -> None:
-        if not self._path.exists():
+        if self._pointer_path.exists():
+            active, previous = self._read_pointer()
+            chunks = self._load_generation(active)
+            self._active_generation = active
+            self._previous_generation = previous
+        elif self._path.exists():
+            chunks = self._read_chunks(self._path)
+        else:
             return
-        data = json.loads(self._path.read_text(encoding="utf-8"))
-        chunks = [StoredChunk(**rec) for rec in data]
         # 自愈：清除历史重复摄入产生的完全相同副本，并写回净化后的索引
         seen: set[tuple[str, str]] = set()
         deduped: list[StoredChunk] = []
@@ -405,3 +486,87 @@ class LocalKnowledgeStore(KnowledgeStore):
         self._chunks = deduped
         if len(deduped) != len(chunks):
             self._persist()
+
+    def _write_generation(self, chunks: list[StoredChunk]) -> str:
+        name = (
+            f"index-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}-"
+            f"{uuid.uuid4().hex[:8]}.json"
+        )
+        path = self._generations_dir / name
+        payload: dict[str, object] = {
+            "format": 1,
+            "created_at": datetime.now(UTC).isoformat(),
+            "chunks": [asdict(chunk) for chunk in chunks],
+        }
+        self._write_json_atomic(path, payload)
+        return name
+
+    def _write_pointer(self, *, active: str, previous: str | None) -> None:
+        self._generation_path(active)
+        if previous is not None:
+            self._generation_path(previous)
+        payload: dict[str, object] = {
+            "format": 1,
+            "active": active,
+            "previous": previous,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        self._write_json_atomic(self._pointer_path, payload)
+
+    def _read_pointer(self) -> tuple[str, str | None]:
+        try:
+            payload = json.loads(self._pointer_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("本地知识库活动代指针不可读") from exc
+        if not isinstance(payload, dict) or payload.get("format") != 1:
+            raise RuntimeError("本地知识库活动代指针格式不受支持")
+        active = payload.get("active")
+        previous = payload.get("previous")
+        if not isinstance(active, str) or not active:
+            raise RuntimeError("本地知识库活动代指针缺少 active")
+        if previous is not None and not isinstance(previous, str):
+            raise RuntimeError("本地知识库活动代指针 previous 格式错误")
+        self._generation_path(active)
+        if previous is not None:
+            self._generation_path(previous)
+        return active, previous
+
+    def _load_generation(self, name: str) -> list[StoredChunk]:
+        path = self._generation_path(name)
+        if not path.is_file():
+            raise RuntimeError(f"本地知识库索引代不存在: {name}")
+        return self._read_chunks(path)
+
+    def _generation_path(self, name: str) -> Path:
+        if Path(name).name != name or not name.startswith("index-") or not name.endswith(".json"):
+            raise RuntimeError("本地知识库索引代名称非法")
+        path = (self._generations_dir / name).resolve()
+        if path.parent != self._generations_dir.resolve():
+            raise RuntimeError("本地知识库索引代超出受控目录")
+        return path
+
+    @staticmethod
+    def _read_chunks(path: Path) -> list[StoredChunk]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"本地知识库索引不可读: {path.name}") from exc
+        raw_chunks = payload.get("chunks") if isinstance(payload, dict) else payload
+        if not isinstance(raw_chunks, list) or any(
+            not isinstance(record, dict) for record in raw_chunks
+        ):
+            raise RuntimeError(f"本地知识库索引格式错误: {path.name}")
+        try:
+            return [StoredChunk(**record) for record in raw_chunks]
+        except TypeError as exc:
+            raise RuntimeError(f"本地知识库索引记录错误: {path.name}") from exc
+
+    def _write_compatibility_mirror(self, chunks: list[StoredChunk]) -> None:
+        payload = [asdict(chunk) for chunk in chunks]
+        self._write_json_atomic(self._path, payload)
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: object) -> None:
+        temporary = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)

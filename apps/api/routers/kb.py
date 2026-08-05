@@ -18,11 +18,13 @@ from packages.rag.lifecycle import (
     sync_documents,
 )
 from packages.rag.retriever import HybridRetriever
+from packages.rag.source_store import SourceDocumentStore
 from packages.rag.store import KnowledgeStore
 
 from apps.api.auth import current_principal_dep, require_kb_admin
 from apps.api.deps import (
     embedder_dep,
+    kb_source_store_dep,
     kb_store_dep,
     model_gateway_dep,
     retriever_dep,
@@ -49,6 +51,7 @@ async def ingest(
     req: IngestRequest,
     embedder: Embedder = Depends(embedder_dep),
     store: KnowledgeStore = Depends(kb_store_dep),
+    source_store: SourceDocumentStore = Depends(kb_source_store_dep),
     settings: Settings = Depends(settings_dep),
     _principal: Principal = Depends(require_kb_admin),
 ) -> IngestResponse:
@@ -56,6 +59,9 @@ async def ingest(
     documents = await run_in_threadpool(_collect_docs, req, settings)
     if not documents:
         raise HTTPException(status_code=400, detail="路径内没有可摄入的文本文件")
+    # 原文先成为事实来源；若 embedding 失败，活动索引保持不变，后续 rebuild
+    # 会从这一代原文修复派生索引。
+    await run_in_threadpool(source_store.publish, documents)
     result = await run_in_threadpool(sync_documents, documents, embedder, store)
     return _sync_response(result)
 
@@ -65,15 +71,18 @@ async def rebuild(
     req: RebuildRequest,
     embedder: Embedder = Depends(embedder_dep),
     store: KnowledgeStore = Depends(kb_store_dep),
+    source_store: SourceDocumentStore = Depends(kb_source_store_dep),
     settings: Settings = Depends(settings_dep),
     _principal: Principal = Depends(require_kb_admin),
 ) -> IngestResponse:
-    """从目录完整构建新索引，准备成功后原子替换活动索引。"""
-    ingest_req = IngestRequest(path=req.path or settings.kb_docs_dir)
-    documents = await run_in_threadpool(_collect_docs, ingest_req, settings)
-    result = await run_in_threadpool(
-        sync_documents, documents, embedder, store, full=True
+    """从持久原文完整构建新索引，准备成功后原子替换活动索引。"""
+    documents = await run_in_threadpool(
+        _collect_rebuild_docs,
+        req,
+        settings,
+        source_store,
     )
+    result = await run_in_threadpool(sync_documents, documents, embedder, store, full=True)
     return _sync_response(result)
 
 
@@ -81,12 +90,18 @@ async def rebuild(
 async def delete_document(
     document_id: str,
     store: KnowledgeStore = Depends(kb_store_dep),
+    source_store: SourceDocumentStore = Depends(kb_source_store_dep),
     _principal: Principal = Depends(require_kb_admin),
 ) -> DeleteDocumentResponse:
     """按稳定文档 ID 删除来源及其所有片段。"""
-    removed = await run_in_threadpool(store.delete_document, document_id)
-    if removed == 0:
+    document_ids = await run_in_threadpool(
+        lambda: {document.document_id for document in store.documents()}
+    )
+    if document_id not in document_ids:
         raise HTTPException(status_code=404, detail="知识库文档不存在")
+    # 原文删除优先；索引删除失败时可由下一次全量重建收敛到事实来源。
+    await run_in_threadpool(source_store.delete, document_id)
+    removed = await run_in_threadpool(store.delete_document, document_id)
     return DeleteDocumentResponse(document_id=document_id, removed_chunks=removed)
 
 
@@ -157,6 +172,27 @@ def _collect_docs(req: IngestRequest, settings: Settings) -> list[SourceDocument
         )
     except (OSError, UnicodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _collect_rebuild_docs(
+    req: RebuildRequest,
+    settings: Settings,
+    source_store: SourceDocumentStore,
+) -> list[SourceDocument]:
+    """Use persisted originals by default; an explicit path replaces that source set."""
+    if req.path:
+        documents = _collect_docs(IngestRequest(path=req.path), settings)
+        source_store.publish(documents, full=True)
+        return documents
+    source_status = source_store.status()
+    documents = source_store.documents()
+    if source_status.generation != "empty":
+        return documents
+    # First-run bootstrap only: import the trusted seed directory, then all future
+    # rebuilds use the persistent source repository.
+    seed = _collect_docs(IngestRequest(path=settings.kb_docs_dir), settings)
+    source_store.publish(seed, full=True)
+    return seed
 
 
 def _sync_response(result: SyncResult) -> IngestResponse:

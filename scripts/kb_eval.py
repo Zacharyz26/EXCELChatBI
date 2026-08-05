@@ -53,12 +53,20 @@ def _build_components(index_dir: str) -> tuple[HybridRetriever, str]:
 
     settings = get_settings()
     embedder: Embedder = (
-        BGEEmbedder(settings.embedding_model, device=settings.embedding_device)
+        BGEEmbedder(
+            settings.embedding_model,
+            device=settings.embedding_device,
+            cache_dir=settings.model_cache_dir,
+        )
         if settings.rag_embedder == "bge"
         else HashingEmbedder(dim=settings.embedding_dim)
     )
     reranker: Reranker = (
-        BGEReranker(settings.rerank_model, device=settings.embedding_device)
+        BGEReranker(
+            settings.rerank_model,
+            device=settings.embedding_device,
+            cache_dir=settings.model_cache_dir,
+        )
         if settings.rag_reranker == "bge"
         else LexicalReranker()
     )
@@ -93,9 +101,7 @@ def _build_components(index_dir: str) -> tuple[HybridRetriever, str]:
 def _ingest(retriever: HybridRetriever) -> tuple[int, float]:
     docs_dir = ROOT / "docs" / "kb_samples"
     paths = sorted(docs_dir.glob("*.md")) + [Path(__file__).parent / "kb_eval_distractors.md"]
-    documents = [
-        SourceDocument(path.name, path.read_text(encoding="utf-8")) for path in paths
-    ]
+    documents = [SourceDocument(path.name, path.read_text(encoding="utf-8")) for path in paths]
     started = time.perf_counter()
     result = sync_documents(documents, retriever.embedder, retriever.store, full=True)
     return result.total_chunks, time.perf_counter() - started
@@ -204,9 +210,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="知识库检索质量评测")
     parser.add_argument("--enforce", action="store_true", help="低于阈值时退出码为 1")
     parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument(
-        "--profile", choices=("auto", "baseline", "semantic"), default="auto"
-    )
+    parser.add_argument("--profile", choices=("auto", "baseline", "semantic"), default="auto")
     parser.add_argument("--json-output", help="把机器可读报告写入指定路径，'-' 表示 stdout")
     args = parser.parse_args()
     if args.top_k < 1:
@@ -255,9 +259,7 @@ def main() -> int:
         if args.json_output:
             output = Path(args.json_output)
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(
-                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"\nJSON 报告：{output}")
 
     if args.enforce and misses:
