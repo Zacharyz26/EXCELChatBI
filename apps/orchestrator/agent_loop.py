@@ -32,7 +32,7 @@ from mcp_servers.common.client_gateway import (
     MCPGatewayExecutionError,
     ShadowComparison,
 )
-from mcp_servers.common.contracts import MCPRequestContext
+from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
 from openai import OpenAIError
 from packages.common.config import get_settings
 from packages.common.logging import get_logger
@@ -734,6 +734,41 @@ async def _stream_agent_chat_inner(
                 },
             )
             return
+        try:
+            await registry.validate_remote_catalog()
+        except MCPProtocolError as exc:
+            error_code = (
+                "capability_catalog_drift"
+                if exc.code == "mcp_catalog_drift"
+                else "capability_catalog_unavailable"
+            )
+            if resume_existing:
+                terminated = await run_in_threadpool(
+                    task_store.terminate_active_run,
+                    run_id,
+                    status="failed",
+                    reason=error_code,
+                    event_type="run.failed",
+                )
+                if terminated is not None:
+                    _failed_run, failed_event = terminated
+                    yield _task_event(failed_event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": error_code,
+                    "message": (
+                        "MCP 工具目录与 Host 契约不一致，请部署兼容版本后重试。"
+                        if error_code == "capability_catalog_drift"
+                        else "MCP 工具目录暂时无法校验，请稍后重试。"
+                    ),
+                    "retryable": error_code == "capability_catalog_unavailable",
+                    "run_id": run_id,
+                    "gateway_code": exc.code,
+                },
+            )
+            return
+        registry.start_catalog_watch()
         current_capability_catalog = registry.capability_catalog_snapshot()
         try:
             if resume_existing:

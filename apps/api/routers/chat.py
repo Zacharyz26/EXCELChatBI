@@ -42,6 +42,7 @@ from apps.orchestrator.agent_loop import (
 from apps.orchestrator.agent_tools import (
     AgentContext,
     build_registry,
+    enabled_capability_profiles_from_settings,
     mcp_client_config_from_settings,
 )
 
@@ -100,6 +101,7 @@ async def chat_stream(
             subject_id=principal.user_id,
         ),
         mcp_config=mcp_client_config_from_settings(settings),
+        enabled_capability_profiles=enabled_capability_profiles_from_settings(settings),
     )
     config = AgentLoopConfig(
         history_limit=settings.chat_history_limit,

@@ -150,6 +150,15 @@ class FakeRegistry:
     def __init__(self, handlers: dict[str, Any]) -> None:
         self._handlers = handlers
         self.executed: list[tuple[str, str]] = []
+        self.remote_catalog_validations = 0
+        self.catalog_watch_started = False
+
+    async def validate_remote_catalog(self) -> dict[str, str]:
+        self.remote_catalog_validations += 1
+        return {"fake": "a" * 64}
+
+    def start_catalog_watch(self) -> None:
+        self.catalog_watch_started = True
 
     def openai_tools(
         self,
@@ -484,8 +493,18 @@ def _remember_agent_reference(
 
 @pytest.mark.asyncio
 async def test_tool_round_emits_transparency_events_and_persists(
-    store: SessionStore, conversation: Conversation
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
     _register_dataset(store, conversation)
     profile_result = {
         "profile": {"row_count": 3, "column_count": 2},
@@ -510,6 +529,8 @@ async def test_tool_round_emits_transparency_events_and_persists(
 
     events = await _run_loop(store, conversation, gateway, registry)
 
+    assert registry.remote_catalog_validations == 1
+    assert registry.catalog_watch_started is True
     assert [name for name, _ in events] == [
         "meta",
         "goal",

@@ -386,6 +386,35 @@ async def test_deterministic_path_fails_closed_when_requested_capability_is_miss
 
 
 @pytest.mark.asyncio
+async def test_deterministic_path_rejects_present_but_unavailable_capability() -> None:
+    contract = build_minimal_contract(
+        run_id="unavailable-capability",
+        user_text="检测销售额异常",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    catalog = _registry().capability_catalog()
+    for item in catalog:
+        if item["name"] == "stats.anomaly":
+            item["allowed"] = False
+            item["required_profile"] = "stats"
+            item["unavailable_reason"] = "profile_not_enabled"
+
+    with pytest.raises(ValueError, match="stats.anomaly"):
+        await create_production_plan(
+            user_text=contract.goal,
+            contract=contract,
+            datasets=[_dataset()],
+            artifacts=[],
+            registry=_registry(),
+            gateway=None,
+            blocking_clarification=None,
+            capability_catalog=catalog,
+        )
+
+
+@pytest.mark.asyncio
 async def test_generic_report_plan_creates_source_analysis_before_report() -> None:
     report_registry = AgentToolRegistry(
         [

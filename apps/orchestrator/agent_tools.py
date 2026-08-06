@@ -35,12 +35,16 @@ from mcp_servers.common.client_gateway import (
 )
 from mcp_servers.common.contracts import (
     GENERIC_OBJECT_OUTPUT_SCHEMA,
+    MCPProtocolError,
     MCPRequestContext,
     MCPToolDescriptor,
     ToolCapabilityMetadata,
 )
 from mcp_servers.common.service_catalog import (
+    AGENT_CAPABILITY_PROFILES,
     AGENT_MCP_SERVICE_TOOLS,
+    DEFAULT_AGENT_CAPABILITY_PROFILES,
+    parse_capability_profiles,
     validate_service_keys,
 )
 from mcp_servers.common.tool import Tool
@@ -188,10 +192,24 @@ class AgentToolRegistry:
         mcp_config: MCPClientConfig | None = None,
         context: AgentContext | None = None,
         lineage_excel: MCPServer | None = None,
+        enabled_capability_profiles: frozenset[str] | None = None,
     ) -> None:
         self._specs = {s.name: s for s in specs}
         self._context = context
         self._lineage_excel = lineage_excel
+        self._enabled_capability_profiles = (
+            DEFAULT_AGENT_CAPABILITY_PROFILES
+            if enabled_capability_profiles is None
+            else enabled_capability_profiles
+        )
+        unknown_profiles = self._enabled_capability_profiles - AGENT_CAPABILITY_PROFILES
+        if unknown_profiles:
+            raise ValueError(
+                "未知 Agent capability profile: "
+                + ", ".join(sorted(unknown_profiles))
+            )
+        self._catalog_watch_tasks: list[asyncio.Task[None]] = []
+        self._validated_remote_catalogs: dict[str, str] = {}
         self._mcp_adapter = MCPServerAdapter(
             "agent-tools", (spec.mcp_binding() for spec in self._specs.values())
         )
@@ -281,14 +299,23 @@ class AgentToolRegistry:
             for capability in spec.metadata.capabilities:
                 existing = catalog.get(capability)
                 if existing is None:
+                    required_profile = _required_profile(capability)
+                    allowed = (
+                        required_profile is None
+                        or required_profile in self._enabled_capability_profiles
+                    )
                     catalog[capability] = {
                         "name": capability,
                         "description": spec.description,
-                        "allowed": True,
+                        "allowed": allowed,
                         "risk": spec.metadata.risk_level,
                         "read_only": spec.metadata.read_only,
                         "artifact_types": list(spec.metadata.artifact_types),
                     }
+                    if required_profile is not None:
+                        catalog[capability]["required_profile"] = required_profile
+                    if not allowed:
+                        catalog[capability]["unavailable_reason"] = "profile_not_enabled"
                     continue
                 artifact_types = {
                     str(item)
@@ -297,11 +324,31 @@ class AgentToolRegistry:
                 }
                 artifact_types.update(spec.metadata.artifact_types)
                 existing["artifact_types"] = sorted(artifact_types)
+        forecast_enabled = "forecast" in self._enabled_capability_profiles
+        catalog.setdefault(
+            "stats.forecast",
+            {
+                "name": "stats.forecast",
+                "description": "预测分析能力（当前部署尚未提供受治理执行工具）。",
+                "allowed": False,
+                "risk": "low",
+                "read_only": True,
+                "artifact_types": [],
+                "required_profile": "forecast",
+                "unavailable_reason": (
+                    "tool_unavailable" if forecast_enabled else "profile_not_enabled"
+                ),
+            },
+        )
         return [catalog[name] for name in sorted(catalog)]
 
     def capability_catalog_snapshot(self) -> JsonObject:
         """Build the immutable, executable v1 catalog persisted with a TaskRun."""
         capabilities = self.capability_catalog()
+        capability_allowed = {
+            str(item["name"]): item.get("allowed") is not False
+            for item in capabilities
+        }
         for item in capabilities:
             name = str(item["name"])
             item["tool_names"] = list(self.tool_names_for_capability(name))
@@ -324,12 +371,37 @@ class AgentToolRegistry:
                     "destructive": metadata.destructive,
                     "open_world": metadata.open_world,
                     "postconditions_version": metadata.postconditions_version,
+                    "allowed": any(
+                        capability_allowed.get(capability, False)
+                        for capability in metadata.capabilities
+                    ),
                 }
             )
         return {
             "schema": "chatbi-capability-catalog-v1",
             "capabilities": capabilities,
             "tools": tools,
+            "profiles": [
+                {
+                    "name": profile,
+                    "enabled": profile in self._enabled_capability_profiles,
+                    "capabilities": sorted(
+                        str(item["name"])
+                        for item in capabilities
+                        if item.get("required_profile") == profile
+                    ),
+                }
+                for profile in sorted(AGENT_CAPABILITY_PROFILES)
+            ],
+            "remote_catalogs": [
+                {
+                    "service_name": service_name,
+                    "content_hash": content_hash,
+                }
+                for service_name, content_hash in sorted(
+                    self._validated_remote_catalogs.items()
+                )
+            ],
         }
 
     def validate_capability_catalog_snapshot(
@@ -384,7 +456,11 @@ class AgentToolRegistry:
         raw = snapshot.get("tools")
         if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             raise ValueError("TaskRun tool 目录快照格式非法")
-        names = [item.get("tool_name") for item in raw]
+        names = [
+            item.get("tool_name")
+            for item in raw
+            if item.get("allowed") is not False
+        ]
         if not all(isinstance(item, str) and item for item in names):
             raise ValueError("TaskRun tool 目录快照包含非法工具名")
         return frozenset(cast(list[str], names))
@@ -521,8 +597,65 @@ class AgentToolRegistry:
             execution = replace(execution, result=result)
         return execution
 
+    async def validate_remote_catalog(self) -> dict[str, str]:
+        """Complete remote discovery before a new immutable snapshot is published."""
+        service_names = sorted(self._mcp_executors)
+        updates = await asyncio.gather(
+            *(self._mcp_executors[name].validate_catalog() for name in service_names)
+        )
+        validated = {
+            service_name: update.content_hash
+            for service_name, update in zip(service_names, updates, strict=True)
+        }
+        self._validated_remote_catalogs = validated
+        return dict(validated)
+
+    def start_catalog_watch(self) -> None:
+        """Receive Tool change notifications for the lifetime of this TaskRun host."""
+        if self._catalog_watch_tasks:
+            return
+        self._catalog_watch_tasks = [
+            asyncio.create_task(
+                self._watch_catalog(service_name, executor),
+                name=f"mcp-tool-catalog-watch:{service_name}",
+            )
+            for service_name, executor in sorted(self._mcp_executors.items())
+        ]
+
+    async def _watch_catalog(
+        self,
+        service_name: str,
+        executor: ManagedMCPClientGateway,
+    ) -> None:
+        while True:
+            try:
+                update = await executor.next_tool_catalog_update(timeout_seconds=60.0)
+            except TimeoutError:
+                continue
+            except MCPProtocolError as exc:
+                if exc.code == "tool_notifications_unavailable":
+                    return
+                _log.error(
+                    "agent_tool.catalog_update_rejected",
+                    service=service_name,
+                    code=exc.code,
+                )
+                return
+            _log.info(
+                "agent_tool.catalog_update_published",
+                service=service_name,
+                content_hash=update.content_hash,
+                tool_count=len(update.descriptors),
+            )
+            self._validated_remote_catalogs[service_name] = update.content_hash
+
     async def aclose(self) -> None:
         """Close a scoped stdio/HTTP session when its TaskRun host exits."""
+        for task in self._catalog_watch_tasks:
+            task.cancel()
+        if self._catalog_watch_tasks:
+            await asyncio.gather(*self._catalog_watch_tasks, return_exceptions=True)
+            self._catalog_watch_tasks.clear()
         await asyncio.gather(
             *(executor.aclose() for executor in self._mcp_executors.values())
         )
@@ -562,6 +695,7 @@ def build_registry(
     context: AgentContext | None = None,
     mcp_config: MCPClientConfig | None = None,
     definition_store: DomainDefinitionStore | None = None,
+    enabled_capability_profiles: frozenset[str] | None = None,
 ) -> AgentToolRegistry:
     """装配 Agent 工具注册表（14.7 清单）。
 
@@ -702,6 +836,7 @@ def build_registry(
         mcp_config=mcp_config,
         context=context,
         lineage_excel=excel,
+        enabled_capability_profiles=enabled_capability_profiles,
     )
 
 
@@ -720,6 +855,24 @@ def mcp_client_config_from_settings(settings: Settings) -> MCPClientConfig:
         max_reconnects=settings.agent_mcp_max_reconnects,
         allow_in_process_fallback=settings.agent_mcp_allow_in_process_fallback,
     )
+
+
+def enabled_capability_profiles_from_settings(settings: Settings) -> frozenset[str]:
+    """Project validated deployment settings into Planner-visible profiles."""
+    profiles = set(parse_capability_profiles(settings.agent_capability_profiles))
+    if settings.rag_runtime_profile == "gpu":
+        profiles.add("gpu")
+    return frozenset(profiles)
+
+
+def _required_profile(capability: str) -> str | None:
+    if capability == "stats.forecast":
+        return "forecast"
+    if capability.startswith("stats."):
+        return "stats"
+    if capability == "visualization.screenshot":
+        return "browser"
+    return None
 
 
 # ── 各 runner 实现 ──

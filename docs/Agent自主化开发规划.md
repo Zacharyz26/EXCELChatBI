@@ -25,8 +25,9 @@
 > 已确认 backend、frontend、Compose 三个 job 全绿，阶段 4 正式关闭。阶段 5A 与 5B-1～5B-5
 > 已完成；提交 `d5a672d` 的
 > [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
-> 已确认真实 Compose Resource 重连及 CPU/GPU 配置门禁全绿，阶段 5 工程关闭。当前进入 6A，
-> 6A-1 固定 TaskRun capability/tool 目录快照。CPU/GPU runtime semantic 与代表性场景签字
+> 已确认真实 Compose Resource 重连及 CPU/GPU 配置门禁全绿，阶段 5 工程关闭。6A-1 已固定
+> TaskRun capability/tool 目录快照，6A-2 已实现受治理 Tool 换代与 profile 可用性，等待 CI。
+> CPU/GPU runtime semantic 与代表性场景签字
 > 仍是发布债务，不得由工程门禁替代。
 
 ## 1. 总目标

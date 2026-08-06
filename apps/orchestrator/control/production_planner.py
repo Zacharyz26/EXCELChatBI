@@ -113,7 +113,11 @@ async def create_production_plan(
         if capability_catalog is None
         else capability_catalog
     )
-    capabilities = {str(item["name"]) for item in effective_catalog}
+    capabilities = {
+        str(item["name"])
+        for item in effective_catalog
+        if item.get("allowed") is not False
+    }
     required_capabilities = criterion_capabilities(contract, artifacts=artifacts)
 
     if blocking_clarification is not None:

@@ -601,6 +601,8 @@ async def test_resource_subscription_emits_versioned_notifications_and_unsubscri
     ) as session:
         capabilities = session.get_server_capabilities()
         assert capabilities is not None and capabilities.resources is not None
+        assert capabilities.tools is not None
+        assert capabilities.tools.listChanged is True
         assert capabilities.resources.subscribe is True
         assert capabilities.resources.listChanged is True
 
@@ -651,6 +653,20 @@ async def test_resource_subscription_emits_versioned_notifications_and_unsubscri
         provider.publish()
         with pytest.raises(TimeoutError):
             await transport.next_resource_notification(timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_sdk_buffer_receives_tool_list_changed_notification() -> None:
+    from mcp import types
+
+    notifications = MCPResourceNotificationBuffer()
+    await notifications(
+        types.ServerNotification(root=types.ToolListChangedNotification())
+    )
+
+    await notifications.next_tool_list_changed(timeout_seconds=0.1)
+    with pytest.raises(TimeoutError):
+        await notifications.next_tool_list_changed(timeout_seconds=0.01)
 
 
 @pytest.mark.asyncio
@@ -1006,6 +1022,23 @@ class _ScriptedTransport:
         self.closed = True
 
 
+class _MutableToolCatalogTransport(_ScriptedTransport):
+    def __init__(self, descriptors: tuple[MCPToolDescriptor, ...]) -> None:
+        super().__init__(descriptors)
+        self.notifications: asyncio.Queue[None] = asyncio.Queue()
+
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        async with asyncio.timeout(timeout_seconds):
+            await self.notifications.get()
+
+    async def publish(self) -> None:
+        await self.notifications.put(None)
+
+
 class _ScriptedResourceTransport(_ScriptedTransport):
     def __init__(
         self,
@@ -1080,6 +1113,37 @@ class _ScriptedResourceTransport(_ScriptedTransport):
     ) -> MCPResourceNotification:
         del timeout_seconds
         raise TimeoutError
+
+
+@pytest.mark.asyncio
+async def test_managed_gateway_validates_tool_catalog_updates_fail_closed() -> None:
+    descriptor = _adapter().list_tools()[0]
+    transport = _MutableToolCatalogTransport((descriptor,))
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(transport="streamable_http"),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"double"}),
+        transport_factory=lambda: transport,
+    )
+
+    initial = await gateway.validate_catalog()
+    assert initial.report.healthy is True
+    assert initial.descriptors == (descriptor,)
+    assert len(initial.content_hash) == 64
+
+    await transport.publish()
+    unchanged = await gateway.next_tool_catalog_update(timeout_seconds=0.1)
+    assert unchanged.content_hash == initial.content_hash
+    assert gateway.health.state == "healthy"
+
+    transport.descriptors = (replace(descriptor, description="drifted"),)
+    await transport.publish()
+    with pytest.raises(MCPProtocolError) as drifted:
+        await gateway.next_tool_catalog_update(timeout_seconds=0.1)
+    assert drifted.value.code == "mcp_catalog_drift"
+    assert gateway.health.state == "unhealthy"
+    assert gateway.health.last_error_code == "mcp_catalog_drift"
+    assert transport.closed is True
 
 
 @pytest.mark.asyncio

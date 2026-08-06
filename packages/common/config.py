@@ -12,7 +12,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from mcp_servers.common.service_catalog import validate_service_keys
+from mcp_servers.common.service_catalog import (
+    DEFAULT_AGENT_CAPABILITY_PROFILES,
+    parse_capability_profiles,
+    validate_service_keys,
+)
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -77,6 +81,7 @@ class Settings(BaseSettings):
     agent_mcp_connect_timeout_seconds: float = Field(default=10, ge=1, le=120)
     agent_mcp_max_reconnects: int = Field(default=1, ge=0, le=3)
     agent_mcp_allow_in_process_fallback: bool = False
+    agent_capability_profiles: str = ",".join(sorted(DEFAULT_AGENT_CAPABILITY_PROFILES))
 
     # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
     redis_host: str = "127.0.0.1"
@@ -138,6 +143,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_rag_profile(self) -> Settings:
         """拒绝不安全身份配置及会静默丢能力的 RAG 后端组合。"""
+        parse_capability_profiles(self.agent_capability_profiles)
         self.agent_mcp_service_token = _resolve_secret(
             value=self.agent_mcp_service_token,
             file_path=self.agent_mcp_service_token_file,

@@ -57,6 +57,7 @@ from apps.orchestrator.agent_loop import AgentLoopConfig, stream_agent_chat
 from apps.orchestrator.agent_tools import (
     AgentContext,
     build_registry,
+    enabled_capability_profiles_from_settings,
     mcp_client_config_from_settings,
 )
 
@@ -956,6 +957,9 @@ def _start_recovered_run(
             subject_id=principal.user_id,
         ),
         mcp_config=mcp_client_config_from_settings(execution.settings),
+        enabled_capability_profiles=enabled_capability_profiles_from_settings(
+            execution.settings
+        ),
     )
     settings = execution.settings
     stored_max_tool_calls = run.budget.get("max_tool_calls")

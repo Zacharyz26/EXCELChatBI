@@ -34,6 +34,26 @@ AGENT_MCP_TOOL_SERVICE = {
     for tool_name in tool_names
 }
 
+AGENT_CAPABILITY_PROFILES = frozenset({"browser", "forecast", "gpu", "stats"})
+DEFAULT_AGENT_CAPABILITY_PROFILES = frozenset({"browser", "stats"})
+
+
+def parse_capability_profiles(raw: str) -> frozenset[str]:
+    """Parse an exact, duplicate-free deployment profile allowlist."""
+    if not raw.strip():
+        return frozenset()
+    items = tuple(item.strip() for item in raw.split(","))
+    if any(not item for item in items):
+        raise ValueError("Agent capability profile 不能包含空名称")
+    if len(set(items)) != len(items):
+        raise ValueError("Agent capability profile 不能重复")
+    unknown = set(items) - AGENT_CAPABILITY_PROFILES
+    if unknown:
+        raise ValueError(
+            "未知 Agent capability profile: " + ", ".join(sorted(unknown))
+        )
+    return frozenset(items)
+
 
 def validate_service_keys(
     values: Mapping[str, str],

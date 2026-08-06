@@ -75,7 +75,11 @@ async def create_replan(
         if capability_catalog is None
         else capability_catalog
     )
-    capabilities = {str(item["name"]) for item in effective_catalog}
+    capabilities = {
+        str(item["name"])
+        for item in effective_catalog
+        if item.get("allowed") is not False
+    }
     required = criterion_capabilities(contract)
 
     if fallback_action == "block":

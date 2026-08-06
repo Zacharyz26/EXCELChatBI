@@ -75,6 +75,12 @@ class MCPTransport(Protocol):
         timeout_seconds: float = 5.0,
     ) -> MCPResourceNotification: ...
 
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -135,15 +141,27 @@ class InProcessMCPTransport:
             "进程内兼容传输不提供异步 Resource 通知",
         )
 
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        del timeout_seconds
+        raise MCPProtocolError(
+            "tool_notifications_unavailable",
+            "进程内兼容传输不提供异步 Tool 目录通知",
+        )
+
     async def aclose(self) -> None:
         return None
 
 
 class MCPResourceNotificationBuffer:
-    """Collect and validate standard Resource notifications from one SDK session."""
+    """Collect standard Resource and Tool catalog notifications from one SDK session."""
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[MCPResourceNotification] = asyncio.Queue()
+        self._tool_list_changed: asyncio.Queue[None] = asyncio.Queue()
 
     async def __call__(self, message: Any) -> None:
         from mcp import types
@@ -169,12 +187,20 @@ class MCPResourceNotificationBuffer:
                     metadata=metadata,
                 )
             )
+        elif isinstance(notification, types.ToolListChangedNotification):
+            await self._tool_list_changed.put(None)
 
     async def next(self, *, timeout_seconds: float = 5.0) -> MCPResourceNotification:
         if timeout_seconds <= 0:
             raise ValueError("Resource notification timeout 必须大于 0")
         async with asyncio.timeout(timeout_seconds):
             return await self._queue.get()
+
+    async def next_tool_list_changed(self, *, timeout_seconds: float = 5.0) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("Tool 目录通知 timeout 必须大于 0")
+        async with asyncio.timeout(timeout_seconds):
+            await self._tool_list_changed.get()
 
 
 class OfficialSDKSessionTransport:
@@ -406,6 +432,20 @@ class OfficialSDKSessionTransport:
             )
         return await self._resource_notifications.next(timeout_seconds=timeout_seconds)
 
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        if self._resource_notifications is None:
+            raise MCPProtocolError(
+                "tool_notifications_unavailable",
+                "当前 SDK Session 未配置 Tool 目录通知处理器",
+            )
+        await self._resource_notifications.next_tool_list_changed(
+            timeout_seconds=timeout_seconds
+        )
+
     async def aclose(self) -> None:
         return None
 
@@ -504,6 +544,14 @@ class OfficialSDKClientTransport:
         return await transport.next_resource_notification(
             timeout_seconds=timeout_seconds
         )
+
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        transport = await self._connected_transport()
+        await transport.next_tool_list_changed(timeout_seconds=timeout_seconds)
 
     async def aclose(self) -> None:
         async with self._owner_lock:
@@ -678,6 +726,27 @@ class DiscoveryReport:
 
 
 @dataclass(frozen=True, slots=True)
+class MCPToolCatalogUpdate:
+    """One strictly validated Tool catalog generation ready for publication."""
+
+    descriptors: tuple[MCPToolDescriptor, ...]
+    content_hash: str
+    report: DiscoveryReport
+
+
+def _tool_catalog_update(
+    descriptors: tuple[MCPToolDescriptor, ...],
+    report: DiscoveryReport,
+) -> MCPToolCatalogUpdate:
+    ordered = tuple(sorted(descriptors, key=lambda item: item.name))
+    return MCPToolCatalogUpdate(
+        descriptors=ordered,
+        content_hash=stable_hash([item.to_protocol_dict() for item in ordered]),
+        report=report,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ShadowComparison:
     tool_name: str
     schema_match: bool
@@ -709,19 +778,39 @@ class MCPClientGateway:
         self._allowed_tools = allowed_tools
         self._discovered: dict[str, MCPToolDescriptor] = {}
         self._healthy = False
+        self._last_report: DiscoveryReport | None = None
+
+    @property
+    def last_discovery_report(self) -> DiscoveryReport | None:
+        return self._last_report
+
+    @property
+    def discovered_tools(self) -> tuple[MCPToolDescriptor, ...]:
+        if not self._healthy:
+            return ()
+        return tuple(self._discovered[name] for name in sorted(self._discovered))
 
     async def refresh(self) -> DiscoveryReport:
         discovered_tools = await self._transport.list_tools()
         discovered = {tool.name: tool for tool in discovered_tools}
+        duplicate_names = {
+            tool.name
+            for tool in discovered_tools
+            if sum(item.name == tool.name for item in discovered_tools) > 1
+        }
         expected_names = set(self._expected) & set(self._allowed_tools)
         discovered_names = set(discovered)
         missing = tuple(sorted(expected_names - discovered_names))
         unexpected = tuple(sorted(discovered_names - expected_names))
         mismatched = tuple(
             sorted(
-                name
-                for name in expected_names & discovered_names
-                if self._expected[name].contract_hash != discovered[name].contract_hash
+                duplicate_names
+                | {
+                    name
+                    for name in expected_names & discovered_names
+                    if self._expected[name].contract_hash
+                    != discovered[name].contract_hash
+                }
             )
         )
         self._healthy = not missing and not unexpected and not mismatched
@@ -734,6 +823,7 @@ class MCPClientGateway:
             unexpected=unexpected,
             mismatched=mismatched,
         )
+        self._last_report = report
         _log.info(
             "mcp.discovery",
             healthy=report.healthy,
@@ -820,6 +910,14 @@ class MCPClientGateway:
         return await self._transport.next_resource_notification(
             timeout_seconds=timeout_seconds
         )
+
+    async def next_tool_list_changed(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        self._require_healthy_resources()
+        await self._transport.next_tool_list_changed(timeout_seconds=timeout_seconds)
 
     def _require_healthy_resources(self) -> None:
         if not self._healthy:
@@ -911,6 +1009,114 @@ class ManagedMCPClientGateway:
     @property
     def health(self) -> GatewayHealth:
         return self._health
+
+    async def validate_catalog(self) -> MCPToolCatalogUpdate:
+        """Rediscover and publish only an exact Host-approved Tool catalog."""
+        gateway: MCPClientGateway | None = None
+        try:
+            async with asyncio.timeout(self._config.connect_timeout_seconds):
+                gateway = await self._ready_gateway()
+                report = await gateway.refresh()
+        except TimeoutError as exc:
+            await self._invalidate("mcp_connect_timeout")
+            raise MCPProtocolError(
+                "mcp_connect_timeout",
+                "MCP 工具目录校验超时",
+                retryable=True,
+            ) from exc
+        except MCPProtocolError as exc:
+            await self._invalidate(exc.code)
+            raise
+        except Exception as exc:
+            error_code = _connection_error_code(exc)
+            await self._invalidate(error_code)
+            raise MCPProtocolError(
+                error_code,
+                "MCP 工具目录校验失败",
+                retryable=error_code != "mcp_authentication_failed",
+            ) from exc
+        if not report.healthy:
+            await self._invalidate("mcp_catalog_drift")
+            raise MCPProtocolError(
+                "mcp_catalog_drift",
+                "MCP 工具发现结果与静态契约不一致",
+            )
+        self._mark_healthy()
+        return _tool_catalog_update(gateway.discovered_tools, report)
+
+    async def next_tool_catalog_update(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> MCPToolCatalogUpdate:
+        """Wait for ``tools/list_changed`` and strictly validate its replacement."""
+        try:
+            async with asyncio.timeout(self._config.connect_timeout_seconds):
+                gateway = await self._ready_gateway()
+        except TimeoutError as exc:
+            await self._invalidate("mcp_connect_timeout")
+            raise MCPProtocolError(
+                "mcp_connect_timeout",
+                "MCP Tool 目录通知连接超时",
+                retryable=True,
+            ) from exc
+        except MCPProtocolError:
+            raise
+        except Exception as exc:
+            error_code = _connection_error_code(exc)
+            await self._invalidate(error_code)
+            raise MCPProtocolError(
+                error_code,
+                "MCP Tool 目录通知连接中断",
+                retryable=error_code != "mcp_authentication_failed",
+            ) from exc
+        try:
+            await gateway.next_tool_list_changed(timeout_seconds=timeout_seconds)
+        except TimeoutError:
+            # A quiet, healthy Tool notification stream is an ordinary timeout.
+            # Callers decide whether and when to poll again.
+            raise
+        except MCPProtocolError as exc:
+            if exc.code != "tool_notifications_unavailable":
+                await self._invalidate(exc.code)
+            raise
+        except Exception as exc:
+            error_code = _connection_error_code(exc)
+            await self._invalidate(error_code)
+            raise MCPProtocolError(
+                error_code,
+                "MCP Tool 目录通知连接中断",
+                retryable=error_code != "mcp_authentication_failed",
+            ) from exc
+        try:
+            async with asyncio.timeout(self._config.connect_timeout_seconds):
+                report = await gateway.refresh()
+        except TimeoutError as exc:
+            await self._invalidate("mcp_connect_timeout")
+            raise MCPProtocolError(
+                "mcp_connect_timeout",
+                "MCP Tool 目录变更校验超时",
+                retryable=True,
+            ) from exc
+        except MCPProtocolError as exc:
+            await self._invalidate(exc.code)
+            raise
+        except Exception as exc:
+            error_code = _connection_error_code(exc)
+            await self._invalidate(error_code)
+            raise MCPProtocolError(
+                error_code,
+                "MCP Tool 目录通知连接中断",
+                retryable=error_code != "mcp_authentication_failed",
+            ) from exc
+        if not report.healthy:
+            await self._invalidate("mcp_catalog_drift")
+            raise MCPProtocolError(
+                "mcp_catalog_drift",
+                "MCP Tool 目录变更未通过 Host 契约校验",
+            )
+        self._mark_healthy()
+        return _tool_catalog_update(gateway.discovered_tools, report)
 
     async def list_resource_page(
         self,

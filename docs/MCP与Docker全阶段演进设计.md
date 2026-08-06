@@ -25,8 +25,9 @@ v2.5 阶段 3–4 的实际交付与证据见
 Resource list/read，5B-2 已贯通定义/数据 Claim 和旧报告复核，5B-3 已实现目录分页与
 Resource 订阅通知；5B-4/5 的真实 Compose Resource 重连与 CPU/GPU 配置门禁已由提交
 `d5a672d` 的 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
-确认全绿，阶段 5 工程关闭；runtime semantic 与领域签字债务保留。当前进入 6A-1：
-TaskRun 固定不可变 capability/tool 目录；动态通知换代、profile 可用性和受控并行仍是后续交付。
+确认全绿，阶段 5 工程关闭；runtime semantic 与领域签字债务保留。6A-1 已固定 TaskRun
+capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable 投影；受控并行仍是
+后续交付。
 
 ## 2. 不随阶段变化的边界
 

@@ -157,6 +157,38 @@ async def test_retry_fallback_creates_deterministic_revision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_fallback_rejects_unavailable_frozen_capability() -> None:
+    trend = _definition("trend", "stats.trend", [], fallback="correct_parameters")
+    contract = build_minimal_contract(
+        run_id="run",
+        user_text="分析趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    with pytest.raises(ValueError, match="stats.trend"):
+        await create_replan(
+            contract=contract,
+            current_plan=_plan([trend]),
+            current_steps=[_step(trend, status="failed", position=0)],
+            observation=_observation("trend"),
+            datasets=[],
+            artifacts=[],
+            registry=_registry(),
+            gateway=None,
+            capability_catalog=[
+                {
+                    "name": "stats.trend",
+                    "allowed": False,
+                    "required_profile": "stats",
+                    "unavailable_reason": "profile_not_enabled",
+                }
+            ],
+        )
+
+
+@pytest.mark.asyncio
 async def test_block_fallback_persists_failed_step_as_blocked() -> None:
     trend = _definition("trend", "stats.trend", [], fallback="block")
     contract = build_minimal_contract(

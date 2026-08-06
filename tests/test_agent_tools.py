@@ -28,6 +28,7 @@ from apps.orchestrator.agent_tools import (  # noqa: E402
 )
 from mcp_servers.chart.server import build_server as build_chart  # noqa: E402
 from mcp_servers.common.contracts import ToolCapabilityMetadata  # noqa: E402
+from mcp_servers.common.service_catalog import parse_capability_profiles  # noqa: E402
 from mcp_servers.dataset_ops.server import build_server as build_ops  # noqa: E402
 from mcp_servers.excel_parser.server import build_server as build_excel  # noqa: E402
 from mcp_servers.report.server import build_server as build_report  # noqa: E402
@@ -195,6 +196,74 @@ def test_task_catalog_snapshot_detects_drift_and_hides_new_tools() -> None:
     assert AgentToolRegistry([]).validate_capability_catalog_snapshot(snapshot) == (
         "tool_unavailable:first",
     )
+
+
+def test_capability_profiles_explain_and_hide_unavailable_tools() -> None:
+    registry = build_registry(
+        excel=build_excel(),
+        stats=build_stats(),
+        chart=build_chart(),
+        dataset_ops=build_ops(),
+        report=build_report(),
+        retriever=cast(HybridRetriever, _FakeRetriever()),
+        enabled_capability_profiles=frozenset(),
+    )
+
+    catalog = {str(item["name"]): item for item in registry.capability_catalog()}
+    assert catalog["stats.trend"]["allowed"] is False
+    assert catalog["stats.trend"]["required_profile"] == "stats"
+    assert catalog["stats.trend"]["unavailable_reason"] == "profile_not_enabled"
+    assert catalog["visualization.screenshot"]["allowed"] is False
+    assert catalog["stats.forecast"]["allowed"] is False
+    assert catalog["stats.forecast"]["unavailable_reason"] == "profile_not_enabled"
+    assert catalog["visualization.chart"]["allowed"] is True
+
+    snapshot = registry.capability_catalog_snapshot()
+    allowed_tool_names = registry.tool_names_from_snapshot(snapshot)
+    assert "trend_analysis" not in allowed_tool_names
+    assert "chart_screenshot" not in allowed_tool_names
+    assert "gen_chart" in allowed_tool_names
+    profiles = {str(item["name"]): item for item in snapshot["profiles"]}
+    assert profiles["stats"]["enabled"] is False
+    assert profiles["browser"]["enabled"] is False
+    assert profiles["gpu"]["capabilities"] == []
+
+
+def test_enabled_forecast_profile_remains_unavailable_without_tool() -> None:
+    registry = AgentToolRegistry(
+        [],
+        enabled_capability_profiles=frozenset({"forecast"}),
+    )
+    forecast = next(
+        item
+        for item in registry.capability_catalog()
+        if item["name"] == "stats.forecast"
+    )
+    assert forecast["allowed"] is False
+    assert forecast["unavailable_reason"] == "tool_unavailable"
+
+
+@pytest.mark.parametrize("raw", ["stats,stats", "stats,unknown", "stats,"])
+def test_capability_profile_configuration_fails_closed(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_capability_profiles(raw)
+
+
+@pytest.mark.asyncio
+async def test_validated_remote_catalog_hashes_are_frozen_into_snapshot() -> None:
+    registry = _registry()
+
+    hashes = await registry.validate_remote_catalog()
+    snapshot = registry.capability_catalog_snapshot()
+
+    assert set(hashes) == {"agent-tools"}
+    assert snapshot["remote_catalogs"] == [
+        {
+            "service_name": "agent-tools",
+            "content_hash": hashes["agent-tools"],
+        }
+    ]
+    await registry.aclose()
 
 
 # ── execute 入口 ──

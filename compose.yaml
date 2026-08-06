@@ -207,6 +207,7 @@ services:
       AGENT_MCP_SERVICE_TOKEN_FILES_JSON: '{"data-tools":"/run/secrets/mcp_data_token","stats-tools":"/run/secrets/mcp_stats_token","chart-tools":"/run/secrets/mcp_chart_token","report-tools":"/run/secrets/mcp_report_token","knowledge-tools":"/run/secrets/mcp_knowledge_token"}'
       AGENT_MCP_CONTEXT_SIGNING_KEY_FILE: /run/secrets/mcp_context_signing_key
       AGENT_MCP_ALLOW_IN_PROCESS_FALLBACK: "false"
+      AGENT_CAPABILITY_PROFILES: ${AGENT_CAPABILITY_PROFILES:-stats,browser}
     volumes:
       - chatbi-db:/var/lib/chatbi/db
       - chatbi-uploads:/var/lib/chatbi/uploads

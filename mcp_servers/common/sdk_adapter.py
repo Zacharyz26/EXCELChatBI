@@ -303,22 +303,24 @@ def build_sdk_server(
             if active is not None and active.task is not None:
                 active.task.cancel()
 
-        original_get_capabilities = server.get_capabilities
+    original_get_capabilities = server.get_capabilities
 
-        def resource_capabilities(
-            notification_options: NotificationOptions,
-            experimental_capabilities: dict[str, dict[str, Any]],
-        ) -> types.ServerCapabilities:
+    def governed_capabilities(
+        notification_options: NotificationOptions,
+        experimental_capabilities: dict[str, dict[str, Any]],
+    ) -> types.ServerCapabilities:
+        notification_options.tools_changed = True
+        if adapter.has_resources:
             notification_options.resources_changed = True
-            capabilities = original_get_capabilities(
-                notification_options,
-                experimental_capabilities,
-            )
-            if capabilities.resources is not None:
-                capabilities.resources.subscribe = True
-            return capabilities
+        capabilities = original_get_capabilities(
+            notification_options,
+            experimental_capabilities,
+        )
+        if capabilities.resources is not None:
+            capabilities.resources.subscribe = True
+        return capabilities
 
-        server.get_capabilities = resource_capabilities  # type: ignore[method-assign]
+    server.get_capabilities = governed_capabilities  # type: ignore[method-assign]
 
     return server
 
