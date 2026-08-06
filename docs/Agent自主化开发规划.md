@@ -1,7 +1,7 @@
 # ChatBI Agent 自主化开发规划
 
-> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-05
-> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–4 已关闭，当前开发阶段 5B
+> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-06
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–5 工程关闭，当前开发阶段 6A
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 代表性盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
@@ -22,9 +22,12 @@
 > 自主等级、分析分支和反馈闭环，并补齐反馈进入 LLM Planner、辅助确认和标准只读副作用
 > 拒绝的 Compose 场景。竞态修复提交 `7f81fe2` 的
 > [run 30980088817](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/30980088817)
-> 已确认 backend、frontend、Compose 三个 job 全绿，阶段 4 正式关闭。阶段 5A 已完成
-> 版本化定义、受控公式和 Evidence 工程切片；当前进入 5B，首个切片实现按签名
-> project/subject 过滤的 MCP Resource list/read。正式产品验收仍待代表性场景签字。
+> 已确认 backend、frontend、Compose 三个 job 全绿，阶段 4 正式关闭。阶段 5A 与 5B-1～5B-5
+> 已完成；提交 `d5a672d` 的
+> [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
+> 已确认真实 Compose Resource 重连及 CPU/GPU 配置门禁全绿，阶段 5 工程关闭。当前进入 6A，
+> 6A-1 固定 TaskRun capability/tool 目录快照。CPU/GPU runtime semantic 与代表性场景签字
+> 仍是发布债务，不得由工程门禁替代。
 
 ## 1. 总目标
 
@@ -246,7 +249,7 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 > 3B/3C 交付记录：[`v2.5/阶段3B实施记录.md`](./v2.5/阶段3B实施记录.md) 与
 > [`v2.5/阶段3C实施记录.md`](./v2.5/阶段3C实施记录.md)，均已通过真实 CI 并关闭；
 > 3D/3E 也已由提交 `0b5980c` 的真实 CI 独立关闭，阶段 3 全部完成；
-> 当前开发入口：阶段 5B；阶段 4 已由提交 `7f81fe2` 的真实 Compose CI 关闭。
+> 当前开发入口：阶段 6A；阶段 5 已由提交 `d5a672d` 的真实 Compose CI 工程关闭。
 
 - 工作记忆：当前目标、计划、步骤和观察；
 - 对话记忆：最近原文、滚动摘要、实体映射，落地 `compaction.py` 与 `coref.py`；
@@ -292,7 +295,8 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 > `list/read` 与签名上下文隔离，5B-2 已贯通 Resource/Invocation/Evidence/Claim 和旧报告
 > 历史版本复核，5B-3 已实现项目目录、签名分页与订阅通知，5B-4 已实现双传输等价、
 > 重连重新订阅及 Compose 重启门禁，见
-> [`v2.5/阶段5B实施记录.md`](./v2.5/阶段5B实施记录.md)。真实 Compose 结果待 CI 确认；
+> [`v2.5/阶段5B实施记录.md`](./v2.5/阶段5B实施记录.md)。真实 Compose 门禁已由
+> [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157) 确认；
 > 5B-5 已实现原文/索引/模型缓存分离、Local/Milvus 切代回滚及 CPU/GPU profile 静态门禁；
 > 真实 profile 模型/semantic 等价和代表性场景签字仍待外部验收。
 
@@ -314,6 +318,11 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 和拒答语义。
 
 ### 阶段 6：自主分析能力
+
+> 当前切片：6A-1 以 SQLite v9 为每个 TaskRun 原子保存不可变 capability/tool 目录快照，
+> Planner、Replanner、恢复校验和模型工具暴露都固定读取该版本；实现与边界见
+> [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。动态 `tools/list_changed`、profile
+> 可用性和受控并行尚未完成。
 
 - 自动识别时间、指标、维度和 ID 角色；
 - 数据质量诊断与清洗建议；

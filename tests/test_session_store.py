@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9
 
 
 @pytest.fixture
@@ -62,6 +62,7 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "approval_operations",
         "domain_definitions",
         "domain_field_mappings",
+        "capability_catalog_snapshots",
     } <= tables
 
 
@@ -72,6 +73,34 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="不支持的 ChatBI 数据库版本 99"):
         SessionStore(str(db_path))
+
+
+def test_v8_database_is_backed_up_and_migrated_to_v9(tmp_path: Path) -> None:
+    db_path = tmp_path / "v8.db"
+    SessionStore(str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        for trigger in v9.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v9.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v9.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (v9.VERSION,),
+        )
+        connection.execute(f"PRAGMA user_version = {v8.VERSION}")
+
+    migrated = SessionStore(str(db_path))
+
+    assert migrated.schema_version == v9.VERSION
+    assert len(list(tmp_path.glob("v8.db.v8-backup.*.sqlite3"))) == 1
+    with sqlite3.connect(db_path) as connection:
+        table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (v9.ADDED_TABLES[0],),
+        ).fetchone()
+    assert table is not None
 
 
 def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None:
@@ -85,62 +114,23 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         "lineage_control_plane": "ready",
         "collaboration_control_plane": "ready",
         "domain_definition_control_plane": "ready",
+        "capability_catalog_control_plane": "ready",
     }
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 4"
-        )
-
-    with pytest.raises(RuntimeError, match="checksum"):
-        store.readiness_status()
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-            (v4.CHECKSUM, v4.VERSION),
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
-            (v5.VERSION,),
-        )
-
-    with pytest.raises(RuntimeError, match="checksum"):
-        store.readiness_status()
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-            (v5.CHECKSUM, v5.VERSION),
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
-            (v6.VERSION,),
-        )
-
-    with pytest.raises(RuntimeError, match="checksum"):
-        store.readiness_status()
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-            (v6.CHECKSUM, v6.VERSION),
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
-            (v7.VERSION,),
-        )
-
-    with pytest.raises(RuntimeError, match="checksum"):
-        store.readiness_status()
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
-            (v7.CHECKSUM, v7.VERSION),
-        )
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
-            (v8.VERSION,),
-        )
-
-    with pytest.raises(RuntimeError, match="checksum"):
-        store.readiness_status()
+    migrations = (v4, v5, v6, v7, v8, v9)
+    for index, migration in enumerate(migrations):
+        with sqlite3.connect(db_path) as connection:
+            if index > 0:
+                previous = migrations[index - 1]
+                connection.execute(
+                    "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                    (previous.CHECKSUM, previous.VERSION),
+                )
+            connection.execute(
+                "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = ?",
+                (migration.VERSION,),
+            )
+        with pytest.raises(RuntimeError, match="checksum"):
+            store.readiness_status()
 
 
 def test_project_crud_and_validation(store: SessionStore) -> None:

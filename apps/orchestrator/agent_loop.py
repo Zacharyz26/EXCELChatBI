@@ -74,6 +74,7 @@ from packages.session.store import SessionStore
 from packages.session.task_models import (
     ApprovalRecord,
     AutonomyMode,
+    CapabilityCatalogSnapshot,
     ObservationSource,
     RunStatus,
     StepStatus,
@@ -116,6 +117,14 @@ from apps.orchestrator.control.verifier import VerificationResult, verify_comple
 from apps.orchestrator.run_manager import RunControl
 
 _log = get_logger("orchestrator.agent_loop")
+
+
+class CapabilityCatalogDrift(RuntimeError):
+    """The registry can no longer honor the immutable TaskRun catalog."""
+
+    def __init__(self, issues: tuple[str, ...]) -> None:
+        super().__init__(";".join(issues))
+        self.issues = issues
 
 _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助用户完成数据分析。
 
@@ -615,6 +624,7 @@ async def _stream_agent_chat_inner(
         memory_reference_resolution: MemoryReferenceResolution | None = None
         reference_query = user_text
         effective_autonomy_mode = autonomy_mode
+        capability_snapshot: CapabilityCatalogSnapshot | None = None
         try:
             datasets = await run_in_threadpool(store.list_datasets, project_id)
         except (sqlite3.Error, ValueError) as exc:
@@ -724,6 +734,7 @@ async def _stream_agent_chat_inner(
                 },
             )
             return
+        current_capability_catalog = registry.capability_catalog_snapshot()
         try:
             if resume_existing:
                 stored_run = await run_in_threadpool(task_store.get_run, run_id)
@@ -744,6 +755,16 @@ async def _stream_agent_chat_inner(
                 conversation = stored_conversation
                 user_message_id = run.user_message_id
                 goal_event = None
+                capability_snapshot = await run_in_threadpool(
+                    task_store.get_capability_catalog_snapshot,
+                    run_id,
+                )
+                if capability_snapshot is None:
+                    capability_snapshot = await run_in_threadpool(
+                        task_store.ensure_capability_catalog_snapshot,
+                        run_id,
+                        current_capability_catalog,
+                    )
             else:
                 (
                     conversation,
@@ -762,6 +783,7 @@ async def _stream_agent_chat_inner(
                         "autonomy_mode": effective_autonomy_mode,
                     },
                     parent_run_id=parent_run_id,
+                    capability_catalog=current_capability_catalog,
                 )
                 user_message_id = user_message.id
                 store.invalidate_conversation(conversation_id)
@@ -776,6 +798,17 @@ async def _stream_agent_chat_inner(
                     per_message_max_chars=config.compaction_message_max_chars,
                 )
                 compaction_view = compaction_result.view
+                capability_snapshot = await run_in_threadpool(
+                    task_store.get_capability_catalog_snapshot,
+                    run_id,
+                )
+            if capability_snapshot is None:
+                raise RuntimeError("TaskRun capability 目录快照不存在")
+            catalog_issues = registry.validate_capability_catalog_snapshot(
+                capability_snapshot.catalog
+            )
+            if catalog_issues:
+                raise CapabilityCatalogDrift(catalog_issues)
             memory_snapshot, memory_records = await run_in_threadpool(
                 memory_store.create_snapshot,
                 project_id=project_id,
@@ -845,6 +878,28 @@ async def _stream_agent_chat_inner(
                     memory_snapshot_id=memory_snapshot.memory_snapshot_id,
                     principal=active_principal,
                 )
+        except CapabilityCatalogDrift as exc:
+            terminated = await run_in_threadpool(
+                task_store.terminate_active_run,
+                run_id,
+                status="failed",
+                reason="capability_catalog_drift",
+                event_type="run.failed",
+            )
+            if terminated is not None:
+                _failed_run, failed_event = terminated
+                yield _task_event(failed_event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": "capability_catalog_drift",
+                    "message": "任务冻结的工具能力目录已不可用，请创建新任务后重试。",
+                    "retryable": False,
+                    "run_id": run_id,
+                    "issues": list(exc.issues),
+                },
+            )
+            return
         except (
             CompactionAccessDenied,
             MemoryAccessDenied,
@@ -869,6 +924,14 @@ async def _stream_agent_chat_inner(
                 },
             )
             return
+
+        assert capability_snapshot is not None
+        frozen_capability_catalog = registry.capability_catalog_from_snapshot(
+            capability_snapshot.catalog
+        )
+        frozen_tool_names = registry.tool_names_from_snapshot(
+            capability_snapshot.catalog
+        )
 
         if context is None:  # 防御性分支：原子创建后正常情况下必然存在
             run, failed_event = await _transition_after_failure(
@@ -901,6 +964,8 @@ async def _stream_agent_chat_inner(
                 "autonomy_mode": effective_autonomy_mode,
                 "parent_run_id": run.parent_run_id,
                 "memory_snapshot_id": memory_snapshot.memory_snapshot_id,
+                "capability_catalog_snapshot_id": capability_snapshot.snapshot_id,
+                "capability_catalog_hash": capability_snapshot.content_hash,
                 "compaction_id": memory_snapshot.compaction_id,
                 "reference_status": (
                     reference_resolution.status
@@ -1078,6 +1143,7 @@ async def _stream_agent_chat_inner(
                             config.max_tool_calls,
                         ),
                         require_available_capabilities=enforce_plan,
+                        capability_catalog=frozen_capability_catalog,
                     )
                 production_plan = replace(
                     production_plan,
@@ -1293,6 +1359,7 @@ async def _stream_agent_chat_inner(
                             config.max_tool_calls,
                         ),
                         require_available_capabilities=enforce_plan,
+                        capability_catalog=frozen_capability_catalog,
                     )
                 production_plan = replace(
                     production_plan,
@@ -1639,9 +1706,12 @@ async def _stream_agent_chat_inner(
             )
             tools = (
                 (
-                    registry.openai_tools_for_capabilities(planned_capabilities)
+                    registry.openai_tools_for_capabilities(
+                        planned_capabilities,
+                        allowed_tool_names=frozen_tool_names,
+                    )
                     if plan_enforced
-                    else registry.openai_tools()
+                    else registry.openai_tools(allowed_tool_names=frozen_tool_names)
                 )
                 if tools_enabled
                 else None
@@ -2815,6 +2885,7 @@ async def _stream_agent_chat_inner(
                             datasets=datasets,
                             artifacts=latest_artifacts,
                             registry=registry,
+                            capability_catalog=frozen_capability_catalog,
                             planner_gateway=planner_gateway,
                             config=config,
                             tool_calls=calls_used,
@@ -2991,6 +3062,7 @@ async def _stream_agent_chat_inner(
                             datasets=datasets,
                             artifacts=latest_artifacts,
                             registry=registry,
+                            capability_catalog=frozen_capability_catalog,
                             planner_gateway=planner_gateway,
                             config=config,
                             tool_calls=calls_used,
@@ -3504,6 +3576,7 @@ async def _replan_from_failure(
     datasets: list[Dataset],
     artifacts: list[Artifact],
     registry: AgentToolRegistry,
+    capability_catalog: list[JsonObject],
     planner_gateway: PlannerGateway | None,
     config: AgentLoopConfig,
     tool_calls: int,
@@ -3536,6 +3609,7 @@ async def _replan_from_failure(
             gateway=planner_gateway,
             temperature=0.0,
             max_steps=min(config.planner_max_steps, config.max_tool_calls),
+            capability_catalog=capability_catalog,
         )
         revised_plan = _preserve_host_reference_assumptions(
             decision.plan,

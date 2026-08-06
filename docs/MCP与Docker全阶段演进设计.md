@@ -1,7 +1,7 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；阶段 3–4 已关闭，5A 已完成，当前开发入口为 5B
-> · 更新日期：2026-08-05
+> 状态：总体设计已完成；阶段 3–5 工程关闭，当前开发入口为阶段 6A
+> · 更新日期：2026-08-06
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
 ## 1. 文档定位
@@ -23,9 +23,10 @@ v2.5 阶段 3–4 的实际交付与证据见
 完成 backend、frontend 与 Compose 三任务验证并正式关闭。阶段 5A 已完成版本化定义、
 受控公式 Tool 和 Evidence 工程切片；5B-1 已实现按签名 project/subject 过滤的选择性 MCP
 Resource list/read，5B-2 已贯通定义/数据 Claim 和旧报告复核，5B-3 已实现目录分页与
-Resource 订阅通知；5B-4 已实现 stdio/HTTP Resource 等价、断线重连重新订阅和 Compose
-重启门禁，本地双传输探针已通过，真实 Compose 结果待 CI 确认。RAG 生命周期及阶段 5–6
-其余扩展仍是未来交付，不代表后续治理已经实现。
+Resource 订阅通知；5B-4/5 的真实 Compose Resource 重连与 CPU/GPU 配置门禁已由提交
+`d5a672d` 的 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
+确认全绿，阶段 5 工程关闭；runtime semantic 与领域签字债务保留。当前进入 6A-1：
+TaskRun 固定不可变 capability/tool 目录；动态通知换代、profile 可用性和受控并行仍是后续交付。
 
 ## 2. 不随阶段变化的边界
 
@@ -141,7 +142,8 @@ Resource 订阅通知；5B-4 已实现 stdio/HTTP Resource 等价、断线重连
 > SDK `list/read`；5B-2 已贯通定义版本、编译参数、数据 Evidence、Claim 和旧报告复核。
 > 5B-3 已交付项目目录、签名分页游标、订阅/退订与版本化通知；5B-4 已交付双传输等价、
 > Gateway 重新订阅及 Compose 重启门禁；5B-5 已交付原文/索引/模型缓存分离、Local/Milvus
-> 切代回滚和 CPU/GPU profile。真实 Compose/semantic 等价仍待 CI 与目标机器确认。
+> 切代回滚和 CPU/GPU profile。真实 Compose 配置/重连门禁已全绿；runtime semantic 等价与
+> 领域代表性签字仍待目标机器和领域负责人确认。
 
 - `knowledge-tools` 同时提供受控查询 Tool 和选择性只读 Resource。领域定义（业务指标只是
   其中一种）使用稳定 opaque URI，携带定义版本、生效时间、粒度、公式 hash、负责人和来源，
@@ -168,6 +170,10 @@ Resource 订阅通知；5B-4 已实现 stdio/HTTP Resource 等价、断线重连
 - RAG 容器重建、索引切代和回滚不破坏 MCP Resource/Claim 引用。
 
 ## 7. v2.5 阶段 6：自主分析能力
+
+> 当前实现：6A-1 已增加 SQLite v9 TaskRun capability/tool 目录快照；新任务创建时原子冻结，
+> Planner/Replanner/模型工具暴露读取固定目录，恢复时已冻结工具缺失或契约/路由漂移失败关闭。
+> `tools/list_changed` 的运行时接收与新任务目录换代、profile 可用性和受控并行尚未实现。
 
 ### MCP 设计
 

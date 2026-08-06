@@ -104,11 +104,16 @@ async def create_production_plan(
     temperature: float = 0.0,
     max_steps: int = 12,
     require_available_capabilities: bool = True,
+    capability_catalog: list[JsonObject] | None = None,
 ) -> ProductionPlan:
     """选择 fast/template/LLM 路径，生成并确定性验证统一 TaskPlan。"""
     context = build_planner_context(datasets=datasets, artifacts=artifacts)
-    capability_catalog = registry.capability_catalog()
-    capabilities = {str(item["name"]) for item in capability_catalog}
+    effective_catalog = (
+        registry.capability_catalog()
+        if capability_catalog is None
+        else capability_catalog
+    )
+    capabilities = {str(item["name"]) for item in effective_catalog}
     required_capabilities = criterion_capabilities(contract, artifacts=artifacts)
 
     if blocking_clarification is not None:
@@ -134,7 +139,7 @@ async def create_production_plan(
             planning_request=user_text,
             contract=contract.to_dict(),
             context=context,
-            capability_catalog=capability_catalog,
+            capability_catalog=effective_catalog,
             observations=[],
             criterion_capabilities=required_capabilities,
             temperature=temperature,

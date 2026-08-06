@@ -1,7 +1,7 @@
 # v2.5 记忆、自主性与协作
 
-> 状态：阶段 3–4 已关闭；5A 已完成，当前开发入口为 5B Resource/Evidence/RAG 生命周期
-> 更新日期：2026-08-05
+> 状态：阶段 3–5 工程关闭；当前开发入口为阶段 6A capability 目录与受控扩展
+> 更新日期：2026-08-06
 > 基线：v2.4 阶段 2A–2E 已实现，最新 Compose/容器 CI 全绿；G7 因人工评测
 > 代表性不足继续保持 `review_required`
 
@@ -18,12 +18,12 @@
 |---|---|---|
 | 3：记忆系统 | 工作/对话/项目记忆、上下文压缩、指代消解、Evidence 血缘与恢复 | 已完成并通过真实 Docker/Compose CI |
 | 4：人机协作 | 计划干预、审批、任务控制、恢复、自主等级、分支与反馈 | 已完成并通过真实 Docker/Compose CI |
-| 5：知识与数据联合推理 | 版本化领域定义、公式、口径冲突与知识 Resource | 5A、5B-1～5 已实现；5B-4/5 Compose CI、CPU/GPU semantic 等价和代表性签字仍待确认 |
-| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 等代表性场景冻结后实施和验收 |
+| 5：知识与数据联合推理 | 版本化领域定义、公式、口径冲突与知识 Resource | 工程关闭并通过真实 Compose CI；CPU/GPU runtime semantic 与代表性签字是发布债务 |
+| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 6A-1 TaskRun capability 目录冻结已启动；产品验收仍待代表性场景冻结 |
 
 受限 SQL 和 Code Interpreter 仍属于独立安全项目，不随 v2.5 普通功能自动启用。
 
-## 阶段 3–4 交付记录与阶段 5 入口
+## 阶段 3–5 交付记录与阶段 6 入口
 
 阶段 3 已完成，已失去现行作用的 3A–3E“实施计划”不再单独保留；目标、实际交付、
 边界和发布证据统一以实施记录为准：
@@ -58,12 +58,16 @@ ApprovalRecord 决定；批准后仍需显式恢复。8 条浏览器测试覆盖
 [run 30980088817](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/30980088817)
 已确认 backend、frontend 和 Compose 浏览器/重启/离线恢复三个 job 全绿，阶段 4 正式关闭。
 5A 已交付版本化定义、受控公式编译和 Evidence 接入，详见
-[阶段5A实施记录](./阶段5A实施记录.md)。当前进入 5B：首个切片已把领域定义接入按签名
+[阶段5A实施记录](./阶段5A实施记录.md)。5B 首个切片已把领域定义接入按签名
 project/subject 过滤的 MCP Resource list/read；5B-2 已贯通 Resource/Invocation/Evidence/
 Claim 并提供旧报告历史定义复核；5B-3 已实现项目目录、签名分页游标、订阅/退订和版本化
 变更通知；5B-4 已补 stdio/HTTP Resource 等价、Gateway 重新订阅和 Compose 服务重启门禁，
-本地双传输探针已通过，真实 Compose 结果待提交后 CI 确认，详见
-[阶段5B实施记录](./阶段5B实施记录.md)。RAG 生命周期和代表性场景签字仍未完成。
+5B-5 已补原文/索引/缓存分离、索引切代回滚与 CPU/GPU 配置门禁。提交 `d5a672d` 的
+[run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
+已确认 backend、frontend 与真实 Compose 三项全绿，阶段 5 工程关闭，详见
+[阶段5B实施记录](./阶段5B实施记录.md)。CPU/GPU runtime semantic 与领域代表性签字仍是
+显式发布债务。当前进入 [阶段6A](./阶段6A实施记录.md)：6A-1 先冻结每个 TaskRun 的
+capability/tool 目录，动态 `tools/list_changed` 与 profile 可用性留在后续切片。
 
 阶段 3 关闭状态：
 
@@ -96,4 +100,5 @@ Claim 并提供旧报告历史定义复核；5B-3 已实现项目目录、签名
 - [`../v2.4/README.md`](../v2.4/README.md)：v2.4 已实现范围和未关闭门禁；
 - [`../v2.4/Planner与Verifier评测设计.md`](../v2.4/Planner与Verifier评测设计.md)：
   现有冻结评测及代表性修订要求。
-- [`./阶段5B实施记录.md`](./阶段5B实施记录.md)：当前 Resource 接入与后续边界。
+- [`./阶段5B实施记录.md`](./阶段5B实施记录.md)：阶段 5 工程关闭证据与发布债务。
+- [`./阶段6A实施记录.md`](./阶段6A实施记录.md)：TaskRun capability 目录冻结与后续边界。

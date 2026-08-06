@@ -22,6 +22,7 @@ from packages.session.task_models import (
     ApprovalRecord,
     ApprovalRiskLevel,
     ApprovalStatus,
+    CapabilityCatalogSnapshot,
     Checkpoint,
     ClaimDraft,
     ClaimRecord,
@@ -51,6 +52,13 @@ class ControlConflict(RuntimeError):
     """A task-control command is unsafe for the current persisted state."""
 
 
+_EMPTY_CAPABILITY_CATALOG: JsonObject = {
+    "schema": "chatbi-capability-catalog-v1",
+    "capabilities": [],
+    "tools": [],
+}
+
+
 class TaskStore:
     """Task control-plane persistence sharing the SessionStore SQLite file."""
 
@@ -66,9 +74,10 @@ class TaskStore:
         contract: TaskContract,
         budget: JsonObject,
         parent_run_id: str | None = None,
+        capability_catalog: JsonObject | None = None,
     ) -> tuple[TaskRun, TaskEvent]:
         now = _utc_now()
-        run, event, snapshot = _new_run_records(
+        run, event, snapshot, capability_snapshot = _new_run_records(
             project_id=project_id,
             conversation_id=conversation_id,
             user_message_id=user_message_id,
@@ -76,10 +85,18 @@ class TaskStore:
             budget=budget,
             parent_run_id=parent_run_id,
             now=now,
+            capability_catalog=capability_catalog,
         )
         with self._connection() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            _insert_run_records(connection, run, contract, event, snapshot)
+            _insert_run_records(
+                connection,
+                run,
+                contract,
+                event,
+                snapshot,
+                capability_snapshot,
+            )
         return run, event
 
     def start_run_with_user_turn(
@@ -92,6 +109,7 @@ class TaskStore:
         contract: TaskContract,
         budget: JsonObject,
         parent_run_id: str | None = None,
+        capability_catalog: JsonObject | None = None,
     ) -> tuple[Conversation, Message, TaskRun, TaskEvent]:
         """Atomically create the user message, run, contract, goal and snapshot."""
         clean_content = _required_text(content, "消息内容")
@@ -105,7 +123,7 @@ class TaskStore:
             tool_calls=None,
             created_at=now,
         )
-        run, event, snapshot = _new_run_records(
+        run, event, snapshot, capability_snapshot = _new_run_records(
             project_id=project_id,
             conversation_id=conversation_id,
             user_message_id=message.id,
@@ -113,6 +131,7 @@ class TaskStore:
             budget=budget,
             parent_run_id=parent_run_id,
             now=now,
+            capability_catalog=capability_catalog,
         )
         with self._connection() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -153,7 +172,14 @@ class TaskStore:
                 "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
                 (title, now, conversation_id),
             )
-            _insert_run_records(connection, run, contract, event, snapshot)
+            _insert_run_records(
+                connection,
+                run,
+                contract,
+                event,
+                snapshot,
+                capability_snapshot,
+            )
 
         conversation = Conversation(
             id=str(row["id"]),
@@ -170,6 +196,55 @@ class TaskStore:
                 "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
             ).fetchone()
         return _run_from_row(row) if row is not None else None
+
+    def get_capability_catalog_snapshot(
+        self,
+        run_id: str,
+    ) -> CapabilityCatalogSnapshot | None:
+        """Return the immutable executable catalog bound to a TaskRun."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM capability_catalog_snapshots WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return _capability_catalog_snapshot_from_row(row) if row is not None else None
+
+    def ensure_capability_catalog_snapshot(
+        self,
+        run_id: str,
+        catalog: JsonObject,
+    ) -> CapabilityCatalogSnapshot:
+        """Backfill a pre-v9 TaskRun once; never replace an existing snapshot."""
+        normalized = _normalize_capability_catalog(catalog)
+        content_hash = _hash_text(_dump_json(normalized))
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT 1 FROM task_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            row = connection.execute(
+                "SELECT * FROM capability_catalog_snapshots WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                snapshot = _capability_catalog_snapshot_from_row(row)
+                if snapshot.content_hash != content_hash:
+                    raise ControlConflict("TaskRun capability 目录快照已冻结，禁止替换")
+                return snapshot
+            snapshot = CapabilityCatalogSnapshot(
+                snapshot_id=uuid.uuid4().hex,
+                run_id=run_id,
+                schema_version=1,
+                catalog=normalized,
+                content_hash=content_hash,
+                created_at=now,
+            )
+            _insert_capability_catalog_snapshot(connection, snapshot)
+        return snapshot
 
     def get_latest_run_for_conversation(
         self,
@@ -3562,7 +3637,8 @@ def _new_run_records(
     budget: JsonObject,
     parent_run_id: str | None,
     now: str,
-) -> tuple[TaskRun, TaskEvent, JsonObject]:
+    capability_catalog: JsonObject | None,
+) -> tuple[TaskRun, TaskEvent, JsonObject, CapabilityCatalogSnapshot]:
     run = TaskRun(
         run_id=contract.run_id,
         project_id=project_id,
@@ -3588,7 +3664,18 @@ def _new_run_records(
     event = TaskEvent(uuid.uuid4().hex, run.run_id, 1, "goal", goal_payload, now)
     snapshot = AgentState.from_run(run).to_dict()
     snapshot["last_sequence"] = event.sequence
-    return run, event, snapshot
+    normalized_catalog = _normalize_capability_catalog(
+        _EMPTY_CAPABILITY_CATALOG if capability_catalog is None else capability_catalog
+    )
+    capability_snapshot = CapabilityCatalogSnapshot(
+        snapshot_id=uuid.uuid4().hex,
+        run_id=run.run_id,
+        schema_version=1,
+        catalog=normalized_catalog,
+        content_hash=_hash_text(_dump_json(normalized_catalog)),
+        created_at=now,
+    )
+    return run, event, snapshot, capability_snapshot
 
 
 def _insert_run_records(
@@ -3597,6 +3684,7 @@ def _insert_run_records(
     contract: TaskContract,
     event: TaskEvent,
     snapshot: JsonObject,
+    capability_snapshot: CapabilityCatalogSnapshot,
 ) -> None:
     _validate_parent_run(connection, run)
     connection.execute(
@@ -3637,6 +3725,28 @@ def _insert_run_records(
         VALUES (?, ?, ?, ?)
         """,
         (run.run_id, run.state_version, _dump_json(snapshot), run.updated_at),
+    )
+    _insert_capability_catalog_snapshot(connection, capability_snapshot)
+
+
+def _insert_capability_catalog_snapshot(
+    connection: sqlite3.Connection,
+    snapshot: CapabilityCatalogSnapshot,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO capability_catalog_snapshots(
+            snapshot_id, run_id, schema_version, catalog_json, content_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot.snapshot_id,
+            snapshot.run_id,
+            snapshot.schema_version,
+            _dump_json(snapshot.catalog),
+            snapshot.content_hash,
+            snapshot.created_at,
+        ),
     )
 
 
@@ -3973,6 +4083,51 @@ def _claim_from_row(
         evidence_ids=evidence_ids,
         created_at=str(row["created_at"]),
     )
+
+
+def _capability_catalog_snapshot_from_row(
+    row: sqlite3.Row,
+) -> CapabilityCatalogSnapshot:
+    catalog = _normalize_capability_catalog(_load_object(str(row["catalog_json"])))
+    content_hash = str(row["content_hash"])
+    if _hash_text(_dump_json(catalog)) != content_hash:
+        raise ValueError("数据库中的 capability 目录快照 hash 不匹配")
+    return CapabilityCatalogSnapshot(
+        snapshot_id=str(row["snapshot_id"]),
+        run_id=str(row["run_id"]),
+        schema_version=int(row["schema_version"]),
+        catalog=catalog,
+        content_hash=content_hash,
+        created_at=str(row["created_at"]),
+    )
+
+
+def _normalize_capability_catalog(catalog: JsonObject) -> JsonObject:
+    """Validate and detach the persisted v1 catalog from caller-owned objects."""
+    if catalog.get("schema") != "chatbi-capability-catalog-v1":
+        raise ValueError("capability 目录 schema 不受支持")
+    raw_capabilities = catalog.get("capabilities")
+    raw_tools = catalog.get("tools")
+    if not isinstance(raw_capabilities, list) or not all(
+        isinstance(item, dict) for item in raw_capabilities
+    ):
+        raise ValueError("capability 目录 capabilities 格式非法")
+    if not isinstance(raw_tools, list) or not all(
+        isinstance(item, dict) for item in raw_tools
+    ):
+        raise ValueError("capability 目录 tools 格式非法")
+    capability_names = [item.get("name") for item in raw_capabilities]
+    tool_names = [item.get("tool_name") for item in raw_tools]
+    if not all(isinstance(item, str) and item.strip() for item in capability_names):
+        raise ValueError("capability 目录包含非法能力名")
+    if not all(isinstance(item, str) and item.strip() for item in tool_names):
+        raise ValueError("capability 目录包含非法工具名")
+    if len(set(capability_names)) != len(capability_names):
+        raise ValueError("capability 目录包含重复能力")
+    if len(set(tool_names)) != len(tool_names):
+        raise ValueError("capability 目录包含重复工具")
+    # Canonical JSON round-trip both validates serializability and deep-copies values.
+    return _load_object(_dump_json(catalog))
 
 
 def _dump_json(value: object) -> str:

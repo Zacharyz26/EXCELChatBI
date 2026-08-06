@@ -23,9 +23,11 @@ from apps.orchestrator.agent_tools import (  # noqa: E402
     AgentContext,
     AgentToolError,
     AgentToolRegistry,
+    AgentToolSpec,
     build_registry,
 )
 from mcp_servers.chart.server import build_server as build_chart  # noqa: E402
+from mcp_servers.common.contracts import ToolCapabilityMetadata  # noqa: E402
 from mcp_servers.dataset_ops.server import build_server as build_ops  # noqa: E402
 from mcp_servers.excel_parser.server import build_server as build_excel  # noqa: E402
 from mcp_servers.report.server import build_server as build_report  # noqa: E402
@@ -153,6 +155,46 @@ def test_tool_audit_metadata_comes_from_routed_contract() -> None:
     assert metadata["idempotent"] is False
     assert isinstance(metadata["contract_hash"], str)
     assert len(cast(str, metadata["contract_hash"])) == 64
+
+
+def test_task_catalog_snapshot_detects_drift_and_hides_new_tools() -> None:
+    first = AgentToolSpec(
+        name="first",
+        description="first contract",
+        parameters={"type": "object"},
+        runner=lambda _args: {},
+        metadata=ToolCapabilityMetadata(capabilities=("analysis.first",)),
+    )
+    frozen_registry = AgentToolRegistry([first])
+    snapshot = frozen_registry.capability_catalog_snapshot()
+    frozen_names = frozen_registry.tool_names_from_snapshot(snapshot)
+
+    added = AgentToolSpec(
+        name="added",
+        description="added later",
+        parameters={"type": "object"},
+        runner=lambda _args: {},
+        metadata=ToolCapabilityMetadata(capabilities=("analysis.added",)),
+    )
+    expanded_registry = AgentToolRegistry([first, added])
+    assert expanded_registry.validate_capability_catalog_snapshot(snapshot) == ()
+    assert [
+        item["function"]["name"]
+        for item in expanded_registry.openai_tools(allowed_tool_names=frozen_names)
+    ] == ["first"]
+
+    changed = AgentToolSpec(
+        name="first",
+        description="changed contract",
+        parameters={"type": "object"},
+        runner=lambda _args: {},
+        metadata=ToolCapabilityMetadata(capabilities=("analysis.first",)),
+    )
+    issues = AgentToolRegistry([changed]).validate_capability_catalog_snapshot(snapshot)
+    assert "tool_contract_drift:first:contract_hash" in issues
+    assert AgentToolRegistry([]).validate_capability_catalog_snapshot(snapshot) == (
+        "tool_unavailable:first",
+    )
 
 
 # ── execute 入口 ──

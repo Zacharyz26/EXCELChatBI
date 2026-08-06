@@ -117,6 +117,69 @@ def test_task_run_events_transition_and_optimistic_version(tmp_path: Path) -> No
         )
 
 
+def test_task_run_capability_catalog_is_atomic_and_immutable(tmp_path: Path) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="capability-snapshot-run",
+        user_text="冻结工具目录",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    catalog = {
+        "schema": "chatbi-capability-catalog-v1",
+        "capabilities": [
+            {
+                "name": "data.profile",
+                "allowed": True,
+                "tool_names": ["get_data_profile"],
+            }
+        ],
+        "tools": [
+            {
+                "tool_name": "get_data_profile",
+                "service_name": "excel-parser",
+                "tool_version": "1.0.0",
+                "contract_hash": "a" * 64,
+                "capabilities": ["data.profile"],
+            }
+        ],
+    }
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 1},
+        capability_catalog=catalog,
+    )
+
+    snapshot = tasks.get_capability_catalog_snapshot(run.run_id)
+    assert snapshot is not None
+    assert snapshot.catalog == catalog
+    assert len(snapshot.content_hash) == 64
+    catalog["tools"] = []
+    assert tasks.get_capability_catalog_snapshot(run.run_id) == snapshot
+    assert tasks.ensure_capability_catalog_snapshot(run.run_id, snapshot.catalog) == snapshot
+    with pytest.raises(ControlConflict, match="已冻结"):
+        tasks.ensure_capability_catalog_snapshot(
+            run.run_id,
+            {
+                "schema": "chatbi-capability-catalog-v1",
+                "capabilities": [],
+                "tools": [],
+            },
+        )
+    with sqlite3.connect(session.db_path) as connection, pytest.raises(
+        sqlite3.IntegrityError,
+        match="immutable",
+    ):
+        connection.execute(
+            "UPDATE capability_catalog_snapshots SET catalog_json = '{}' WHERE run_id = ?",
+            (run.run_id,),
+        )
+
+
 def test_latest_conversation_run_is_server_authoritative(tmp_path: Path) -> None:
     session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
     first_contract = build_minimal_contract(

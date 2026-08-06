@@ -151,10 +151,15 @@ class FakeRegistry:
         self._handlers = handlers
         self.executed: list[tuple[str, str]] = []
 
-    def openai_tools(self) -> list[dict[str, Any]]:
+    def openai_tools(
+        self,
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
         return [
             {"type": "function", "function": {"name": name, "parameters": {}}}
             for name in self._handlers
+            if allowed_tool_names is None or name in allowed_tool_names
         ]
 
     def capability_catalog(self) -> list[dict[str, Any]]:
@@ -171,12 +176,64 @@ class FakeRegistry:
             for capability in self.capabilities_for_tool(name)
         ]
 
-    def openai_tools_for_capabilities(self, capabilities: set[str]) -> list[dict[str, Any]]:
+    def openai_tools_for_capabilities(
+        self,
+        capabilities: set[str],
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
         return [
             item
-            for item in self.openai_tools()
+            for item in self.openai_tools(allowed_tool_names=allowed_tool_names)
             if capabilities.intersection(self.capabilities_for_tool(str(item["function"]["name"])))
         ]
+
+    def capability_catalog_snapshot(self) -> dict[str, Any]:
+        capabilities = self.capability_catalog()
+        for item in capabilities:
+            item["tool_names"] = [
+                name
+                for name in self._handlers
+                if item["name"] in self.capabilities_for_tool(name)
+            ]
+        return {
+            "schema": "chatbi-capability-catalog-v1",
+            "capabilities": capabilities,
+            "tools": [
+                {
+                    "tool_name": name,
+                    "service_name": "fake",
+                    "tool_version": "1.0.0",
+                    "contract_hash": hashlib.sha256(name.encode()).hexdigest(),
+                    "capabilities": list(self.capabilities_for_tool(name)),
+                }
+                for name in self._handlers
+            ],
+        }
+
+    def validate_capability_catalog_snapshot(
+        self,
+        snapshot: dict[str, Any],
+    ) -> tuple[str, ...]:
+        current = {
+            item["tool_name"]: item
+            for item in self.capability_catalog_snapshot()["tools"]
+        }
+        return tuple(
+            f"tool_unavailable:{item['tool_name']}"
+            for item in snapshot["tools"]
+            if item["tool_name"] not in current
+        )
+
+    @staticmethod
+    def capability_catalog_from_snapshot(
+        snapshot: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return list(snapshot["capabilities"])
+
+    @staticmethod
+    def tool_names_from_snapshot(snapshot: dict[str, Any]) -> frozenset[str]:
+        return frozenset(item["tool_name"] for item in snapshot["tools"])
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
         mapping = {
@@ -589,6 +646,72 @@ async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
     assert run.status == "paused"
     assert run.autonomy_mode == "assisted"
     assert tasks.list_invocations(run.run_id) == []
+
+
+@pytest.mark.asyncio
+async def test_resume_fails_closed_when_frozen_tool_is_unavailable(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    initial_events = await _run_loop(
+        store,
+        conversation,
+        ScriptedGateway([]),
+        FakeRegistry({"get_data_profile": lambda _: {}}),
+        user_text="查看数据画像",
+        enforce_plan=True,
+        autonomy_mode="assisted",
+    )
+    run_id = cast(str, dict(initial_events)["meta"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    paused = tasks.get_run(run_id)
+    assert paused is not None and paused.status == "paused"
+    resumed, _, _ = tasks.control_transition(
+        run_id,
+        expected_version=paused.state_version,
+        idempotency_key="resume-with-catalog-drift",
+        command="resume",
+        allowed_statuses={"paused"},
+        status="running",
+        event_type="run.resumed",
+        payload={"reason": "catalog_drift_test"},
+        require_checkpoint=True,
+    )
+    raw = [
+        item
+        async for item in stream_agent_chat(
+            conversation_id=conversation.id,
+            project_id=conversation.project_id,
+            user_text="查看数据画像",
+            store=store,
+            gateway=cast(Any, ScriptedGateway([])),
+            registry=cast(AgentToolRegistry, FakeRegistry({})),
+            locks=ConversationLockPool(),
+            config=AgentLoopConfig(tool_result_max_chars=500),
+            run_id=resumed.run_id,
+            resume_existing=True,
+        )
+    ]
+    events = _events(raw)
+
+    error = next(payload for name, payload in events if name == "error")
+    assert error["code"] == "capability_catalog_drift"
+    assert error["issues"] == ["tool_unavailable:get_data_profile"]
+    failed = tasks.get_run(run_id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.terminal_reason == "capability_catalog_drift"
+    assert tasks.list_invocations(run_id) == []
 
 
 @pytest.mark.asyncio

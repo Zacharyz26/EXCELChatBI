@@ -56,6 +56,7 @@ async def create_replan(
     gateway: PlannerGateway | None,
     temperature: float = 0.0,
     max_steps: int = 12,
+    capability_catalog: list[JsonObject] | None = None,
 ) -> ReplanDecision:
     """依据一次失败 Observation 修订计划，保留已完成步骤。"""
     logical_step_id = str(observation.get("step_id", ""))
@@ -69,9 +70,12 @@ async def create_replan(
     observation_id = str(observation.get("observation_id", "unknown"))
     reason = f"observation:{observation_id}:{code}"[:200]
     fallback_action = _fallback_action(failed_step)
-    capabilities = {
-        str(item["name"]) for item in registry.capability_catalog()
-    }
+    effective_catalog = (
+        registry.capability_catalog()
+        if capability_catalog is None
+        else capability_catalog
+    )
+    capabilities = {str(item["name"]) for item in effective_catalog}
     required = criterion_capabilities(contract)
 
     if fallback_action == "block":
@@ -150,7 +154,7 @@ async def create_replan(
         planning_request=contract.goal,
         contract=contract.to_dict(),
         context=context,
-        capability_catalog=registry.capability_catalog(),
+        capability_catalog=effective_catalog,
         observations=[_safe_observation(observation)],
         criterion_capabilities=required,
         temperature=temperature,

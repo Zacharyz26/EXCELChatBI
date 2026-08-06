@@ -18,7 +18,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding
 from mcp_servers.common.base_server import MCPServer
@@ -262,9 +262,17 @@ class AgentToolRegistry:
         """已注册工具名（稳定顺序）。"""
         return list(self._specs)
 
-    def openai_tools(self) -> list[dict[str, Any]]:
+    def openai_tools(
+        self,
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """全部工具的 OpenAI 兼容定义（喂给网关 tools 参数）。"""
-        return [s.openai_tool() for s in self._specs.values()]
+        return [
+            spec.openai_tool()
+            for spec in self._specs.values()
+            if allowed_tool_names is None or spec.name in allowed_tool_names
+        ]
 
     def capability_catalog(self) -> list[JsonObject]:
         """从实际注册工具生成 Planner 能力目录，避免另维护一份静态清单。"""
@@ -291,14 +299,108 @@ class AgentToolRegistry:
                 existing["artifact_types"] = sorted(artifact_types)
         return [catalog[name] for name in sorted(catalog)]
 
+    def capability_catalog_snapshot(self) -> JsonObject:
+        """Build the immutable, executable v1 catalog persisted with a TaskRun."""
+        capabilities = self.capability_catalog()
+        for item in capabilities:
+            name = str(item["name"])
+            item["tool_names"] = list(self.tool_names_for_capability(name))
+        tools: list[JsonObject] = []
+        for tool_name in sorted(self._specs):
+            descriptor = self._specs[tool_name].mcp_descriptor()
+            metadata = descriptor.metadata
+            tools.append(
+                {
+                    "service_name": self._mcp_tool_routes[tool_name],
+                    "tool_name": tool_name,
+                    "tool_version": metadata.tool_version,
+                    "contract_hash": descriptor.contract_hash,
+                    "capabilities": list(metadata.capabilities),
+                    "risk_level": metadata.risk_level,
+                    "required_permissions": list(metadata.required_permissions),
+                    "artifact_types": list(metadata.artifact_types),
+                    "read_only": metadata.read_only,
+                    "idempotent": metadata.idempotent,
+                    "destructive": metadata.destructive,
+                    "open_world": metadata.open_world,
+                    "postconditions_version": metadata.postconditions_version,
+                }
+            )
+        return {
+            "schema": "chatbi-capability-catalog-v1",
+            "capabilities": capabilities,
+            "tools": tools,
+        }
+
+    def validate_capability_catalog_snapshot(
+        self,
+        snapshot: JsonObject,
+    ) -> tuple[str, ...]:
+        """Fail closed when a frozen tool disappeared or its contract/route drifted."""
+        if snapshot.get("schema") != "chatbi-capability-catalog-v1":
+            return ("unsupported_catalog_schema",)
+        raw_tools = snapshot.get("tools")
+        if not isinstance(raw_tools, list):
+            return ("invalid_catalog_tools",)
+        current = {
+            str(item["tool_name"]): item
+            for item in cast(list[JsonObject], self.capability_catalog_snapshot()["tools"])
+        }
+        issues: list[str] = []
+        seen: set[str] = set()
+        for raw_tool in raw_tools:
+            if not isinstance(raw_tool, dict):
+                issues.append("invalid_catalog_tool")
+                continue
+            tool = cast(JsonObject, raw_tool)
+            tool_name = tool.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name or tool_name in seen:
+                issues.append("invalid_or_duplicate_tool_name")
+                continue
+            seen.add(tool_name)
+            current_tool = current.get(tool_name)
+            if current_tool is None:
+                issues.append(f"tool_unavailable:{tool_name}")
+                continue
+            for key in (
+                "service_name",
+                "tool_version",
+                "contract_hash",
+                "capabilities",
+            ):
+                if tool.get(key) != current_tool.get(key):
+                    issues.append(f"tool_contract_drift:{tool_name}:{key}")
+        return tuple(issues)
+
+    @staticmethod
+    def capability_catalog_from_snapshot(snapshot: JsonObject) -> list[JsonObject]:
+        raw = snapshot.get("capabilities")
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise ValueError("TaskRun capability 目录快照格式非法")
+        return [cast(JsonObject, item) for item in raw]
+
+    @staticmethod
+    def tool_names_from_snapshot(snapshot: JsonObject) -> frozenset[str]:
+        raw = snapshot.get("tools")
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise ValueError("TaskRun tool 目录快照格式非法")
+        names = [item.get("tool_name") for item in raw]
+        if not all(isinstance(item, str) and item for item in names):
+            raise ValueError("TaskRun tool 目录快照包含非法工具名")
+        return frozenset(cast(list[str], names))
+
     def openai_tools_for_capabilities(
-        self, capabilities: set[str]
+        self,
+        capabilities: set[str],
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         """只暴露当前计划声明的 capability 对应工具。"""
         return [
             spec.openai_tool()
             for spec in self._specs.values()
             if capabilities.intersection(spec.metadata.capabilities)
+            and (allowed_tool_names is None or spec.name in allowed_tool_names)
         ]
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:

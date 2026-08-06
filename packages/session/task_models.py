@@ -55,6 +55,18 @@ class TaskRun:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityCatalogSnapshot:
+    """A TaskRun-scoped immutable view of executable tool capabilities."""
+
+    snapshot_id: str
+    run_id: str
+    schema_version: int
+    catalog: JsonObject
+    content_hash: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskEvent:
     event_id: str
     run_id: str
