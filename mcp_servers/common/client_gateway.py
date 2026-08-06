@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeVar
 
@@ -410,6 +410,16 @@ class OfficialSDKSessionTransport:
         return None
 
 
+@dataclass(slots=True)
+class _OfficialSDKConnectionOwner:
+    """State shared with the single task that owns SDK async contexts."""
+
+    stop: asyncio.Event
+    ready: asyncio.Future[OfficialSDKSessionTransport]
+    task: asyncio.Task[None] | None = None
+    failure: BaseException | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class MCPClientConfig:
     """Static, Host-owned MCP transport configuration.
@@ -435,18 +445,20 @@ class MCPClientConfig:
 class OfficialSDKClientTransport:
     """Lazy official-SDK client for stdio or stateful Streamable HTTP.
 
-    A connection owns one initialized ``ClientSession``. Closing an unhealthy
-    connection terminates the underlying subprocess/HTTP session, so the next
-    gateway call performs a clean initialize + tools/list cycle.
+    A dedicated task owns every async context for one initialized
+    ``ClientSession``. AnyIO cancel scopes must be exited by the task that
+    entered them; request, reconnect and shutdown callers may otherwise be
+    different tasks. Closing an unhealthy connection signals and joins its
+    owner, so the next managed gateway performs a clean initialize +
+    tools/list cycle.
     """
 
     def __init__(self, config: MCPClientConfig) -> None:
         if config.transport not in {"stdio", "streamable_http"}:
             raise ValueError("OfficialSDKClientTransport 仅支持 stdio/streamable_http")
         self._config = config
-        self._stack: AsyncExitStack | None = None
-        self._session_transport: OfficialSDKSessionTransport | None = None
-        self._resource_notifications = MCPResourceNotificationBuffer()
+        self._owner: _OfficialSDKConnectionOwner | None = None
+        self._owner_lock = asyncio.Lock()
 
     async def list_tools(self) -> tuple[MCPToolDescriptor, ...]:
         transport = await self._connected_transport()
@@ -494,25 +506,66 @@ class OfficialSDKClientTransport:
         )
 
     async def aclose(self) -> None:
-        stack, self._stack = self._stack, None
-        self._session_transport = None
-        if stack is not None:
-            await stack.aclose()
-        self._resource_notifications = MCPResourceNotificationBuffer()
+        async with self._owner_lock:
+            owner, self._owner = self._owner, None
+        if owner is not None:
+            await self._stop_owner(owner)
 
     async def _connected_transport(self) -> OfficialSDKSessionTransport:
-        if self._session_transport is not None:
-            return self._session_transport
+        async with self._owner_lock:
+            owner = self._owner
+            if owner is None:
+                owner = self._new_owner()
+                self._owner = owner
+        if owner.task is not None and owner.task.done():
+            await self._discard_owner(owner)
+            raise self._owner_disconnected(owner) from owner.failure
         try:
             async with asyncio.timeout(self._config.connect_timeout_seconds):
-                await self._connect()
+                transport = await asyncio.shield(owner.ready)
         except BaseException:
-            await self.aclose()
+            await self._discard_owner(owner)
             raise
-        assert self._session_transport is not None
-        return self._session_transport
+        if owner.task is not None and owner.task.done():
+            await self._discard_owner(owner)
+            raise self._owner_disconnected(owner) from owner.failure
+        return transport
 
-    async def _connect(self) -> None:
+    def _new_owner(self) -> _OfficialSDKConnectionOwner:
+        loop = asyncio.get_running_loop()
+        owner = _OfficialSDKConnectionOwner(
+            stop=asyncio.Event(),
+            ready=loop.create_future(),
+        )
+        owner.task = asyncio.create_task(
+            self._run_connection_owner(owner),
+            name=f"mcp-{self._config.transport}-connection-owner",
+        )
+        return owner
+
+    async def _run_connection_owner(
+        self,
+        owner: _OfficialSDKConnectionOwner,
+    ) -> None:
+        try:
+            async with self._open_connection() as transport:
+                if not owner.ready.done():
+                    owner.ready.set_result(transport)
+                await owner.stop.wait()
+        except BaseException as exc:
+            owner.failure = exc
+            if not owner.ready.done():
+                if owner.stop.is_set():
+                    owner.ready.cancel()
+                elif isinstance(exc, Exception):
+                    owner.ready.set_exception(exc)
+                else:
+                    owner.ready.set_exception(self._owner_disconnected(owner))
+
+    @asynccontextmanager
+    async def _open_connection(
+        self,
+    ) -> AsyncIterator[OfficialSDKSessionTransport]:
         # Optional MCP runtime imports stay off the compatibility-only API path.
         import httpx
         from mcp import ClientSession
@@ -521,9 +574,8 @@ class OfficialSDKClientTransport:
 
         from mcp_servers.common.sdk_adapter import MCP_PROTOCOL_VERSION
 
-        stack = AsyncExitStack()
-        await stack.__aenter__()
-        try:
+        resource_notifications = MCPResourceNotificationBuffer()
+        async with AsyncExitStack() as stack:
             if self._config.transport == "stdio":
                 if not self._config.stdio_command:
                     raise MCPProtocolError(
@@ -563,7 +615,7 @@ class OfficialSDKClientTransport:
                 ClientSession(
                     read_stream,
                     write_stream,
-                    message_handler=self._resource_notifications,
+                    message_handler=resource_notifications,
                 )
             )
             initialized = await session.initialize()
@@ -572,17 +624,47 @@ class OfficialSDKClientTransport:
                     "incompatible_protocol",
                     "MCP Server 协议版本不在固定 allowlist",
                 )
-        except BaseException:
-            await stack.aclose()
-            raise
-        self._stack = stack
-        self._session_transport = OfficialSDKSessionTransport(
-            session,
-            context_signing_key=(
-                self._config.context_signing_key or self._config.service_token or None
-            ),
-            resource_notifications=self._resource_notifications,
+            yield OfficialSDKSessionTransport(
+                session,
+                context_signing_key=(
+                    self._config.context_signing_key
+                    or self._config.service_token
+                    or None
+                ),
+                resource_notifications=resource_notifications,
+            )
+
+    async def _discard_owner(self, owner: _OfficialSDKConnectionOwner) -> None:
+        async with self._owner_lock:
+            if self._owner is owner:
+                self._owner = None
+        await self._stop_owner(owner)
+
+    @staticmethod
+    async def _stop_owner(owner: _OfficialSDKConnectionOwner) -> None:
+        owner.stop.set()
+        task = owner.task
+        if task is None or task is asyncio.current_task():
+            return
+        if not owner.ready.done():
+            # A stop event cannot interrupt SDK initialize(). Cancellation is
+            # delivered inside the owner task, which still unwinds every
+            # AnyIO context from the task that entered it.
+            task.cancel()
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                raise
+
+    @staticmethod
+    def _owner_disconnected(owner: _OfficialSDKConnectionOwner) -> ConnectionError:
+        detail = (
+            f": {type(owner.failure).__name__}"
+            if owner.failure is not None
+            else ""
         )
+        return ConnectionError(f"MCP SDK connection owner stopped{detail}")
 
 
 @dataclass(frozen=True, slots=True)

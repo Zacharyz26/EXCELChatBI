@@ -801,6 +801,72 @@ async def test_official_sdk_client_transport_stdio_round_trip(
 
 
 @pytest.mark.asyncio
+async def test_official_sdk_transport_closes_contexts_in_owner_task() -> None:
+    class _EmptySession:
+        async def list_tools(self) -> Any:
+            return type("ToolList", (), {"tools": ()})()
+
+    class _TaskOwnedTransport(OfficialSDKClientTransport):
+        def __init__(self) -> None:
+            super().__init__(MCPClientConfig(transport="stdio"))
+            self.entered_task: asyncio.Task[Any] | None = None
+            self.exited_task: asyncio.Task[Any] | None = None
+
+        @asynccontextmanager
+        async def _open_connection(
+            self,
+        ) -> AsyncIterator[OfficialSDKSessionTransport]:
+            self.entered_task = asyncio.current_task()
+            try:
+                yield OfficialSDKSessionTransport(_EmptySession())
+            finally:
+                self.exited_task = asyncio.current_task()
+
+    transport = _TaskOwnedTransport()
+    request_task = asyncio.create_task(transport.list_tools())
+
+    discovered = await request_task
+    await asyncio.wait_for(transport.aclose(), timeout=5)
+
+    assert discovered == ()
+    assert transport.entered_task is transport.exited_task
+    assert transport.entered_task is not request_task
+
+
+@pytest.mark.asyncio
+async def test_official_sdk_transport_cancels_connect_in_owner_task() -> None:
+    class _SlowConnectTransport(OfficialSDKClientTransport):
+        def __init__(self) -> None:
+            super().__init__(
+                MCPClientConfig(
+                    transport="streamable_http",
+                    connect_timeout_seconds=0.01,
+                )
+            )
+            self.entered_task: asyncio.Task[Any] | None = None
+            self.exited_task: asyncio.Task[Any] | None = None
+
+        @asynccontextmanager
+        async def _open_connection(
+            self,
+        ) -> AsyncIterator[OfficialSDKSessionTransport]:
+            self.entered_task = asyncio.current_task()
+            try:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+                yield  # pragma: no cover
+            finally:
+                self.exited_task = asyncio.current_task()
+
+    transport = _SlowConnectTransport()
+
+    with pytest.raises(TimeoutError):
+        await transport.list_tools()
+
+    assert transport.entered_task is transport.exited_task
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_client_cancellation_keeps_session_usable() -> None:
     started = threading.Event()
     release = threading.Event()
