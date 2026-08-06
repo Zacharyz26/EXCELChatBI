@@ -192,8 +192,12 @@ class _FixtureRegistry:
         self.project_id = project_id
         self.executed: list[tuple[str, dict[str, Any]]] = []
 
-    def openai_tools(self) -> list[dict[str, Any]]:
-        return [
+    def openai_tools(
+        self,
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        tools = [
             _tool("get_data_profile", "获取数据画像与质量概况。", ["dataset_ref"]),
             _tool(
                 "trend_analysis",
@@ -238,6 +242,12 @@ class _FixtureRegistry:
                 ["analysis_ids", "title", "include_pdf"],
             ),
         ]
+        return [
+            item
+            for item in tools
+            if allowed_tool_names is None
+            or str(item["function"]["name"]) in allowed_tool_names
+        ]
 
     def capability_catalog(self) -> list[JsonObject]:
         """Expose the production Planner catalog shape for Stage 2 evaluation."""
@@ -280,14 +290,140 @@ class _FixtureRegistry:
     def openai_tools_for_capabilities(
         self,
         capabilities: set[str],
+        *,
+        allowed_tool_names: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         return [
             item
-            for item in self.openai_tools()
+            for item in self.openai_tools(allowed_tool_names=allowed_tool_names)
             if capabilities.intersection(
                 self.capabilities_for_tool(str(item["function"]["name"]))
             )
         ]
+
+    async def validate_remote_catalog(self) -> dict[str, str]:
+        """Publish the deterministic in-memory fixture catalog for this run."""
+        return {"fixture-tools": self._remote_catalog_hash()}
+
+    def start_catalog_watch(self) -> None:
+        """The immutable evaluation fixture has no runtime catalog changes."""
+
+    def capability_catalog_snapshot(self) -> JsonObject:
+        capabilities = self.capability_catalog()
+        for item in capabilities:
+            capability = str(item["name"])
+            item["tool_names"] = [
+                name
+                for name, values in _CAPABILITIES_BY_TOOL.items()
+                if capability in values
+            ]
+        return {
+            "schema": "chatbi-capability-catalog-v1",
+            "capabilities": capabilities,
+            "tools": self._snapshot_tools(),
+            "profiles": [],
+            "remote_catalogs": [
+                {
+                    "service_name": "fixture-tools",
+                    "content_hash": self._remote_catalog_hash(),
+                }
+            ],
+        }
+
+    def validate_capability_catalog_snapshot(
+        self,
+        snapshot: JsonObject,
+    ) -> tuple[str, ...]:
+        if snapshot.get("schema") != "chatbi-capability-catalog-v1":
+            return ("unsupported_catalog_schema",)
+        raw_tools = snapshot.get("tools")
+        if not isinstance(raw_tools, list):
+            return ("invalid_catalog_tools",)
+        current = {
+            str(item["tool_name"]): item for item in self._snapshot_tools()
+        }
+        issues: list[str] = []
+        seen: set[str] = set()
+        for raw_tool in raw_tools:
+            if not isinstance(raw_tool, dict):
+                issues.append("invalid_catalog_tool")
+                continue
+            tool_name = raw_tool.get("tool_name")
+            if not isinstance(tool_name, str) or not tool_name or tool_name in seen:
+                issues.append("invalid_or_duplicate_tool_name")
+                continue
+            seen.add(tool_name)
+            current_tool = current.get(tool_name)
+            if current_tool is None:
+                issues.append(f"tool_unavailable:{tool_name}")
+                continue
+            for key in (
+                "service_name",
+                "tool_version",
+                "contract_hash",
+                "capabilities",
+            ):
+                if raw_tool.get(key) != current_tool.get(key):
+                    issues.append(f"tool_contract_drift:{tool_name}:{key}")
+        return tuple(issues)
+
+    @staticmethod
+    def capability_catalog_from_snapshot(snapshot: JsonObject) -> list[JsonObject]:
+        raw = snapshot.get("capabilities")
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise ValueError("TaskRun capability 目录快照格式非法")
+        return [cast(JsonObject, item) for item in raw]
+
+    @staticmethod
+    def tool_names_from_snapshot(snapshot: JsonObject) -> frozenset[str]:
+        raw = snapshot.get("tools")
+        if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+            raise ValueError("TaskRun tool 目录快照格式非法")
+        names = [
+            item.get("tool_name")
+            for item in raw
+            if item.get("allowed") is not False
+        ]
+        if not all(isinstance(item, str) and item for item in names):
+            raise ValueError("TaskRun tool 目录快照包含非法工具名")
+        return frozenset(cast(list[str], names))
+
+    def _snapshot_tools(self) -> list[JsonObject]:
+        return [
+            {
+                "service_name": "fixture-tools",
+                "tool_name": str(item["function"]["name"]),
+                "tool_version": "fixture-v1",
+                "contract_hash": self._tool_contract_hash(item),
+                "capabilities": list(
+                    self.capabilities_for_tool(str(item["function"]["name"]))
+                ),
+                "allowed": True,
+            }
+            for item in self.openai_tools()
+        ]
+
+    def _remote_catalog_hash(self) -> str:
+        encoded = json.dumps(
+            self._snapshot_tools(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _tool_contract_hash(self, tool: dict[str, Any]) -> str:
+        tool_name = str(tool["function"]["name"])
+        encoded = json.dumps(
+            {
+                "tool": tool,
+                "capabilities": list(self.capabilities_for_tool(tool_name)),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
         return _CAPABILITIES_BY_TOOL.get(tool_name, ())

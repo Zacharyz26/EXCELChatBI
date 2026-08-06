@@ -148,6 +148,25 @@ def test_fixture_registry_exposes_stage2_capability_partition(
     }
     assert [item["function"]["name"] for item in offered] == ["get_data_profile"]
 
+    remote_catalogs = asyncio.run(registry.validate_remote_catalog())
+    snapshot = registry.capability_catalog_snapshot()
+    assert snapshot["remote_catalogs"] == [
+        {
+            "service_name": "fixture-tools",
+            "content_hash": remote_catalogs["fixture-tools"],
+        }
+    ]
+    assert registry.validate_capability_catalog_snapshot(snapshot) == ()
+    assert registry.tool_names_from_snapshot(snapshot) == frozenset(
+        item["function"]["name"] for item in registry.openai_tools()
+    )
+    assert [
+        item["function"]["name"]
+        for item in registry.openai_tools(
+            allowed_tool_names=frozenset({"kb_search"})
+        )
+    ] == ["kb_search"]
+
 
 def test_stage2_mode_executes_persisted_plan_and_scores_observables(
     monkeypatch: pytest.MonkeyPatch,
