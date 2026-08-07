@@ -19,7 +19,7 @@ from packages.session.memory_store import (
     MemoryStore,
     MemoryVersionConflict,
 )
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9, v10
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
 from packages.session.task_store import TaskStore
@@ -165,17 +165,23 @@ def test_conflict_is_excluded_until_explicit_revision(tmp_path: Path) -> None:
 
     assert conflicting.outcome == "conflict"
     assert conflicting.record.status == "conflict"
-    assert [item.memory_id for item in memories.list_records(
-        project_id=project_id,
-        principal=_OWNER,
-    )] == [original.memory_id]
-    assert len(
-        memories.list_records(
+    assert [
+        item.memory_id
+        for item in memories.list_records(
             project_id=project_id,
             principal=_OWNER,
-            include_conflicts=True,
         )
-    ) == 2
+    ] == [original.memory_id]
+    assert (
+        len(
+            memories.list_records(
+                project_id=project_id,
+                principal=_OWNER,
+                include_conflicts=True,
+            )
+        )
+        == 2
+    )
 
     revised = memories.revise(
         original.memory_id,
@@ -209,9 +215,7 @@ def test_conflict_is_excluded_until_explicit_revision(tmp_path: Path) -> None:
 def test_memory_governance_audits_writes_conflicts_snapshots_and_refusals(
     tmp_path: Path,
 ) -> None:
-    session, _, project_id, conversation_id, message_id, content = _workspace(
-        tmp_path
-    )
+    session, _, project_id, conversation_id, message_id, content = _workspace(tmp_path)
     events: list[AuditEvent] = []
     memories = MemoryStore(session, audit_recorder=events.append)
     original = memories.remember(
@@ -268,9 +272,7 @@ def test_memory_governance_audits_writes_conflicts_snapshots_and_refusals(
 def test_project_subject_and_conversation_scopes_are_isolated(
     tmp_path: Path,
 ) -> None:
-    session, memories, project_id, conversation_id, message_id, content = _workspace(
-        tmp_path
-    )
+    session, memories, project_id, conversation_id, message_id, content = _workspace(tmp_path)
     _add_member(
         session,
         project_id=project_id,
@@ -409,9 +411,7 @@ def test_cross_project_sources_and_links_are_rejected(tmp_path: Path) -> None:
 def test_expiry_soft_delete_and_snapshots_have_stable_contents(
     tmp_path: Path,
 ) -> None:
-    session, memories, project_id, conversation_id, message_id, content = _workspace(
-        tmp_path
-    )
+    session, memories, project_id, conversation_id, message_id, content = _workspace(tmp_path)
     active = memories.remember(
         project_id=project_id,
         principal=_OWNER,
@@ -573,6 +573,13 @@ def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v10.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v10.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v10.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v10.VERSION,))
         for trigger in v9.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v9.ADDED_INDEXES:
@@ -609,12 +616,8 @@ def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
             connection.execute(f'DROP INDEX IF EXISTS "{index}"')
         for table in v6.ADDED_TABLES:
             connection.execute(f'DROP TABLE IF EXISTS "{table}"')
-        connection.execute(
-            "ALTER TABLE datasets DROP COLUMN lineage_parent_ref"
-        )
-        connection.execute(
-            "ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref"
-        )
+        connection.execute("ALTER TABLE datasets DROP COLUMN lineage_parent_ref")
+        connection.execute("ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref")
         connection.execute(
             "DELETE FROM schema_migrations WHERE version = ?",
             (v6.VERSION,),
@@ -653,9 +656,7 @@ def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
         ).fetchone()
         tables = {
             str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
     assert migration is not None
     assert migration[0] == v4.CHECKSUM
@@ -668,9 +669,7 @@ def test_v3_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
 
 
 def test_project_delete_cascades_memory_control_plane(tmp_path: Path) -> None:
-    session, memories, project_id, conversation_id, message_id, content = _workspace(
-        tmp_path
-    )
+    session, memories, project_id, conversation_id, message_id, content = _workspace(tmp_path)
     record = memories.remember(
         project_id=project_id,
         principal=_OWNER,

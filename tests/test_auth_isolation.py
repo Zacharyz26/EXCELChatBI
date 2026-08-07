@@ -85,17 +85,18 @@ def test_project_lists_are_scoped_by_user_and_tenant(
     alice_project = alice.post("/projects", json={"name": "Alice"}).json()
     bob_project = bob.post("/projects", json={"name": "Bob"}).json()
 
-    assert [item["id"] for item in alice.get("/projects").json()] == [
-        alice_project["id"]
-    ]
+    assert [item["id"] for item in alice.get("/projects").json()] == [alice_project["id"]]
     assert [item["id"] for item in bob.get("/projects").json()] == [bob_project["id"]]
     assert same_user_other_tenant.get("/projects").json() == []
 
     assert alice.get(f"/projects/{bob_project['id']}").status_code == 404
-    assert bob.patch(
-        f"/projects/{alice_project['id']}",
-        json={"name": "越权修改"},
-    ).status_code == 404
+    assert (
+        bob.patch(
+            f"/projects/{alice_project['id']}",
+            json={"name": "越权修改"},
+        ).status_code
+        == 404
+    )
 
 
 def test_conversation_and_dataset_cannot_cross_project_boundary(
@@ -115,17 +116,23 @@ def test_conversation_and_dataset_cannot_cross_project_boundary(
     )
 
     assert bob.get(f"/conversations/{conversation['id']}").status_code == 404
-    assert bob.patch(
-        f"/datasets/{_DATASET_REF}",
-        json={"filename": "stolen.xlsx"},
-    ).status_code == 404
+    assert (
+        bob.patch(
+            f"/datasets/{_DATASET_REF}",
+            json={"filename": "stolen.xlsx"},
+        ).status_code
+        == 404
+    )
     assert bob.get(f"/projects/{project['id']}/datasets").status_code == 404
 
     assert alice.get(f"/conversations/{conversation['id']}").status_code == 200
-    assert alice.patch(
-        f"/datasets/{_DATASET_REF}",
-        json={"filename": "owned.xlsx"},
-    ).status_code == 200
+    assert (
+        alice.patch(
+            f"/datasets/{_DATASET_REF}",
+            json={"filename": "owned.xlsx"},
+        ).status_code
+        == 200
+    )
 
 
 def test_report_download_is_scoped_to_owning_project(
@@ -182,16 +189,30 @@ def test_task_control_write_is_project_scoped_and_idempotent(
     detail = alice.get(detail_path)
     assert detail.status_code == 200
     assert detail.json()["tool_audits"] == []
+    assert detail.json()["execution_control"] == {
+        "schema_version": 1,
+        "max_tool_calls": 2,
+        "max_parallelism": 2,
+        "data_version_hash": tasks.data_version_hash(run.run_id),
+        "dataset_version_count": 0,
+        "evidence_ledger_version": 0,
+        "root_status": "active",
+        "active_branch_count": 0,
+        "cancel_requested_branch_count": 0,
+    }
     assert bob.get(detail_path).status_code == 404
     headers = {
         "Idempotency-Key": "cancel-private-run",
         "If-Match": str(run.state_version),
     }
 
-    assert bob.post(
-        f"/agent/runs/{run.run_id}/cancel",
-        headers=headers,
-    ).status_code == 404
+    assert (
+        bob.post(
+            f"/agent/runs/{run.run_id}/cancel",
+            headers=headers,
+        ).status_code
+        == 404
+    )
     cancelled = alice.post(
         f"/agent/runs/{run.run_id}/cancel",
         headers=headers,
@@ -206,13 +227,16 @@ def test_task_control_write_is_project_scoped_and_idempotent(
     assert cancelled.json()["replayed"] is False
     assert replayed.status_code == 200
     assert replayed.json()["replayed"] is True
-    assert len(
-        [
-            event
-            for event in tasks.list_events(run.run_id)
-            if event.event_type == "run.cancelled"
-        ]
-    ) == 1
+    assert (
+        len(
+            [
+                event
+                for event in tasks.list_events(run.run_id)
+                if event.event_type == "run.cancelled"
+            ]
+        )
+        == 1
+    )
 
     feedback_path = f"/agent/runs/{run.run_id}/feedback"
     feedback_headers = {
@@ -225,11 +249,14 @@ def test_task_control_write_is_project_scoped_and_idempotent(
         "evidence_ids": [],
         "artifact_ids": [],
     }
-    assert bob.post(
-        feedback_path,
-        headers=feedback_headers,
-        json=feedback_body,
-    ).status_code == 404
+    assert (
+        bob.post(
+            feedback_path,
+            headers=feedback_headers,
+            json=feedback_body,
+        ).status_code
+        == 404
+    )
     feedback = alice.post(
         feedback_path,
         headers=feedback_headers,
@@ -264,7 +291,10 @@ def test_task_control_write_is_project_scoped_and_idempotent(
     assert reconnect.status_code == 200
     assert reconnect.text.count("event: run.cancelled") == 1
     assert reconnect.text.count("event: done") == 1
-    assert alice.get(
-        reconnect_path,
-        headers={"Last-Event-ID": "another-run:1"},
-    ).status_code == 400
+    assert (
+        alice.get(
+            reconnect_path,
+            headers={"Last-Event-ID": "another-run:1"},
+        ).status_code
+        == 400
+    )

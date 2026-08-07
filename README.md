@@ -11,7 +11,7 @@
 当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
 Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
-SSE 展示。SQLite schema v9 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+SSE 展示。SQLite schema v10 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
 幂等操作、不可变快照、资源关联、持久化对话压缩、ApprovalRecord、版本化领域定义与字段映射。
 阶段 3A 的离线一致备份/恢复、
@@ -28,8 +28,9 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 已确认 backend、frontend 与真实 Compose Resource 重连/CPU-GPU 配置门禁全绿，阶段 5
 工程关闭。真实 CPU/GPU 模型语义等价和领域代表性签字继续作为发布债务，不由配置门禁代替。
-当前进入阶段 6A；首个切片以 SQLite v9 为每个 TaskRun 固定不可变 capability/tool 目录快照，
-Planner、Replanner、恢复校验和模型工具暴露统一读取该快照。
+当前进入阶段 6A：SQLite v9 为每个 TaskRun 固定不可变 capability/tool 目录快照，
+6A-2 已接入受治理目录换代和 profile 可用性；SQLite v10 进一步固定执行作用域、数据版本、
+取消树与 Evidence Ledger，并对同一 ready frontier 的受治理只读工具开启有界并行。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -133,6 +134,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - SQLite v9 为 TaskRun 原子保存内容寻址的 capability/tool 目录快照；新增工具只对新任务可见，
   已冻结工具缺失、版本/契约或服务路由漂移时恢复失败关闭，Planner/Replanner 与模型工具集不读
   运行中的新目录；
+- SQLite v10 为 TaskRun 原子固定共享预算、数据集版本绑定和取消树；独立只读幂等分支
+  可有界并行，结果由 Host 按统一 Evidence Ledger 原子提交，不跨版本、不分裂预算；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
@@ -141,9 +144,10 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E、4A–4D 和阶段 5 工程门禁已完成并通过真实 Compose CI；阶段 6A-1
-  已启动 TaskRun capability 目录冻结。真实 CPU/GPU semantic 等价、领域代表性签字、
-  `tools/list_changed` 动态换代、受控并行和多数据集自主分析仍未完成；
+- **v2.5**：阶段 3A–3E、4A–4D 和阶段 5 工程门禁已完成并通过真实 Compose CI；阶段 6A-1～6A-3
+  已完成本地实现，并已加入双 MCP 服务受控并行及重启/离线恢复门禁，等待完整 CI 确认。
+  真实 CPU/GPU semantic 等价、领域代表性签字、
+  数据角色/质量能力和多数据集自主分析仍未完成；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -186,9 +190,9 @@ v2.5 阶段 5（工程关闭；真实 CPU/GPU semantic 与领域签字债务保�
   SQLite v8 版本化定义 + 受控公式 + Evidence → MCP Resource list/read
   定义/数据 Claim + 旧报告复核 → 目录分页/订阅/通知 → 双传输/重连 → RAG 生命周期 → 代表性签字
 
-v2.5 阶段 6A（开发中；6A-1 目录冻结已实现）
-  SQLite v9 TaskRun capability/tool 快照 → Planner/Replanner/工具暴露固定目录
-  恢复时契约漂移失败关闭 → tools/list_changed 换代 → profile 可用性 → 受控并行
+v2.5 阶段 6A（开发中；6A-1～6A-3 已实现，待完整 CI）
+  SQLite v9 TaskRun capability/tool 快照 → tools/list_changed 换代 → profile 可用性
+  SQLite v10 共享预算/固定数据版本/取消树/Evidence Ledger → ready frontier 有界并行
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证

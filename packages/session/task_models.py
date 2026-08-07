@@ -67,6 +67,48 @@ class CapabilityCatalogSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskExecutionScope:
+    """Immutable TaskRun-wide budget and parallel scheduling boundary."""
+
+    scope_id: str
+    run_id: str
+    schema_version: int
+    max_tool_calls: int
+    max_parallelism: int
+    cancellation_root_id: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDatasetBinding:
+    """One dataset version visible to a TaskRun, including derived additions."""
+
+    run_id: str
+    dataset_ref: str
+    binding_kind: Literal["initial", "derived"]
+    parent_ref: str | None
+    producing_invocation_id: str | None
+    dataset_created_at: str
+    bound_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationNode:
+    """A persisted root or invocation branch in the TaskRun cancellation tree."""
+
+    node_id: str
+    run_id: str
+    parent_node_id: str | None
+    invocation_id: str | None
+    step_id: str | None
+    data_version_hash: str
+    status: Literal["active", "completed", "cancel_requested"]
+    reason: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskEvent:
     event_id: str
     run_id: str
@@ -162,6 +204,19 @@ class EvidenceRecord:
     source: JsonObject
     result_hash: str
     summary: JsonObject
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceLedgerEntry:
+    """Total-order ledger projection shared by every execution branch."""
+
+    ledger_entry_id: str
+    run_id: str
+    sequence: int
+    evidence_id: str
+    branch_node_id: str
+    data_version_hash: str
     created_at: str
 
 

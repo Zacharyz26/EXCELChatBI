@@ -61,6 +61,35 @@ verify_original_run() {
   test -s .data/e2e/recovered-report.pdf
 }
 
+verify_parallel_run() {
+  detail="$(
+    curl --fail --silent \
+      -H "$auth_header" \
+      "http://127.0.0.1:8080/api/agent/runs/${parallel_run_id}"
+  )"
+  DETAIL_JSON="$detail" node -e '
+  const detail = JSON.parse(process.env.DETAIL_JSON);
+  const control = detail.execution_control;
+  if (!control || control.evidence_ledger_version !== 2
+      || control.dataset_version_count !== 1 || control.root_status !== "completed"
+      || control.active_branch_count !== 0) {
+    throw new Error("6A parallel execution control did not survive recovery");
+  }
+  if (detail.tool_audits.length !== 2
+      || !detail.tool_audits.every((item) => item.parallel === true
+        && item.cancellation_status === "completed"
+        && item.data_version_hash === control.data_version_hash)) {
+    throw new Error("6A parallel branch audit did not survive recovery");
+  }
+  const ledger = detail.tool_audits.map(
+    (item) => item.evidence_ledger_sequence,
+  ).sort((left, right) => left - right);
+  if (JSON.stringify(ledger) !== JSON.stringify([1, 2])) {
+    throw new Error(`unexpected recovered Evidence Ledger: ${ledger}`);
+  }
+  '
+}
+
 verify_reference_recovery() {
   "${compose[@]}" exec -T api \
     python -m apps.api.memory_recovery_probe verify \
@@ -121,6 +150,9 @@ if (audit.branch_profile_tool_calls !== 1) {
 if (audit.read_only_report_attempts < 1) {
   throw new Error("read-only side-effect denial scenario did not attempt report generation");
 }
+if (audit.parallel_tool_batches !== 1) {
+  throw new Error(`6A parallel batch was requested ${audit.parallel_tool_batches} times`);
+}
 '
 
 resource_probe_log=".data/e2e/mcp-resource-reconnect.jsonl"
@@ -156,11 +188,13 @@ fi
 grep -q '"status":"passed"' "$resource_probe_log"
 
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
+parallel_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.parallel_run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
 latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.read_only_run_id)")"
 "${compose[@]}" restart api report-tools web
 wait_for_application "Web/API/report-tools restart"
 verify_original_run
+verify_parallel_run
 CHATBI_COMPOSE_RECOVERY_ONLY=1 \
   CHATBI_COMPOSE_RECOVERY_RUN_ID="$run_id" \
   CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID="$latest_run_id" \
@@ -289,5 +323,6 @@ wait_for_application "offline workspace restore"
 recovery_json="$(verify_reference_recovery)"
 printf '%s\n' "$recovery_json" > .data/e2e/memory-recovery-verified.json
 verify_original_run
+verify_parallel_run
 
-echo "Compose E2E, MCP Resource reconnect, offline restore and fixed reference recovery passed."
+echo "Compose E2E, 6A parallel recovery, MCP Resource reconnect, offline restore and fixed reference recovery passed."

@@ -22,6 +22,9 @@ from packages.session.migrations import (
     v5,
     v6,
     v7,
+    v8,
+    v9,
+    v10,
 )
 from packages.session.store import _SCHEMA_V1
 
@@ -401,6 +404,9 @@ def run_rehearsal(
         | set(v5.ADDED_TABLES)
         | set(v6.ADDED_TABLES)
         | set(v7.ADDED_TABLES)
+        | set(v8.ADDED_TABLES)
+        | set(v9.ADDED_TABLES)
+        | set(v10.ADDED_TABLES)
     )
     added_after_interrupt = _table_names(interrupted) & current_tables
     checks = {

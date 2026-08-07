@@ -13,6 +13,9 @@ const BRANCH_GOAL = (
 const READ_ONLY_GOAL = (
   "COMPOSE_4D_READ_ONLY：请基于已有数据画像重新生成一份报告并导出 PDF。"
 );
+const PARALLEL_GOAL = (
+  "COMPOSE_6A_PARALLEL：请深入分析这份数据的画像和销售额时间趋势。"
+);
 const RUN_NOT_VISIBLE = "run_not_visible";
 
 interface RunDetailPayload {
@@ -27,9 +30,22 @@ interface RunDetailPayload {
   tool_audits: Array<{
     tool_name: string;
     status: string;
+    parallel: boolean;
+    branch_node_id: string | null;
+    cancellation_status: string | null;
+    data_version_hash: string | null;
+    evidence_ledger_sequence: number | null;
     evidence_id: string | null;
     artifact_id: string | null;
   }>;
+  execution_control: {
+    max_parallelism: number;
+    data_version_hash: string | null;
+    dataset_version_count: number;
+    evidence_ledger_version: number;
+    root_status: string | null;
+    active_branch_count: number;
+  } | null;
   feedback: Array<{ rating: string; comment: string | null }>;
 }
 
@@ -119,8 +135,93 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   });
 
   await page.getByRole("radio", { name: "自主模式" }).click();
+  await page.getByLabel("消息内容").fill(PARALLEL_GOAL);
+  const parallelResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/api/chat/stream")
+      && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "发送消息" }).click();
+  const parallelResponse = await parallelResponsePromise;
+  expect(parallelResponse.ok()).toBeTruthy();
+  const parallelRunId = await parallelResponse.headerValue("x-chatbi-run-id");
+  expect(parallelRunId).toBeTruthy();
+  await expect(page.getByText(
+    "Compose 6A 受控并行画像与趋势分析已完成。",
+    { exact: true },
+  )).toBeVisible({ timeout: 120_000 });
+  await expect.poll(
+    async () => getRunStatusForPolling(page, parallelRunId!),
+    { timeout: 120_000 },
+  ).toBe("completed");
+
+  const parallelEventsResponse = await page.request.get(
+    `/api/agent/runs/${encodeURIComponent(parallelRunId!)}/events`,
+    { headers: AUTH_HEADERS },
+  );
+  expect(parallelEventsResponse.ok()).toBeTruthy();
+  const parallelEvents = await parallelEventsResponse.json() as {
+    events: Array<{
+      sequence: number;
+      event_type: string;
+      payload: Record<string, unknown>;
+    }>;
+  };
+  const parallelStarted = parallelEvents.events.filter(
+    (event) => event.event_type === "step.started"
+      && event.payload.parallel === true,
+  );
+  const parallelCompleted = parallelEvents.events.filter(
+    (event) => event.event_type === "step.completed"
+      && ["get_data_profile", "trend_analysis"].includes(String(event.payload.tool))
+      && event.payload.status === "completed",
+  );
+  expect(parallelStarted).toHaveLength(2);
+  expect(parallelCompleted).toHaveLength(2);
+  expect(Math.max(...parallelStarted.map((event) => event.sequence))).toBeLessThan(
+    Math.min(...parallelCompleted.map((event) => event.sequence)),
+  );
+  expect(new Set(parallelStarted.map(
+    (event) => String(event.payload.branch_node_id),
+  )).size).toBe(2);
+  expect(new Set(parallelStarted.map(
+    (event) => String(event.payload.data_version_hash),
+  )).size).toBe(1);
+  expect(parallelCompleted.map(
+    (event) => Number(event.payload.evidence_ledger_sequence),
+  )).toEqual([1, 2]);
+
+  const parallelDetail = await getRunDetail(page, parallelRunId!);
+  expect(parallelDetail.execution_control).toEqual(expect.objectContaining({
+    max_parallelism: 4,
+    dataset_version_count: 1,
+    evidence_ledger_version: 2,
+    root_status: "completed",
+    active_branch_count: 0,
+  }));
+  expect(parallelDetail.tool_audits).toHaveLength(2);
+  expect(parallelDetail.tool_audits.every(
+    (audit) => audit.parallel
+      && audit.cancellation_status === "completed"
+      && audit.data_version_hash === parallelDetail.execution_control?.data_version_hash,
+  )).toBeTruthy();
+  expect(parallelDetail.tool_audits.map(
+    (audit) => audit.evidence_ledger_sequence,
+  )).toEqual([1, 2]);
+
+  const parallelControlButton = page.getByRole("button", { name: "任务协作" });
+  await parallelControlButton.click();
+  const executionBoundary = page.getByRole("region", { name: "任务执行边界" });
+  await expect(executionBoundary).toContainText("Evidence Ledger");
+  await expect(executionBoundary).toContainText("v2");
+  const parallelAuditCards = page.locator(".agent-tool-audit", {
+    hasText: "受控并行",
+  });
+  await expect(parallelAuditCards).toHaveCount(2);
+  await expect(parallelAuditCards.first()).toContainText("Ledger #");
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+
   await page.getByLabel("消息内容").fill(
-    "请把本次对话已完成的数据画像组装成一份报告，附要点解读，并导出 PDF。",
+    "COMPOSE_REPORT：请把本次对话已完成的数据画像组装成一份报告，附要点解读，并导出 PDF。",
   );
   const streamResponsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/chat/stream")
@@ -375,6 +476,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
       run_id: runId,
       pdf_url: reportPdfUrl,
       completed_event_count: 1,
+      parallel_run_id: parallelRunId,
       assisted_run_id: assistedRunId,
       read_only_run_id: readOnlyRunId,
     }),

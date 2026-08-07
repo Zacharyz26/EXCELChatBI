@@ -103,9 +103,7 @@ def _context(
     project_id: str = "probe-project",
     conversation_id: str = "probe-conversation",
 ) -> MCPRequestContext:
-    deadline = datetime.now(UTC) + (
-        timedelta(seconds=-1) if expired else timedelta(minutes=1)
-    )
+    deadline = datetime.now(UTC) + (timedelta(seconds=-1) if expired else timedelta(minutes=1))
     return MCPRequestContext(
         subject_id="probe-user",
         project_id=project_id,
@@ -118,6 +116,8 @@ def _context(
         permission_snapshot_id="probe-permissions",
         memory_snapshot_id=memory_snapshot_id,
         evidence_ledger_version=0,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
         trace_id="probe-trace",
         deadline_at=deadline.isoformat(),
     )
@@ -216,9 +216,7 @@ def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]
             ),
             source_type="user_confirmation",
             source_ref=confirmation.id,
-            source_hash=hashlib.sha256(
-                confirmation.content.encode("utf-8")
-            ).hexdigest(),
+            source_hash=hashlib.sha256(confirmation.content.encode("utf-8")).hexdigest(),
             confidence=1.0,
         ),
         idempotency_key="mcp-reference-probe",
@@ -544,9 +542,7 @@ async def _wait_http(url: str, process: asyncio.subprocess.Process) -> None:
             if process.returncode is not None:
                 stderr = await process.stderr.read() if process.stderr else b""
                 tail = stderr.decode(errors="replace")[-1000:]
-                raise RuntimeError(
-                    f"Streamable HTTP probe server 提前退出: {tail}"
-                )
+                raise RuntimeError(f"Streamable HTTP probe server 提前退出: {tail}")
             try:
                 response = await client.get(url)
                 if response.status_code == 401:
@@ -815,8 +811,7 @@ async def run_probe(output: Path) -> dict[str, Any]:
     if len(resource_hashes) != 1:
         raise RuntimeError("MCP Resource 在 stdio 与 HTTP 间输出不等价")
     if (
-        stdio.resources.initial_catalog_version
-        != http_result.resources.initial_catalog_version
+        stdio.resources.initial_catalog_version != http_result.resources.initial_catalog_version
         or stdio.resources.published_catalog_version
         != http_result.resources.published_catalog_version
     ):
@@ -831,9 +826,7 @@ async def run_probe(output: Path) -> dict[str, Any]:
         "resource_equivalent": True,
         "resource_contract": "pagination-subscription-notification-v1",
         "host_reference": {
-            "conversation_resolution_hash": host_reference[
-                "conversation_resolution_hash"
-            ],
+            "conversation_resolution_hash": host_reference["conversation_resolution_hash"],
             "memory_resolution_hash": host_reference["memory_resolution_hash"],
             "target_ref_hash": host_reference["target_ref_hash"],
             "memory_snapshot_id": host_reference["memory_snapshot_id"],

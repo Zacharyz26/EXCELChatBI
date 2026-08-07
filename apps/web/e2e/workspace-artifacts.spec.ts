@@ -220,6 +220,17 @@ function mockAgentRun(
         completed_at: stepStatus === "completed" ? NOW : null,
       }],
       tool_audits: [],
+      execution_control: {
+        schema_version: 1,
+        max_tool_calls: 4,
+        max_parallelism: 2,
+        data_version_hash: "a".repeat(64),
+        dataset_version_count: 1,
+        evidence_ledger_version: 0,
+        root_status: status === "completed" ? "completed" : "active",
+        active_branch_count: 0,
+        cancel_requested_branch_count: 0,
+      },
       related_runs: [],
       feedback: [],
       state: { last_sequence: 3 },
@@ -1359,6 +1370,9 @@ test("高风险审批只记录决定，用户显式继续后才执行", async ({
   await panel.getByRole("button", { name: "继续执行" }).click();
 
   await expect(panel.locator(".agent-status")).toHaveText("已完成");
+  await expect(panel.getByRole("region", { name: "任务执行边界" })).toContainText(
+    "并行上限",
+  );
   await expect(panel).toContainText("已消费");
 });
 

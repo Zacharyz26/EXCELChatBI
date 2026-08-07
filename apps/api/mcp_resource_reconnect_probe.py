@@ -54,6 +54,8 @@ def _context(
         permission_snapshot_id="compose-resource-permissions",
         memory_snapshot_id="0" * 32,
         evidence_ledger_version=0,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
         trace_id="compose-resource-trace",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
     )
@@ -190,11 +192,7 @@ async def run_probe() -> dict[str, Any]:
     project_id, conversation_id, definitions = _seed(settings)
     context = _context(project_id=project_id, conversation_id=conversation_id)
     raw_tokens = json.loads(settings.agent_mcp_service_tokens_json)
-    service_token = (
-        raw_tokens.get("knowledge-tools")
-        if isinstance(raw_tokens, dict)
-        else None
-    )
+    service_token = raw_tokens.get("knowledge-tools") if isinstance(raw_tokens, dict) else None
     if not service_token or not settings.agent_mcp_context_signing_key:
         raise RuntimeError("Compose Resource 探针缺少 knowledge-tools 内部凭据")
     http_config = MCPClientConfig(

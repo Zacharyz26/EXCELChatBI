@@ -22,17 +22,21 @@ from packages.session.task_models import (
     ApprovalRecord,
     ApprovalRiskLevel,
     ApprovalStatus,
+    CancellationNode,
     CapabilityCatalogSnapshot,
     Checkpoint,
     ClaimDraft,
     ClaimRecord,
+    EvidenceLedgerEntry,
     EvidenceRecord,
     InvocationStatus,
     Observation,
     ObservationSource,
     RunStatus,
     StepStatus,
+    TaskDatasetBinding,
     TaskEvent,
+    TaskExecutionScope,
     TaskPlanRecord,
     TaskRun,
     TaskStepRecord,
@@ -197,6 +201,59 @@ class TaskStore:
             ).fetchone()
         return _run_from_row(row) if row is not None else None
 
+    def get_execution_scope(self, run_id: str) -> TaskExecutionScope | None:
+        """Return the immutable shared budget and cancellation root for a run."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_execution_scopes WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return _execution_scope_from_row(row) if row is not None else None
+
+    def list_dataset_bindings(self, run_id: str) -> list[TaskDatasetBinding]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_dataset_bindings
+                WHERE run_id = ?
+                ORDER BY bound_at, dataset_ref
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_dataset_binding_from_row(row) for row in rows]
+
+    def data_version_hash(self, run_id: str) -> str:
+        """Hash the append-only dataset versions currently visible to a TaskRun."""
+        with self._connection() as connection:
+            scope = connection.execute(
+                "SELECT 1 FROM task_execution_scopes WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if scope is None:
+                raise ValueError(f"TaskRun 执行作用域不存在: {run_id}")
+            return _data_version_hash(connection, run_id)
+
+    def list_cancellation_nodes(self, run_id: str) -> list[CancellationNode]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_cancellation_nodes
+                WHERE run_id = ?
+                ORDER BY CASE WHEN parent_node_id IS NULL THEN 0 ELSE 1 END,
+                         created_at, node_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_cancellation_node_from_row(row) for row in rows]
+
+    def get_cancellation_node_for_invocation(self, invocation_id: str) -> CancellationNode | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM task_cancellation_nodes WHERE invocation_id = ?
+                """,
+                (invocation_id,),
+            ).fetchone()
+        return _cancellation_node_from_row(row) if row is not None else None
+
     def get_capability_catalog_snapshot(
         self,
         run_id: str,
@@ -348,6 +405,15 @@ class TaskStore:
                 """,
                 (clean_reason, now, run_id),
             )
+            cancellation_status = "cancel_requested" if running_invocations else "completed"
+            connection.execute(
+                """
+                UPDATE task_cancellation_nodes
+                SET status = ?, reason = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'active'
+                """,
+                (cancellation_status, clean_reason, now, run_id),
+            )
             next_version = current.state_version + 1
             connection.execute(
                 """
@@ -413,8 +479,10 @@ class TaskStore:
         ``verifying`` 尚无可重建执行边界，继续失败关闭。
         """
         cutoff = (
-            datetime.now(UTC) - timedelta(seconds=max(stale_after_seconds, 0))
-        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+            (datetime.now(UTC) - timedelta(seconds=max(stale_after_seconds, 0)))
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z")
+        )
         with self._connection() as connection:
             rows = connection.execute(
                 """
@@ -434,8 +502,7 @@ class TaskStore:
                         str(row["run_id"]),
                         expected_version=int(row["state_version"]),
                         idempotency_key=(
-                            f"process-recovery:{row['run_id']}:"
-                            f"{row['state_version']}"
+                            f"process-recovery:{row['run_id']}:" f"{row['state_version']}"
                         ),
                         command="recover_pause",
                         allowed_statuses={"running"},
@@ -531,9 +598,7 @@ class TaskStore:
                     f"实际 {current.state_version}"
                 )
             if current.status not in allowed_statuses:
-                raise ControlConflict(
-                    f"TaskRun 状态 {current.status} 不能执行 {clean_command}"
-                )
+                raise ControlConflict(f"TaskRun 状态 {current.status} 不能执行 {clean_command}")
             if require_idle:
                 active = connection.execute(
                     """
@@ -595,14 +660,36 @@ class TaskStore:
                     """,
                     (now, run_id),
                 )
+                connection.execute(
+                    """
+                    UPDATE task_cancellation_nodes
+                    SET status = 'cancel_requested', reason = ?, updated_at = ?
+                    WHERE run_id = ? AND status = 'active'
+                    """,
+                    (terminal_reason or "user_cancelled", now, run_id),
+                )
+            elif status in {"completed", "blocked", "failed"}:
+                connection.execute(
+                    """
+                    UPDATE task_cancellation_nodes
+                    SET status = 'completed', reason = ?, updated_at = ?
+                    WHERE run_id = ? AND parent_node_id IS NULL AND status = 'active'
+                    """,
+                    (terminal_reason, now, run_id),
+                )
 
             next_version = current.state_version + 1
-            finished_at = now if status in {
-                "completed",
-                "blocked",
-                "failed",
-                "cancelled",
-            } else None
+            finished_at = (
+                now
+                if status
+                in {
+                    "completed",
+                    "blocked",
+                    "failed",
+                    "cancelled",
+                }
+                else None
+            )
             connection.execute(
                 """
                 UPDATE task_runs
@@ -633,12 +720,8 @@ class TaskStore:
                     "checkpoint_id": checkpoint.checkpoint_id,
                     "sequence": checkpoint.sequence,
                     "state_version": checkpoint.state_version,
-                    "last_event_sequence": checkpoint.state.get(
-                        "last_sequence", 0
-                    ),
-                    "completed_step_ids": checkpoint.state.get(
-                        "completed_step_ids", []
-                    ),
+                    "last_event_sequence": checkpoint.state.get("last_sequence", 0),
+                    "completed_step_ids": checkpoint.state.get("completed_step_ids", []),
                 }
             if status == "cancelled":
                 event_payload["unknown_invocations"] = unknown_invocations
@@ -660,9 +743,7 @@ class TaskStore:
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
-                    "completed_step_ids": _completed_step_ids(
-                        connection, run_id
-                    ),
+                    "completed_step_ids": _completed_step_ids(connection, run_id),
                 }
             )
             connection.execute(
@@ -733,9 +814,7 @@ class TaskStore:
                     f"实际 {current.state_version}"
                 )
             if current.status != "waiting_user":
-                raise ControlConflict(
-                    f"TaskRun 状态 {current.status} 不能回答澄清问题"
-                )
+                raise ControlConflict(f"TaskRun 状态 {current.status} 不能回答澄清问题")
             waiting_rows = connection.execute(
                 """
                 SELECT payload_json FROM task_events
@@ -926,9 +1005,7 @@ class TaskStore:
                     f"实际 {current.state_version}"
                 )
             if current.status != "paused":
-                raise ControlConflict(
-                    f"TaskRun 状态 {current.status} 不能重试步骤"
-                )
+                raise ControlConflict(f"TaskRun 状态 {current.status} 不能重试步骤")
             active_invocation = connection.execute(
                 """
                 SELECT 1 FROM tool_invocations
@@ -967,9 +1044,7 @@ class TaskStore:
             if target is None:
                 raise ControlConflict("重试步骤不属于当前活动计划")
             if target.status not in {"failed", "blocked"}:
-                raise ControlConflict(
-                    f"步骤 {clean_step_id} 状态 {target.status} 不能重试"
-                )
+                raise ControlConflict(f"步骤 {clean_step_id} 状态 {target.status} 不能重试")
             running_step = next(
                 (item for item in previous_steps if item.status == "running"),
                 None,
@@ -1089,9 +1164,7 @@ class TaskStore:
                         for step in steps
                     ],
                     "assumptions": previous_plan.plan.get("assumptions", []),
-                    "clarifications": previous_plan.plan.get(
-                        "clarifications", []
-                    ),
+                    "clarifications": previous_plan.plan.get("clarifications", []),
                     "planner": {
                         "route": "user",
                         "phase": "step_retry",
@@ -1118,9 +1191,7 @@ class TaskStore:
                     "active_plan_id": plan_record.plan_id,
                     "active_plan": previous_plan.plan,
                     "retry_step_id": clean_step_id,
-                    "completed_step_ids": _completed_step_ids(
-                        connection, run_id
-                    ),
+                    "completed_step_ids": _completed_step_ids(connection, run_id),
                 }
             )
             connection.execute(
@@ -1162,9 +1233,7 @@ class TaskStore:
         clean_key = _required_text(idempotency_key, "Idempotency-Key")[:200]
         clean_tenant = _required_text(tenant_id, "tenant_id")[:200]
         clean_subject = _required_text(subject_user_id, "subject_user_id")[:200]
-        clean_requester = _required_text(
-            requested_by_user_id, "requested_by_user_id"
-        )[:200]
+        clean_requester = _required_text(requested_by_user_id, "requested_by_user_id")[:200]
         clean_step_id = _required_text(step_id, "step_id")[:100]
         clean_tool = _required_text(tool_name, "tool_name")[:200]
         schema_hash = _required_sha256(tool_schema_hash, "tool_schema_hash")
@@ -1215,9 +1284,7 @@ class TaskStore:
             if replay_row is not None:
                 replayed = _approval_from_row(replay_row)
                 if replayed.request_hash != request_hash:
-                    raise IdempotencyConflict(
-                        "Idempotency-Key 已绑定到不同授权请求"
-                    )
+                    raise IdempotencyConflict("Idempotency-Key 已绑定到不同授权请求")
                 event_row = connection.execute(
                     """
                     SELECT event_id, run_id, sequence, event_type,
@@ -1236,9 +1303,7 @@ class TaskStore:
                 )
             required_status: RunStatus = "running" if pause_run else "paused"
             if current.status != required_status:
-                raise ControlConflict(
-                    f"TaskRun 状态 {current.status} 不能请求高风险授权"
-                )
+                raise ControlConflict(f"TaskRun 状态 {current.status} 不能请求高风险授权")
             if pause_run:
                 ensure_transition(current.status, "paused")
             active = connection.execute(
@@ -1250,9 +1315,7 @@ class TaskStore:
                 (run_id,),
             ).fetchone()
             if active is not None:
-                raise ControlConflict(
-                    "任务存在执行中或结果未知的工具调用，不能请求授权"
-                )
+                raise ControlConflict("任务存在执行中或结果未知的工具调用，不能请求授权")
             plan_row = connection.execute(
                 """
                 SELECT plan.* FROM task_plans AS plan
@@ -1277,9 +1340,7 @@ class TaskStore:
                 raise ControlConflict("授权步骤不属于当前活动计划")
             step = _step_from_row(step_row)
             if step.status not in {"pending", "failed", "blocked"}:
-                raise ControlConflict(
-                    f"步骤状态 {step.status} 不能请求高风险授权"
-                )
+                raise ControlConflict(f"步骤状态 {step.status} 不能请求高风险授权")
             for user_id in {clean_subject, clean_requester}:
                 membership = connection.execute(
                     """
@@ -1555,9 +1616,7 @@ class TaskStore:
                     f"实际 {current_approval.version}"
                 )
             if current_approval.status != "pending":
-                raise ControlConflict(
-                    f"ApprovalRecord 状态 {current_approval.status} 不能再次决定"
-                )
+                raise ControlConflict(f"ApprovalRecord 状态 {current_approval.status} 不能再次决定")
             if (
                 current_approval.tenant_id != clean_tenant
                 or current_approval.subject_user_id != clean_actor
@@ -1927,8 +1986,7 @@ class TaskStore:
         if current_plan is None:
             raise ControlConflict("TaskRun 没有可修改的活动计划")
         capabilities = {
-            str(item.get("capability"))
-            for item in _validated_plan_steps(current_plan.plan)
+            str(item.get("capability")) for item in _validated_plan_steps(current_plan.plan)
         }
         validation = validate_task_plan(
             plan,
@@ -1937,9 +1995,7 @@ class TaskStore:
             allow_waiting_user=False,
         )
         if not validation.valid:
-            raise ControlConflict(
-                "用户计划修订未通过契约校验: " + "; ".join(validation.issues)
-            )
+            raise ControlConflict("用户计划修订未通过契约校验: " + "; ".join(validation.issues))
         skipped = set(skipped_step_ids or set())
         request_payload: JsonObject = {
             "plan": plan,
@@ -1990,9 +2046,7 @@ class TaskStore:
             raise ValueError("计划修订只允许显式覆盖为 skipped 或 blocked")
         unknown_overrides = set(overrides) - set(definitions_by_id)
         if unknown_overrides:
-            raise ValueError(
-                "计划状态覆盖引用未知步骤: " + ", ".join(sorted(unknown_overrides))
-            )
+            raise ValueError("计划状态覆盖引用未知步骤: " + ", ".join(sorted(unknown_overrides)))
         now = _utc_now()
         with self._connection() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2060,9 +2114,7 @@ class TaskStore:
                     (run_id,),
                 ).fetchone()
                 if active is not None:
-                    raise ControlConflict(
-                        "任务存在执行中或结果未知的工具调用，不能修改计划"
-                    )
+                    raise ControlConflict("任务存在执行中或结果未知的工具调用，不能修改计划")
 
             version = current.plan_version + 1
             previous_steps: dict[str, TaskStepRecord] = {}
@@ -2085,13 +2137,9 @@ class TaskStore:
                         continue
                     revised_definition = definitions_by_id.get(logical_id)
                     if revised_definition is None:
-                        raise ValueError(
-                            f"计划修订不能删除已{previous.status}步骤: {logical_id}"
-                        )
+                        raise ValueError(f"计划修订不能删除已{previous.status}步骤: {logical_id}")
                     if revised_definition != previous.definition:
-                        raise ValueError(
-                            f"计划修订不能修改已{previous.status}步骤: {logical_id}"
-                        )
+                        raise ValueError(f"计划修订不能修改已{previous.status}步骤: {logical_id}")
 
             plan_record = TaskPlanRecord(
                 plan_id=uuid.uuid4().hex,
@@ -2120,10 +2168,7 @@ class TaskStore:
             for position, definition in enumerate(step_definitions):
                 logical_id = str(definition["step_id"])
                 previous_step = previous_steps.get(logical_id)
-                if (
-                    previous_step is not None
-                    and previous_step.status in {"completed", "skipped"}
-                ):
+                if previous_step is not None and previous_step.status in {"completed", "skipped"}:
                     status = previous_step.status
                     started_at = previous_step.started_at
                     completed_at = previous_step.completed_at
@@ -2493,6 +2538,26 @@ class TaskStore:
             now = _utc_now()
             next_usage = current.usage if usage is None else usage
             finished_at = now if status in {"completed", "blocked", "failed", "cancelled"} else None
+            if finished_at is not None:
+                active_branch = connection.execute(
+                    """
+                    SELECT 1 FROM task_cancellation_nodes
+                    WHERE run_id = ? AND parent_node_id IS NOT NULL
+                      AND status = 'active'
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if active_branch is not None:
+                    raise ControlConflict("TaskRun 存在活动并行分支，不能进入终态")
+                connection.execute(
+                    """
+                    UPDATE task_cancellation_nodes
+                    SET status = 'completed', reason = ?, updated_at = ?
+                    WHERE run_id = ? AND parent_node_id IS NULL AND status = 'active'
+                    """,
+                    (terminal_reason, now, run_id),
+                )
             connection.execute(
                 """
                 UPDATE task_runs
@@ -2512,9 +2577,7 @@ class TaskStore:
                 ),
             )
             sequence = _next_sequence(connection, run_id)
-            event = TaskEvent(
-                uuid.uuid4().hex, run_id, sequence, event_type, payload, now
-            )
+            event = TaskEvent(uuid.uuid4().hex, run_id, sequence, event_type, payload, now)
             _insert_event(connection, event)
             updated_row = connection.execute(
                 "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
@@ -2525,9 +2588,7 @@ class TaskStore:
             snapshot.update(
                 {
                     "last_sequence": sequence,
-                    "completed_step_ids": _completed_step_ids(
-                        connection, run_id
-                    ),
+                    "completed_step_ids": _completed_step_ids(connection, run_id),
                 }
             )
             connection.execute(
@@ -2594,9 +2655,7 @@ class TaskStore:
                 "goal",
                 {
                     "goal": contract.goal,
-                    "success_criteria": [
-                        item.to_dict() for item in contract.success_criteria
-                    ],
+                    "success_criteria": [item.to_dict() for item in contract.success_criteria],
                     "constraints": list(contract.constraints),
                     "updated": True,
                 },
@@ -2646,6 +2705,8 @@ class TaskStore:
                 if invocation.tool_name != tool_name or invocation.args_hash != args_hash:
                     raise IdempotencyConflict("幂等键已绑定到不同的工具调用")
                 return invocation, False
+            _validate_dataset_arguments(connection, run_id, arguments)
+            _assert_tool_budget_available(connection, run_id, requested=1)
             invocation = ToolInvocation(
                 invocation_id=uuid.uuid4().hex,
                 run_id=run_id,
@@ -2682,6 +2743,7 @@ class TaskStore:
                     invocation.started_at,
                 ),
             )
+            _insert_invocation_branch(connection, invocation)
         return invocation, True
 
     def start_invocation_with_event(
@@ -2727,6 +2789,8 @@ class TaskStore:
                 )
             if current_run.status != "running":
                 raise ValueError("TaskRun 不在 running 状态，不能开始工具调用")
+            _validate_dataset_arguments(connection, run_id, arguments)
+            _assert_tool_budget_available(connection, run_id, requested=1)
             logical_step_id = tool_call_id
             if step_id is not None:
                 step_row = connection.execute(
@@ -2783,6 +2847,7 @@ class TaskStore:
                     invocation.started_at,
                 ),
             )
+            branch = _insert_invocation_branch(connection, invocation)
             if step_id is not None:
                 connection.execute(
                     """
@@ -2794,12 +2859,13 @@ class TaskStore:
                     (now, step_id),
                 )
             next_version = current_run.state_version + 1
+            usage = _usage_after_reservation(connection, current_run)
             connection.execute(
                 """
-                UPDATE task_runs SET state_version = ?, updated_at = ?
+                UPDATE task_runs SET state_version = ?, usage_json = ?, updated_at = ?
                 WHERE run_id = ? AND state_version = ?
                 """,
-                (next_version, now, run_id, expected_version),
+                (next_version, _dump_json(usage), now, run_id, expected_version),
             )
             event = TaskEvent(
                 event_id=uuid.uuid4().hex,
@@ -2813,6 +2879,8 @@ class TaskStore:
                     "attempt": attempt,
                     "tool": tool_name,
                     "invocation_id": invocation.invocation_id,
+                    "branch_node_id": branch.node_id,
+                    "data_version_hash": branch.data_version_hash,
                     "arguments_hash": args_hash,
                     "policy": policy_decision,
                 },
@@ -2829,6 +2897,8 @@ class TaskStore:
                 {
                     "last_sequence": event.sequence,
                     "active_invocation_id": invocation.invocation_id,
+                    "active_invocation_ids": _active_invocation_ids(connection, run_id),
+                    "data_version_hash": branch.data_version_hash,
                 }
             )
             connection.execute(
@@ -2840,6 +2910,215 @@ class TaskStore:
                 (next_version, _dump_json(snapshot), now, run_id),
             )
         return updated_run, invocation, event, True
+
+    def reserve_parallel_invocations(
+        self,
+        *,
+        run_id: str,
+        expected_version: int,
+        requests: list[JsonObject],
+    ) -> tuple[TaskRun, list[ToolInvocation], list[TaskEvent], bool]:
+        """Atomically reserve independent branches against one shared budget.
+
+        Every request must contain ``tool_call_id``, ``tool_name``, ``arguments``,
+        ``idempotency_key``, ``policy_decision`` and a distinct current-plan
+        ``step_id``. The batch is all-or-nothing; a partial idempotent replay is
+        rejected so callers can never execute an unreserved sibling.
+        """
+        if len(requests) < 2:
+            raise ValueError("并行批次至少需要两个工具调用")
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current_run = _run_from_row(run_row)
+            if current_run.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current_run.state_version}"
+                )
+            if current_run.status != "running":
+                raise ValueError("TaskRun 不在 running 状态，不能预留并行工具调用")
+            scope_row = connection.execute(
+                "SELECT * FROM task_execution_scopes WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if scope_row is None:
+                raise ControlConflict("TaskRun 缺少受控并行执行作用域")
+            scope = _execution_scope_from_row(scope_row)
+            if len(requests) > scope.max_parallelism:
+                raise ControlConflict(f"并行分支数超过上限（{scope.max_parallelism}）")
+
+            normalized = [_normalize_parallel_request(item) for item in requests]
+            idempotency_keys = [item["idempotency_key"] for item in normalized]
+            tool_call_ids = [item["tool_call_id"] for item in normalized]
+            step_ids = [item["step_id"] for item in normalized]
+            if (
+                len(set(idempotency_keys)) != len(normalized)
+                or len(set(tool_call_ids)) != len(normalized)
+                or len(set(step_ids)) != len(normalized)
+            ):
+                raise ControlConflict("并行批次的幂等键、调用 ID 和步骤必须互不重复")
+            existing_rows = connection.execute(
+                f"""
+                SELECT * FROM tool_invocations
+                WHERE run_id = ? AND idempotency_key IN (
+                    {','.join('?' for _ in idempotency_keys)}
+                )
+                """,
+                (run_id, *idempotency_keys),
+            ).fetchall()
+            if existing_rows:
+                if len(existing_rows) != len(normalized):
+                    raise IdempotencyConflict("并行批次只完成了部分预留，拒绝混合重放")
+                by_key = {
+                    str(row["idempotency_key"]): _invocation_from_row(row) for row in existing_rows
+                }
+                replayed: list[ToolInvocation] = []
+                for item in normalized:
+                    invocation = by_key[item["idempotency_key"]]
+                    args_hash = _hash_text(_dump_json(item["arguments"]))
+                    if (
+                        invocation.tool_name != item["tool_name"]
+                        or invocation.args_hash != args_hash
+                        or invocation.step_id != item["step_id"]
+                    ):
+                        raise IdempotencyConflict("并行幂等键已绑定到不同调用")
+                    replayed.append(invocation)
+                return current_run, replayed, [], False
+
+            _validate_parallel_steps(
+                connection,
+                run_id=run_id,
+                plan_version=current_run.plan_version,
+                step_ids=cast(list[str], step_ids),
+            )
+            _assert_tool_budget_available(connection, run_id, requested=len(normalized))
+            data_hash = _data_version_hash(connection, run_id)
+            invocations: list[ToolInvocation] = []
+            events: list[TaskEvent] = []
+            for item in normalized:
+                arguments = cast(JsonObject, item["arguments"])
+                _validate_dataset_arguments(connection, run_id, arguments)
+                invocation = ToolInvocation(
+                    invocation_id=uuid.uuid4().hex,
+                    run_id=run_id,
+                    step_id=cast(str, item["step_id"]),
+                    tool_call_id=cast(str, item["tool_call_id"]),
+                    tool_name=cast(str, item["tool_name"]),
+                    idempotency_key=cast(str, item["idempotency_key"]),
+                    args_hash=_hash_text(_dump_json(arguments)),
+                    args=arguments,
+                    status="running",
+                    result_hash=None,
+                    error_text=None,
+                    artifact_id=None,
+                    started_at=now,
+                    completed_at=None,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO tool_invocations(
+                        invocation_id, run_id, step_id, tool_call_id, tool_name,
+                        idempotency_key, args_hash, args_json, status, result_hash,
+                        error_text, artifact_id, started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, NULL, ?, NULL)
+                    """,
+                    (
+                        invocation.invocation_id,
+                        invocation.run_id,
+                        invocation.step_id,
+                        invocation.tool_call_id,
+                        invocation.tool_name,
+                        invocation.idempotency_key,
+                        invocation.args_hash,
+                        _dump_json(invocation.args),
+                        invocation.started_at,
+                    ),
+                )
+                branch = _insert_invocation_branch(
+                    connection, invocation, data_version_hash=data_hash
+                )
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'running', started_at = COALESCE(started_at, ?),
+                        completed_at = NULL
+                    WHERE step_id = ?
+                    """,
+                    (now, invocation.step_id),
+                )
+                step_row = connection.execute(
+                    "SELECT * FROM task_steps WHERE step_id = ?", (invocation.step_id,)
+                ).fetchone()
+                assert step_row is not None
+                logical_step_id = _step_logical_id(step_row)
+                event = TaskEvent(
+                    event_id=uuid.uuid4().hex,
+                    run_id=run_id,
+                    sequence=_next_sequence(connection, run_id),
+                    event_type="step.started",
+                    payload={
+                        "plan_version": current_run.plan_version,
+                        "step_id": logical_step_id,
+                        "persisted_step_id": invocation.step_id,
+                        "attempt": _logical_step_attempt_count(connection, run_id, logical_step_id),
+                        "tool": invocation.tool_name,
+                        "invocation_id": invocation.invocation_id,
+                        "branch_node_id": branch.node_id,
+                        "data_version_hash": data_hash,
+                        "arguments_hash": invocation.args_hash,
+                        "policy": cast(JsonObject, item["policy_decision"]),
+                        "parallel": True,
+                    },
+                    occurred_at=now,
+                )
+                _insert_event(connection, event)
+                invocations.append(invocation)
+                events.append(event)
+
+            next_version = current_run.state_version + 1
+            usage = _usage_after_reservation(connection, current_run)
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET state_version = ?, usage_json = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (
+                    next_version,
+                    _dump_json(usage),
+                    now,
+                    run_id,
+                    expected_version,
+                ),
+            )
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated_run = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated_run)
+            snapshot.update(
+                {
+                    "last_sequence": events[-1].sequence,
+                    "active_invocation_id": invocations[0].invocation_id,
+                    "active_invocation_ids": [item.invocation_id for item in invocations],
+                    "data_version_hash": data_hash,
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated_run, invocations, events, True
 
     def complete_invocation(
         self,
@@ -2869,6 +3148,12 @@ class TaskStore:
                 WHERE invocation_id = ? AND status = 'running'
                 """,
                 (status, error_text, now, invocation_id),
+            )
+            _complete_invocation_branch(
+                connection,
+                invocation_id,
+                reason=error_text,
+                now=now,
             )
             updated = connection.execute(
                 "SELECT * FROM tool_invocations WHERE invocation_id = ?", (invocation_id,)
@@ -2927,9 +3212,7 @@ class TaskStore:
                     raise ValueError("工具调用引用的 TaskStep 不存在")
                 logical_step_id = _step_logical_id(step_row)
             attempt = (
-                _logical_step_attempt_count(
-                    connection, current_run.run_id, logical_step_id
-                )
+                _logical_step_attempt_count(connection, current_run.run_id, logical_step_id)
                 if invocation.step_id is not None
                 else 1
             )
@@ -2941,6 +3224,12 @@ class TaskStore:
                 WHERE invocation_id = ? AND status = 'running'
                 """,
                 (status, clean_error, now, invocation_id),
+            )
+            _complete_invocation_branch(
+                connection,
+                invocation_id,
+                reason=clean_code,
+                now=now,
             )
             if invocation.step_id is not None:
                 connection.execute(
@@ -2990,6 +3279,7 @@ class TaskStore:
                     "status": status,
                     "tool": invocation.tool_name,
                     "invocation_id": invocation.invocation_id,
+                    "branch_node_id": _branch_node_id(connection, invocation.invocation_id),
                     "observation": observation.to_dict(),
                     "evidence_ids": [],
                     "artifact_ids": [],
@@ -3007,6 +3297,7 @@ class TaskStore:
                 {
                     "last_sequence": event.sequence,
                     "active_invocation_id": None,
+                    "active_invocation_ids": _active_invocation_ids(connection, current_run.run_id),
                     "last_observation": observation.to_dict(),
                 }
             )
@@ -3086,9 +3377,7 @@ class TaskStore:
                     raise ValueError("工具调用引用的 TaskStep 不存在")
                 logical_step_id = _step_logical_id(step_row)
             attempt = (
-                _logical_step_attempt_count(
-                    connection, current_run.run_id, logical_step_id
-                )
+                _logical_step_attempt_count(connection, current_run.run_id, logical_step_id)
                 if invocation.step_id is not None
                 else 1
             )
@@ -3143,14 +3432,10 @@ class TaskStore:
                         artifact.conversation_id,
                         artifact.message_id,
                         artifact.type,
-                        _dump_json(artifact.payload)
-                        if artifact.payload is not None
-                        else None,
+                        _dump_json(artifact.payload) if artifact.payload is not None else None,
                         artifact.file_ref,
                         artifact.source_tool,
-                        _dump_json(artifact.params)
-                        if artifact.params is not None
-                        else None,
+                        _dump_json(artifact.params) if artifact.params is not None else None,
                         artifact.dataset_ref,
                         artifact.created_at,
                     ),
@@ -3201,6 +3486,11 @@ class TaskStore:
                 """,
                 (result_hash, evidence.artifact_id, now, invocation.invocation_id),
             )
+            branch = _complete_invocation_branch(
+                connection,
+                invocation.invocation_id,
+                now=now,
+            )
             if invocation.step_id is not None:
                 connection.execute(
                     """
@@ -3228,6 +3518,40 @@ class TaskStore:
                     _dump_json(evidence.summary),
                     evidence.created_at,
                 ),
+            )
+            ledger_sequence = _next_evidence_ledger_sequence(connection, current_run.run_id)
+            ledger_entry = EvidenceLedgerEntry(
+                ledger_entry_id=uuid.uuid4().hex,
+                run_id=current_run.run_id,
+                sequence=ledger_sequence,
+                evidence_id=evidence.evidence_id,
+                branch_node_id=branch.node_id,
+                data_version_hash=branch.data_version_hash,
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO evidence_ledger_entries(
+                    ledger_entry_id, run_id, sequence, evidence_id,
+                    branch_node_id, data_version_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ledger_entry.ledger_entry_id,
+                    ledger_entry.run_id,
+                    ledger_entry.sequence,
+                    ledger_entry.evidence_id,
+                    ledger_entry.branch_node_id,
+                    ledger_entry.data_version_hash,
+                    ledger_entry.created_at,
+                ),
+            )
+            _bind_derived_dataset_if_present(
+                connection,
+                run=current_run,
+                invocation=invocation,
+                result=result,
+                now=now,
             )
 
             next_version = current_run.state_version + 1
@@ -3264,6 +3588,9 @@ class TaskStore:
                     "status": "completed",
                     "tool": invocation.tool_name,
                     "invocation_id": invocation.invocation_id,
+                    "branch_node_id": branch.node_id,
+                    "evidence_ledger_sequence": ledger_entry.sequence,
+                    "data_version_hash": ledger_entry.data_version_hash,
                     "summary": str(summary.get("summary", ""))[:1000],
                     "observation": observation.to_dict(),
                     "evidence_ids": [evidence.evidence_id],
@@ -3285,10 +3612,11 @@ class TaskStore:
                     "last_evidence_ids": [evidence.evidence_id],
                     "last_artifact_ids": [artifact.id] if artifact is not None else [],
                     "active_invocation_id": None,
+                    "active_invocation_ids": _active_invocation_ids(connection, current_run.run_id),
+                    "evidence_ledger_version": ledger_entry.sequence,
+                    "data_version_hash": _data_version_hash(connection, current_run.run_id),
                     "last_observation": observation.to_dict(),
-                    "completed_step_ids": _completed_step_ids(
-                        connection, current_run.run_id
-                    ),
+                    "completed_step_ids": _completed_step_ids(connection, current_run.run_id),
                 }
             )
             connection.execute(
@@ -3350,19 +3678,38 @@ class TaskStore:
     def list_evidence(self, run_id: str) -> list[EvidenceRecord]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM evidence WHERE run_id = ? ORDER BY created_at, rowid",
+                """
+                SELECT evidence.*
+                FROM evidence
+                JOIN evidence_ledger_entries AS ledger
+                  ON ledger.evidence_id = evidence.evidence_id
+                WHERE evidence.run_id = ?
+                ORDER BY ledger.sequence
+                """,
                 (run_id,),
             ).fetchall()
         return [_evidence_from_row(row) for row in rows]
+
+    def list_evidence_ledger(self, run_id: str) -> list[EvidenceLedgerEntry]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM evidence_ledger_entries
+                WHERE run_id = ? ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_evidence_ledger_entry_from_row(row) for row in rows]
 
     def evidence_ledger_version(self, run_id: str) -> int:
         """返回 TaskRun 追加式 Evidence ledger 的当前版本（即已提交条目数）。"""
         with self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT run.run_id, COUNT(evidence.evidence_id)
+                SELECT run.run_id, COUNT(ledger.ledger_entry_id)
                 FROM task_runs AS run
-                LEFT JOIN evidence ON evidence.run_id = run.run_id
+                LEFT JOIN evidence_ledger_entries AS ledger
+                  ON ledger.run_id = run.run_id
                 WHERE run.run_id = ?
                 GROUP BY run.run_id
                 """,
@@ -3411,8 +3758,7 @@ class TaskStore:
             if (
                 compiled.get("definition_match") is not True
                 or compiled.get("definition_id") != resource.get("definition_id")
-                or compiled.get("definition_version")
-                != resource.get("definition_version")
+                or compiled.get("definition_version") != resource.get("definition_version")
                 or compiled.get("formula_hash") != resource.get("formula_hash")
             ):
                 continue
@@ -3443,17 +3789,16 @@ class TaskStore:
             raise ControlConflict("数据调用与已解析领域公式或定义版本不一致")
         return None
 
-    def replace_claims(
-        self, run_id: str, claims: list[ClaimDraft]
-    ) -> list[ClaimRecord]:
+    def replace_claims(self, run_id: str, claims: list[ClaimDraft]) -> list[ClaimRecord]:
         """Replace the current candidate Claim ledger and validate Evidence scope."""
         created: list[ClaimRecord] = []
         now = _utc_now()
         with self._connection() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute(
-                "SELECT 1 FROM task_runs WHERE run_id = ?", (run_id,)
-            ).fetchone() is None:
+            if (
+                connection.execute("SELECT 1 FROM task_runs WHERE run_id = ?", (run_id,)).fetchone()
+                is None
+            ):
                 raise ValueError(f"TaskRun 不存在: {run_id}")
             connection.execute("DELETE FROM claims WHERE run_id = ?", (run_id,))
             for draft in claims:
@@ -3499,10 +3844,7 @@ class TaskStore:
                     INSERT INTO claim_evidence(claim_id, evidence_id)
                     VALUES (?, ?)
                     """,
-                    [
-                        (record.claim_id, evidence_id)
-                        for evidence_id in record.evidence_ids
-                    ],
+                    [(record.claim_id, evidence_id) for evidence_id in record.evidence_ids],
                 )
                 created.append(record)
         return created
@@ -3523,9 +3865,7 @@ class TaskStore:
                     (str(row["claim_id"]),),
                 ).fetchall()
                 records.append(
-                    _claim_from_row(
-                        row, tuple(str(item["evidence_id"]) for item in evidence_rows)
-                    )
+                    _claim_from_row(row, tuple(str(item["evidence_id"]) for item in evidence_rows))
                 )
         return records
 
@@ -3541,9 +3881,7 @@ class TaskStore:
             if snapshot is None:
                 raise ValueError(f"TaskRun 不存在: {run_id}")
             state = _load_object(str(snapshot["state_json"]))
-            state["completed_step_ids"] = _completed_step_ids(
-                connection, run_id
-            )
+            state["completed_step_ids"] = _completed_step_ids(connection, run_id)
             checkpoint = _insert_checkpoint(
                 connection,
                 run_id=run_id,
@@ -3727,6 +4065,7 @@ def _insert_run_records(
         (run.run_id, run.state_version, _dump_json(snapshot), run.updated_at),
     )
     _insert_capability_catalog_snapshot(connection, capability_snapshot)
+    _insert_execution_scope(connection, run)
 
 
 def _insert_capability_catalog_snapshot(
@@ -3747,6 +4086,56 @@ def _insert_capability_catalog_snapshot(
             snapshot.content_hash,
             snapshot.created_at,
         ),
+    )
+
+
+def _insert_execution_scope(connection: sqlite3.Connection, run: TaskRun) -> None:
+    """Freeze shared budget, initial datasets and the root cancellation node."""
+    max_tool_calls = _positive_int(run.budget.get("max_tool_calls"), default=12)
+    max_parallelism = min(
+        max_tool_calls,
+        _positive_int(run.budget.get("max_parallelism"), default=4),
+    )
+    scope_id = uuid.uuid4().hex
+    root_id = uuid.uuid4().hex
+    connection.execute(
+        """
+        INSERT INTO task_execution_scopes(
+            scope_id, run_id, schema_version, max_tool_calls, max_parallelism,
+            cancellation_root_id, created_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+        """,
+        (
+            scope_id,
+            run.run_id,
+            max_tool_calls,
+            max_parallelism,
+            root_id,
+            run.created_at,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO task_dataset_bindings(
+            run_id, dataset_ref, binding_kind, parent_ref,
+            producing_invocation_id, dataset_created_at, bound_at
+        )
+        SELECT ?, ref, 'initial', parent_ref, NULL, created_at, ?
+        FROM dataset_lineage_anchors
+        WHERE project_id = ? AND deleted_at IS NULL AND created_at <= ?
+        ORDER BY created_at, ref
+        """,
+        (run.run_id, run.created_at, run.project_id, run.created_at),
+    )
+    data_hash = _data_version_hash(connection, run.run_id)
+    connection.execute(
+        """
+        INSERT INTO task_cancellation_nodes(
+            node_id, run_id, parent_node_id, invocation_id, step_id,
+            data_version_hash, status, reason, created_at, updated_at
+        ) VALUES (?, ?, NULL, NULL, NULL, ?, 'active', NULL, ?, ?)
+        """,
+        (root_id, run.run_id, data_hash, run.created_at, run.created_at),
     )
 
 
@@ -3863,11 +4252,7 @@ def _validate_checkpoint(
     if checkpoint_plan != run.plan_version:
         raise ControlConflict("Checkpoint 计划版本已过期")
     last_sequence = checkpoint.state.get("last_sequence")
-    if (
-        not isinstance(last_sequence, int)
-        or isinstance(last_sequence, bool)
-        or last_sequence < 1
-    ):
+    if not isinstance(last_sequence, int) or isinstance(last_sequence, bool) or last_sequence < 1:
         raise ControlConflict("Checkpoint 事件游标无效")
     latest_event_row = connection.execute(
         "SELECT COALESCE(MAX(sequence), 0) FROM task_events WHERE run_id = ?",
@@ -3984,21 +4369,15 @@ def _approval_from_row(row: sqlite3.Row) -> ApprovalRecord:
         version=int(row["version"]),
         expires_at=str(row["expires_at"]),
         decision_reason=(
-            str(row["decision_reason"])
-            if row["decision_reason"] is not None
-            else None
+            str(row["decision_reason"]) if row["decision_reason"] is not None else None
         ),
         decided_by_user_id=(
-            str(row["decided_by_user_id"])
-            if row["decided_by_user_id"] is not None
-            else None
+            str(row["decided_by_user_id"]) if row["decided_by_user_id"] is not None else None
         ),
         requested_at=str(row["requested_at"]),
         updated_at=str(row["updated_at"]),
         decided_at=str(row["decided_at"]) if row["decided_at"] is not None else None,
-        consumed_at=(
-            str(row["consumed_at"]) if row["consumed_at"] is not None else None
-        ),
+        consumed_at=(str(row["consumed_at"]) if row["consumed_at"] is not None else None),
         idempotency_key=str(row["idempotency_key"]),
         request_hash=str(row["request_hash"]),
         request_event_id=str(row["request_event_id"]),
@@ -4026,11 +4405,7 @@ def _logical_step_attempt_count(
         """,
         (run_id,),
     ).fetchall()
-    return sum(
-        1
-        for row in rows
-        if _step_logical_id(row) == logical_step_id
-    )
+    return sum(1 for row in rows if _step_logical_id(row) == logical_step_id)
 
 
 def _invocation_from_row(row: sqlite3.Row) -> ToolInvocation:
@@ -4066,13 +4441,63 @@ def _evidence_from_row(row: sqlite3.Row) -> EvidenceRecord:
     )
 
 
-def _claim_from_row(
-    row: sqlite3.Row, evidence_ids: tuple[str, ...]
-) -> ClaimRecord:
+def _execution_scope_from_row(row: sqlite3.Row) -> TaskExecutionScope:
+    return TaskExecutionScope(
+        scope_id=str(row["scope_id"]),
+        run_id=str(row["run_id"]),
+        schema_version=int(row["schema_version"]),
+        max_tool_calls=int(row["max_tool_calls"]),
+        max_parallelism=int(row["max_parallelism"]),
+        cancellation_root_id=str(row["cancellation_root_id"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _dataset_binding_from_row(row: sqlite3.Row) -> TaskDatasetBinding:
+    return TaskDatasetBinding(
+        run_id=str(row["run_id"]),
+        dataset_ref=str(row["dataset_ref"]),
+        binding_kind=cast(Literal["initial", "derived"], str(row["binding_kind"])),
+        parent_ref=_optional_text(row["parent_ref"]),
+        producing_invocation_id=_optional_text(row["producing_invocation_id"]),
+        dataset_created_at=str(row["dataset_created_at"]),
+        bound_at=str(row["bound_at"]),
+    )
+
+
+def _cancellation_node_from_row(row: sqlite3.Row) -> CancellationNode:
+    return CancellationNode(
+        node_id=str(row["node_id"]),
+        run_id=str(row["run_id"]),
+        parent_node_id=_optional_text(row["parent_node_id"]),
+        invocation_id=_optional_text(row["invocation_id"]),
+        step_id=_optional_text(row["step_id"]),
+        data_version_hash=str(row["data_version_hash"]),
+        status=cast(
+            Literal["active", "completed", "cancel_requested"],
+            str(row["status"]),
+        ),
+        reason=_optional_text(row["reason"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _evidence_ledger_entry_from_row(row: sqlite3.Row) -> EvidenceLedgerEntry:
+    return EvidenceLedgerEntry(
+        ledger_entry_id=str(row["ledger_entry_id"]),
+        run_id=str(row["run_id"]),
+        sequence=int(row["sequence"]),
+        evidence_id=str(row["evidence_id"]),
+        branch_node_id=str(row["branch_node_id"]),
+        data_version_hash=str(row["data_version_hash"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _claim_from_row(row: sqlite3.Row, evidence_ids: tuple[str, ...]) -> ClaimRecord:
     raw_refs = json.loads(str(row["value_refs_json"]))
-    if not isinstance(raw_refs, list) or not all(
-        isinstance(item, dict) for item in raw_refs
-    ):
+    if not isinstance(raw_refs, list) or not all(isinstance(item, dict) for item in raw_refs):
         raise ValueError("数据库中的 Claim value_refs 格式非法")
     return ClaimRecord(
         claim_id=str(row["claim_id"]),
@@ -4112,9 +4537,7 @@ def _normalize_capability_catalog(catalog: JsonObject) -> JsonObject:
         isinstance(item, dict) for item in raw_capabilities
     ):
         raise ValueError("capability 目录 capabilities 格式非法")
-    if not isinstance(raw_tools, list) or not all(
-        isinstance(item, dict) for item in raw_tools
-    ):
+    if not isinstance(raw_tools, list) or not all(isinstance(item, dict) for item in raw_tools):
         raise ValueError("capability 目录 tools 格式非法")
     capability_names = [item.get("name") for item in raw_capabilities]
     tool_names = [item.get("tool_name") for item in raw_tools]
@@ -4190,6 +4613,321 @@ def _definition_execution_binding(
         "compiled_tool_name": compiled_tool_name,
         "compiled_arguments_hash": compiled_arguments_hash,
     }
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
+def _data_version_hash(connection: sqlite3.Connection, run_id: str) -> str:
+    rows = connection.execute(
+        """
+        SELECT dataset_ref, binding_kind, parent_ref, producing_invocation_id,
+               dataset_created_at
+        FROM task_dataset_bindings
+        WHERE run_id = ?
+        ORDER BY dataset_ref
+        """,
+        (run_id,),
+    ).fetchall()
+    payload = [
+        {
+            "dataset_ref": str(row["dataset_ref"]),
+            "binding_kind": str(row["binding_kind"]),
+            "parent_ref": _optional_text(row["parent_ref"]),
+            "producing_invocation_id": _optional_text(row["producing_invocation_id"]),
+            "dataset_created_at": str(row["dataset_created_at"]),
+        }
+        for row in rows
+    ]
+    return _hash_text(_dump_json({"schema": "task-data-version-v1", "datasets": payload}))
+
+
+def _validate_dataset_arguments(
+    connection: sqlite3.Connection,
+    run_id: str,
+    arguments: JsonObject,
+) -> None:
+    if "dataset_ref" not in arguments:
+        return
+    dataset_ref = arguments.get("dataset_ref")
+    if not isinstance(dataset_ref, str) or not dataset_ref:
+        raise ControlConflict("工具调用的 dataset_ref 无效")
+    row = connection.execute(
+        """
+        SELECT 1 FROM task_dataset_bindings
+        WHERE run_id = ? AND dataset_ref = ?
+        """,
+        (run_id, dataset_ref),
+    ).fetchone()
+    if row is None:
+        raise ControlConflict("工具调用引用的数据集不属于 TaskRun 固定数据版本")
+
+
+def _assert_tool_budget_available(
+    connection: sqlite3.Connection,
+    run_id: str,
+    *,
+    requested: int,
+) -> None:
+    scope = connection.execute(
+        "SELECT max_tool_calls FROM task_execution_scopes WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if scope is None:
+        raise ControlConflict("TaskRun 缺少共享预算执行作用域")
+    used = connection.execute(
+        "SELECT COUNT(*) FROM tool_invocations WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    count = int(used[0]) if used is not None else 0
+    if requested < 1 or count + requested > int(scope["max_tool_calls"]):
+        raise ControlConflict("tool_budget_exhausted")
+
+
+def _insert_invocation_branch(
+    connection: sqlite3.Connection,
+    invocation: ToolInvocation,
+    *,
+    data_version_hash: str | None = None,
+) -> CancellationNode:
+    scope = connection.execute(
+        "SELECT cancellation_root_id FROM task_execution_scopes WHERE run_id = ?",
+        (invocation.run_id,),
+    ).fetchone()
+    if scope is None:
+        raise ControlConflict("TaskRun 缺少根取消节点")
+    data_hash = data_version_hash or _data_version_hash(connection, invocation.run_id)
+    node = CancellationNode(
+        node_id=uuid.uuid4().hex,
+        run_id=invocation.run_id,
+        parent_node_id=str(scope["cancellation_root_id"]),
+        invocation_id=invocation.invocation_id,
+        step_id=invocation.step_id,
+        data_version_hash=data_hash,
+        status="active",
+        reason=None,
+        created_at=invocation.started_at,
+        updated_at=invocation.started_at,
+    )
+    connection.execute(
+        """
+        INSERT INTO task_cancellation_nodes(
+            node_id, run_id, parent_node_id, invocation_id, step_id,
+            data_version_hash, status, reason, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)
+        """,
+        (
+            node.node_id,
+            node.run_id,
+            node.parent_node_id,
+            node.invocation_id,
+            node.step_id,
+            node.data_version_hash,
+            node.created_at,
+            node.updated_at,
+        ),
+    )
+    return node
+
+
+def _complete_invocation_branch(
+    connection: sqlite3.Connection,
+    invocation_id: str,
+    *,
+    status: Literal["completed", "cancel_requested"] = "completed",
+    reason: str | None = None,
+    now: str,
+) -> CancellationNode:
+    connection.execute(
+        """
+        UPDATE task_cancellation_nodes
+        SET status = ?, reason = ?, updated_at = ?
+        WHERE invocation_id = ? AND status = 'active'
+        """,
+        (status, reason, now, invocation_id),
+    )
+    row = connection.execute(
+        "SELECT * FROM task_cancellation_nodes WHERE invocation_id = ?",
+        (invocation_id,),
+    ).fetchone()
+    if row is None:
+        raise ControlConflict("Invocation 缺少取消树分支")
+    return _cancellation_node_from_row(row)
+
+
+def _active_invocation_ids(connection: sqlite3.Connection, run_id: str) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT invocation_id FROM task_cancellation_nodes
+        WHERE run_id = ? AND status = 'active' AND invocation_id IS NOT NULL
+        ORDER BY created_at, node_id
+        """,
+        (run_id,),
+    ).fetchall()
+    return [str(row["invocation_id"]) for row in rows]
+
+
+def _branch_node_id(connection: sqlite3.Connection, invocation_id: str) -> str:
+    row = connection.execute(
+        "SELECT node_id FROM task_cancellation_nodes WHERE invocation_id = ?",
+        (invocation_id,),
+    ).fetchone()
+    if row is None:
+        raise ControlConflict("Invocation 缺少取消树分支")
+    return str(row["node_id"])
+
+
+def _next_evidence_ledger_sequence(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COALESCE(MAX(sequence), 0) + 1
+        FROM evidence_ledger_entries WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else 1
+
+
+def _bind_derived_dataset_if_present(
+    connection: sqlite3.Connection,
+    *,
+    run: TaskRun,
+    invocation: ToolInvocation,
+    result: Any,
+    now: str,
+) -> None:
+    if invocation.tool_name != "transform_dataset" or not isinstance(result, dict):
+        return
+    dataset_ref = result.get("dataset_ref")
+    parent_ref = result.get("parent_ref")
+    if not isinstance(dataset_ref, str) or not isinstance(parent_ref, str):
+        raise ControlConflict("衍生数据集结果缺少版本引用")
+    parent = connection.execute(
+        """
+        SELECT 1 FROM task_dataset_bindings
+        WHERE run_id = ? AND dataset_ref = ?
+        """,
+        (run.run_id, parent_ref),
+    ).fetchone()
+    if parent is None:
+        raise ControlConflict("衍生数据集的父版本不属于当前 TaskRun")
+    anchor = connection.execute(
+        """
+        SELECT ref, project_id, parent_ref, created_at
+        FROM dataset_lineage_anchors WHERE ref = ?
+        """,
+        (dataset_ref,),
+    ).fetchone()
+    if (
+        anchor is None
+        or str(anchor["project_id"]) != run.project_id
+        or str(anchor["parent_ref"]) != parent_ref
+    ):
+        raise ControlConflict("衍生数据集版本未通过项目与血缘校验")
+    existing = connection.execute(
+        """
+        SELECT binding_kind, parent_ref, producing_invocation_id
+        FROM task_dataset_bindings
+        WHERE run_id = ? AND dataset_ref = ?
+        """,
+        (run.run_id, dataset_ref),
+    ).fetchone()
+    if existing is not None:
+        if (
+            str(existing["binding_kind"]) != "derived"
+            or str(existing["parent_ref"]) != parent_ref
+            or str(existing["producing_invocation_id"]) != invocation.invocation_id
+        ):
+            raise ControlConflict("衍生数据集版本已由其他分支绑定")
+        return
+    connection.execute(
+        """
+        INSERT INTO task_dataset_bindings(
+            run_id, dataset_ref, binding_kind, parent_ref,
+            producing_invocation_id, dataset_created_at, bound_at
+        ) VALUES (?, ?, 'derived', ?, ?, ?, ?)
+        """,
+        (
+            run.run_id,
+            dataset_ref,
+            parent_ref,
+            invocation.invocation_id,
+            str(anchor["created_at"]),
+            now,
+        ),
+    )
+
+
+def _usage_after_reservation(
+    connection: sqlite3.Connection,
+    run: TaskRun,
+) -> JsonObject:
+    row = connection.execute(
+        "SELECT COUNT(*) FROM tool_invocations WHERE run_id = ?", (run.run_id,)
+    ).fetchone()
+    reserved = int(row[0]) if row is not None else 0
+    usage = dict(run.usage)
+    current = usage.get("tool_attempts", 0)
+    current_attempts = current if isinstance(current, int) and not isinstance(current, bool) else 0
+    usage["tool_attempts"] = max(current_attempts, reserved)
+    return usage
+
+
+def _normalize_parallel_request(request: JsonObject) -> JsonObject:
+    normalized: JsonObject = {}
+    for key in ("tool_call_id", "tool_name", "idempotency_key", "step_id"):
+        value = request.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"并行调用 {key} 不能为空")
+        normalized[key] = value.strip()
+    arguments = request.get("arguments")
+    policy = request.get("policy_decision")
+    if not isinstance(arguments, dict) or not isinstance(policy, dict):
+        raise ValueError("并行调用 arguments/policy_decision 必须是对象")
+    normalized["arguments"] = cast(JsonObject, arguments)
+    normalized["policy_decision"] = cast(JsonObject, policy)
+    return normalized
+
+
+def _validate_parallel_steps(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    plan_version: int,
+    step_ids: list[str],
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT step.*
+        FROM task_steps AS step
+        JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+        WHERE step.run_id = ? AND plan.version = ?
+        ORDER BY step.position
+        """,
+        (run_id, plan_version),
+    ).fetchall()
+    by_id = {str(row["step_id"]): row for row in rows}
+    if any(step_id not in by_id for step_id in step_ids):
+        raise ControlConflict("并行调用包含不属于当前计划的步骤")
+    status_by_logical = {_step_logical_id(row): str(row["status"]) for row in rows}
+    for step_id in step_ids:
+        row = by_id[step_id]
+        if str(row["status"]) != "pending":
+            raise ControlConflict("并行调用步骤不是 pending 状态")
+        definition = _load_object(str(row["step_json"]))
+        dependencies = definition.get("dependencies", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) for item in dependencies
+        ):
+            raise ControlConflict("并行调用步骤依赖格式非法")
+        if any(
+            status_by_logical.get(item) not in {"completed", "skipped"} for item in dependencies
+        ):
+            raise ControlConflict("并行调用步骤依赖尚未满足")
 
 
 def _optional_text(value: Any) -> str | None:
@@ -4268,10 +5006,7 @@ def _control_replay(
             continue
         if control.get("idempotency_key") != idempotency_key:
             continue
-        if (
-            control.get("command") != command
-            or control.get("request_hash") != request_hash
-        ):
+        if control.get("command") != command or control.get("request_hash") != request_hash:
             raise IdempotencyConflict("Idempotency-Key 已绑定到不同控制命令")
         return _event_from_row(row)
     return None
@@ -4304,9 +5039,7 @@ def _approval_operation_replay(
         or str(row["operation_type"]) != operation_type
         or str(row["request_hash"]) != request_hash
     ):
-        raise IdempotencyConflict(
-            "Idempotency-Key 已绑定到不同 ApprovalRecord 操作"
-        )
+        raise IdempotencyConflict("Idempotency-Key 已绑定到不同 ApprovalRecord 操作")
     approval_row = connection.execute(
         "SELECT * FROM approval_records WHERE approval_id = ?",
         (approval_id,),

@@ -26,8 +26,8 @@ Resource list/read，5B-2 已贯通定义/数据 Claim 和旧报告复核，5B-3
 Resource 订阅通知；5B-4/5 的真实 Compose Resource 重连与 CPU/GPU 配置门禁已由提交
 `d5a672d` 的 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 确认全绿，阶段 5 工程关闭；runtime semantic 与领域签字债务保留。6A-1 已固定 TaskRun
-capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable 投影；受控并行仍是
-后续交付。
+capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable 投影，6A-3 已以
+SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence Ledger，并启用受限并行，等待完整 CI。
 
 ## 2. 不随阶段变化的边界
 
@@ -172,9 +172,9 @@ capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable
 
 ## 7. v2.5 阶段 6：自主分析能力
 
-> 当前实现：6A-1 已增加 SQLite v9 TaskRun capability/tool 目录快照；新任务创建时原子冻结，
-> Planner/Replanner/模型工具暴露读取固定目录，恢复时已冻结工具缺失或契约/路由漂移失败关闭。
-> `tools/list_changed` 的运行时接收与新任务目录换代、profile 可用性和受控并行尚未实现。
+> 当前实现：6A-1 已增加 SQLite v9 TaskRun capability/tool 目录快照，6A-2 已完成
+> `tools/list_changed` 的运行时接收/新任务目录换代和 profile 可用性；6A-3 已增加 SQLite v10
+> 受控并行控制面和 ready-frontier 并行执行。完整异步链与 Compose 门禁待 CI 验证。
 
 ### MCP 设计
 

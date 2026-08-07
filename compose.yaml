@@ -208,6 +208,7 @@ services:
       AGENT_MCP_CONTEXT_SIGNING_KEY_FILE: /run/secrets/mcp_context_signing_key
       AGENT_MCP_ALLOW_IN_PROCESS_FALLBACK: "false"
       AGENT_CAPABILITY_PROFILES: ${AGENT_CAPABILITY_PROFILES:-stats,browser}
+      AGENT_MAX_PARALLEL_TOOLS: ${AGENT_MAX_PARALLEL_TOOLS:-4}
     volumes:
       - chatbi-db:/var/lib/chatbi/db
       - chatbi-uploads:/var/lib/chatbi/uploads

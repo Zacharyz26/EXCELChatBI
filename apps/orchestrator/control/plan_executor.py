@@ -31,37 +31,26 @@ class PlanSchedule:
 
     @property
     def ready_capabilities(self) -> set[str]:
-        return {
-            str(step.definition["capability"])
-            for step in self.ready
-        }
+        return {str(step.definition["capability"]) for step in self.ready}
 
     @property
     def all_finished(self) -> bool:
-        return not (
-            self.ready
-            or self.waiting
-            or self.running
-            or self.failed
-            or self.blocked
-        )
+        return not (self.ready or self.waiting or self.running or self.failed or self.blocked)
 
     @property
     def deadlocked(self) -> bool:
         """没有运行/就绪步骤但仍有未完成步骤时，必须重规划或阻塞。"""
-        return not self.ready and not self.running and bool(
-            self.waiting or self.failed or self.blocked
+        return (
+            not self.ready
+            and not self.running
+            and bool(self.waiting or self.failed or self.blocked)
         )
 
 
 def schedule_plan_steps(steps: list[TaskStepRecord]) -> PlanSchedule:
     """按依赖和持久状态计算就绪步骤，保持计划中的原始顺序。"""
     known = {step.logical_id for step in steps}
-    satisfied = {
-        step.logical_id
-        for step in steps
-        if step.status in {"completed", "skipped"}
-    }
+    satisfied = {step.logical_id for step in steps if step.status in {"completed", "skipped"}}
     ready: list[TaskStepRecord] = []
     waiting: list[TaskStepRecord] = []
     running: list[TaskStepRecord] = []
@@ -71,9 +60,7 @@ def schedule_plan_steps(steps: list[TaskStepRecord]) -> PlanSchedule:
 
     for step in steps:
         dependencies = {
-            str(item)
-            for item in step.definition.get("dependencies", [])
-            if isinstance(item, str)
+            str(item) for item in step.definition.get("dependencies", []) if isinstance(item, str)
         }
         if not dependencies.issubset(known):
             # TaskPlan 在入库前已经校验；若持久数据仍出现未知依赖，必须 fail-closed。
@@ -119,6 +106,30 @@ def match_ready_step(
         ),
         None,
     )
+
+
+def match_ready_steps_batch(
+    *,
+    tool_names: tuple[str, ...],
+    schedule: PlanSchedule,
+    resolver: CapabilityResolver,
+    offered_step_ids: set[str],
+) -> tuple[TaskStepRecord, ...] | None:
+    """Bind one model tool batch to distinct ready steps without mutating state."""
+    remaining = set(offered_step_ids)
+    matched: list[TaskStepRecord] = []
+    for tool_name in tool_names:
+        step = match_ready_step(
+            tool_name=tool_name,
+            schedule=schedule,
+            resolver=resolver,
+            offered_step_ids=remaining,
+        )
+        if step is None:
+            return None
+        remaining.remove(step.step_id)
+        matched.append(step)
+    return tuple(matched)
 
 
 def schedule_payload(schedule: PlanSchedule) -> dict[str, list[str]]:

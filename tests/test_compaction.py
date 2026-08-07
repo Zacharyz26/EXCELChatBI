@@ -18,7 +18,7 @@ from packages.session.compaction import (
     CompactionStore,
 )
 from packages.session.memory_store import MemoryAccessDenied, MemoryStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v5, v6, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v5, v6, v7, v8, v9, v10
 from packages.session.store import SessionStore
 from packages.session.task_store import TaskStore
 
@@ -44,8 +44,7 @@ def _seed_long_history(session: SessionStore, conversation_id: str) -> list[str]
             conversation_id=conversation_id,
             role="user",
             content=(
-                "第一条需求需要保留，但凭据 api_key=top-secret-value 不得进入摘要。"
-                + "甲" * 80
+                "第一条需求需要保留，但凭据 api_key=top-secret-value 不得进入摘要。" + "甲" * 80
             ),
         ),
         session.append_message(
@@ -238,9 +237,7 @@ def test_concurrent_compaction_retries_create_one_immutable_version(
     assert all(view is not None for view in views)
     assert len({view.record.compaction_id for view in views if view is not None}) == 1
     with sqlite3.connect(session.db_path) as connection:
-        count = connection.execute(
-            "SELECT COUNT(*) FROM conversation_compactions"
-        ).fetchone()
+        count = connection.execute("SELECT COUNT(*) FROM conversation_compactions").fetchone()
     assert count is not None and count[0] == 1
 
 
@@ -410,6 +407,13 @@ def test_v4_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v10.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v10.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v10.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v10.VERSION,))
         for trigger in v9.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v9.ADDED_INDEXES:
@@ -446,12 +450,8 @@ def test_v4_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
             connection.execute(f'DROP INDEX IF EXISTS "{index}"')
         for table in v6.ADDED_TABLES:
             connection.execute(f'DROP TABLE IF EXISTS "{table}"')
-        connection.execute(
-            "ALTER TABLE datasets DROP COLUMN lineage_parent_ref"
-        )
-        connection.execute(
-            "ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref"
-        )
+        connection.execute("ALTER TABLE datasets DROP COLUMN lineage_parent_ref")
+        connection.execute("ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref")
         connection.execute(
             "DELETE FROM schema_migrations WHERE version = ?",
             (v6.VERSION,),
@@ -481,10 +481,7 @@ def test_v4_database_is_backed_up_and_migrated_to_current(tmp_path: Path) -> Non
             """,
             (v5.VERSION,),
         ).fetchone()
-        columns = {
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(memory_snapshots)")
-        }
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(memory_snapshots)")}
         lineage_migration = connection.execute(
             """
             SELECT checksum, source_version

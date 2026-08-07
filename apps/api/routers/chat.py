@@ -117,6 +117,7 @@ async def chat_stream(
         model_timeout_seconds=settings.agent_model_timeout_seconds,
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
         approval_ttl_seconds=settings.agent_approval_ttl_seconds,
+        max_parallel_tools=settings.agent_max_parallel_tools,
     )
     run_id = uuid.uuid4().hex
     subscription = agent_run_manager.start(

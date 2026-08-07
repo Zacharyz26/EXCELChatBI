@@ -90,6 +90,8 @@ def _context(**changes: Any) -> MCPRequestContext:
         permission_snapshot_id="permissions-1",
         memory_snapshot_id="0" * 32,
         evidence_ledger_version=0,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
         trace_id="trace-1",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
     )
@@ -177,8 +179,7 @@ class _MutableResourceProvider:
         if context.project_id != "project-1" or context.subject_id != "user-1":
             raise PermissionError("not visible")
         valid_uris = {
-            f"chatbi://mutable/resource-{index}"
-            for index in range(1, self.resource_count + 1)
+            f"chatbi://mutable/resource-{index}" for index in range(1, self.resource_count + 1)
         }
         if uri not in valid_uris:
             raise FileNotFoundError(uri)
@@ -641,9 +642,7 @@ async def test_resource_subscription_emits_versioned_notifications_and_unsubscri
         assert updated.kind == "updated"
         assert updated.uri == "chatbi://mutable/resource-1"
         assert list_changed.catalog_version == updated.catalog_version
-        assert list_changed.previous_catalog_version == (
-            updated.previous_catalog_version
-        )
+        assert list_changed.previous_catalog_version == (updated.previous_catalog_version)
         assert list_changed.catalog_version != list_changed.previous_catalog_version
 
         await transport.unsubscribe_resource(
@@ -660,9 +659,7 @@ async def test_sdk_buffer_receives_tool_list_changed_notification() -> None:
     from mcp import types
 
     notifications = MCPResourceNotificationBuffer()
-    await notifications(
-        types.ServerNotification(root=types.ToolListChangedNotification())
-    )
+    await notifications(types.ServerNotification(root=types.ToolListChangedNotification()))
 
     await notifications.next_tool_list_changed(timeout_seconds=0.1)
     with pytest.raises(TimeoutError):
@@ -1100,11 +1097,7 @@ class _ScriptedResourceTransport(_ScriptedTransport):
         uri: str,
         context: MCPRequestContext,
     ) -> None:
-        self.subscriptions = [
-            item
-            for item in self.subscriptions
-            if item != (uri, context)
-        ]
+        self.subscriptions = [item for item in self.subscriptions if item != (uri, context)]
 
     async def next_resource_notification(
         self,
@@ -1198,12 +1191,8 @@ async def test_managed_gateway_restores_resource_subscriptions_after_reconnect()
 
     assert [item.uri for item in resources] == ["chatbi://mutable/resource-1"]
     assert disconnected.closed is True
-    assert [item[0] for item in disconnected.subscriptions] == [
-        "chatbi://mutable/resource-1"
-    ]
-    assert recovered.subscriptions == [
-        ("chatbi://mutable/resource-1", context)
-    ]
+    assert [item[0] for item in disconnected.subscriptions] == ["chatbi://mutable/resource-1"]
+    assert recovered.subscriptions == [("chatbi://mutable/resource-1", context)]
     assert gateway.health.generation == 2
     await gateway.aclose()
 

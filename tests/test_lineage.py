@@ -11,7 +11,7 @@ from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.governance.audit import AuditEvent
 from packages.governance.permissions import Principal
 from packages.session.lineage import LineageAccessDenied, LineageStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7, v8, v9, v10
 from packages.session.models import ArtifactDraft
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
@@ -44,9 +44,7 @@ def test_complete_lineage_graph_and_deleted_dataset_anchors(tmp_path: Path) -> N
         "evidence",
         "claim",
     }.issubset({node.node_type for node in graph.nodes})
-    assert {
-        edge.relation for edge in graph.edges
-    } >= {
+    assert {edge.relation for edge in graph.edges} >= {
         "derived_from",
         "used_by",
         "produced",
@@ -219,6 +217,13 @@ def test_v5_database_is_backed_up_and_backfills_lineage_anchors(
     )
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v10.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v10.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v10.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v10.VERSION,))
         for trigger in v9.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v9.ADDED_INDEXES:
@@ -255,12 +260,8 @@ def test_v5_database_is_backed_up_and_backfills_lineage_anchors(
             connection.execute(f'DROP INDEX IF EXISTS "{index}"')
         for table in v6.ADDED_TABLES:
             connection.execute(f'DROP TABLE IF EXISTS "{table}"')
-        connection.execute(
-            "ALTER TABLE datasets DROP COLUMN lineage_parent_ref"
-        )
-        connection.execute(
-            "ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref"
-        )
+        connection.execute("ALTER TABLE datasets DROP COLUMN lineage_parent_ref")
+        connection.execute("ALTER TABLE artifacts DROP COLUMN lineage_dataset_ref")
         connection.execute(
             "DELETE FROM schema_migrations WHERE version = ?",
             (v6.VERSION,),

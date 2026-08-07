@@ -38,7 +38,7 @@ from packages.common.config import get_settings
 from packages.common.logging import get_logger
 from packages.governance.observability import trace_span
 from packages.governance.permissions import Principal
-from packages.governance.policy import ToolPolicyGateway, ToolPolicyRequest
+from packages.governance.policy import PolicyDecision, ToolPolicyGateway, ToolPolicyRequest
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
@@ -102,7 +102,9 @@ from apps.orchestrator.control.contracts import (
     build_minimal_contract,
 )
 from apps.orchestrator.control.plan_executor import (
+    PlanSchedule,
     match_ready_step,
+    match_ready_steps_batch,
     schedule_payload,
     schedule_plan_steps,
 )
@@ -125,6 +127,7 @@ class CapabilityCatalogDrift(RuntimeError):
     def __init__(self, issues: tuple[str, ...]) -> None:
         super().__init__(";".join(issues))
         self.issues = issues
+
 
 _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助用户完成数据分析。
 
@@ -284,6 +287,7 @@ class AgentLoopConfig:
     approval_ttl_seconds: int = 900
     planner_max_steps: int = 12
     max_replans: int = 3
+    max_parallel_tools: int = 4
 
 
 @dataclass(frozen=True)
@@ -298,6 +302,30 @@ class _ToolExecutionOutcome:
     gateway_health: str = "compatibility"
     gateway_generation: int = 0
     mcp_service: str | None = None
+
+
+@dataclass(frozen=True)
+class _ParallelPreparedCall:
+    call: ToolCall
+    step: TaskStepRecord
+    arguments: JsonObject
+    fields: str
+    policy: PolicyDecision
+    policy_payload: JsonObject
+    tool_contract: JsonObject
+    definition_execution: JsonObject | None
+    signature: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class _ParallelBatchOutcome:
+    run: TaskRun
+    messages: tuple[ModelMessage, ...]
+    calls_executed: int
+    attempts_reserved: int
+    unknown_error: tuple[str, str, str, str] | None = None
+    aborted: bool = False
 
 
 def _requests_chart(user_text: str) -> bool:
@@ -815,6 +843,7 @@ async def _stream_agent_chat_inner(
                     contract=contract,
                     budget={
                         "max_tool_calls": config.max_tool_calls,
+                        "max_parallelism": config.max_parallel_tools,
                         "autonomy_mode": effective_autonomy_mode,
                     },
                     parent_run_id=parent_run_id,
@@ -964,9 +993,7 @@ async def _stream_agent_chat_inner(
         frozen_capability_catalog = registry.capability_catalog_from_snapshot(
             capability_snapshot.catalog
         )
-        frozen_tool_names = registry.tool_names_from_snapshot(
-            capability_snapshot.catalog
-        )
+        frozen_tool_names = registry.tool_names_from_snapshot(capability_snapshot.catalog)
 
         if context is None:  # 防御性分支：原子创建后正常情况下必然存在
             run, failed_event = await _transition_after_failure(
@@ -1546,9 +1573,8 @@ async def _stream_agent_chat_inner(
             )
 
         plan_review_resumed = False
-        if (
-            effective_autonomy_mode == "assisted"
-            and (not resume_existing or clarification_question_id is not None)
+        if effective_autonomy_mode == "assisted" and (
+            not resume_existing or clarification_question_id is not None
         ):
             if control is not None:
                 control.pause()
@@ -1594,9 +1620,8 @@ async def _stream_agent_chat_inner(
             plan_review_resumed = True
 
         if (
-            (not resume_existing or clarification_question_id is not None)
-            and not plan_review_resumed
-        ):
+            not resume_existing or clarification_question_id is not None
+        ) and not plan_review_resumed:
             try:
                 run, started_event = await run_in_threadpool(
                     task_store.transition,
@@ -2191,6 +2216,85 @@ async def _stream_agent_chat_inner(
             )
             working.append(ModelMessage(role="assistant", content=turn_text, tool_calls=tool_calls))
 
+            parallel_event_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+            parallel_task = asyncio.create_task(
+                _try_execute_parallel_frontier(
+                    tool_calls=tool_calls,
+                    schedule=schedule,
+                    offered_step_ids=offered_step_ids,
+                    offered_plan_version=offered_plan_version,
+                    run=run,
+                    run_id=run_id,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                    assistant_message_id=assistant_message.id,
+                    task_store=task_store,
+                    store=store,
+                    registry=registry,
+                    policy=active_policy,
+                    principal=active_principal,
+                    memory_snapshot_id=memory_snapshot.memory_snapshot_id,
+                    signature_counts=signature_counts,
+                    attempts_used=attempts_used,
+                    config=config,
+                    control=control,
+                    event_queue=parallel_event_queue,
+                )
+            )
+            while not parallel_task.done() or not parallel_event_queue.empty():
+                try:
+                    parallel_event = await asyncio.wait_for(parallel_event_queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+                yield parallel_event
+            parallel_outcome = await parallel_task
+            if parallel_outcome is not None:
+                run = parallel_outcome.run
+                attempts_used += parallel_outcome.attempts_reserved
+                calls_used += parallel_outcome.calls_executed
+                if attempts_used >= config.max_tool_calls:
+                    tools_allowed = False
+                    budget_exhausted = True
+                working.extend(parallel_outcome.messages)
+                if parallel_outcome.aborted:
+                    return
+                if parallel_outcome.unknown_error is not None:
+                    error_code, error_message, invocation_id, transport = (
+                        parallel_outcome.unknown_error
+                    )
+                    run, blocked_event = await run_in_threadpool(
+                        task_store.transition,
+                        run_id,
+                        expected_version=run.state_version,
+                        status="blocked",
+                        event_type="run.blocked",
+                        payload={
+                            "reason": error_code,
+                            "invocation_id": invocation_id,
+                            "transport": transport,
+                            "parallel": True,
+                        },
+                        terminal_reason=error_code,
+                        usage=_tool_usage(
+                            calls_used,
+                            attempts_used,
+                            invalid_attempts_used,
+                        ),
+                    )
+                    yield _task_event(blocked_event, conversation_id)
+                    yield _event(
+                        "error",
+                        {
+                            "code": error_code,
+                            "message": error_message,
+                            "retryable": False,
+                            "run_id": run_id,
+                            "run_status": run.status,
+                        },
+                    )
+                    return
+                continue
+
             for call_index, call in enumerate(tool_calls):
                 controlled_run = await _controlled_run_boundary(
                     control,
@@ -2258,11 +2362,7 @@ async def _stream_agent_chat_inner(
                     "mcp_descriptor_for_tool",
                     None,
                 )
-                descriptor = (
-                    descriptor_lookup(call.name)
-                    if callable(descriptor_lookup)
-                    else None
-                )
+                descriptor = descriptor_lookup(call.name) if callable(descriptor_lookup) else None
                 resource_project_id: str | None = None
                 dataset_ref = call_args.get("dataset_ref")
                 if isinstance(dataset_ref, str) and dataset_ref:
@@ -2286,15 +2386,10 @@ async def _stream_agent_chat_inner(
                 signature_scope = (
                     f"plan:{offered_plan_version}:{planned_step.logical_id}"
                     if planned_step is not None
-                    else (
-                        f"plan:{offered_plan_version}:unbound"
-                        if plan_enforced
-                        else "legacy"
-                    )
+                    else (f"plan:{offered_plan_version}:unbound" if plan_enforced else "legacy")
                 )
                 signature = (
-                    f"{signature_scope}:{call.name}:"
-                    f"{_normalized_argument_mapping(call_args)}"
+                    f"{signature_scope}:{call.name}:" f"{_normalized_argument_mapping(call_args)}"
                 )
                 repeated_signature = signature_counts.get(signature, 0) >= 1
                 signature_counts[signature] = signature_counts.get(signature, 0) + 1
@@ -2342,9 +2437,8 @@ async def _stream_agent_chat_inner(
                     if policy_decision.code == "tool_budget_exhausted":
                         tools_allowed = False
                         budget_exhausted = True
-                elif (
-                    effective_autonomy_mode == "read_only"
-                    and (descriptor is None or not descriptor.metadata.read_only)
+                elif effective_autonomy_mode == "read_only" and (
+                    descriptor is None or not descriptor.metadata.read_only
                 ):
                     feedback = (
                         "未执行：标准只读模式禁止产生写入或外部副作用；"
@@ -2388,9 +2482,7 @@ async def _stream_agent_chat_inner(
                     None,
                 )
                 tool_contract = (
-                    audit_metadata_lookup(call.name)
-                    if callable(audit_metadata_lookup)
-                    else {}
+                    audit_metadata_lookup(call.name) if callable(audit_metadata_lookup) else {}
                 )
                 if (
                     feedback is None
@@ -2416,10 +2508,7 @@ async def _stream_agent_chat_inner(
                                 tool_schema_hash=contract_hash,
                                 parameter_summary_hash=parameter_hash,
                             )
-                            if (
-                                candidate is not None
-                                and candidate.status in {"denied", "revoked"}
-                            ):
+                            if candidate is not None and candidate.status in {"denied", "revoked"}:
                                 feedback = (
                                     "未执行：该高风险工具授权已被拒绝或撤销。"
                                     "如需重新申请，请先修改计划或参数。"
@@ -2442,9 +2531,7 @@ async def _stream_agent_chat_inner(
                                     candidate.approval_id,
                                     expected_run_version=run.state_version,
                                     expected_approval_version=candidate.version,
-                                    idempotency_key=(
-                                        f"approval-consume:{candidate.approval_id}"
-                                    ),
+                                    idempotency_key=(f"approval-consume:{candidate.approval_id}"),
                                     tenant_id=active_principal.tenant_scope,
                                     actor_user_id=active_principal.user_id,
                                     tool_name=call.name,
@@ -2469,11 +2556,13 @@ async def _stream_agent_chat_inner(
                             try:
                                 if pending is None:
                                     expires_at = (
-                                        datetime.now(UTC)
-                                        + timedelta(
-                                            seconds=config.approval_ttl_seconds
+                                        (
+                                            datetime.now(UTC)
+                                            + timedelta(seconds=config.approval_ttl_seconds)
                                         )
-                                    ).isoformat().replace("+00:00", "Z")
+                                        .isoformat()
+                                        .replace("+00:00", "Z")
+                                    )
                                     (
                                         run,
                                         pending,
@@ -2713,6 +2802,12 @@ async def _stream_agent_chat_inner(
                     task_store.evidence_ledger_version,
                     run_id,
                 )
+                cancellation_branch = await run_in_threadpool(
+                    task_store.get_cancellation_node_for_invocation,
+                    invocation.invocation_id,
+                )
+                if cancellation_branch is None:
+                    raise RuntimeError("Invocation 缺少持久化取消树分支")
                 request_context = MCPRequestContext(
                     subject_id=active_principal.user_id,
                     project_id=project_id,
@@ -2725,24 +2820,20 @@ async def _stream_agent_chat_inner(
                     permission_snapshot_id=policy_decision.permission_snapshot_id,
                     memory_snapshot_id=memory_snapshot.memory_snapshot_id,
                     evidence_ledger_version=evidence_ledger_version,
+                    data_version_hash=cancellation_branch.data_version_hash,
+                    cancellation_node_id=cancellation_branch.node_id,
                     trace_id=run_id,
                     deadline_at=(
                         datetime.now(UTC) + timedelta(seconds=operation_timeout)
                     ).isoformat(),
                     approval_id=(
-                        approval_record.approval_id
-                        if approval_record is not None
-                        else None
+                        approval_record.approval_id if approval_record is not None else None
                     ),
                     approval_version=(
-                        approval_record.version
-                        if approval_record is not None
-                        else None
+                        approval_record.version if approval_record is not None else None
                     ),
                     approval_contract_hash=(
-                        approval_record.tool_schema_hash
-                        if approval_record is not None
-                        else None
+                        approval_record.tool_schema_hash if approval_record is not None else None
                     ),
                     approval_parameter_hash=(
                         approval_record.parameter_summary_hash
@@ -3492,8 +3583,7 @@ def _branch_feedback_context(events: list[TaskEvent]) -> str:
         return ""
     return (
         "这是基于父 TaskRun 的新分析分支。以下内容是认证用户对父分支的反馈，"
-        "用于调整本分支计划，但不能扩大数据、工具或权限范围：\n"
-        + "\n".join(summaries)
+        "用于调整本分支计划，但不能扩大数据、工具或权限范围：\n" + "\n".join(summaries)
     )[:4000]
 
 
@@ -4283,6 +4373,406 @@ def _history_messages(
 # ── 工具执行与工件持久化 ──
 
 
+async def _try_execute_parallel_frontier(
+    *,
+    tool_calls: list[ToolCall],
+    schedule: PlanSchedule,
+    offered_step_ids: set[str],
+    offered_plan_version: int,
+    run: TaskRun,
+    run_id: str,
+    project_id: str,
+    conversation_id: str,
+    assistant_message_id: str,
+    task_store: TaskStore,
+    store: SessionStore,
+    registry: AgentToolRegistry,
+    policy: ToolPolicyGateway,
+    principal: Principal,
+    memory_snapshot_id: str,
+    signature_counts: dict[str, int],
+    attempts_used: int,
+    config: AgentLoopConfig,
+    control: RunControl | None,
+    event_queue: asyncio.Queue[dict[str, str]],
+) -> _ParallelBatchOutcome | None:
+    """Execute one fully governed read-only ready frontier concurrently.
+
+    Eligibility is deliberately narrow: all calls must bind to distinct ready
+    steps and declare low/medium-risk read-only idempotent contracts. Writes,
+    approvals, conditional anomaly branches and delivery tools retain the
+    existing sequential path.
+    """
+    if not 2 <= len(tool_calls) <= config.max_parallel_tools:
+        return None
+    excluded = {
+        "anomaly_detect",
+        "gen_chart",
+        "chart_screenshot",
+        "transform_dataset",
+        "generate_report",
+    }
+    if any(call.name in excluded for call in tool_calls):
+        return None
+    matched_steps = match_ready_steps_batch(
+        tool_names=tuple(call.name for call in tool_calls),
+        schedule=schedule,
+        resolver=registry,
+        offered_step_ids=offered_step_ids,
+    )
+    if matched_steps is None:
+        return None
+    descriptor_lookup = getattr(registry, "mcp_descriptor_for_tool", None)
+    if not callable(descriptor_lookup):
+        return None
+    audit_metadata_lookup = getattr(registry, "audit_metadata_for_tool", None)
+    prepared: list[_ParallelPreparedCall] = []
+    proposed_signatures: set[str] = set()
+    for index, (call, step) in enumerate(zip(tool_calls, matched_steps, strict=True)):
+        descriptor = descriptor_lookup(call.name)
+        if (
+            descriptor is None
+            or not descriptor.metadata.read_only
+            or not descriptor.metadata.idempotent
+            or descriptor.metadata.destructive
+            or descriptor.metadata.open_world
+            or descriptor.metadata.risk_level not in {"low", "medium"}
+        ):
+            return None
+        arguments = _parse_args(call.arguments)
+        try:
+            definition_execution = await run_in_threadpool(
+                task_store.resolve_definition_execution,
+                run_id,
+                tool_name=call.name,
+                arguments=arguments,
+            )
+        except ControlConflict:
+            return None
+        resource_project_id: str | None = None
+        dataset_ref = arguments.get("dataset_ref")
+        if isinstance(dataset_ref, str) and dataset_ref:
+            dataset = await run_in_threadpool(store.get_dataset, dataset_ref)
+            if dataset is not None:
+                resource_project_id = dataset.project_id
+        decision = policy.authorize(
+            ToolPolicyRequest(
+                principal=principal,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_name=call.name,
+                arguments=arguments,
+                calls_used=attempts_used + index,
+                max_tool_calls=config.max_tool_calls,
+                resource_project_id=resource_project_id,
+            )
+        )
+        if not decision.allowed:
+            return None
+        signature = (
+            f"plan:{offered_plan_version}:{step.logical_id}:{call.name}:"
+            f"{_normalized_argument_mapping(arguments)}"
+        )
+        if signature_counts.get(signature, 0) >= 1 or signature in proposed_signatures:
+            return None
+        proposed_signatures.add(signature)
+        tool_contract = audit_metadata_lookup(call.name) if callable(audit_metadata_lookup) else {}
+        policy_payload = decision.to_event_payload()
+        if tool_contract:
+            policy_payload["tool_contract"] = tool_contract
+        if definition_execution is not None:
+            policy_payload["definition_execution"] = definition_execution
+        prepared.append(
+            _ParallelPreparedCall(
+                call=call,
+                step=step,
+                arguments=arguments,
+                fields=_humanize_args(call.name, arguments),
+                policy=decision,
+                policy_payload=policy_payload,
+                tool_contract=tool_contract,
+                definition_execution=definition_execution,
+                signature=signature,
+                idempotency_key=invocation_idempotency_key(run_id, call.id, call.name, arguments),
+            )
+        )
+
+    requests: list[JsonObject] = [
+        {
+            "tool_call_id": item.call.id,
+            "tool_name": item.call.name,
+            "arguments": item.arguments,
+            "idempotency_key": item.idempotency_key,
+            "policy_decision": item.policy_payload,
+            "step_id": item.step.step_id,
+        }
+        for item in prepared
+    ]
+    try:
+        run, invocations, started_events, created = await run_in_threadpool(
+            task_store.reserve_parallel_invocations,
+            run_id=run_id,
+            expected_version=run.state_version,
+            requests=requests,
+        )
+    except ControlConflict as exc:
+        if str(exc) in {"tool_budget_exhausted"}:
+            return None
+        raise
+    if not created:
+        raise ControlConflict("活动 TaskRun 不允许重放已经预留的并行批次")
+    for item in prepared:
+        signature_counts[item.signature] = signature_counts.get(item.signature, 0) + 1
+    for item, event in zip(prepared, started_events, strict=True):
+        await event_queue.put(_task_event(event, conversation_id))
+        await event_queue.put(
+            _event(
+                "tool_start",
+                {
+                    "id": item.call.id,
+                    "step_id": item.step.logical_id,
+                    "tool": item.call.name,
+                    "label": _TOOL_LABELS.get(item.call.name, item.call.name),
+                    "fields": item.fields,
+                    "args_preview": _compact_json(item.arguments, 300),
+                    "parallel": True,
+                },
+            )
+        )
+
+    ledger_version = await run_in_threadpool(task_store.evidence_ledger_version, run_id)
+    branches = []
+    for invocation in invocations:
+        branch = await run_in_threadpool(
+            task_store.get_cancellation_node_for_invocation,
+            invocation.invocation_id,
+        )
+        if branch is None:
+            raise RuntimeError("并行 Invocation 缺少持久化取消树分支")
+        branches.append(branch)
+    operation_timeout = _active_operation_timeout(
+        control,
+        total_seconds=config.run_timeout_seconds,
+        operation_seconds=config.tool_timeout_seconds,
+    )
+    execution_tasks: list[asyncio.Task[_ToolExecutionOutcome]] = []
+    async with asyncio.TaskGroup() as group:
+        for item, invocation, branch in zip(prepared, invocations, branches, strict=True):
+            request_context = MCPRequestContext(
+                subject_id=principal.user_id,
+                project_id=project_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                plan_version=run.plan_version,
+                step_id=item.step.logical_id,
+                invocation_id=invocation.invocation_id,
+                idempotency_key=item.idempotency_key,
+                permission_snapshot_id=item.policy.permission_snapshot_id,
+                memory_snapshot_id=memory_snapshot_id,
+                evidence_ledger_version=ledger_version,
+                data_version_hash=branch.data_version_hash,
+                cancellation_node_id=branch.node_id,
+                trace_id=run_id,
+                deadline_at=(datetime.now(UTC) + timedelta(seconds=operation_timeout)).isoformat(),
+            )
+            execution_tasks.append(
+                group.create_task(
+                    _execute_tool(
+                        registry,
+                        item.call,
+                        arguments=item.arguments,
+                        context=request_context,
+                        trace_id=run_id,
+                        invocation_id=invocation.invocation_id,
+                        timeout_seconds=operation_timeout,
+                    ),
+                    name=f"agent-tool:{run_id}:{item.step.logical_id}",
+                )
+            )
+    executions = [task.result() for task in execution_tasks]
+    messages: list[ModelMessage] = []
+    unknown_error: tuple[str, str, str, str] | None = None
+    for item, invocation, execution in zip(prepared, invocations, executions, strict=True):
+        current = await run_in_threadpool(task_store.get_run, run_id)
+        if current is None or current.status != "running":
+            _cleanup_uncommitted_report_files(item.call, execution.result)
+            return _ParallelBatchOutcome(
+                run=current or run,
+                messages=tuple(messages),
+                calls_executed=len(executions),
+                attempts_reserved=len(prepared),
+                aborted=True,
+            )
+        run = current
+        if execution.error_text is not None:
+            error_code = execution.error_code or "tool_execution_failed"
+            _compare_mcp_error(registry, item.call.name, error_code)
+            run, _failed, failure_event = await run_in_threadpool(
+                task_store.commit_tool_failure,
+                invocation.invocation_id,
+                status="unknown" if execution.result_unknown else "failed",
+                expected_version=run.state_version,
+                error_code=error_code,
+                error_text=execution.error_text,
+                source="system" if execution.result_unknown else "tool",
+                retryable=execution.retryable,
+            )
+            if failure_event is not None:
+                await event_queue.put(_task_event(failure_event, conversation_id))
+            await event_queue.put(
+                _event(
+                    "tool_end",
+                    {
+                        "id": item.call.id,
+                        "step_id": item.step.logical_id,
+                        "tool": item.call.name,
+                        "status": "error",
+                        "message": execution.error_text,
+                        "transport": execution.transport,
+                        "parallel": True,
+                    },
+                )
+            )
+            messages.append(
+                ModelMessage(
+                    role="tool",
+                    content=f"工具执行失败：{execution.error_text}",
+                    tool_call_id=item.call.id,
+                )
+            )
+            await _persist_tool_outcome(
+                store,
+                conversation_id,
+                {
+                    "tool_call_id": item.call.id,
+                    "tool": item.call.name,
+                    "status": "error",
+                    "message": execution.error_text,
+                    "fields": item.fields,
+                    "parallel": True,
+                },
+            )
+            if execution.result_unknown and unknown_error is None:
+                unknown_error = (
+                    error_code,
+                    "并行工具调用结果状态未知，任务已停止且不会自动重试。",
+                    invocation.invocation_id,
+                    execution.transport,
+                )
+            continue
+
+        result = execution.result
+        artifact_draft = _prepare_artifact(
+            item.call,
+            result,
+            arguments=item.arguments,
+            artifact_type=_artifact_type_for(registry, item.call.name),
+        )
+        shadow_comparison = _compare_mcp_success(
+            registry,
+            tool_name=item.call.name,
+            arguments=item.arguments,
+            result=result,
+            artifact=artifact_draft,
+        )
+        summary = _summarize_result(item.call.name, result)
+        (
+            run,
+            _completed,
+            _evidence,
+            artifact,
+            step_event,
+            _checkpoint,
+        ) = await run_in_threadpool(
+            task_store.commit_tool_success,
+            invocation.invocation_id,
+            expected_version=run.state_version,
+            assistant_message_id=assistant_message_id,
+            result=result,
+            evidence_kind="tool_result",
+            evidence_source={
+                "transport": execution.transport,
+                "mcp_execution": "canonical_gateway",
+                "mcp_degraded": execution.degraded,
+                "mcp_gateway_health": execution.gateway_health,
+                "mcp_gateway_generation": execution.gateway_generation,
+                "mcp_service": execution.mcp_service,
+                "tool_contract": item.tool_contract,
+                "tool": item.call.name,
+                "tool_call_id": item.call.id,
+                "dataset_ref": item.arguments.get("dataset_ref"),
+                "parallel": True,
+                **_definition_result_evidence_fields(item.call.name, result),
+                **(
+                    {"definition_execution": item.definition_execution}
+                    if item.definition_execution is not None
+                    else {}
+                ),
+                **(
+                    shadow_comparison.evidence_fields()
+                    if shadow_comparison is not None
+                    else {"mcp_contract_validation": "unavailable"}
+                ),
+            },
+            evidence_summary=build_evidence_summary(
+                summary=summary,
+                result=result,
+                artifact_id=None,
+            ),
+            artifact_draft=artifact_draft,
+        )
+        store.invalidate_conversation(conversation_id)
+        if artifact is not None:
+            await event_queue.put(_event("artifact", _artifact_payload(artifact)))
+        await event_queue.put(_task_event(step_event, conversation_id))
+        await event_queue.put(
+            _event(
+                "tool_end",
+                {
+                    "id": item.call.id,
+                    "step_id": item.step.logical_id,
+                    "tool": item.call.name,
+                    "status": "ok",
+                    "summary": summary,
+                    "transport": execution.transport,
+                    "degraded": execution.degraded,
+                    "mcp_service": execution.mcp_service,
+                    "parallel": True,
+                },
+            )
+        )
+        await _persist_tool_outcome(
+            store,
+            conversation_id,
+            {
+                "tool_call_id": item.call.id,
+                "tool": item.call.name,
+                "status": "ok",
+                "summary": summary,
+                "transport": execution.transport,
+                "degraded": execution.degraded,
+                "mcp_service": execution.mcp_service,
+                "fields": item.fields,
+                "parallel": True,
+            },
+        )
+        messages.append(
+            ModelMessage(
+                role="tool",
+                content=_model_view(item.call.name, result, config.tool_result_max_chars),
+                tool_call_id=item.call.id,
+            )
+        )
+    return _ParallelBatchOutcome(
+        run=run,
+        messages=tuple(messages),
+        calls_executed=len(executions),
+        attempts_reserved=len(prepared),
+        unknown_error=unknown_error,
+    )
+
+
 async def _persist_tool_outcome(
     store: SessionStore, conversation_id: str, outcome: JsonObject
 ) -> None:
@@ -4476,9 +4966,7 @@ def _definition_result_evidence_fields(tool_name: str, result: Any) -> JsonObjec
     if isinstance(compiled, dict):
         compiled_tool_name = compiled.get("tool_name")
         compiled_arguments = compiled.get("arguments")
-        if isinstance(compiled_tool_name, str) and isinstance(
-            compiled_arguments, dict
-        ):
+        if isinstance(compiled_tool_name, str) and isinstance(compiled_arguments, dict):
             fields["compiled_invocation"] = {
                 "definition_id": compiled.get("definition_id"),
                 "definition_version": compiled.get("definition_version"),

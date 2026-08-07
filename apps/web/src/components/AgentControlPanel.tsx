@@ -297,6 +297,37 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
             {error && <div className="agent-control-message agent-control-message--error">{error}</div>}
             {notice && <div className="agent-control-message">{notice}</div>}
 
+            {detail.execution_control && (
+              <section className="agent-section" aria-label="任务执行边界">
+                <div className="agent-section__title">
+                  <span>共享执行边界</span>
+                  <small>control v{detail.execution_control.schema_version}</small>
+                </div>
+                <dl className="agent-execution-control">
+                  <div>
+                    <dt>预算</dt>
+                    <dd>
+                      {String(detail.run.usage.tool_attempts ?? 0)} / {detail.execution_control.max_tool_calls}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>并行上限</dt>
+                    <dd>{detail.execution_control.max_parallelism}</dd>
+                  </div>
+                  <div>
+                    <dt>数据版本</dt>
+                    <dd>{detail.execution_control.data_version_hash
+                      ? shortHash(detail.execution_control.data_version_hash)
+                      : "未绑定"}</dd>
+                  </div>
+                  <div>
+                    <dt>Evidence Ledger</dt>
+                    <dd>v{detail.execution_control.evidence_ledger_version}</dd>
+                  </div>
+                </dl>
+              </section>
+            )}
+
             {detail.run.status === "waiting_user" && clarification && (
               <section className="agent-section agent-clarification-card">
                 <div className="agent-section__title">
@@ -661,11 +692,18 @@ function ToolAudit({ audit }: { audit: AgentToolAudit }) {
         <div><dt>权限</dt><dd>{audit.required_permissions.join("、") || "未记录"}</dd></div>
         <div><dt>Gateway</dt><dd>{health}{audit.degraded ? " · 降级" : ""}</dd></div>
         <div><dt>传输</dt><dd>{audit.transport ?? "未记录"}</dd></div>
+        <div><dt>调度</dt><dd>{audit.parallel ? "受控并行" : "顺序执行"}</dd></div>
+        <div>
+          <dt>数据版本</dt>
+          <dd>{audit.data_version_hash ? shortHash(audit.data_version_hash) : "未记录"}</dd>
+        </div>
       </dl>
       <p>
         {audit.evidence_id
           ? `Evidence ${shortHash(audit.evidence_id)}`
           : "Evidence 尚未生成"}
+        {audit.evidence_ledger_sequence !== null
+          && ` · Ledger #${audit.evidence_ledger_sequence}`}
         {audit.artifact_id && ` · Artifact ${shortHash(audit.artifact_id)}`}
       </p>
     </article>

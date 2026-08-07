@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9, v10
 
 
 @pytest.fixture
@@ -63,6 +63,10 @@ def test_schema_initializes_and_reopens(tmp_path: Path) -> None:
         "domain_definitions",
         "domain_field_mappings",
         "capability_catalog_snapshots",
+        "task_execution_scopes",
+        "task_dataset_bindings",
+        "task_cancellation_nodes",
+        "evidence_ledger_entries",
     } <= tables
 
 
@@ -75,30 +79,30 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
         SessionStore(str(db_path))
 
 
-def test_v8_database_is_backed_up_and_migrated_to_v9(tmp_path: Path) -> None:
-    db_path = tmp_path / "v8.db"
+def test_v9_database_is_backed_up_and_migrated_to_v10(tmp_path: Path) -> None:
+    db_path = tmp_path / "v9.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
-        for trigger in v9.ADDED_TRIGGERS:
+        for trigger in v10.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
-        for index in v9.ADDED_INDEXES:
+        for index in v10.ADDED_INDEXES:
             connection.execute(f'DROP INDEX IF EXISTS "{index}"')
-        for table in v9.ADDED_TABLES:
+        for table in v10.ADDED_TABLES:
             connection.execute(f'DROP TABLE IF EXISTS "{table}"')
         connection.execute(
             "DELETE FROM schema_migrations WHERE version = ?",
-            (v9.VERSION,),
+            (v10.VERSION,),
         )
-        connection.execute(f"PRAGMA user_version = {v8.VERSION}")
+        connection.execute(f"PRAGMA user_version = {v9.VERSION}")
 
     migrated = SessionStore(str(db_path))
 
-    assert migrated.schema_version == v9.VERSION
-    assert len(list(tmp_path.glob("v8.db.v8-backup.*.sqlite3"))) == 1
+    assert migrated.schema_version == v10.VERSION
+    assert len(list(tmp_path.glob("v9.db.v9-backup.*.sqlite3"))) == 1
     with sqlite3.connect(db_path) as connection:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (v9.ADDED_TABLES[0],),
+            (v10.ADDED_TABLES[0],),
         ).fetchone()
     assert table is not None
 
@@ -115,8 +119,9 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         "collaboration_control_plane": "ready",
         "domain_definition_control_plane": "ready",
         "capability_catalog_control_plane": "ready",
+        "controlled_parallel_control_plane": "ready",
     }
-    migrations = (v4, v5, v6, v7, v8, v9)
+    migrations = (v4, v5, v6, v7, v8, v9, v10)
     for index, migration in enumerate(migrations):
         with sqlite3.connect(db_path) as connection:
             if index > 0:
@@ -195,9 +200,7 @@ def test_deleting_parent_dataset_clears_lineage_reference(
     store: SessionStore, tmp_path: Path
 ) -> None:
     project = store.create_project("血缘")
-    store.register_dataset(
-        ref="parent", project_id=project.id, filename="a.xlsx", profile={}
-    )
+    store.register_dataset(ref="parent", project_id=project.id, filename="a.xlsx", profile={})
     store.register_dataset(
         ref="child",
         project_id=project.id,
@@ -385,9 +388,7 @@ def test_conversation_order_and_cascade(store: SessionStore) -> None:
     second = store.create_conversation(project.id, "第二条")
     assert store.list_conversations(project.id) == [second, first]
 
-    message = store.append_message(
-        conversation_id=first.id, role="user", content="更新第一条"
-    )
+    message = store.append_message(conversation_id=first.id, role="user", content="更新第一条")
     store.create_artifact(
         conversation_id=first.id,
         message_id=message.id,

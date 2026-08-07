@@ -173,6 +173,8 @@ class MCPRequestContext:
     permission_snapshot_id: str
     memory_snapshot_id: str
     evidence_ledger_version: int
+    data_version_hash: str
+    cancellation_node_id: str
     trace_id: str
     deadline_at: str
     approval_id: str | None = None
@@ -191,6 +193,7 @@ class MCPRequestContext:
             self.idempotency_key,
             self.permission_snapshot_id,
             self.memory_snapshot_id,
+            self.cancellation_node_id,
             self.trace_id,
             self.deadline_at,
         )
@@ -198,6 +201,10 @@ class MCPRequestContext:
             any(not item.strip() for item in string_fields)
             or self.plan_version < 0
             or self.evidence_ledger_version < 0
+            or not _is_sha256(self.data_version_hash)
+            or len(self.cancellation_node_id) != 32
+            or self.cancellation_node_id != self.cancellation_node_id.lower()
+            or any(char not in "0123456789abcdef" for char in self.cancellation_node_id)
             or len(self.memory_snapshot_id) != 32
             or self.memory_snapshot_id != self.memory_snapshot_id.lower()
             or any(char not in "0123456789abcdef" for char in self.memory_snapshot_id)
@@ -293,6 +300,8 @@ class MCPRequestContext:
                     raw,
                     "evidence_ledger_version",
                 ),
+                data_version_hash=_required_string(raw, "data_version_hash"),
+                cancellation_node_id=_required_string(raw, "cancellation_node_id"),
                 trace_id=_required_string(raw, "trace_id"),
                 deadline_at=_required_string(raw, "deadline_at"),
                 approval_id=_optional_string(raw, "approval_id"),
@@ -389,8 +398,7 @@ class MCPResourceSubscriptionSnapshot:
 
     def __post_init__(self) -> None:
         if not self.uri.strip() or any(
-            not _is_sha256(value)
-            for value in (self.catalog_version, self.content_hash)
+            not _is_sha256(value) for value in (self.catalog_version, self.content_hash)
         ):
             raise ValueError("MCP Resource 订阅快照无效")
 
@@ -409,8 +417,7 @@ class MCPResourceNotification:
 
     def __post_init__(self) -> None:
         if any(
-            not _is_sha256(value)
-            for value in (self.catalog_version, self.previous_catalog_version)
+            not _is_sha256(value) for value in (self.catalog_version, self.previous_catalog_version)
         ):
             raise ValueError("MCP Resource 通知目录版本无效")
         if self.kind == "updated" and (self.uri is None or not self.uri.strip()):

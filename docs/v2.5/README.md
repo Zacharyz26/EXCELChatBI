@@ -19,7 +19,7 @@
 | 3：记忆系统 | 工作/对话/项目记忆、上下文压缩、指代消解、Evidence 血缘与恢复 | 已完成并通过真实 Docker/Compose CI |
 | 4：人机协作 | 计划干预、审批、任务控制、恢复、自主等级、分支与反馈 | 已完成并通过真实 Docker/Compose CI |
 | 5：知识与数据联合推理 | 版本化领域定义、公式、口径冲突与知识 Resource | 工程关闭并通过真实 Compose CI；CPU/GPU runtime semantic 与代表性签字是发布债务 |
-| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 6A-2 Tool 目录换代与 profile 可用性已实现，等待 CI；产品验收仍待代表性场景冻结 |
+| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 6A-3 共享预算/数据版本/取消树/Evidence Ledger、审计投影与 Compose 关闭门禁已实现，等待完整 CI；产品验收仍待代表性场景冻结 |
 
 受限 SQL 和 Code Interpreter 仍属于独立安全项目，不随 v2.5 普通功能自动启用。
 
@@ -66,8 +66,10 @@ Claim 并提供旧报告历史定义复核；5B-3 已实现项目目录、签名
 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 已确认 backend、frontend 与真实 Compose 三项全绿，阶段 5 工程关闭，详见
 [阶段5B实施记录](./阶段5B实施记录.md)。CPU/GPU runtime semantic 与领域代表性签字仍是
-显式发布债务。当前 [阶段6A](./阶段6A实施记录.md) 已完成 6A-1 TaskRun 目录冻结和
-6A-2 受治理 `tools/list_changed` 换代、profile unavailable 投影，下一步是 6A-3 受控并行基础。
+显式发布债务。当前 [阶段6A](./阶段6A实施记录.md) 已完成 6A-1 TaskRun 目录冻结、
+6A-2 受治理 `tools/list_changed` 换代/profile unavailable 投影，以及 6A-3 受控并行基础、
+任务审计投影和真实双 MCP 服务 Compose 恢复门禁；
+完整 CI 通过后可关闭 6A，再进入数据角色识别与质量建议。
 
 阶段 3 关闭状态：
 

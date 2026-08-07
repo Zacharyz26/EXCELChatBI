@@ -28,6 +28,7 @@ from packages.session.migrations import (
     v7,
     v8,
     v9,
+    v10,
 )
 from packages.session.models import (
     Artifact,
@@ -144,14 +145,12 @@ class SessionStore:
         return int(row[0]) if row is not None else 0
 
     def readiness_status(self) -> dict[str, int | str]:
-        """验证 SQLite、记忆、压缩、血缘与任务能力目录控制面。"""
+        """验证 SQLite、记忆、压缩、血缘与任务执行控制面。"""
         with self._connection() as connection:
             version_row = connection.execute("PRAGMA user_version").fetchone()
             version = int(version_row[0]) if version_row is not None else 0
             if version != _SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"SQLite schema 版本不兼容: {version} != {_SCHEMA_VERSION}"
-                )
+                raise RuntimeError(f"SQLite schema 版本不兼容: {version} != {_SCHEMA_VERSION}")
             integrity_row = connection.execute("PRAGMA quick_check").fetchone()
             if integrity_row is None or str(integrity_row[0]) != "ok":
                 raise RuntimeError("SQLite quick_check 未通过")
@@ -169,12 +168,16 @@ class SessionStore:
                 "domain_definitions",
                 "domain_field_mappings",
                 "capability_catalog_snapshots",
+                "task_execution_scopes",
+                "task_dataset_bindings",
+                "task_cancellation_nodes",
+                "evidence_ledger_entries",
             }
             rows = connection.execute(
                 """
                 SELECT name FROM sqlite_master
                 WHERE type = 'table'
-                  AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tuple(sorted(required_tables)),
             ).fetchall()
@@ -184,7 +187,7 @@ class SessionStore:
             migrations = connection.execute(
                 """
                 SELECT version, name, checksum FROM schema_migrations
-                WHERE version IN (?, ?, ?, ?, ?, ?)
+                WHERE version IN (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     v4.VERSION,
@@ -193,11 +196,11 @@ class SessionStore:
                     v7.VERSION,
                     v8.VERSION,
                     v9.VERSION,
+                    v10.VERSION,
                 ),
             ).fetchall()
             actual_migrations = {
-                int(row["version"]): (str(row["name"]), str(row["checksum"]))
-                for row in migrations
+                int(row["version"]): (str(row["name"]), str(row["checksum"])) for row in migrations
             }
             expected_migrations = {
                 v4.VERSION: (v4.NAME, v4.CHECKSUM),
@@ -206,6 +209,7 @@ class SessionStore:
                 v7.VERSION: (v7.NAME, v7.CHECKSUM),
                 v8.VERSION: (v8.NAME, v8.CHECKSUM),
                 v9.VERSION: (v9.NAME, v9.CHECKSUM),
+                v10.VERSION: (v10.NAME, v10.CHECKSUM),
             }
             if actual_migrations != expected_migrations:
                 raise RuntimeError("SQLite v2.5 migration checksum 不匹配")
@@ -221,6 +225,7 @@ class SessionStore:
             "collaboration_control_plane": "ready",
             "domain_definition_control_plane": "ready",
             "capability_catalog_control_plane": "ready",
+            "controlled_parallel_control_plane": "ready",
         }
 
     # ── Project ──
@@ -515,9 +520,7 @@ class SessionStore:
         衍生数据与历史工件本身保留。parquet 文件的清理由调用方（路由层）负责。
         """
         with self._connection() as connection, connection:
-            cursor = connection.execute(
-                "DELETE FROM datasets WHERE ref = ?", (dataset_ref,)
-            )
+            cursor = connection.execute("DELETE FROM datasets WHERE ref = ?", (dataset_ref,))
         if cursor.rowcount:
             # 受影响对话不可枚举（工件 dataset_ref 被置空），整体失效热缓存
             self._cache.clear()
@@ -1063,8 +1066,7 @@ class SessionStore:
             version = int(row[0]) if row is not None else 0
             if version != CURRENT_SCHEMA_VERSION:
                 raise RuntimeError(
-                    f"只读 SQLite schema 版本不兼容: {version}，"
-                    f"期望 {CURRENT_SCHEMA_VERSION}"
+                    f"只读 SQLite schema 版本不兼容: {version}，" f"期望 {CURRENT_SCHEMA_VERSION}"
                 )
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)

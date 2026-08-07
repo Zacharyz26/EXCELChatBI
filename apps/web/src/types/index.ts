@@ -291,6 +291,7 @@ export interface AgentRunDetail {
   plan: AgentPlan | null;
   steps: AgentTaskStep[];
   tool_audits: AgentToolAudit[];
+  execution_control: AgentExecutionControl | null;
   related_runs: AgentRun[];
   feedback: AgentRunFeedback[];
   state: Record<string, unknown> | null;
@@ -326,6 +327,11 @@ export interface AgentToolAudit {
   policy_allowed: boolean | null;
   policy_code: string | null;
   permission_snapshot_id: string | null;
+  parallel: boolean;
+  branch_node_id: string | null;
+  cancellation_status: "active" | "completed" | "cancel_requested" | null;
+  data_version_hash: string | null;
+  evidence_ledger_sequence: number | null;
   transport: string | null;
   gateway_health: string | null;
   gateway_generation: number | null;
@@ -335,6 +341,18 @@ export interface AgentToolAudit {
   artifact_id: string | null;
   started_at: string;
   completed_at: string | null;
+}
+
+export interface AgentExecutionControl {
+  schema_version: number;
+  max_tool_calls: number;
+  max_parallelism: number;
+  data_version_hash: string | null;
+  dataset_version_count: number;
+  evidence_ledger_version: number;
+  root_status: "active" | "completed" | "cancel_requested" | null;
+  active_branch_count: number;
+  cancel_requested_branch_count: number;
 }
 
 export interface LatestAgentRunResponse {

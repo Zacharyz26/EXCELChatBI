@@ -427,8 +427,9 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
    阶段 5 已交付 schema v8 版本化定义、受控公式和 Evidence，5B-1 已接入
    按签名 project/subject 过滤的 MCP Resource list/read，5B-2 已贯通定义与数据 Claim 并支持
    旧报告历史版本复核，5B-3 已实现项目目录、签名分页与订阅通知，5B-4/5 真实 Compose
-   工程门禁全绿。当前入口为阶段 6A：schema v9 固定 TaskRun capability/tool 目录；后续补
-   动态目录换代、profile 可用性、受控并行、自主分析和统计护栏。
+   工程门禁全绿。当前入口为阶段 6A：schema v9 固定 TaskRun capability/tool 目录并完成受治理
+   换代/profile 可用性，schema v10 建立共享预算、固定数据版本、取消树和 Evidence Ledger；
+   后续补数据角色、质量建议、自主分析和统计护栏。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
 6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。

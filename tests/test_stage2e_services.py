@@ -44,6 +44,8 @@ def _context(project_id: str, conversation_id: str) -> MCPRequestContext:
         permission_snapshot_id="permission-stage2e",
         memory_snapshot_id="0" * 32,
         evidence_ledger_version=0,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
         trace_id="trace-stage2e",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
     )
@@ -64,19 +66,14 @@ def _settings(tmp_path: Path) -> Settings:
 def test_five_service_catalog_is_complete_and_disjoint() -> None:
     assert tuple(AGENT_MCP_SERVICE_TOOLS) == AGENT_MCP_SERVICES
     flattened = [
-        tool_name
-        for tool_names in AGENT_MCP_SERVICE_TOOLS.values()
-        for tool_name in tool_names
+        tool_name for tool_names in AGENT_MCP_SERVICE_TOOLS.values() for tool_name in tool_names
     ]
     assert len(flattened) == 12
     assert len(flattened) == len(set(flattened))
 
 
 def test_production_routes_resolve_six_secret_files(tmp_path: Path) -> None:
-    urls = {
-        service: f"http://{service}:8000/mcp/"
-        for service in AGENT_MCP_SERVICES
-    }
+    urls = {service: f"http://{service}:8000/mcp/" for service in AGENT_MCP_SERVICES}
     token_files: dict[str, str] = {}
     for service in AGENT_MCP_SERVICES:
         path = tmp_path / f"{service}.token"
@@ -97,8 +94,7 @@ def test_production_routes_resolve_six_secret_files(tmp_path: Path) -> None:
     )
 
     assert json.loads(settings.agent_mcp_service_tokens_json) == {
-        service: f"secret-{service}"
-        for service in AGENT_MCP_SERVICES
+        service: f"secret-{service}" for service in AGENT_MCP_SERVICES
     }
     assert settings.agent_mcp_context_signing_key == "separate-context-key"
 

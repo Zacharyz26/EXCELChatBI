@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from packages.session.lineage import inspect_lineage_connection
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9, v10
 
 BACKUP_FORMAT = "chatbi-workspace-backup-v1"
 _COUNTED_TABLES = (
@@ -46,6 +46,10 @@ _COUNTED_TABLES = (
     "domain_definitions",
     "domain_field_mappings",
     "capability_catalog_snapshots",
+    "task_execution_scopes",
+    "task_dataset_bindings",
+    "task_cancellation_nodes",
+    "evidence_ledger_entries",
 )
 
 
@@ -69,9 +73,7 @@ def backup_workspace(
 
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     destination = (
-        _safe_output_path(output, root)
-        if output is not None
-        else root / f"workspace-{stamp}"
+        _safe_output_path(output, root) if output is not None else root / f"workspace-{stamp}"
     )
     if destination.exists():
         raise RuntimeError(f"备份目标已存在: {destination}")
@@ -194,9 +196,7 @@ def verify_workspace_backup(input_dir: str | Path) -> dict[str, Any]:
         normalized_trees[label] = normalized
 
     actual_files = {
-        item.relative_to(source).as_posix()
-        for item in source.rglob("*")
-        if item.is_file()
+        item.relative_to(source).as_posix() for item in source.rglob("*") if item.is_file()
     }
     if actual_files != expected_files:
         raise RuntimeError("工作区备份包含未登记文件或缺少已登记文件")
@@ -249,9 +249,7 @@ def restore_workspace(
         database_item["path"],
         "database.path",
     )
-    temporary_database = database.with_name(
-        f".{database.name}.restore-{uuid.uuid4().hex}.tmp"
-    )
+    temporary_database = database.with_name(f".{database.name}.restore-{uuid.uuid4().hex}.tmp")
     database.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copy2(database_source, temporary_database)
@@ -270,9 +268,7 @@ def restore_workspace(
         )
     except Exception as exc:
         temporary_database.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"工作区恢复未完成；覆盖前副本保留在 {quarantine}"
-        ) from exc
+        raise RuntimeError(f"工作区恢复未完成；覆盖前副本保留在 {quarantine}") from exc
     restored = _inspect_database(database)
     return {
         "status": "restored",
@@ -301,13 +297,11 @@ def _inspect_database(path: Path) -> dict[str, object]:
         version_row = connection.execute("PRAGMA user_version").fetchone()
         version = int(version_row[0]) if version_row is not None else 0
         if version != CURRENT_SCHEMA_VERSION:
-            raise RuntimeError(
-                f"工作区 SQLite schema 版本不兼容: {version}"
-            )
+            raise RuntimeError(f"工作区 SQLite schema 版本不兼容: {version}")
         migrations = connection.execute(
             """
             SELECT version, name, checksum FROM schema_migrations
-            WHERE version IN (?, ?, ?, ?, ?, ?)
+            WHERE version IN (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 v4.VERSION,
@@ -316,11 +310,11 @@ def _inspect_database(path: Path) -> dict[str, object]:
                 v7.VERSION,
                 v8.VERSION,
                 v9.VERSION,
+                v10.VERSION,
             ),
         ).fetchall()
         actual_migrations = {
-            str(int(row[0])): {"name": str(row[1]), "checksum": str(row[2])}
-            for row in migrations
+            str(int(row[0])): {"name": str(row[1]), "checksum": str(row[2])} for row in migrations
         }
         expected_migrations = {
             str(v4.VERSION): {"name": v4.NAME, "checksum": v4.CHECKSUM},
@@ -329,13 +323,12 @@ def _inspect_database(path: Path) -> dict[str, object]:
             str(v7.VERSION): {"name": v7.NAME, "checksum": v7.CHECKSUM},
             str(v8.VERSION): {"name": v8.NAME, "checksum": v8.CHECKSUM},
             str(v9.VERSION): {"name": v9.NAME, "checksum": v9.CHECKSUM},
+            str(v10.VERSION): {"name": v10.NAME, "checksum": v10.CHECKSUM},
         }
         if actual_migrations != expected_migrations:
             raise RuntimeError("工作区 v2.5 migration checksum 不匹配")
         counts = {
-            table: int(
-                connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-            )
+            table: int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
             for table in _COUNTED_TABLES
         }
         lineage = inspect_lineage_connection(connection)
@@ -408,8 +401,7 @@ def _tree_paths(manifest: dict[str, Any], label: str) -> set[str]:
     if not isinstance(entries, list):
         raise RuntimeError(f"工作区备份 {label} 清单无效")
     return {
-        _safe_relative_file(_mapping(item, label)["path"], label).as_posix()
-        for item in entries
+        _safe_relative_file(_mapping(item, label)["path"], label).as_posix() for item in entries
     }
 
 

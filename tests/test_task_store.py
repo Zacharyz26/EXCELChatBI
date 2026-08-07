@@ -25,6 +25,13 @@ from packages.session.task_store import (
 def _workspace(tmp_path: Path) -> tuple[SessionStore, TaskStore, str, str, str]:
     session = SessionStore(str(tmp_path / "chatbi.db"))
     project = session.create_project("Agent 控制面")
+    for dataset_ref in ("d" * 32, "sales"):
+        session.register_dataset(
+            ref=dataset_ref,
+            project_id=project.id,
+            filename=f"{dataset_ref}.xlsx",
+            profile={"columns": []},
+        )
     conversation = session.create_conversation(project.id)
     _, message = session.start_user_turn(
         conversation_id=conversation.id,
@@ -61,9 +68,7 @@ def test_migration_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
     db_path = tmp_path / "tampered.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 2"
-        )
+        connection.execute("UPDATE schema_migrations SET checksum = 'tampered' WHERE version = 2")
 
     with pytest.raises(RuntimeError, match="checksum 不匹配"):
         SessionStore(str(db_path))
@@ -170,9 +175,12 @@ def test_task_run_capability_catalog_is_atomic_and_immutable(tmp_path: Path) -> 
                 "tools": [],
             },
         )
-    with sqlite3.connect(session.db_path) as connection, pytest.raises(
-        sqlite3.IntegrityError,
-        match="immutable",
+    with (
+        sqlite3.connect(session.db_path) as connection,
+        pytest.raises(
+            sqlite3.IntegrityError,
+            match="immutable",
+        ),
     ):
         connection.execute(
             "UPDATE capability_catalog_snapshots SET catalog_json = '{}' WHERE run_id = ?",
@@ -344,9 +352,10 @@ def test_terminal_run_feedback_and_analysis_branch_are_append_only(
     )
     assert child.parent_run_id == parent.run_id
     assert child.autonomy_mode == "autonomous"
-    assert [item.run_id for item in tasks.list_runs_for_conversation(conversation_id)][
-        :2
-    ] == [child.run_id, parent.run_id]
+    assert [item.run_id for item in tasks.list_runs_for_conversation(conversation_id)][:2] == [
+        child.run_id,
+        parent.run_id,
+    ]
 
     with pytest.raises(ControlConflict, match="终态"):
         tasks.create_run(
@@ -987,9 +996,7 @@ def test_invocation_start_and_failure_observation_are_atomic_events(
         payload={},
     )
     arguments = {"dataset_ref": "sales"}
-    key = invocation_idempotency_key(
-        running.run_id, "call-1", "get_data_profile", arguments
-    )
+    key = invocation_idempotency_key(running.run_id, "call-1", "get_data_profile", arguments)
 
     started_run, invocation, started, created = tasks.start_invocation_with_event(
         run_id=running.run_id,
@@ -1099,9 +1106,7 @@ def test_failure_observation_rolls_back_with_event_insert(tmp_path: Path) -> Non
     unchanged_run = tasks.get_run(running.run_id)
     assert unchanged_run is not None
     assert unchanged_run.state_version == started_run.state_version
-    assert [item.event_type for item in tasks.list_events(running.run_id)][-1] == (
-        "step.started"
-    )
+    assert [item.event_type for item in tasks.list_events(running.run_id)][-1] == ("step.started")
 
 
 def test_tool_success_atomically_commits_artifact_evidence_event_and_checkpoint(
@@ -1142,27 +1147,25 @@ def test_tool_success_atomically_commits_artifact_evidence_event_and_checkpoint(
         idempotency_key="atomic-tool-success-key",
     )
 
-    updated, completed, evidence, artifact, event, checkpoint = (
-        tasks.commit_tool_success(
-            invocation.invocation_id,
-            expected_version=running.state_version,
-            assistant_message_id=assistant.id,
-            result={"profile": {"row_count": 3}},
-            evidence_kind="tool_result",
-            evidence_source={"tool": "get_data_profile"},
-            evidence_summary={
-                "summary": "共 3 行",
-                "value_index": [{"path": "$.profile.row_count", "value": "3"}],
-            },
-            artifact_draft=ArtifactDraft(
-                type="profile",
-                payload={"profile": {"row_count": 3}},
-                file_ref=None,
-                source_tool="get_data_profile",
-                params={"analysis_id": "profile-analysis"},
-                dataset_ref="sales",
-            ),
-        )
+    updated, completed, evidence, artifact, event, checkpoint = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=running.state_version,
+        assistant_message_id=assistant.id,
+        result={"profile": {"row_count": 3}},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "get_data_profile"},
+        evidence_summary={
+            "summary": "共 3 行",
+            "value_index": [{"path": "$.profile.row_count", "value": "3"}],
+        },
+        artifact_draft=ArtifactDraft(
+            type="profile",
+            payload={"profile": {"row_count": 3}},
+            file_ref=None,
+            source_tool="get_data_profile",
+            params={"analysis_id": "profile-analysis"},
+            dataset_ref="sales",
+        ),
     )
 
     assert updated.state_version == running.state_version + 1
@@ -1387,9 +1390,12 @@ def test_downgrade_requires_terminal_runs_and_preserves_export(tmp_path: Path) -
     assert export_path.exists()
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_runs'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='task_runs'"
+            ).fetchone()[0]
+            == 0
+        )
     with sqlite3.connect(export_path) as connection:
         assert connection.execute("SELECT status FROM task_runs").fetchone()[0] == "failed"
 
@@ -1615,13 +1621,10 @@ def test_control_transition_is_idempotent_and_version_guarded(
     assert paused.status == "paused"
     assert replayed == paused
     assert replay_event == first_event
-    assert len(
-        [
-            event
-            for event in tasks.list_events(run.run_id)
-            if event.event_type == "run.paused"
-        ]
-    ) == 1
+    assert (
+        len([event for event in tasks.list_events(run.run_id) if event.event_type == "run.paused"])
+        == 1
+    )
     with pytest.raises(IdempotencyConflict):
         tasks.control_transition(
             run.run_id,
@@ -1650,9 +1653,7 @@ def test_control_transition_is_idempotent_and_version_guarded(
     )
     assert resume_created is True
     assert resumed.status == "running"
-    assert resume_event.payload["checkpoint"]["checkpoint_id"] == (
-        checkpoint.checkpoint_id
-    )
+    assert resume_event.payload["checkpoint"]["checkpoint_id"] == (checkpoint.checkpoint_id)
     with pytest.raises(StateVersionConflict):
         tasks.control_transition(
             run.run_id,
@@ -1929,13 +1930,11 @@ def test_user_step_retry_creates_one_immutable_plan_revision(
         idempotency_key="retry-search-step",
         step_id="search",
     )
-    replayed, replay_plan, replay_steps, replay_event, replay_created = (
-        tasks.retry_step(
-            run.run_id,
-            expected_version=run.state_version,
-            idempotency_key="retry-search-step",
-            step_id="search",
-        )
+    replayed, replay_plan, replay_steps, replay_event, replay_created = tasks.retry_step(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="retry-search-step",
+        step_id="search",
     )
 
     assert created is True

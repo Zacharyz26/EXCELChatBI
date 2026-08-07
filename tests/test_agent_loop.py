@@ -201,9 +201,7 @@ class FakeRegistry:
         capabilities = self.capability_catalog()
         for item in capabilities:
             item["tool_names"] = [
-                name
-                for name in self._handlers
-                if item["name"] in self.capabilities_for_tool(name)
+                name for name in self._handlers if item["name"] in self.capabilities_for_tool(name)
             ]
         return {
             "schema": "chatbi-capability-catalog-v1",
@@ -224,10 +222,7 @@ class FakeRegistry:
         self,
         snapshot: dict[str, Any],
     ) -> tuple[str, ...]:
-        current = {
-            item["tool_name"]: item
-            for item in self.capability_catalog_snapshot()["tools"]
-        }
+        current = {item["tool_name"]: item for item in self.capability_catalog_snapshot()["tools"]}
         return tuple(
             f"tool_unavailable:{item['tool_name']}"
             for item in snapshot["tools"]
@@ -369,6 +364,71 @@ class WriteMCPGatewayRegistry(MCPGatewayRegistry):
                 risk_level="medium",
                 read_only=False,
             ),
+        )
+
+
+class ParallelMCPGatewayRegistry(FakeRegistry):
+    """A two-tool MCP fake that fails unless both branches overlap."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            {
+                "get_data_profile": lambda _: None,
+                "trend_analysis": lambda _: None,
+            }
+        )
+        self.contexts: list[MCPRequestContext] = []
+        self._active = 0
+        self._both_started = asyncio.Event()
+
+    def mcp_descriptor_for_tool(self, tool_name: str) -> MCPToolDescriptor | None:
+        capabilities = self.capabilities_for_tool(tool_name)
+        if not capabilities:
+            return None
+        return MCPToolDescriptor(
+            name=tool_name,
+            description=tool_name,
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            metadata=ToolCapabilityMetadata(capabilities=capabilities),
+        )
+
+    def audit_metadata_for_tool(self, tool_name: str) -> dict[str, Any]:
+        descriptor = self.mcp_descriptor_for_tool(tool_name)
+        assert descriptor is not None
+        return {
+            "tool_name": tool_name,
+            "contract_hash": descriptor.contract_hash,
+            "read_only": True,
+            "idempotent": True,
+            "risk_level": "low",
+        }
+
+    async def execute_mcp(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: MCPRequestContext,
+        *,
+        timeout_seconds: float,
+    ) -> MCPExecutionResult:
+        del arguments, timeout_seconds
+        self.contexts.append(context)
+        self._active += 1
+        if self._active == 2:
+            self._both_started.set()
+        await asyncio.wait_for(self._both_started.wait(), timeout=1)
+        self._active -= 1
+        result = (
+            {"profile": {"row_count": 3}}
+            if name == "get_data_profile"
+            else {"series": [{"period": "一月", "value": 1}]}
+        )
+        return MCPExecutionResult(
+            result=result,
+            transport="stdio",
+            degraded=False,
+            health=GatewayHealth("healthy", "stdio", generation=1),
         )
 
 
@@ -648,9 +708,7 @@ async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
         store,
         conversation,
         ScriptedGateway([]),
-        FakeRegistry(
-            {"get_data_profile": lambda _: {"profile": {"row_count": 3}}}
-        ),
+        FakeRegistry({"get_data_profile": lambda _: {"profile": {"row_count": 3}}}),
         user_text="查看数据画像",
         enforce_plan=True,
         autonomy_mode="assisted",
@@ -878,8 +936,7 @@ async def test_read_only_mode_persists_policy_denial_without_executing_write_too
     assert snapshot is not None
     assert snapshot["last_observation"]["code"] == "autonomy_write_denied"
     assert any(
-        name == "tool_end"
-        and payload.get("message", "").startswith("未执行：标准只读模式")
+        name == "tool_end" and payload.get("message", "").startswith("未执行：标准只读模式")
         for name, payload in events
     )
 
@@ -1007,9 +1064,7 @@ async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
     resumed_events = _events(resumed_raw)
 
     resumed_names = [name for name, _ in resumed_events]
-    assert resumed_names.index("approval.consumed") < resumed_names.index(
-        "step.started"
-    )
+    assert resumed_names.index("approval.consumed") < resumed_names.index("step.started")
     saved = tasks.get_run(run_id)
     assert saved is not None and saved.status == "completed"
     consumed = tasks.get_approval(approval.approval_id)
@@ -1086,9 +1141,7 @@ async def test_executor_uses_mcp_context_and_transports_have_equivalent_evidence
         "contract_hash": "a" * 64,
     }
     started = next(payload for name, payload in events if name == "step.started")
-    assert started["payload"]["policy"]["tool_contract"] == evidence[0].source[
-        "tool_contract"
-    ]
+    assert started["payload"]["policy"]["tool_contract"] == evidence[0].source["tool_contract"]
 
     http_conversation = store.create_conversation(conversation.project_id)
     http_registry = MCPGatewayRegistry(
@@ -1282,7 +1335,7 @@ async def test_dependency_executor_only_offers_the_current_ready_frontier(
         }
     )
 
-    events = await _run_loop(
+    await _run_loop(
         store,
         conversation,
         gateway,
@@ -1304,6 +1357,98 @@ async def test_dependency_executor_only_offers_the_current_ready_frontier(
         "get_data_profile",
         "trend_analysis",
     ]
+
+
+@pytest.mark.asyncio
+async def test_independent_ready_steps_execute_in_one_controlled_parallel_batch(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    plan = {
+        "schema_version": 1,
+        "summary": "并行取得画像和趋势证据",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "取得数据画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "trend",
+                "purpose": "取得趋势结果",
+                "capability": "stats.trend",
+                "dependencies": [],
+                "expected_evidence": ["趋势 Evidence"],
+                "completion_conditions": ["趋势成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "deltas": ["我会同时检查画像和趋势。"],
+                "tool_calls": [
+                    ToolCall(
+                        id="parallel-profile",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    ),
+                    ToolCall(
+                        id="parallel-trend",
+                        name="trend_analysis",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    ),
+                ],
+            },
+            {"deltas": ["两项分析均已完成。"]},
+        ],
+        plan,
+    )
+    registry = ParallelMCPGatewayRegistry()
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="深入分析数据画像和趋势",
+        planner_gateway=gateway,
+    )
+
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    invocations = tasks.list_invocations(run_id)
+    assert len(invocations) == 2
+    assert all(item.status == "succeeded" for item in invocations)
+    starts = [payload for name, payload in events if name == "tool_start"]
+    assert len(starts) == 2
+    assert all(payload["parallel"] is True for payload in starts)
+    ledger = tasks.list_evidence_ledger(run_id)
+    assert [item.sequence for item in ledger] == [1, 2]
+    assert len({item.branch_node_id for item in ledger}) == 2
+    assert len({context.cancellation_node_id for context in registry.contexts}) == 2
+    assert len({context.data_version_hash for context in registry.contexts}) == 1
+    assert {context.evidence_ledger_version for context in registry.contexts} == {0}
+    nodes = tasks.list_cancellation_nodes(run_id)
+    assert len(nodes) == 3
+    assert all(node.status == "completed" for node in nodes)
     run_id = cast(str, dict(events)["meta"]["run_id"])
     assert [
         (step.logical_id, step.status) for step in TaskStore(store.db_path).list_plan_steps(run_id)
@@ -1903,11 +2048,7 @@ async def test_domain_definition_lookup_joins_the_evidence_ledger(
                     )
                 ],
             },
-            {
-                "deltas": [
-                    "已解析版本 1（来源：urn:domain-definition:grouped-measure:v1）。"
-                ]
-            },
+            {"deltas": ["已解析版本 1（来源：urn:domain-definition:grouped-measure:v1）。"]},
         ]
     )
 
@@ -2029,9 +2170,7 @@ async def test_compiled_definition_binds_data_evidence_and_numeric_claim(
     definition_evidence = next(
         item for item in evidence if item.source["tool"] == "domain_definition_lookup"
     )
-    data_evidence = next(
-        item for item in evidence if item.source["tool"] == "aggregate_preview"
-    )
+    data_evidence = next(item for item in evidence if item.source["tool"] == "aggregate_preview")
     assert definition_evidence.source["definition_resource"] == {
         "definition_id": definition_id,
         "definition_version": 1,
@@ -2061,8 +2200,7 @@ async def test_compiled_definition_binds_data_evidence_and_numeric_claim(
         data_evidence.evidence_id,
     }
     assert any(
-        ref.get("kind") == "definition_execution"
-        and ref.get("supported") is True
+        ref.get("kind") == "definition_execution" and ref.get("supported") is True
         for ref in numeric_claim.value_refs
     )
 

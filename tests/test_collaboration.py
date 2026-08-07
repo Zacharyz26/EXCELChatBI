@@ -17,7 +17,7 @@ from apps.api.routers import agent_runs
 from apps.orchestrator.control.contracts import build_minimal_contract
 from fastapi import Header
 from packages.governance.permissions import Principal
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v7, v8, v9
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v7, v8, v9, v10
 from packages.session.store import SessionStore
 from packages.session.task_store import (
     ControlConflict,
@@ -33,8 +33,10 @@ _HASH_B = hashlib.sha256(b"parameters").hexdigest()
 
 def _approval_expiry() -> str:
     return (
-        datetime.now(UTC) + timedelta(hours=1)
-    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        (datetime.now(UTC) + timedelta(hours=1))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _plan(*, summary: str = "分析后生成报告") -> dict[str, object]:
@@ -140,15 +142,13 @@ def test_user_plan_revision_is_paused_versioned_and_idempotent(
         reason="本轮不需要报告",
         skipped_step_ids={"report"},
     )
-    replayed, replay_plan, replay_steps, replay_event, replay_created = (
-        tasks.revise_plan_by_user(
-            run_id,
-            expected_version=state_version,
-            idempotency_key="revise-plan-once",
-            plan=revised,
-            reason="本轮不需要报告",
-            skipped_step_ids={"report"},
-        )
+    replayed, replay_plan, replay_steps, replay_event, replay_created = tasks.revise_plan_by_user(
+        run_id,
+        expected_version=state_version,
+        idempotency_key="revise-plan-once",
+        plan=revised,
+        reason="本轮不需要报告",
+        skipped_step_ids={"report"},
     )
 
     assert created is True and replay_created is False
@@ -189,6 +189,13 @@ def test_v6_database_is_backed_up_and_migrated_to_collaboration_schema(
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v10.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v10.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v10.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v10.VERSION,))
         for trigger in v9.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v9.ADDED_INDEXES:
@@ -432,6 +439,7 @@ def collaboration_api(
             """,
             (project_id, "2026-07-31T00:00:00Z"),
         )
+
     async def store_override() -> SessionStore:
         return store
 
@@ -535,9 +543,7 @@ async def test_collaboration_api_enforces_subject_version_and_idempotency(
     )
     assert bob_approvals.json() == []
 
-    decision_path = (
-        f"/agent/runs/{run_id}/approvals/{approval.approval_id}/decision"
-    )
+    decision_path = f"/agent/runs/{run_id}/approvals/{approval.approval_id}/decision"
     decision_headers = {
         "Authorization": f"Bearer {_ALICE_TOKEN}",
         "If-Match": str(run.state_version),
@@ -547,15 +553,17 @@ async def test_collaboration_api_enforces_subject_version_and_idempotency(
         **decision_headers,
         "Authorization": f"Bearer {_BOB_TOKEN}",
     }
-    assert (await client.post(
-        decision_path,
-        json={
-            "expected_version": approval.version,
-            "decision": "approved",
-            "reason": "越权",
-        },
-        headers=bob_decision_headers,
-    )).status_code == 409
+    assert (
+        await client.post(
+            decision_path,
+            json={
+                "expected_version": approval.version,
+                "decision": "approved",
+                "reason": "越权",
+            },
+            headers=bob_decision_headers,
+        )
+    ).status_code == 409
     decision = await client.post(
         decision_path,
         json={
@@ -568,15 +576,17 @@ async def test_collaboration_api_enforces_subject_version_and_idempotency(
     assert decision.status_code == 200
     assert decision.json()["approval"]["status"] == "approved"
     assert decision.json()["replayed"] is False
-    assert (await client.post(
-        decision_path,
-        json={
-            "expected_version": approval.version,
-            "decision": "approved",
-            "reason": "确认执行",
-        },
-        headers=bob_decision_headers,
-    )).status_code == 409
+    assert (
+        await client.post(
+            decision_path,
+            json={
+                "expected_version": approval.version,
+                "decision": "approved",
+                "reason": "确认执行",
+            },
+            headers=bob_decision_headers,
+        )
+    ).status_code == 409
     replay = await client.post(
         decision_path,
         json={

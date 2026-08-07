@@ -408,9 +408,7 @@ def test_knowledge_resources_are_project_and_subject_scoped(
         definition.resource_uri,
     ]
     assert resources[0].metadata is not None
-    assert resources[0].metadata["com.chatbi/resource-kind"] == (
-        "domain-definition-catalog"
-    )
+    assert resources[0].metadata["com.chatbi/resource-kind"] == ("domain-definition-catalog")
     assert len(str(resources[0].metadata["com.chatbi/catalog-version"])) == 64
     assert resources[1].metadata == {
         "com.chatbi/definition-id": definition.definition_id,
@@ -441,9 +439,7 @@ def test_knowledge_resources_are_project_and_subject_scoped(
             "resource_uri": definition.resource_uri,
         }
     ]
-    assert catalog_payload["catalog_version"] == catalog.metadata[
-        "com.chatbi/catalog-version"
-    ]
+    assert catalog_payload["catalog_version"] == catalog.metadata["com.chatbi/catalog-version"]
     contents = runtime.adapter.read_resource(definition.resource_uri, alice_context)
     payload = json.loads(contents.text)
     assert payload["definition_id"] == definition.definition_id
@@ -758,6 +754,8 @@ def _mcp_context(
         permission_snapshot_id="permission-stage5",
         memory_snapshot_id="0" * 32,
         evidence_ledger_version=1,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
         trace_id="trace-stage5",
         deadline_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
     )

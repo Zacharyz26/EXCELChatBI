@@ -26,7 +26,8 @@
 > 已完成；提交 `d5a672d` 的
 > [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 > 已确认真实 Compose Resource 重连及 CPU/GPU 配置门禁全绿，阶段 5 工程关闭。6A-1 已固定
-> TaskRun capability/tool 目录快照，6A-2 已实现受治理 Tool 换代与 profile 可用性，等待 CI。
+> TaskRun capability/tool 目录快照，6A-2 已实现受治理 Tool 换代与 profile 可用性，
+> 6A-3 已实现共享预算、固定数据版本、取消树、统一 Evidence Ledger 和有界并行，等待完整 CI。
 > CPU/GPU runtime semantic 与代表性场景签字
 > 仍是发布债务，不得由工程门禁替代。
 
@@ -320,10 +321,10 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 
 ### 阶段 6：自主分析能力
 
-> 当前切片：6A-1 以 SQLite v9 为每个 TaskRun 原子保存不可变 capability/tool 目录快照，
-> Planner、Replanner、恢复校验和模型工具暴露都固定读取该版本；实现与边界见
-> [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。动态 `tools/list_changed`、profile
-> 可用性和受控并行尚未完成。
+> 当前切片：6A-1～6A-3 已完成本地实现。SQLite v9 固定 TaskRun capability/tool 目录，
+> 6A-2 完成受治理 `tools/list_changed` 和 profile 可用性，SQLite v10 建立共享预算、数据版本、
+> 取消树与 Evidence Ledger 并启用受限 ready-frontier 并行；实现与边界见
+> [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。完整 CI 通过后再关闭 6A。
 
 - 自动识别时间、指标、维度和 ID 角色；
 - 数据质量诊断与清洗建议；

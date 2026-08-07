@@ -17,8 +17,12 @@ from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
 from packages.session.task_models import (
     ApprovalRecord,
+    CancellationNode,
+    EvidenceLedgerEntry,
     EvidenceRecord,
+    TaskDatasetBinding,
     TaskEvent,
+    TaskExecutionScope,
     TaskPlanRecord,
     TaskRun,
     TaskStepRecord,
@@ -419,10 +423,7 @@ async def list_agent_approvals(
         tenant_id=principal.tenant_scope,
         subject_user_id=principal.user_id,
     )
-    return [
-        ApprovalResponse.model_validate(_approval_payload(record))
-        for record in records
-    ]
+    return [ApprovalResponse.model_validate(_approval_payload(record)) for record in records]
 
 
 @router.post(
@@ -511,6 +512,15 @@ async def get_agent_run(
     steps = await run_in_threadpool(tasks.list_plan_steps, run_id)
     invocations = await run_in_threadpool(tasks.list_invocations, run_id)
     evidence = await run_in_threadpool(tasks.list_evidence, run_id)
+    execution_scope = await run_in_threadpool(tasks.get_execution_scope, run_id)
+    dataset_bindings = await run_in_threadpool(tasks.list_dataset_bindings, run_id)
+    cancellation_nodes = await run_in_threadpool(tasks.list_cancellation_nodes, run_id)
+    evidence_ledger = await run_in_threadpool(tasks.list_evidence_ledger, run_id)
+    data_version_hash = (
+        await run_in_threadpool(tasks.data_version_hash, run_id)
+        if execution_scope is not None
+        else None
+    )
     started_events = await run_in_threadpool(
         tasks.list_events_by_type,
         run_id,
@@ -530,16 +540,21 @@ async def get_agent_run(
     return {
         "run": _run_payload(run),
         "contract": contract,
-        "plan": (
-            _plan_payload(plan)
-            if plan is not None
-            else None
-        ),
+        "plan": (_plan_payload(plan) if plan is not None else None),
         "steps": [_step_payload(step) for step in steps],
         "tool_audits": _tool_audit_payloads(
             invocations,
             evidence,
             started_events,
+            cancellation_nodes,
+            evidence_ledger,
+        ),
+        "execution_control": _execution_control_payload(
+            execution_scope,
+            dataset_bindings,
+            cancellation_nodes,
+            evidence_ledger,
+            data_version_hash,
         ),
         "related_runs": [_run_payload(item) for item in related_runs],
         "feedback": [_feedback_payload(event) for event in feedback_events],
@@ -679,11 +694,7 @@ def _reconnect_cursor(
             raise HTTPException(status_code=400, detail="Last-Event-ID 事件游标无效") from exc
         if header_cursor < 0:
             raise HTTPException(status_code=400, detail="Last-Event-ID 事件游标无效")
-    if (
-        after_sequence is not None
-        and header_cursor is not None
-        and after_sequence != header_cursor
-    ):
+    if after_sequence is not None and header_cursor is not None and after_sequence != header_cursor:
         raise HTTPException(status_code=400, detail="事件游标参数冲突")
     return after_sequence if after_sequence is not None else (header_cursor or 0)
 
@@ -808,9 +819,15 @@ def _tool_audit_payloads(
     invocations: list[ToolInvocation],
     evidence: list[EvidenceRecord],
     started_events: list[TaskEvent],
+    cancellation_nodes: list[CancellationNode],
+    evidence_ledger: list[EvidenceLedgerEntry],
 ) -> list[dict[str, object]]:
-    """用持久 Invocation、策略事件和 Evidence 生成一致的只读审计投影。"""
+    """用持久 Invocation、策略、取消树和 Ledger 生成一致只读审计投影。"""
     evidence_by_invocation = {item.invocation_id: item for item in evidence}
+    branch_by_invocation = {
+        item.invocation_id: item for item in cancellation_nodes if item.invocation_id is not None
+    }
+    ledger_by_evidence = {item.evidence_id: item for item in evidence_ledger}
     started_by_invocation: dict[str, TaskEvent] = {}
     for event in started_events:
         invocation_id = event.payload.get("invocation_id")
@@ -823,6 +840,8 @@ def _tool_audit_payloads(
         policy = _object_field(started.payload if started is not None else {}, "policy")
         contract = _object_field(policy, "tool_contract")
         record = evidence_by_invocation.get(invocation.invocation_id)
+        branch = branch_by_invocation.get(invocation.invocation_id)
+        ledger_entry = ledger_by_evidence.get(record.evidence_id) if record is not None else None
         source = record.source if record is not None else {}
         evidence_contract = _object_field(source, "tool_contract")
         if evidence_contract:
@@ -849,6 +868,15 @@ def _tool_audit_payloads(
                     policy,
                     "permission_snapshot_id",
                 ),
+                "parallel": (
+                    started.payload.get("parallel") is True if started is not None else False
+                ),
+                "branch_node_id": branch.node_id if branch is not None else None,
+                "cancellation_status": branch.status if branch is not None else None,
+                "data_version_hash": (branch.data_version_hash if branch is not None else None),
+                "evidence_ledger_sequence": (
+                    ledger_entry.sequence if ledger_entry is not None else None
+                ),
                 "transport": _string_field(source, "transport"),
                 "gateway_health": _string_field(source, "mcp_gateway_health"),
                 "gateway_generation": _int_field(
@@ -857,15 +885,43 @@ def _tool_audit_payloads(
                 ),
                 "degraded": _bool_field(source, "mcp_degraded"),
                 "evidence_id": record.evidence_id if record is not None else None,
-                "evidence_result_hash": (
-                    record.result_hash if record is not None else None
-                ),
+                "evidence_result_hash": (record.result_hash if record is not None else None),
                 "artifact_id": invocation.artifact_id,
                 "started_at": invocation.started_at,
                 "completed_at": invocation.completed_at,
             }
         )
     return payloads
+
+
+def _execution_control_payload(
+    scope: TaskExecutionScope | None,
+    dataset_bindings: list[TaskDatasetBinding],
+    cancellation_nodes: list[CancellationNode],
+    evidence_ledger: list[EvidenceLedgerEntry],
+    data_version_hash: str | None,
+) -> dict[str, object] | None:
+    """投影有界 TaskRun 执行作用域，不暴露工具结果或数据正文。"""
+    if scope is None:
+        return None
+    root = next(
+        (item for item in cancellation_nodes if item.parent_node_id is None),
+        None,
+    )
+    branches = [item for item in cancellation_nodes if item.parent_node_id is not None]
+    return {
+        "schema_version": scope.schema_version,
+        "max_tool_calls": scope.max_tool_calls,
+        "max_parallelism": scope.max_parallelism,
+        "data_version_hash": data_version_hash,
+        "dataset_version_count": len(dataset_bindings),
+        "evidence_ledger_version": len(evidence_ledger),
+        "root_status": root.status if root is not None else None,
+        "active_branch_count": sum(item.status == "active" for item in branches),
+        "cancel_requested_branch_count": sum(
+            item.status == "cancel_requested" for item in branches
+        ),
+    }
 
 
 def _object_field(value: object, key: str) -> dict[str, object]:
@@ -957,9 +1013,7 @@ def _start_recovered_run(
             subject_id=principal.user_id,
         ),
         mcp_config=mcp_client_config_from_settings(execution.settings),
-        enabled_capability_profiles=enabled_capability_profiles_from_settings(
-            execution.settings
-        ),
+        enabled_capability_profiles=enabled_capability_profiles_from_settings(execution.settings),
     )
     settings = execution.settings
     stored_max_tool_calls = run.budget.get("max_tool_calls")
@@ -978,6 +1032,7 @@ def _start_recovered_run(
         compaction_summary_max_chars=settings.chat_compaction_summary_max_chars,
         compaction_message_max_chars=settings.chat_compaction_message_max_chars,
         max_tool_calls=max_tool_calls,
+        max_parallel_tools=settings.agent_max_parallel_tools,
         tool_result_max_chars=settings.agent_tool_result_max_chars,
         registry_max_entries=settings.agent_registry_max_entries,
         run_timeout_seconds=settings.agent_run_timeout_seconds,

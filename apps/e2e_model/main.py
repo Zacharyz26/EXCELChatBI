@@ -21,11 +21,14 @@ app = FastAPI(title="ChatBI E2E model fixture")
 _BRANCH_MARKER = "COMPOSE_4D_BRANCH"
 _FEEDBACK_MARKER = "COMPOSE_4D_FEEDBACK"
 _READ_ONLY_MARKER = "COMPOSE_4D_READ_ONLY"
+_PARALLEL_MARKER = "COMPOSE_6A_PARALLEL"
+_REPORT_MARKER = "COMPOSE_REPORT"
 _audit: dict[str, int | bool] = {
     "planner_calls": 0,
     "feedback_marker_seen_in_planner": False,
     "branch_profile_tool_calls": 0,
     "read_only_report_attempts": 0,
+    "parallel_tool_batches": 0,
 }
 
 
@@ -87,19 +90,73 @@ async def _stream_turn(
 ) -> AsyncIterator[str]:
     call_id = f"call-{uuid.uuid4().hex[:16]}"
     last_message = messages[-1] if messages else None
-    has_current_tool_result = (
-        isinstance(last_message, dict) and last_message.get("role") == "tool"
-    )
+    has_current_tool_result = isinstance(last_message, dict) and last_message.get("role") == "tool"
     tools = raw_tools if isinstance(raw_tools, list) else []
     tool_names = [
         function.get("name")
         for item in tools
-        if isinstance(item, dict)
-        and isinstance((function := item.get("function")), dict)
+        if isinstance(item, dict) and isinstance((function := item.get("function")), dict)
     ]
     joined = json.dumps(messages, ensure_ascii=False)
     scenario_marker = _latest_scenario_marker(messages)
     if (
+        not has_current_tool_result
+        and scenario_marker == _PARALLEL_MARKER
+        and {"get_data_profile", "trend_analysis"}.issubset(tool_names)
+    ):
+        dataset_refs = re.findall(r"最新数据集 ([0-9a-f]{32})", joined)
+        if not dataset_refs:
+            raise HTTPException(status_code=422, detail="dataset_ref missing")
+        _audit["parallel_tool_batches"] = int(_audit["parallel_tool_batches"]) + 1
+        dataset_ref = dataset_refs[-1]
+        yield _sse_chunk(
+            model,
+            {
+                "role": "assistant",
+                "content": "我会在同一受控批次中并行检查数据画像和趋势。",
+            },
+        )
+        yield _sse_chunk(
+            model,
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": f"{call_id}-profile",
+                        "type": "function",
+                        "function": {
+                            "name": "get_data_profile",
+                            "arguments": json.dumps(
+                                {"dataset_ref": dataset_ref},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "id": f"{call_id}-trend",
+                        "type": "function",
+                        "function": {
+                            "name": "trend_analysis",
+                            "arguments": json.dumps(
+                                {
+                                    "dataset_ref": dataset_ref,
+                                    "value_col": "销售额",
+                                    "time_col": "月份",
+                                    "method": "ma",
+                                    "forecast_horizon": 0,
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    },
+                ]
+            },
+        )
+        yield _sse_chunk(model, {}, finish_reason="tool_calls")
+    elif (
         not has_current_tool_result
         and scenario_marker == _BRANCH_MARKER
         and "get_data_profile" in tool_names
@@ -107,9 +164,7 @@ async def _stream_turn(
         dataset_refs = re.findall(r"最新数据集 ([0-9a-f]{32})", joined)
         if not dataset_refs:
             raise HTTPException(status_code=422, detail="dataset_ref missing")
-        _audit["branch_profile_tool_calls"] = (
-            int(_audit["branch_profile_tool_calls"]) + 1
-        )
+        _audit["branch_profile_tool_calls"] = int(_audit["branch_profile_tool_calls"]) + 1
         yield _sse_chunk(
             model,
             {
@@ -141,9 +196,7 @@ async def _stream_turn(
         yield _sse_chunk(model, {}, finish_reason="tool_calls")
     elif not has_current_tool_result and "generate_report" in tool_names:
         if scenario_marker == _READ_ONLY_MARKER:
-            _audit["read_only_report_attempts"] = (
-                int(_audit["read_only_report_attempts"]) + 1
-            )
+            _audit["read_only_report_attempts"] = int(_audit["read_only_report_attempts"]) + 1
         analysis_ids = re.findall(r"analysis_id=([A-Za-z0-9_-]+)", joined)
         if not analysis_ids:
             raise HTTPException(status_code=422, detail="analysis_id missing")
@@ -181,6 +234,15 @@ async def _stream_turn(
             },
         )
         yield _sse_chunk(model, {}, finish_reason="tool_calls")
+    elif scenario_marker == _PARALLEL_MARKER:
+        yield _sse_chunk(
+            model,
+            {
+                "role": "assistant",
+                "content": "Compose 6A 受控并行画像与趋势分析已完成。",
+            },
+        )
+        yield _sse_chunk(model, {}, finish_reason="stop")
     elif scenario_marker == _BRANCH_MARKER:
         yield _sse_chunk(
             model,
@@ -255,6 +317,7 @@ def _complete_json(messages: list[Any]) -> str:
         )
     if "受约束任务 Planner" in system:
         payload = json.loads(raw_user)
+        planning_request = str(payload.get("planning_request") or "")
         raw_catalog = payload.get("capability_catalog")
         catalog = raw_catalog if isinstance(raw_catalog, list) else []
         allowed = {
@@ -264,6 +327,39 @@ def _complete_json(messages: list[Any]) -> str:
         }
         if "data.profile" not in allowed:
             raise HTTPException(status_code=422, detail="data.profile unavailable")
+        if _PARALLEL_MARKER in planning_request:
+            if "stats.trend" not in allowed:
+                raise HTTPException(status_code=422, detail="stats.trend unavailable")
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "summary": "并行取得画像与趋势 Evidence。",
+                    "steps": [
+                        {
+                            "step_id": "parallel_profile",
+                            "purpose": "取得数据规模与字段画像",
+                            "capability": "data.profile",
+                            "dependencies": [],
+                            "expected_evidence": ["数据画像 Evidence"],
+                            "completion_conditions": ["画像工具成功"],
+                            "fallback": [{"when": "画像读取失败", "action": "retry"}],
+                        },
+                        {
+                            "step_id": "parallel_trend",
+                            "purpose": "取得销售额时间趋势",
+                            "capability": "stats.trend",
+                            "dependencies": [],
+                            "expected_evidence": ["趋势 Evidence"],
+                            "completion_conditions": ["趋势工具成功"],
+                            "fallback": [{"when": "趋势分析失败", "action": "retry"}],
+                        },
+                    ],
+                    "assumptions": [],
+                    "clarifications": [],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         return json.dumps(
             {
                 "schema_version": 1,
@@ -303,7 +399,12 @@ def _latest_scenario_marker(messages: list[Any]) -> str | None:
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         content = str(message.get("content", ""))
-        for marker in (_READ_ONLY_MARKER, _BRANCH_MARKER):
+        for marker in (
+            _REPORT_MARKER,
+            _PARALLEL_MARKER,
+            _READ_ONLY_MARKER,
+            _BRANCH_MARKER,
+        ):
             if marker in content:
                 return marker
     return None
@@ -315,20 +416,24 @@ def _sse_chunk(
     *,
     finish_reason: str | None = None,
 ) -> str:
-    return "data: " + json.dumps(
-        {
-            "id": "chatcmpl-chatbi-e2e",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finish_reason,
-                }
-            ],
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ) + "\n\n"
+    return (
+        "data: "
+        + json.dumps(
+            {
+                "id": "chatcmpl-chatbi-e2e",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n\n"
+    )
