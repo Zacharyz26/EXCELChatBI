@@ -2550,7 +2550,12 @@ async def test_report_files_are_cleaned_if_atomic_success_commit_fails(
     assert not markdown_path.exists()
     assert not pdf_path.exists()
     run_id = cast(str, events[-1][1]["run_id"])
-    assert TaskStore(store.db_path).list_evidence(run_id) == []
+    tasks = TaskStore(store.db_path)
+    assert tasks.list_evidence(run_id) == []
+    assert [item.status for item in tasks.list_invocations(run_id)] == ["unknown"]
+    assert {item.status for item in tasks.list_cancellation_nodes(run_id)} == {
+        "cancel_requested"
+    }
 
 
 @pytest.mark.parametrize(
@@ -2860,6 +2865,18 @@ async def test_tool_call_budget_is_enforced(
     assert gateway.calls[1]["tools"] is None
     assert dict(events)["done"]["tool_calls"] == 1
     assert dict(events)["done"]["run_status"] == "blocked"
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    assert [item.status for item in tasks.list_invocations(run_id)] == ["succeeded"]
+    rejected = [
+        payload
+        for name, payload in events
+        if name == "step.completed"
+        and cast(dict[str, Any], payload.get("payload", {})).get("status") == "rejected"
+    ]
+    assert len(rejected) == 1
+    observation = cast(dict[str, Any], rejected[0]["payload"])["observation"]
+    assert cast(dict[str, Any], observation)["code"] == "tool_budget_exhausted"
 
 
 def test_host_enriches_report_delivery_and_referenced_chart_lineage(
@@ -3682,6 +3699,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
 def test_resume_stream_reconstructs_lost_host_from_checkpoint(
     chat_harness: ChatHarness,
 ) -> None:
+    _register_dataset(chat_harness.store, chat_harness.conversation)
     for index in range(3):
         chat_harness.store.append_message(
             conversation_id=chat_harness.conversation.id,
@@ -3714,6 +3732,9 @@ def test_resume_stream_reconstructs_lost_host_from_checkpoint(
         contract=contract,
         budget={"max_tool_calls": 4},
     )
+    assert [item.dataset_ref for item in tasks.list_dataset_bindings(run.run_id)] == [
+        _DATASET_REF
+    ]
     compactions = CompactionStore(
         chat_harness.store,
         audit_recorder=lambda _event: None,

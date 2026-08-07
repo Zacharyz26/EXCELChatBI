@@ -353,6 +353,7 @@ class TaskStore:
         reason: str,
         event_type: str,
         expected_version: int | None = None,
+        usage: JsonObject | None = None,
     ) -> tuple[TaskRun, TaskEvent] | None:
         """原子收敛活动任务，并把仍在 running 的调用标记为 unknown。
 
@@ -415,17 +416,19 @@ class TaskStore:
                 (cancellation_status, clean_reason, now, run_id),
             )
             next_version = current.state_version + 1
+            next_usage = current.usage if usage is None else usage
             connection.execute(
                 """
                 UPDATE task_runs
                 SET status = ?, state_version = ?, terminal_reason = ?,
-                    updated_at = ?, finished_at = ?
+                    usage_json = ?, updated_at = ?, finished_at = ?
                 WHERE run_id = ? AND state_version = ?
                 """,
                 (
                     status,
                     next_version,
                     clean_reason,
+                    _dump_json(next_usage),
                     now,
                     now,
                     run_id,
@@ -454,6 +457,7 @@ class TaskStore:
                 {
                     "last_sequence": event.sequence,
                     "active_invocation_id": None,
+                    "active_invocation_ids": [],
                 }
             )
             connection.execute(
@@ -2745,6 +2749,135 @@ class TaskStore:
             )
             _insert_invocation_branch(connection, invocation)
         return invocation, True
+
+    def record_tool_rejection(
+        self,
+        *,
+        run_id: str,
+        expected_version: int,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: JsonObject,
+        policy_decision: JsonObject,
+        error_code: str,
+        error_text: str,
+        source: ObservationSource,
+        retryable: bool,
+        step_id: str | None = None,
+    ) -> tuple[TaskRun, TaskEvent]:
+        """持久化未获执行许可的 Tool Call，且不占用 Invocation 预算。"""
+        clean_code = _required_text(error_code, "Observation code")[:100]
+        clean_error = _required_text(error_text, "工具拒绝原因")[:2000]
+        clean_tool_name = _required_text(tool_name, "工具名称")
+        clean_tool_call_id = _required_text(tool_call_id, "Tool Call ID")
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"TaskRun 不存在: {run_id}")
+            current_run = _run_from_row(run_row)
+            if current_run.state_version != expected_version:
+                raise StateVersionConflict(
+                    f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
+                    f"实际 {current_run.state_version}"
+                )
+            if current_run.status != "running":
+                raise ValueError("TaskRun 不在 running 状态，不能记录工具拒绝")
+
+            logical_step_id = clean_tool_call_id
+            attempt = 1
+            if step_id is not None:
+                step_row = connection.execute(
+                    """
+                    SELECT step.* FROM task_steps AS step
+                    JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+                    WHERE step.step_id = ? AND step.run_id = ?
+                      AND plan.version = ?
+                    """,
+                    (step_id, run_id, current_run.plan_version),
+                ).fetchone()
+                if step_row is None:
+                    raise ValueError("工具拒绝引用的 TaskStep 不属于当前计划")
+                logical_step_id = _step_logical_id(step_row)
+                attempt = _logical_step_attempt_count(connection, run_id, logical_step_id) + 1
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'failed', completed_at = ?
+                    WHERE step_id = ?
+                    """,
+                    (now, step_id),
+                )
+
+            observation = Observation(
+                observation_id=uuid.uuid4().hex,
+                run_id=run_id,
+                step_id=logical_step_id,
+                invocation_id=None,
+                source=source,
+                status="error",
+                code=clean_code,
+                summary=clean_error[:1000],
+                retryable=retryable,
+                payload_ref=None,
+                created_at=now,
+            )
+            next_version = current_run.state_version + 1
+            connection.execute(
+                """
+                UPDATE task_runs SET state_version = ?, updated_at = ?
+                WHERE run_id = ? AND state_version = ?
+                """,
+                (next_version, now, run_id, expected_version),
+            )
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="step.completed",
+                payload={
+                    "plan_version": current_run.plan_version,
+                    "step_id": logical_step_id,
+                    "persisted_step_id": step_id,
+                    "attempt": attempt,
+                    "status": "rejected",
+                    "tool": clean_tool_name,
+                    "tool_call_id": clean_tool_call_id,
+                    "invocation_id": None,
+                    "branch_node_id": None,
+                    "arguments_hash": _hash_text(_dump_json(arguments)),
+                    "policy": policy_decision,
+                    "observation": observation.to_dict(),
+                    "evidence_ids": [],
+                    "artifact_ids": [],
+                },
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            updated_row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert updated_row is not None
+            updated_run = _run_from_row(updated_row)
+            snapshot = _merged_snapshot(connection, updated_run)
+            snapshot.update(
+                {
+                    "last_sequence": event.sequence,
+                    "last_observation": observation.to_dict(),
+                }
+            )
+            connection.execute(
+                """
+                UPDATE task_snapshots
+                SET state_version = ?, state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_version, _dump_json(snapshot), now, run_id),
+            )
+        return updated_run, event
 
     def start_invocation_with_event(
         self,

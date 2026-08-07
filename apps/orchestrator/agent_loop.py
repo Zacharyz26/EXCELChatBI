@@ -81,6 +81,7 @@ from packages.session.task_models import (
     TaskEvent,
     TaskRun,
     TaskStepRecord,
+    ToolInvocation,
 )
 from packages.session.task_store import (
     ControlConflict,
@@ -2679,19 +2680,38 @@ async def _stream_agent_chat_inner(
                     }
                 if definition_execution is not None:
                     policy_payload["definition_execution"] = definition_execution
+                reserved_invocation: ToolInvocation | None = None
+                rejection_event: TaskEvent | None = None
+                step_started_event: TaskEvent | None = None
                 try:
-                    start_result = await run_in_threadpool(
-                        task_store.start_invocation_with_event,
-                        run_id=run_id,
-                        expected_version=run.state_version,
-                        tool_call_id=call.id,
-                        tool_name=call.name,
-                        arguments=call_args,
-                        idempotency_key=idempotency_key,
-                        policy_decision=policy_payload,
-                        step_id=planned_step.step_id if planned_step is not None else None,
-                    )
-                    run, invocation, step_started_event, _created = start_result
+                    if failure_code == "tool_budget_exhausted":
+                        run, rejection_event = await run_in_threadpool(
+                            task_store.record_tool_rejection,
+                            run_id=run_id,
+                            expected_version=run.state_version,
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                            arguments=call_args,
+                            policy_decision=policy_payload,
+                            error_code=failure_code,
+                            error_text=feedback or "工具调用预算已耗尽",
+                            source=failure_source,
+                            retryable=False,
+                            step_id=(planned_step.step_id if planned_step is not None else None),
+                        )
+                    else:
+                        start_result = await run_in_threadpool(
+                            task_store.start_invocation_with_event,
+                            run_id=run_id,
+                            expected_version=run.state_version,
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                            arguments=call_args,
+                            idempotency_key=idempotency_key,
+                            policy_decision=policy_payload,
+                            step_id=(planned_step.step_id if planned_step is not None else None),
+                        )
+                        run, reserved_invocation, step_started_event, _created = start_result
                 except (sqlite3.Error, RuntimeError, ValueError) as exc:
                     _log.error(
                         "agent.persist_invocation_failed",
@@ -2735,16 +2755,21 @@ async def _stream_agent_chat_inner(
                 )
 
                 if feedback is not None:
-                    run, _failed_invocation, failure_event = await run_in_threadpool(
-                        task_store.commit_tool_failure,
-                        invocation.invocation_id,
-                        status="failed",
-                        expected_version=run.state_version,
-                        error_code=failure_code or "tool_not_executed",
-                        error_text=feedback,
-                        source=failure_source,
-                        retryable=not budget_exhausted,
-                    )
+                    failure_event: TaskEvent | None
+                    if rejection_event is not None:
+                        failure_event = rejection_event
+                    else:
+                        assert reserved_invocation is not None
+                        run, _failed_invocation, failure_event = await run_in_threadpool(
+                            task_store.commit_tool_failure,
+                            reserved_invocation.invocation_id,
+                            status="failed",
+                            expected_version=run.state_version,
+                            error_code=failure_code or "tool_not_executed",
+                            error_text=feedback,
+                            source=failure_source,
+                            retryable=not budget_exhausted,
+                        )
                     if failure_event is not None:
                         yield _task_event(failure_event, conversation_id)
                     yield _event(
@@ -2792,6 +2817,7 @@ async def _stream_agent_chat_inner(
                         break
                     continue
 
+                assert reserved_invocation is not None
                 calls_used += 1
                 operation_timeout = _active_operation_timeout(
                     control,
@@ -2804,7 +2830,7 @@ async def _stream_agent_chat_inner(
                 )
                 cancellation_branch = await run_in_threadpool(
                     task_store.get_cancellation_node_for_invocation,
-                    invocation.invocation_id,
+                    reserved_invocation.invocation_id,
                 )
                 if cancellation_branch is None:
                     raise RuntimeError("Invocation 缺少持久化取消树分支")
@@ -2815,7 +2841,7 @@ async def _stream_agent_chat_inner(
                     run_id=run_id,
                     plan_version=run.plan_version,
                     step_id=logical_step_id,
-                    invocation_id=invocation.invocation_id,
+                    invocation_id=reserved_invocation.invocation_id,
                     idempotency_key=idempotency_key,
                     permission_snapshot_id=policy_decision.permission_snapshot_id,
                     memory_snapshot_id=memory_snapshot.memory_snapshot_id,
@@ -2847,7 +2873,7 @@ async def _stream_agent_chat_inner(
                     arguments=call_args,
                     context=request_context,
                     trace_id=run_id,
-                    invocation_id=invocation.invocation_id,
+                    invocation_id=reserved_invocation.invocation_id,
                     timeout_seconds=operation_timeout,
                 )
                 result = execution.result
@@ -2866,7 +2892,7 @@ async def _stream_agent_chat_inner(
                     _compare_mcp_error(registry, call.name, error_code)
                     run, _failed_invocation, failure_event = await run_in_threadpool(
                         task_store.commit_tool_failure,
-                        invocation.invocation_id,
+                        reserved_invocation.invocation_id,
                         status="unknown" if execution.result_unknown else "failed",
                         expected_version=run.state_version,
                         error_code=error_code,
@@ -2938,7 +2964,7 @@ async def _stream_agent_chat_inner(
                             event_type="run.blocked",
                             payload={
                                 "reason": error_code,
-                                "invocation_id": invocation.invocation_id,
+                                "invocation_id": reserved_invocation.invocation_id,
                                 "transport": execution.transport,
                             },
                             terminal_reason=error_code,
@@ -3094,7 +3120,7 @@ async def _stream_agent_chat_inner(
                     _cleanup_uncommitted_report_files(call, result)
                     run, _failed_invocation, failure_event = await run_in_threadpool(
                         task_store.commit_tool_failure,
-                        invocation.invocation_id,
+                        reserved_invocation.invocation_id,
                         status="failed",
                         expected_version=run.state_version,
                         error_code="tool_postcondition_failed",
@@ -3253,7 +3279,7 @@ async def _stream_agent_chat_inner(
                         _checkpoint,
                     ) = await run_in_threadpool(
                         task_store.commit_tool_success,
-                        invocation.invocation_id,
+                        reserved_invocation.invocation_id,
                         expected_version=run.state_version,
                         assistant_message_id=assistant_message.id,
                         result=result,
@@ -3662,22 +3688,24 @@ async def _transition_after_failure(
     tool_attempts: int | None = None,
     invalid_tool_calls: int | None = None,
 ) -> tuple[TaskRun, TaskEvent]:
-    """Persist an operational failure before exposing it to the SSE client."""
+    """原子收敛运行中调用后再暴露操作失败，避免遗留活动取消分支。"""
     usage: JsonObject = {"tool_calls": tool_calls}
     if tool_attempts is not None:
         usage["tool_attempts"] = tool_attempts
     if invalid_tool_calls is not None:
         usage["invalid_tool_calls"] = invalid_tool_calls
-    return await run_in_threadpool(
-        task_store.transition,
+    terminated = await run_in_threadpool(
+        task_store.terminate_active_run,
         run.run_id,
         expected_version=run.state_version,
         status="failed",
         event_type=event_type,
-        payload={"reason": reason},
-        terminal_reason=reason,
+        reason=reason,
         usage=usage,
     )
+    if terminated is None:
+        raise RuntimeError("活动 TaskRun 未能持久化失败终态")
+    return terminated
 
 
 @dataclass(frozen=True, slots=True)
