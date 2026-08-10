@@ -6,7 +6,7 @@ import hashlib
 import shutil
 from pathlib import Path
 
-import pandas as pd
+from apps.e2e_model.prepare_fixture import build_sales_fixture
 from packages.governance.permissions import Principal
 from packages.session.memory_models import MemoryDraft
 from packages.session.memory_store import MemoryStore
@@ -14,24 +14,6 @@ from packages.session.store import SessionStore
 
 ROOT = Path(__file__).resolve().parent.parent
 E2E_ROOT = (ROOT / ".data" / "e2e").resolve()
-
-
-def build_sales_fixture() -> pd.DataFrame:
-    """构造可同时覆盖画像与真实趋势分析的确定性销售数据。"""
-    return pd.DataFrame(
-        {
-            "月份": [
-                "2026-01",
-                "2026-02",
-                "2026-03",
-                "2026-04",
-                "2026-05",
-                "2026-06",
-            ],
-            "地区": ["华东", "华南", "华东", "华南", "华东", "华南"],
-            "销售额": [120, 95, 140, 130, 155, 170],
-        }
-    )
 
 
 def main() -> None:

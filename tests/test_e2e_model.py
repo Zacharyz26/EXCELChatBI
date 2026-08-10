@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pandas as pd
 import pytest
 from apps.e2e_model.main import (
     _complete_json,
     _latest_scenario_marker,
     _stream_turn,
 )
+from apps.e2e_model.prepare_fixture import main as prepare_compose_fixture
 from mcp_servers.stats.tools import trend_analysis
 from packages.common.dataset_store import save_dataframe
-from scripts.prepare_fullstack_e2e import build_sales_fixture
 
 
 def test_compose_planner_fixture_returns_a_valid_profile_plan() -> None:
@@ -112,8 +114,13 @@ async def test_compose_branch_fixture_requests_the_registered_dataset_profile() 
 
 
 @pytest.mark.asyncio
-async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn() -> None:
-    dataset_ref = save_dataframe(build_sales_fixture())
+async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("E2E_FIXTURE_DIR", str(tmp_path))
+    prepare_compose_fixture()
+    dataset_ref = save_dataframe(pd.read_excel(tmp_path / "sales.xlsx"))
     chunks = [
         chunk
         async for chunk in _stream_turn(
