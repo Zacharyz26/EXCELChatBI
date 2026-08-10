@@ -10,6 +10,9 @@ from apps.e2e_model.main import (
     _latest_scenario_marker,
     _stream_turn,
 )
+from mcp_servers.stats.tools import trend_analysis
+from packages.common.dataset_store import save_dataframe
+from scripts.prepare_fullstack_e2e import build_sales_fixture
 
 
 def test_compose_planner_fixture_returns_a_valid_profile_plan() -> None:
@@ -110,7 +113,7 @@ async def test_compose_branch_fixture_requests_the_registered_dataset_profile() 
 
 @pytest.mark.asyncio
 async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn() -> None:
-    dataset_ref = "d" * 32
+    dataset_ref = save_dataframe(build_sales_fixture())
     chunks = [
         chunk
         async for chunk in _stream_turn(
@@ -150,3 +153,9 @@ async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn()
     assert {json.loads(call["function"]["arguments"])["dataset_ref"] for call in tool_calls} == {
         dataset_ref
     }
+    trend_call = next(
+        call for call in tool_calls if call["function"]["name"] == "trend_analysis"
+    )
+    trend = trend_analysis(json.loads(trend_call["function"]["arguments"]))
+    assert trend["method"] == "ma"
+    assert trend["n"] == 6

@@ -130,7 +130,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await fileChooser.setFiles(fixture);
   const uploadResponse = await uploadResponsePromise;
   expect(uploadResponse.ok()).toBeTruthy();
-  await expect(page.getByText("已完成“sales.xlsx”的数据画像，共 3 行、3 列。")).toBeVisible({
+  await expect(page.getByText("已完成“sales.xlsx”的数据画像，共 6 行、3 列。")).toBeVisible({
     timeout: 30_000,
   });
 

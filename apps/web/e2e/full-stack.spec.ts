@@ -43,7 +43,7 @@ test("真实 Web/API 完成记忆治理、Excel 上传与血缘查看", async ({
   await expect(page.getByText("上传了文件：sales.xlsx", { exact: true })).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText("已完成“sales.xlsx”的数据画像，共 3 行、3 列。")).toBeVisible();
+  await expect(page.getByText("已完成“sales.xlsx”的数据画像，共 6 行、3 列。")).toBeVisible();
   await expect(page.getByText("1 个数据集", { exact: true })).toBeVisible();
   await expect(page.getByText("sales.xlsx", { exact: true }).first()).toBeVisible();
 
