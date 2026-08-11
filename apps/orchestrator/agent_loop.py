@@ -2717,10 +2717,6 @@ async def _stream_agent_chat_inner(
                     feedback = f"未执行：{definition_execution_error}"
                     failure_code = "definition_execution_mismatch"
                     failure_source = "policy"
-                elif data_role_guard is not None and not data_role_guard.allowed:
-                    feedback = f"未执行：{data_role_guard.message}"
-                    failure_code = data_role_guard.code
-                    failure_source = "policy"
                 elif not policy_decision.allowed:
                     feedback = f"未执行：{policy_decision.reason}"
                     failure_code = policy_decision.code
@@ -2754,6 +2750,10 @@ async def _stream_agent_chat_inner(
                             "capability。请遵循当前计划，或等待 Replanner 生成新计划版本。"
                         )
                         failure_code = "tool_not_in_plan"
+                    failure_source = "policy"
+                elif data_role_guard is not None and not data_role_guard.allowed:
+                    feedback = f"未执行：{data_role_guard.message}"
+                    failure_code = data_role_guard.code
                     failure_source = "policy"
                 else:
                     feedback = None

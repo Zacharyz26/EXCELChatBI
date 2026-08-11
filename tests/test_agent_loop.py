@@ -2731,6 +2731,7 @@ async def test_tool_failure_feeds_error_back_for_retry(
     store: SessionStore, conversation: Conversation
 ) -> None:
     """校验/业务失败回传模型带错重试（14.5.1，复用 analyze 已验证模式）。"""
+    _register_dataset(store, conversation)
     attempts = {"n": 0}
 
     def flaky(args: dict[str, Any]) -> dict[str, Any]:
@@ -2743,7 +2744,13 @@ async def test_tool_failure_feeds_error_back_for_retry(
     call = {"tool_calls": [ToolCall(id="c1", name="aggregate_preview", arguments="{}")]}
     retry = {
         "tool_calls": [
-            ToolCall(id="c2", name="aggregate_preview", arguments='{"value_col":"销售额"}')
+            ToolCall(
+                id="c2",
+                name="aggregate_preview",
+                arguments=(
+                    f'{{"dataset_ref":"{_DATASET_REF}","value_col":"销售额"}}'
+                ),
+            )
         ]
     }
     gateway = ScriptedGateway([call, retry, {"deltas": ["修好了"]}])
