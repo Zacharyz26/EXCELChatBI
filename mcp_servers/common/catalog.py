@@ -18,11 +18,179 @@ def _object(properties: JsonSchema, *required: str) -> JsonSchema:
     }
 
 
+def _closed_object(properties: JsonSchema, *required: str) -> JsonSchema:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(required),
+        "additionalProperties": False,
+    }
+
+
 _STRING = {"type": "string"}
 _INTEGER = {"type": "integer"}
 _NUMBER_OR_NULL = {"type": ["number", "null"]}
 _ARRAY = {"type": "array"}
 _OBJECT = {"type": "object"}
+
+_ROLE_CANDIDATE_SCHEMA = _closed_object(
+    {
+        "role": {
+            "type": "string",
+            "enum": ["time", "metric", "dimension", "identifier", "unknown"],
+        },
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence": {"type": "array", "items": _STRING},
+    },
+    "role",
+    "score",
+    "evidence",
+)
+_ROLE_COLUMN_SCHEMA = _closed_object(
+    {
+        "column": _STRING,
+        "primary_role": {
+            "type": "string",
+            "enum": ["time", "metric", "dimension", "identifier", "unknown"],
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "ambiguous": {"type": "boolean"},
+        "candidates": {
+            "type": "array",
+            "items": _ROLE_CANDIDATE_SCHEMA,
+            "minItems": 1,
+        },
+        "profile_evidence": _closed_object(
+            {
+                "dtype": _STRING,
+                "null_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                "distinct_count": _INTEGER,
+                "non_null_count": _INTEGER,
+                "unique_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "dtype",
+            "null_ratio",
+            "distinct_count",
+            "non_null_count",
+            "unique_ratio",
+        ),
+    },
+    "column",
+    "primary_role",
+    "confidence",
+    "ambiguous",
+    "candidates",
+    "profile_evidence",
+)
+_ROLES_OUTPUT_SCHEMA = _closed_object(
+    {
+        "schema": {"const": "chatbi-data-roles-v1"},
+        "method": {"const": "deterministic-profile-heuristics-v1"},
+        "columns": {"type": "array", "items": _ROLE_COLUMN_SCHEMA},
+        "summary": _closed_object(
+            {
+                "time": _INTEGER,
+                "metric": _INTEGER,
+                "dimension": _INTEGER,
+                "identifier": _INTEGER,
+                "unknown": _INTEGER,
+                "ambiguous": _INTEGER,
+            },
+            "time",
+            "metric",
+            "dimension",
+            "identifier",
+            "unknown",
+            "ambiguous",
+        ),
+        "ambiguous_columns": {"type": "array", "items": _STRING},
+        "requires_confirmation": {"type": "boolean"},
+    },
+    "schema",
+    "method",
+    "columns",
+    "summary",
+    "ambiguous_columns",
+    "requires_confirmation",
+)
+_QUALITY_ISSUE_SCHEMA = _closed_object(
+    {
+        "issue_id": _STRING,
+        "code": _STRING,
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "columns": {"type": "array", "items": _STRING},
+        "evidence": _OBJECT,
+        "suggested_action": _STRING,
+        "recommendation": _STRING,
+    },
+    "issue_id",
+    "code",
+    "severity",
+    "columns",
+    "evidence",
+    "suggested_action",
+    "recommendation",
+)
+_QUALITY_RECOMMENDATION_SCHEMA = _closed_object(
+    {
+        "issue_id": _STRING,
+        "action": _STRING,
+        "columns": {"type": "array", "items": _STRING},
+        "message": _STRING,
+        "automatic": {"const": False},
+    },
+    "issue_id",
+    "action",
+    "columns",
+    "message",
+    "automatic",
+)
+_QUALITY_OUTPUT_SCHEMA = _closed_object(
+    {
+        "schema": {"const": "chatbi-data-quality-v1"},
+        "mutates_data": {"const": False},
+        "duplicate_rows": _INTEGER,
+        "high_null_columns": {
+            "type": "array",
+            "items": _closed_object(
+                {
+                    "name": _STRING,
+                    "null_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "name",
+                "null_ratio",
+            ),
+        },
+        "constant_columns": {"type": "array", "items": _STRING},
+        "issues": {"type": "array", "items": _QUALITY_ISSUE_SCHEMA},
+        "recommendations": {
+            "type": "array",
+            "items": _QUALITY_RECOMMENDATION_SCHEMA,
+        },
+        "summary": _closed_object(
+            {
+                "issue_count": _INTEGER,
+                "high": _INTEGER,
+                "medium": _INTEGER,
+                "low": _INTEGER,
+                "requires_confirmation": {"type": "boolean"},
+            },
+            "issue_count",
+            "high",
+            "medium",
+            "low",
+            "requires_confirmation",
+        ),
+    },
+    "schema",
+    "mutates_data",
+    "duplicate_rows",
+    "high_null_columns",
+    "constant_columns",
+    "issues",
+    "recommendations",
+    "summary",
+)
 
 _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
     "parse_excel": _object(
@@ -167,7 +335,14 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
         "bytes",
     ),
     "get_data_profile": _object(
-        {"profile": _OBJECT, "quality": _OBJECT}, "profile", "quality"
+        {
+            "profile": _OBJECT,
+            "roles": _ROLES_OUTPUT_SCHEMA,
+            "quality": _QUALITY_OUTPUT_SCHEMA,
+        },
+        "profile",
+        "roles",
+        "quality",
     ),
     "kb_search": _object(
         {"is_empty": {"type": "boolean"}, "hits": _ARRAY}, "is_empty", "hits"
@@ -223,6 +398,7 @@ def tool_metadata(
     read_only: bool = True,
     idempotent: bool = True,
     risk_level: str = "low",
+    tool_version: str = "1.0.0",
 ) -> ToolCapabilityMetadata:
     """Construct reviewed metadata; callers cannot obtain it from model arguments."""
     risk: RiskLevel
@@ -239,8 +415,11 @@ def tool_metadata(
     capabilities = (capability,) if isinstance(capability, str) else capability
     if not capabilities or any(not item.strip() for item in capabilities):
         raise ValueError("capability 不能为空")
+    if not tool_version.strip():
+        raise ValueError("tool_version 不能为空")
     return ToolCapabilityMetadata(
         capabilities=capabilities,
+        tool_version=tool_version,
         artifact_types=tuple(artifact_types),
         read_only=read_only,
         destructive=False,

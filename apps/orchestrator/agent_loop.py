@@ -33,6 +33,7 @@ from mcp_servers.common.client_gateway import (
     ShadowComparison,
 )
 from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
+from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from openai import OpenAIError
 from packages.common.config import get_settings
 from packages.common.logging import get_logger
@@ -101,6 +102,11 @@ from apps.orchestrator.control.contracts import (
     SuccessCriterion,
     TaskContract,
     build_minimal_contract,
+)
+from apps.orchestrator.control.data_role_guard import (
+    DataRoleGuardResult,
+    tool_role_requirements,
+    validate_data_role_preconditions,
 )
 from apps.orchestrator.control.plan_executor import (
     PlanSchedule,
@@ -221,6 +227,13 @@ _OPEN_ANALYSIS_PATTERN = re.compile(
     r"^(?:请)?(?:深入|全面|详细)?(?:分析|看看|看一下|研究)(?:一下)?(?:这份|这个)?数据[。！!？?]?$"
 )
 _TREND_PATTERN = re.compile(r"(?:趋势|随时间|变化|预测)")
+_ANOMALY_PATTERN = re.compile(r"(?:异常|离群)")
+_REGRESSION_PATTERN = re.compile(r"(?:回归|预测因子)")
+_CORRELATION_PATTERN = re.compile(r"(?:相关|关系)")
+_AGGREGATE_PATTERN = re.compile(
+    r"(?:汇总|合计|平均|各地区|各产品|分组|group\s*by)",
+    re.IGNORECASE,
+)
 _METRIC_HINT_PATTERN = re.compile(
     r"(?:销售额|销量|利润|收入|金额|订单量|订单数|转化率|复购率|用户数|访问量|成本)"
 )
@@ -229,7 +242,7 @@ _CONFLICT_HISTORY_PATTERN = re.compile(r"(?:存在冲突口径|口径冲突|冲�
 
 # 工具的中文人话标签（tool_start/plan 事件展示用）
 _TOOL_LABELS = {
-    "get_data_profile": "数据画像与质量概况",
+    "get_data_profile": "数据画像、角色与质量建议",
     "trend_analysis": "趋势分析",
     "anomaly_detect": "异常检测",
     "regression": "回归分析",
@@ -263,6 +276,15 @@ _TOOL_BUSINESS_ERRORS = (
     SchemaValidationError,
     ValueError,
     FileNotFoundError,
+)
+_DATA_ROLE_GUARD_CODES = frozenset(
+    {
+        "data_role_dataset_required",
+        "data_role_profile_unavailable",
+        "data_role_column_missing",
+        "data_role_confirmation_required",
+        "data_role_mismatch",
+    }
 )
 
 
@@ -398,28 +420,79 @@ def _blocking_clarification(
             "question": f"当前项目有多个数据集（{choices}）。请确认本次使用哪一个？",
             "reason": "跨数据集静默选择可能产生错误结论。",
         }
-    if not datasets or _TREND_PATTERN.search(clean) is None:
+    if not datasets:
         return None
 
     selected_datasets = [dataset for dataset in datasets if dataset.ref in verified_dataset_refs]
-    columns = _dataset_column_names(selected_datasets[-1] if selected_datasets else datasets[-1])
-    time_columns = [name for name in columns if _TIME_COLUMN_PATTERN.search(name)]
-    if len(time_columns) > 1 and not any(name in clean for name in time_columns):
-        return {
-            "question_id": "time_column",
-            "about": "time_column",
-            "question": f"请选择本次趋势使用的时间列：{'、'.join(time_columns[:8])}。",
-            "reason": "不同时间口径会改变趋势范围和排序。",
-        }
-
-    metric_columns = [name for name in columns if _METRIC_HINT_PATTERN.search(name)]
-    if len(metric_columns) > 1 and not any(name in clean for name in metric_columns):
-        return {
-            "question_id": "metric",
-            "about": "metric",
-            "question": f"请选择本次分析指标：{'、'.join(metric_columns[:8])}。",
-            "reason": "存在多个符合描述的数值指标。",
-        }
+    dataset = selected_datasets[-1] if selected_datasets else datasets[-1]
+    if _TREND_PATTERN.search(clean) is not None:
+        time_clarification = _role_selection_clarification(
+            clean,
+            dataset,
+            role="time",
+            question_id="time_column",
+            about="time_column",
+            label="本次趋势使用的时间列",
+            reason="不同时间口径会改变趋势范围和排序。",
+        )
+        if time_clarification is not None:
+            return time_clarification
+        return _role_selection_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="metric",
+            about="metric",
+            label="本次分析指标",
+            reason="存在多个符合描述的数值指标，或指标角色需要确认。",
+        )
+    if _ANOMALY_PATTERN.search(clean) is not None:
+        return _role_selection_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="metric",
+            about="metric",
+            label="本次异常检测指标",
+            reason="不同指标会改变异常点和阈值结论。",
+        )
+    if _REGRESSION_PATTERN.search(clean) is not None:
+        target_clarification = _role_selection_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="metric",
+            about="metric",
+            label="本次回归的目标指标",
+            reason="目标指标不同会改变模型含义和结论。",
+        )
+        return target_clarification or _explicit_role_ambiguity_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="regression_field_role",
+            about="metric",
+            label="回归字段",
+        )
+    if _CORRELATION_PATTERN.search(clean) is not None:
+        return _explicit_role_ambiguity_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="correlation_field_role",
+            about="metric",
+            label="相关分析字段",
+        )
+    if _AGGREGATE_PATTERN.search(clean) is not None:
+        return _role_selection_clarification(
+            clean,
+            dataset,
+            role="dimension",
+            question_id="group_column",
+            about="dimension",
+            label="本次分组使用的维度列",
+            reason="分组维度不同会改变聚合粒度和结论。",
+        )
     return None
 
 
@@ -433,6 +506,199 @@ def _dataset_column_names(dataset: Dataset) -> list[str]:
         if isinstance(value, str) and value.strip():
             names.append(value.strip())
     return names
+
+
+def _role_selection_clarification(
+    user_text: str,
+    dataset: Dataset,
+    *,
+    role: str,
+    question_id: str,
+    about: str,
+    label: str,
+    reason: str,
+) -> JsonObject | None:
+    columns = _dataset_column_names(dataset)
+    if not columns:
+        return None
+    ambiguous_by_column: dict[str, bool] = {}
+    try:
+        inferred = infer_data_roles_from_mapping(dataset.profile, dataset_ref=dataset.ref)
+        raw_items = inferred.get("columns")
+        role_items = cast(list[JsonObject], raw_items) if isinstance(raw_items, list) else []
+        candidates = []
+        for item in role_items:
+            column = item.get("column")
+            if not isinstance(column, str):
+                continue
+            candidate_roles = item.get("candidates")
+            supports_role = item.get("primary_role") == role or (
+                bool(item.get("ambiguous"))
+                and isinstance(candidate_roles, list)
+                and any(
+                    isinstance(candidate, dict) and candidate.get("role") == role
+                    for candidate in candidate_roles
+                )
+            )
+            if supports_role:
+                candidates.append(column)
+                ambiguous_by_column[column] = bool(item.get("ambiguous"))
+    except ValueError:
+        pattern = (
+            _TIME_COLUMN_PATTERN
+            if role == "time"
+            else _METRIC_HINT_PATTERN if role == "metric" else None
+        )
+        candidates = (
+            [name for name in columns if pattern.search(name)]
+            if pattern is not None
+            else []
+        )
+        ambiguous_by_column = dict.fromkeys(candidates, False)
+
+    explicitly_named = [name for name in columns if name in user_text]
+    explicit_candidate = next(
+        (name for name in explicitly_named if name in candidates),
+        None,
+    )
+    if explicit_candidate is not None and not ambiguous_by_column.get(
+        explicit_candidate, False
+    ):
+        return None
+    selected_candidates: list[str]
+    if explicit_candidate is not None:
+        selected_candidates = [explicit_candidate]
+    elif len(candidates) > 1 or (
+        len(candidates) == 1 and ambiguous_by_column.get(candidates[0], False)
+    ):
+        selected_candidates = candidates[:8]
+    else:
+        return None
+    return {
+        "question_id": question_id,
+        "about": about,
+        "question": f"请选择{label}：{'、'.join(selected_candidates)}。",
+        "reason": reason,
+        "data_role_request": {
+            "schema": "chatbi-data-role-confirmation-request-v1",
+            "schema_version": 1,
+            "dataset_ref": dataset.ref,
+            "role": role,
+            "candidates": selected_candidates,
+        },
+    }
+
+
+def _explicit_role_ambiguity_clarification(
+    user_text: str,
+    dataset: Dataset,
+    *,
+    role: str,
+    question_id: str,
+    about: str,
+    label: str,
+) -> JsonObject | None:
+    try:
+        inferred = infer_data_roles_from_mapping(dataset.profile, dataset_ref=dataset.ref)
+    except ValueError:
+        return None
+    raw_items = inferred.get("columns")
+    items = cast(list[JsonObject], raw_items) if isinstance(raw_items, list) else []
+    for item in items:
+        column = item.get("column")
+        if not isinstance(column, str) or column not in user_text:
+            continue
+        if item.get("primary_role") == role and not bool(item.get("ambiguous")):
+            continue
+        return {
+            "question_id": question_id,
+            "about": about,
+            "question": f"“{column}”的数据角色不明确。请回复“{column}”确认将其作为{label}。",
+            "reason": "该字段角色会改变分析输入和统计含义。",
+            "data_role_request": {
+                "schema": "chatbi-data-role-confirmation-request-v1",
+                "schema_version": 1,
+                "dataset_ref": dataset.ref,
+                "role": role,
+                "candidates": [column],
+            },
+        }
+    return None
+
+
+def _waiting_user_payload(
+    question: JsonObject,
+    *,
+    plan_id: str,
+    plan_version: int,
+    resume_token: str,
+    source_clarification: JsonObject | None,
+    data_version_hash: str | None,
+) -> JsonObject:
+    """Build one durable clarification payload, including Host-only role metadata."""
+    answer_schema: JsonObject = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 20_000,
+    }
+    payload: JsonObject = {
+        **question,
+        "plan_id": plan_id,
+        "plan_version": plan_version,
+        "answer_schema": answer_schema,
+        "resume_token": resume_token,
+    }
+    if source_clarification is None or data_version_hash is None:
+        return payload
+    raw_request = source_clarification.get("data_role_request")
+    if not isinstance(raw_request, dict):
+        return payload
+    if source_clarification.get("question_id") != question.get("question_id"):
+        return payload
+    candidates = raw_request.get("candidates")
+    if not isinstance(candidates, list) or not all(
+        isinstance(item, str) and item for item in candidates
+    ):
+        return payload
+    payload["data_role_request"] = {
+        **cast(JsonObject, raw_request),
+        "plan_version": plan_version,
+        "data_version_hash": data_version_hash,
+    }
+    payload["answer_schema"] = {
+        "type": "string",
+        "enum": list(candidates),
+    }
+    return payload
+
+
+def _evaluate_data_role_preconditions(
+    *,
+    task_store: TaskStore,
+    store: SessionStore,
+    run_id: str,
+    tool_name: str,
+    arguments: JsonObject,
+) -> DataRoleGuardResult | None:
+    """Resolve the TaskRun-bound profile and confirmations for one tool call."""
+    if not tool_role_requirements(tool_name, arguments):
+        return None
+    dataset_ref = arguments.get("dataset_ref")
+    dataset = store.get_dataset(dataset_ref) if isinstance(dataset_ref, str) else None
+    data_hash = task_store.data_version_hash(run_id)
+    confirmations = tuple(
+        task_store.list_data_role_confirmations(
+            run_id,
+            data_version_hash=data_hash,
+        )
+    )
+    return validate_data_role_preconditions(
+        tool_name=tool_name,
+        arguments=arguments,
+        dataset=dataset,
+        confirmations=confirmations,
+        data_version_hash=data_hash,
+    )
 
 
 class AgentStreamingGateway(Protocol):
@@ -1120,6 +1386,7 @@ async def _stream_agent_chat_inner(
             ),
         ]
 
+        clarification: JsonObject | None = None
         if resume_existing and clarification_question_id is None:
             stored_plan = await run_in_threadpool(task_store.get_active_plan, run_id)
             if stored_plan is None:
@@ -1290,6 +1557,21 @@ async def _stream_agent_chat_inner(
             question_id = str(question_item["question_id"])
             resume_token = uuid.uuid4().hex
             try:
+                role_data_hash = (
+                    await run_in_threadpool(task_store.data_version_hash, run_id)
+                    if clarification is not None
+                    and isinstance(clarification.get("data_role_request"), dict)
+                    and clarification.get("question_id") == question_id
+                    else None
+                )
+                waiting_payload = _waiting_user_payload(
+                    question_item,
+                    plan_id=plan_record.plan_id,
+                    plan_version=plan_record.version,
+                    resume_token=resume_token,
+                    source_clarification=clarification,
+                    data_version_hash=role_data_hash,
+                )
                 await run_in_threadpool(
                     store.append_message,
                     conversation_id=conversation_id,
@@ -1303,17 +1585,7 @@ async def _stream_agent_chat_inner(
                     expected_version=run.state_version,
                     status="waiting_user",
                     event_type="waiting_user",
-                    payload={
-                        **question_item,
-                        "plan_id": plan_record.plan_id,
-                        "plan_version": plan_record.version,
-                        "answer_schema": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 20_000,
-                        },
-                        "resume_token": resume_token,
-                    },
+                    payload=waiting_payload,
                     usage={"tool_calls": 0},
                     checkpoint_reason="waiting_user",
                 )
@@ -1496,6 +1768,22 @@ async def _stream_agent_chat_inner(
                 followup_question = str(question_item["question"])
                 resume_token = uuid.uuid4().hex
                 try:
+                    role_data_hash = (
+                        await run_in_threadpool(task_store.data_version_hash, run_id)
+                        if clarification is not None
+                        and isinstance(clarification.get("data_role_request"), dict)
+                        and clarification.get("question_id")
+                        == question_item.get("question_id")
+                        else None
+                    )
+                    waiting_payload = _waiting_user_payload(
+                        question_item,
+                        plan_id=plan_record.plan_id,
+                        plan_version=plan_record.version,
+                        resume_token=resume_token,
+                        source_clarification=clarification,
+                        data_version_hash=role_data_hash,
+                    )
                     await run_in_threadpool(
                         store.append_message,
                         conversation_id=conversation_id,
@@ -1509,17 +1797,7 @@ async def _stream_agent_chat_inner(
                         expected_version=run.state_version,
                         status="waiting_user",
                         event_type="waiting_user",
-                        payload={
-                            **question_item,
-                            "plan_id": plan_record.plan_id,
-                            "plan_version": plan_record.version,
-                            "answer_schema": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 20_000,
-                            },
-                            "resume_token": resume_token,
-                        },
+                        payload=waiting_payload,
                         usage={"tool_calls": 0},
                         checkpoint_reason="waiting_user",
                     )
@@ -2370,6 +2648,14 @@ async def _stream_agent_chat_inner(
                     referenced_dataset = await run_in_threadpool(store.get_dataset, dataset_ref)
                     if referenced_dataset is not None:
                         resource_project_id = referenced_dataset.project_id
+                data_role_guard = await run_in_threadpool(
+                    _evaluate_data_role_preconditions,
+                    task_store=task_store,
+                    store=store,
+                    run_id=run_id,
+                    tool_name=call.name,
+                    arguments=call_args,
+                )
                 policy_decision = active_policy.authorize(
                     ToolPolicyRequest(
                         principal=active_principal,
@@ -2430,6 +2716,10 @@ async def _stream_agent_chat_inner(
                 elif definition_execution_error is not None:
                     feedback = f"未执行：{definition_execution_error}"
                     failure_code = "definition_execution_mismatch"
+                    failure_source = "policy"
+                elif data_role_guard is not None and not data_role_guard.allowed:
+                    feedback = f"未执行：{data_role_guard.message}"
+                    failure_code = data_role_guard.code
                     failure_source = "policy"
                 elif not policy_decision.allowed:
                     feedback = f"未执行：{policy_decision.reason}"
@@ -2671,6 +2961,10 @@ async def _stream_agent_chat_inner(
                 policy_payload = policy_decision.to_event_payload()
                 if tool_contract:
                     policy_payload["tool_contract"] = tool_contract
+                if data_role_guard is not None:
+                    policy_payload["data_role_preconditions"] = (
+                        data_role_guard.evidence()
+                    )
                 if approval_record is not None:
                     policy_payload["approval"] = {
                         "approval_id": approval_record.approval_id,
@@ -2684,7 +2978,9 @@ async def _stream_agent_chat_inner(
                 rejection_event: TaskEvent | None = None
                 step_started_event: TaskEvent | None = None
                 try:
-                    if failure_code == "tool_budget_exhausted":
+                    if failure_code == "tool_budget_exhausted" or (
+                        failure_code in _DATA_ROLE_GUARD_CODES
+                    ):
                         run, rejection_event = await run_in_threadpool(
                             task_store.record_tool_rejection,
                             run_id=run_id,
@@ -4483,6 +4779,18 @@ async def _try_execute_parallel_frontier(
             dataset = await run_in_threadpool(store.get_dataset, dataset_ref)
             if dataset is not None:
                 resource_project_id = dataset.project_id
+        data_role_guard = await run_in_threadpool(
+            _evaluate_data_role_preconditions,
+            task_store=task_store,
+            store=store,
+            run_id=run_id,
+            tool_name=call.name,
+            arguments=arguments,
+        )
+        if data_role_guard is not None and not data_role_guard.allowed:
+            # Let the sequential path persist the stable rejection code and
+            # return structured feedback to the model.
+            return None
         decision = policy.authorize(
             ToolPolicyRequest(
                 principal=principal,
@@ -4509,6 +4817,8 @@ async def _try_execute_parallel_frontier(
         policy_payload = decision.to_event_payload()
         if tool_contract:
             policy_payload["tool_contract"] = tool_contract
+        if data_role_guard is not None:
+            policy_payload["data_role_preconditions"] = data_role_guard.evidence()
         if definition_execution is not None:
             policy_payload["definition_execution"] = definition_execution
         prepared.append(
@@ -5234,10 +5544,14 @@ def _summarize_result(tool: str, result: Any) -> str:
         return "执行完成"
     if tool == "get_data_profile":
         profile = result.get("profile", {})
+        roles = result.get("roles", {})
         quality = result.get("quality", {})
+        role_summary = roles.get("summary", {}) if isinstance(roles, dict) else {}
+        quality_summary = quality.get("summary", {}) if isinstance(quality, dict) else {}
         return (
             f"{profile.get('row_count', '?')} 行 × {profile.get('column_count', '?')} 列，"
-            f"整行重复 {quality.get('duplicate_rows', '?')} 行"
+            f"指标 {role_summary.get('metric', '?')} / 维度 {role_summary.get('dimension', '?')}，"
+            f"质量问题 {quality_summary.get('issue_count', '?')} 项"
         )
     if tool == "trend_analysis":
         return f"方向={result.get('direction', '?')}，样本 n={result.get('n', '?')}"

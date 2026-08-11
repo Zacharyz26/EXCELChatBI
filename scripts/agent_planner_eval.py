@@ -53,6 +53,12 @@ CAPABILITY_CATALOG: tuple[JsonObject, ...] = (
         "risk": "read_only",
     },
     {
+        "name": "data.roles",
+        "description": "识别时间、指标、维度和 ID，并披露置信度与歧义。",
+        "allowed": True,
+        "risk": "read_only",
+    },
+    {
         "name": "knowledge.search",
         "description": "检索业务定义、口径与可引用来源。",
         "allowed": True,
@@ -692,8 +698,15 @@ def _deterministic_capabilities(
     request: str, context: dict[str, Any]
 ) -> list[str]:
     observations = cast(list[dict[str, Any]], context.get("observations") or [])
+    if any(
+        token in request.lower()
+        for token in ("数据角色", "字段角色", "时间列", "指标列", "维度列", "id列")
+    ):
+        return ["data.roles"]
     if "画像" in request or "规模和质量" in request:
         return ["data.profile"]
+    if any(token in request for token in ("质量", "缺失", "重复", "清洗建议")):
+        return ["data.quality"]
     if "定义" in request and not any(token in request for token in ("计算", "报告")):
         return ["knowledge.search"]
     if "汇总" in request:
@@ -718,6 +731,8 @@ def _deterministic_capabilities(
 def _capability_purpose(capability: str) -> str:
     return {
         "data.profile": "取得数据规模与质量画像",
+        "data.roles": "识别字段角色并披露置信度与歧义",
+        "data.quality": "检查数据质量并给出非自动清洗建议",
         "knowledge.search": "检索并引用业务口径来源",
         "data.aggregate": "按用户指定维度聚合指标",
         "stats.anomaly": "识别异常并记录方法假设",

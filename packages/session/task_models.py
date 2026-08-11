@@ -26,6 +26,7 @@ ObservationStatus = Literal["ok", "error", "partial"]
 StepStatus = Literal["pending", "running", "completed", "failed", "skipped", "blocked"]
 ApprovalRiskLevel = Literal["high", "critical"]
 ApprovalStatus = Literal["pending", "approved", "denied", "consumed", "revoked"]
+DataRole = Literal["time", "metric", "dimension", "identifier", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,22 @@ class TaskDatasetBinding:
     producing_invocation_id: str | None
     dataset_created_at: str
     bound_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class DataRoleConfirmation:
+    """A user-confirmed role bound to one TaskRun plan and data version."""
+
+    confirmation_id: str
+    run_id: str
+    question_id: str
+    dataset_ref: str
+    column: str
+    role: DataRole
+    plan_version: int
+    data_version_hash: str
+    run_state_version: int
+    confirmed_at: str
 
 
 @dataclass(frozen=True, slots=True)

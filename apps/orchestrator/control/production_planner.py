@@ -372,15 +372,42 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         if capability not in result:
             result.append(capability)
 
-    if any(token in request for token in ("画像", "字段", "规模")):
-        add("data.profile")
-    if any(token in request for token in ("质量", "缺失", "重复")):
+    profile_requested = any(token in request for token in ("画像", "字段", "规模"))
+    role_requested = any(
+        token in request
+        for token in (
+            "数据角色",
+            "字段角色",
+            "时间列",
+            "指标列",
+            "度量列",
+            "维度列",
+            "id列",
+            "id 列",
+            "标识列",
+        )
+    )
+    quality_requested = any(
+        token in request for token in ("质量", "缺失", "重复", "常量列", "清洗建议")
+    )
+    # 三项能力由同一个受治理只读工具返回，一次计划只选择用户最具体的能力，
+    # 避免为了画像、角色和质量重复读取同一个数据集。
+    if role_requested:
+        add("data.roles")
+    elif quality_requested and not profile_requested:
+        add("data.quality")
+    elif profile_requested:
         add("data.profile")
     if any(token in request for token in ("定义", "口径", "公司规定")):
         add("knowledge.search")
     if "异常" in request:
         add("stats.anomaly")
-    if "排除" in request or "过滤" in request or "清洗" in request:
+    requests_transform = (
+        "排除" in request
+        or "过滤" in request
+        or ("清洗" in request and "清洗建议" not in request)
+    )
+    if requests_transform:
         add("dataset.transform")
     if "回归" in request:
         add("stats.regression")
@@ -540,6 +567,7 @@ def _deterministic_audit(
 def _capability_purpose(capability: str) -> str:
     return {
         "data.profile": "取得数据规模与字段画像",
+        "data.roles": "识别时间、指标、维度和标识字段并披露歧义",
         "data.quality": "检查缺失、重复和类型质量",
         "knowledge.search": "检索并引用业务口径来源",
         "data.aggregate": "按用户指定维度聚合指标",

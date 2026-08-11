@@ -1,7 +1,7 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；阶段 3–5 工程关闭，当前开发入口为阶段 6A
-> · 更新日期：2026-08-06
+> 状态：总体设计已完成；阶段 3–5 与 6A 工程关闭，阶段 6B-1/6B-2 本地实现完成，当前进入评测/部署门禁
+> · 更新日期：2026-08-11
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
 ## 1. 文档定位
@@ -27,7 +27,11 @@ Resource 订阅通知；5B-4/5 的真实 Compose Resource 重连与 CPU/GPU 配�
 `d5a672d` 的 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 确认全绿，阶段 5 工程关闭；runtime semantic 与领域签字债务保留。6A-1 已固定 TaskRun
 capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable 投影，6A-3 已以
-SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence Ledger，并启用受限并行，等待完整 CI。
+SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence Ledger，并启用受限并行；
+提交 `b67b704` 的完整 CI 与真实 Compose 恢复门禁全绿，6A 已关闭。
+6B-1 已把 `data.roles`、确定性置信/歧义和只读质量建议接入 `get_data_profile` 1.1.0，
+并以严格输出 schema、Planner 单次路由和 React Artifact 展示落地；6B-2 已补绑定计划/数据
+版本的结构化确认和统计/聚合前置门禁。当前等待代表性评测、双传输/Compose 恢复门禁与完整 CI。
 
 ## 2. 不随阶段变化的边界
 
@@ -174,7 +178,9 @@ SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence
 
 > 当前实现：6A-1 已增加 SQLite v9 TaskRun capability/tool 目录快照，6A-2 已完成
 > `tools/list_changed` 的运行时接收/新任务目录换代和 profile 可用性；6A-3 已增加 SQLite v10
-> 受控并行控制面和 ready-frontier 并行执行。完整异步链与 Compose 门禁待 CI 验证。
+> 受控并行控制面和 ready-frontier 并行执行。提交 `b67b704` 的完整异步链与 Compose 门禁
+> 已通过 CI 并关闭 6A。6B-1 数据角色与质量建议、6B-2 结构化确认与统计/聚合门禁已完成
+> 本地实现；当前继续代表性角色评测、双传输/Compose 恢复门禁和完整 CI。
 
 ### MCP 设计
 

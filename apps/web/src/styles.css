@@ -745,12 +745,21 @@ select {
 }
 
 .profile-artifact__fields span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 3px 7px;
   color: #5d6d84;
   font-size: 9.5px;
   line-height: 1.4;
   background: #f2f4f7;
   border-radius: 5px;
+}
+
+.profile-artifact__fields small {
+  color: #5268d7;
+  font-size: 8px;
+  font-weight: 700;
 }
 
 .upload-progress {
@@ -3207,6 +3216,45 @@ select {
   padding: 0 15px 12px;
   color: #77839a;
   font-size: 10.5px;
+}
+
+.profile-artifact__roles-summary {
+  margin: 0;
+  padding: 0 15px 10px;
+  color: #53637c;
+  font-size: 10.5px;
+}
+
+.profile-artifact__advice {
+  margin: 0 15px 15px;
+  padding: 10px 12px;
+  color: #5e687b;
+  font-size: 10px;
+  line-height: 1.55;
+  background: #fff9ed;
+  border: 1px solid #f0dfb5;
+  border-radius: 8px;
+}
+
+.profile-artifact__advice strong,
+.profile-artifact__advice small {
+  display: block;
+}
+
+.profile-artifact__advice strong {
+  color: #725823;
+  font-size: 10.5px;
+}
+
+.profile-artifact__advice small {
+  margin-top: 1px;
+  color: #9a8352;
+  font-weight: 400;
+}
+
+.profile-artifact__advice ul {
+  margin: 6px 0 0;
+  padding-left: 17px;
 }
 
 /* ── 阶段4：上下文面板知识库入口 ── */

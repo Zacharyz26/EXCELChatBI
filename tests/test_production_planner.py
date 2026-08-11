@@ -25,7 +25,9 @@ def _registry() -> AgentToolRegistry:
                 description="读取画像与质量",
                 parameters={"type": "object"},
                 runner=lambda _: {},
-                metadata=ToolCapabilityMetadata(capabilities=("data.profile",)),
+                metadata=ToolCapabilityMetadata(
+                    capabilities=("data.profile", "data.roles", "data.quality")
+                ),
             ),
             AgentToolSpec(
                 name="anomaly_detect",
@@ -349,6 +351,79 @@ async def test_fast_path_produces_valid_shared_plan_without_model() -> None:
     assert result.validation.valid is True
     assert result.capabilities == {"data.profile"}
     assert result.audit["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_fast_path_selects_role_capability_without_duplicate_profile_step() -> None:
+    contract = build_minimal_contract(
+        run_id="role-run",
+        user_text="识别时间列、指标列和维度列，并说明不确定的数据角色",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert result.route == "fast"
+    assert result.capabilities == {"data.roles"}
+    assert len(result.plan["steps"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_fast_path_selects_quality_capability_for_quality_only_request() -> None:
+    contract = build_minimal_contract(
+        run_id="quality-run",
+        user_text="检查空值、重复和常量列，并给出清洗建议",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert result.route == "fast"
+    assert result.capabilities == {"data.quality"}
+    assert len(result.plan["steps"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_cleaning_execution_keeps_transform_capability() -> None:
+    contract = build_minimal_contract(
+        run_id="clean-run",
+        user_text="按已经确认的规则清洗数据并去掉空值",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_registry(),
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert "dataset.transform" in result.capabilities
 
 
 @pytest.mark.asyncio

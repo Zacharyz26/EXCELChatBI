@@ -34,7 +34,7 @@ from mcp_servers.excel_parser.server import build_server as build_excel  # noqa:
 from mcp_servers.report.server import build_server as build_report  # noqa: E402
 from mcp_servers.stats.schemas import REGRESSION_SCHEMA  # noqa: E402
 from mcp_servers.stats.server import build_server as build_stats  # noqa: E402
-from packages.common.dataset_store import save_dataframe  # noqa: E402
+from packages.common.dataset_store import load_dataframe, save_dataframe  # noqa: E402
 from packages.governance.policy import DEFAULT_AGENT_TOOL_ALLOWLIST  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
 from packages.rag.retriever import HybridRetriever, RetrievalResult  # noqa: E402
@@ -113,8 +113,15 @@ def test_registry_exports_all_tools() -> None:
     assert set(reg.names) == DEFAULT_AGENT_TOOL_ALLOWLIST
     assert reg.capabilities_for_tool("get_data_profile") == (
         "data.profile",
+        "data.roles",
         "data.quality",
     )
+    roles = next(
+        item
+        for item in reg.capability_catalog()
+        if item["name"] == "data.roles"
+    )
+    assert roles["artifact_types"] == ["profile"]
     quality = next(
         item
         for item in reg.capability_catalog()
@@ -141,6 +148,16 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
         "analysis_ids",
         "skipped_charts",
     ]
+    profile_descriptor = descriptors["get_data_profile"]
+    assert profile_descriptor.metadata.tool_version == "1.1.0"
+    assert profile_descriptor.output_schema["required"] == [
+        "profile",
+        "roles",
+        "quality",
+    ]
+    assert profile_descriptor.output_schema["properties"]["roles"][
+        "additionalProperties"
+    ] is False
 
 
 def test_tool_audit_metadata_comes_from_routed_contract() -> None:
@@ -302,11 +319,70 @@ def test_execute_happy_path(sales_ref: str) -> None:
 
 
 def test_profile_with_quality(sales_ref: str) -> None:
+    before = load_dataframe(sales_ref)
     out = _registry().execute("get_data_profile", f'{{"dataset_ref": "{sales_ref}"}}')
     assert out["profile"]["row_count"] == 4
+    roles = {item["column"]: item for item in out["roles"]["columns"]}
+    assert roles["地区"]["primary_role"] == "dimension"
+    assert roles["销量"]["primary_role"] == "metric"
+    assert roles["常数列"]["primary_role"] == "unknown"
+    assert roles["常数列"]["ambiguous"] is True
     assert out["quality"]["duplicate_rows"] == 1
     assert out["quality"]["constant_columns"] == ["常数列"]
     assert out["quality"]["high_null_columns"] == []
+    assert out["quality"]["schema"] == "chatbi-data-quality-v1"
+    assert out["quality"]["mutates_data"] is False
+    assert all(
+        recommendation["automatic"] is False
+        for recommendation in out["quality"]["recommendations"]
+    )
+    pd.testing.assert_frame_equal(load_dataframe(sales_ref), before)
+
+
+def test_profile_roles_expose_confidence_ambiguity_and_safe_advice() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "月份": pd.to_datetime(
+                    ["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"]
+                ),
+                "订单ID": ["A-1", "A-2", "A-2", "A-4"],
+                "地区": ["华东", "华北", "华北", "华南"],
+                "销售额": [120.0, None, 90.0, 150.0],
+                "备注": ["首单", "复购", "复购", "活动"],
+                "lifetime_value": [100.0, 120.0, 80.0, 150.0],
+                "invalid": ["yes", "no", "pending", "unknown"],
+            }
+        )
+    )
+
+    out = _registry().execute("get_data_profile", f'{{"dataset_ref": "{ref}"}}')
+    roles = {item["column"]: item for item in out["roles"]["columns"]}
+
+    assert out["roles"]["schema"] == "chatbi-data-roles-v1"
+    assert roles["月份"]["primary_role"] == "time"
+    assert roles["订单ID"]["primary_role"] == "identifier"
+    assert roles["地区"]["primary_role"] == "dimension"
+    assert roles["销售额"]["primary_role"] == "metric"
+    assert roles["备注"]["primary_role"] == "unknown"
+    assert roles["备注"]["ambiguous"] is True
+    assert roles["lifetime_value"]["primary_role"] == "metric"
+    assert roles["lifetime_value"]["ambiguous"] is False
+    assert roles["invalid"]["primary_role"] == "dimension"
+    assert all(0 <= item["confidence"] <= 1 for item in roles.values())
+
+    issues = out["quality"]["issues"]
+    assert any(
+        item["code"] == "missing_values" and item["columns"] == ["销售额"]
+        for item in issues
+    )
+    assert any(item["code"] == "non_unique_identifier" for item in issues)
+    metric_advice = next(
+        item["recommendation"]
+        for item in issues
+        if item["code"] == "missing_values" and item["columns"] == ["销售额"]
+    )
+    assert "不得静默用 0" in metric_advice
 
 
 # ── kb_search ──

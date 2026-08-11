@@ -1275,6 +1275,47 @@ test("上传 Excel 后渲染画像卡和数据集", async ({ page }) => {
   await expect(page.locator(".dataset-item__main")).toContainText("uploaded-sales.xlsx");
 });
 
+test("角色与质量建议 Artifact 展示置信边界且不宣称自动清洗", async ({ page }) => {
+  const state = await installMockApi(page);
+  const assistant = message("profile-advice-message", "assistant", "角色和质量诊断已完成。");
+  state.messages.push(assistant);
+  state.artifacts.push(artifact(
+    "profile-advice",
+    "profile-advice-message",
+    "profile",
+    {
+      profile: profile("sales-ref"),
+      roles: {
+        summary: { time: 1, metric: 1, dimension: 0, identifier: 0, ambiguous: 1 },
+        columns: [
+          { column: "月份", primary_role: "time", confidence: 0.9, ambiguous: false },
+          { column: "销售额", primary_role: "metric", confidence: 0.95, ambiguous: false },
+        ],
+      },
+      quality: {
+        duplicate_rows: 0,
+        high_null_columns: [{ name: "销售额", null_ratio: 0.3 }],
+        constant_columns: [],
+        summary: { issue_count: 1 },
+        issues: [{
+          issue_id: "quality-001",
+          code: "missing_values",
+          recommendation: "先确认缺失机制，再选择删除或受治理填补；不得静默用 0 替代。",
+        }],
+      },
+    },
+    "get_data_profile",
+  ));
+
+  await page.goto("/");
+
+  const card = page.locator(".profile-artifact");
+  await expect(card).toContainText("时间 1");
+  await expect(card).toContainText("指标 1");
+  await expect(card).toContainText("仅建议，不自动修改数据");
+  await expect(card).toContainText("不得静默用 0 替代");
+});
+
 test("Chart Artifact 在生成后及刷新后都可见", async ({ page }) => {
   await installMockApi(page);
   await page.goto("/");

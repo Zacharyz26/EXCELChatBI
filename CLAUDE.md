@@ -10,14 +10,15 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5 + 开发中的阶段 6A**。3A–3C 的历史
+当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5 与 6A**。3A–3C 的历史
 发布门禁已关闭；3D-1–3D-3 的项目记忆治理与 3E-1–3E-3 的 SQLite v6 不可变
 Dataset 锚点、五阶段来源图、安全 React 查看、领域中立质量和联合恢复探针已由提交
 `0b5980c` 的 backend、frontend 与 Docker/Compose CI 验证并关闭。4A-1/4A-2 已落地
 SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/Gateway/Server
 审批执行链；4B 已把 TaskRun、计划修订、结构化澄清、任务控制和审批接入 React。4C/4D
-的恢复、自主等级与反馈分支已关闭，阶段 5 领域定义与知识 Resource 已工程关闭；当前实施 6A
-能力目录和受控并行：
+的恢复、自主等级与反馈分支已关闭，阶段 5 领域定义与知识 Resource 已工程关闭；阶段 6A
+能力目录和受控并行已由完整 CI 关闭；6B-1/6B-2 数据角色、质量建议、结构化确认与执行前
+门禁已完成本地实现，当前继续代表性评测和真实部署门禁：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
@@ -57,9 +58,10 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 - **v2.5 阶段 4A/4B 已完成**：服务端计划干预和审批执行链已接入 React 统一任务协作
   面板；前端以真实 TaskRun/TaskEvent 和版本化 API 驱动计划、澄清、暂停/恢复/取消、
   单步重试与 ApprovalRecord 决定。批准后仍需显式恢复；浏览器按钮不是授权。
-- **v2.5 阶段 4/5 已工程关闭，阶段 6A 开发中**：SQLite v9 固定 TaskRun capability/tool
+- **v2.5 阶段 4/5 与 6A 已工程关闭**：SQLite v9 固定 TaskRun capability/tool
   目录，6A-2 接入受治理 `tools/list_changed` 和 profile 可用性；SQLite v10 建立共享预算、
-  固定数据版本、取消树和 Evidence Ledger，仅允许独立 ready steps 的只读幂等 MCP Tool 有界并行。
+  固定数据版本、取消树和 Evidence Ledger，仅允许独立 ready steps 的只读幂等 MCP Tool 有界并行；
+  提交 `b67b704` 的完整 CI 与真实 Compose 恢复门禁全绿。
 
 目标控制循环：
 
@@ -112,7 +114,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；TaskRun 协作面板、计划编辑、结构化澄清、任务控制、审批、恢复与执行审计 | 阶段 6 继续增加自主分析过程和统计护栏展示 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复；受治理 ready-frontier 并行 | 阶段 6 在共享预算、数据版本、取消树和 Evidence Ledger 上逐步增加自主分析能力 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5 已关闭；阶段 6A 增加不可变能力目录和受控并行控制面 |
+| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5 与 6A 已关闭；后续阶段 6 能力继续复用不可变目录和受控并行控制面 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
 | 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
@@ -151,23 +153,29 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：v2.5 阶段 6A 受控扩展收尾
+### 6.2 当前任务：v2.5 阶段 6B 代表性评测与发布门禁
 
 1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
    `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
 2. v2.4 阶段 2A–2E 与 v2.5 阶段 3–5 已工程关闭；真实 CPU/GPU semantic 等价、
    领域代表性场景与 G7 人工签字仍是显式发布债务，不得由工程门禁代替。
-3. 6A-1/6A-2 已完成能力目录冻结、受治理换代和 profile unavailable 投影；6A-3 已实现
-   SQLite v10 执行作用域、数据版本绑定、取消树、Evidence Ledger 与 ready-frontier 有界并行。
-4. 当前收尾仅限审计投影、双 MCP 服务 Compose 并行、重启/离线恢复和完整 CI；未通过前
-   不得关闭 6A，也不得提前宣称数据角色、质量建议或多数据集自主分析已完成。
+3. 6A-1～6A-3 已完成能力目录冻结、受治理换代、profile unavailable 投影，以及 SQLite v10
+   执行作用域、数据版本绑定、取消树、Evidence Ledger 与 ready-frontier 有界并行；提交
+   `b67b704` 的 [CI run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
+   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6A。
+4. 6B-1 已实现 `data.roles`、确定性角色置信/歧义、只读质量建议、严格 MCP 输出契约、Planner
+   路由和 React Artifact 展示；6B-2 已实现绑定计划/数据版本的结构化角色确认与统计/聚合
+   执行前门禁，完整边界见 `docs/v2.5/阶段6B实施记录.md`。当前需补代表性评测、双传输/
+   Compose 恢复门禁与完整 CI。
+5. 假设筛选、预测和多数据集关联仍须按路线图逐项实现和验收，不得因 6A 控制面或 6B-1
+   画像能力完成而提前宣称阶段 6 完成。
 
 完整状态见 `/docs/v2.5/README.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.5：阶段 3–5 已工程关闭，阶段 6A 进行受控扩展收尾；其后才进入数据角色、
-  质量建议、自主分析和多数据集；
+- v2.5：阶段 3–5 与 6A 已工程关闭，当前进入数据角色、质量建议；其后再逐项进入
+  结果驱动自主分析、统计/预测护栏和多数据集；
   同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker
   状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；

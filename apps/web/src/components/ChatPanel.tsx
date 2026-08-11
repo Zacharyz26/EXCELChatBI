@@ -539,19 +539,31 @@ function CitationArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
 
 function ProfileArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
   const raw = artifact.payload ?? {};
-  // 兼容 {profile, quality} 包装（get_data_profile）与裸画像（上传）
+  // 兼容 {profile, roles, quality} 包装（get_data_profile）与裸画像（上传）
   const payload = isRecord(raw.profile) ? raw.profile : raw;
+  const roles = isRecord(raw.roles) ? raw.roles : null;
   const quality = isRecord(raw.quality) ? raw.quality : null;
   const rowCount = numberValue(payload.row_count);
   const columnCount = numberValue(payload.column_count);
   const columns = Array.isArray(payload.columns) ? payload.columns : [];
-  const names = columns
+  const roleColumns = roles && Array.isArray(roles.columns)
+    ? roles.columns.filter(isRecord)
+    : [];
+  const roleByColumn = new Map(
+    roleColumns.map((item) => [stringOf(item.column), stringOf(item.primary_role)]),
+  );
+  const fields = columns
     .map((column) => (
       column && typeof column === "object" && "name" in column
-        ? String(column.name)
-        : ""
+        ? { name: String(column.name), role: roleByColumn.get(String(column.name)) ?? "" }
+        : null
     ))
-    .filter(Boolean);
+    .filter((item): item is { name: string; role: string } => item !== null && Boolean(item.name));
+  const roleSummary = roles && isRecord(roles.summary) ? roles.summary : null;
+  const qualitySummary = quality && isRecord(quality.summary) ? quality.summary : null;
+  const issues = quality && Array.isArray(quality.issues)
+    ? quality.issues.filter(isRecord)
+    : [];
 
   return (
     <section className="profile-artifact">
@@ -576,14 +588,52 @@ function ProfileArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
             && ` · 常量列 ${quality.constant_columns.length} 个`}
         </p>
       )}
-      {names.length > 0 && (
+      {roleSummary && (
+        <p className="profile-artifact__roles-summary">
+          时间 {String(roleSummary.time ?? 0)} · 指标 {String(roleSummary.metric ?? 0)} ·
+          维度 {String(roleSummary.dimension ?? 0)} · ID {String(roleSummary.identifier ?? 0)}
+          {Number(roleSummary.ambiguous ?? 0) > 0
+            && ` · 待确认 ${String(roleSummary.ambiguous)} 个`}
+        </p>
+      )}
+      {fields.length > 0 && (
         <div className="profile-artifact__fields">
-          {names.slice(0, 8).map((name) => <span key={name}>{name}</span>)}
-          {names.length > 8 && <span>+{names.length - 8}</span>}
+          {fields.slice(0, 8).map((field) => (
+            <span key={field.name}>
+              {field.name}
+              {field.role && <small>{dataRoleLabel(field.role)}</small>}
+            </span>
+          ))}
+          {fields.length > 8 && <span>+{fields.length - 8}</span>}
+        </div>
+      )}
+      {issues.length > 0 && (
+        <div className="profile-artifact__advice">
+          <strong>
+            质量建议 {String(qualitySummary?.issue_count ?? issues.length)} 项
+            <small>仅建议，不自动修改数据</small>
+          </strong>
+          <ul>
+            {issues.slice(0, 3).map((issue, index) => (
+              <li key={stringOf(issue.issue_id) || `${stringOf(issue.code)}-${index}`}>
+                {stringOf(issue.recommendation) || stringOf(issue.code)}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </section>
   );
+}
+
+function dataRoleLabel(role: string): string {
+  return ({
+    time: "时间",
+    metric: "指标",
+    dimension: "维度",
+    identifier: "ID",
+    unknown: "待确认",
+  } as Record<string, string>)[role] ?? role;
 }
 
 function ChartArtifact({ artifact }: { artifact: WorkspaceArtifact }) {

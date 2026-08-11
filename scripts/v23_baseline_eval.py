@@ -52,7 +52,7 @@ _CAPABILITY_BY_TOOL = {
     "generate_report": "report.generate",
 }
 _CAPABILITIES_BY_TOOL = {
-    "get_data_profile": ("data.profile", "data.quality"),
+    "get_data_profile": ("data.profile", "data.roles", "data.quality"),
     "kb_search": ("knowledge.search",),
     "aggregate_preview": ("data.aggregate",),
     "trend_analysis": ("stats.trend",),
@@ -66,6 +66,7 @@ _CAPABILITIES_BY_TOOL = {
 }
 _ARTIFACT_TYPES_BY_CAPABILITY = {
     "data.profile": ["profile"],
+    "data.roles": ["profile"],
     "data.quality": ["profile"],
     "data.aggregate": ["table"],
     "stats.trend": ["stats"],

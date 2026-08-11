@@ -1,7 +1,8 @@
 # ChatBI Agent 自主化开发规划
 
-> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-06
-> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–5 工程关闭，当前开发阶段 6A
+> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-11
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–5 与 6A 工程关闭，
+> 当前开发入口为阶段 6B 匿名代表性评测与双传输/Compose 门禁
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 代表性盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
@@ -27,7 +28,11 @@
 > [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 > 已确认真实 Compose Resource 重连及 CPU/GPU 配置门禁全绿，阶段 5 工程关闭。6A-1 已固定
 > TaskRun capability/tool 目录快照，6A-2 已实现受治理 Tool 换代与 profile 可用性，
-> 6A-3 已实现共享预算、固定数据版本、取消树、统一 Evidence Ledger 和有界并行，等待完整 CI。
+> 6A-3 已实现共享预算、固定数据版本、取消树、统一 Evidence Ledger 和有界并行；提交
+> `b67b704` 的完整 CI 与真实 Compose 恢复门禁全绿，6A 已关闭。
+> 6B-1 已本地实现 `data.roles`、角色置信/歧义、只读质量建议、严格 MCP 输出 schema、
+> Planner 单次路由和 React Artifact 展示；6B-2 已本地实现绑定计划/数据版本的结构化角色
+> 确认与统计/聚合执行门禁，等待代表性评测、真实部署门禁和完整 CI。
 > CPU/GPU runtime semantic 与代表性场景签字
 > 仍是发布债务，不得由工程门禁替代。
 
@@ -59,7 +64,8 @@
   提交；工具开始、失败与 unknown Observation 已原子持久化，unknown 会阻断完成；真实计划
   版本、后台 run 宿主、可幂等任务控制与 Checkpoint 同 run 续跑已经落地；
 - 工具注册表已补 capability、版本、风险、权限、幂等性和 Artifact 后置条件元数据，并由
-  生产 Planner 直接生成能力目录；完整前置条件、运行时健康和多实现选优仍未完成；
+  生产 Planner 直接生成能力目录；6A 已完成运行时健康、不可变目录和 profile 可用性，完整
+  前置条件与多实现选优仍未完成；
 - Agent Executor 已经由标准 MCP Client Gateway 执行：Host RequestContext、固定协议/
   契约发现、stdio/认证 Streamable HTTP、超时取消、健康代次、只读幂等有限重连和
   fail-closed 降级边界均已落地；进程内适配只保留为迁移兼容/测试；
@@ -72,8 +78,8 @@
   计划修订、ApprovalRecord 及高风险工具执行链，4B 已完成对应 React 协作交互；
   OIDC/OAuth、成员管理 API、完整审批策略与企业审计后端仍未落地；
 - 服务端结构化澄清、暂停、恢复、取消和步骤重试协议已接入前端；SSE 游标重连、服务端
-  最近 Run 恢复和工具来源/权限/执行时健康视图已实现；API/Web/工具服务重启的 Compose
-  浏览器门禁代码已补齐，真实运行结果仍待 Docker runner 验证。
+  最近 Run 恢复和工具来源/权限/执行时健康视图已实现；API/Web/工具服务重启及 6A 双 MCP
+  并行/离线恢复 Compose 门禁均已通过真实 Docker runner 验证。
 
 ## 3. 不变量与责任归属
 
@@ -251,7 +257,8 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 > 3B/3C 交付记录：[`v2.5/阶段3B实施记录.md`](./v2.5/阶段3B实施记录.md) 与
 > [`v2.5/阶段3C实施记录.md`](./v2.5/阶段3C实施记录.md)，均已通过真实 CI 并关闭；
 > 3D/3E 也已由提交 `0b5980c` 的真实 CI 独立关闭，阶段 3 全部完成；
-> 当前开发入口：阶段 6A；阶段 5 已由提交 `d5a672d` 的真实 Compose CI 工程关闭。
+> 当前开发入口：阶段 6 的数据角色识别与质量建议；阶段 5 已由提交 `d5a672d`、阶段 6A
+> 已由提交 `b67b704` 的真实 Compose CI 工程关闭。
 
 - 工作记忆：当前目标、计划、步骤和观察；
 - 对话记忆：最近原文、滚动摘要、实体映射，落地 `compaction.py` 与 `coref.py`；
@@ -321,10 +328,15 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 
 ### 阶段 6：自主分析能力
 
-> 当前切片：6A-1～6A-3 已完成本地实现。SQLite v9 固定 TaskRun capability/tool 目录，
+> 已关闭切片：6A-1～6A-3。SQLite v9 固定 TaskRun capability/tool 目录，
 > 6A-2 完成受治理 `tools/list_changed` 和 profile 可用性，SQLite v10 建立共享预算、数据版本、
 > 取消树与 Evidence Ledger 并启用受限 ready-frontier 并行；实现与边界见
-> [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。完整 CI 通过后再关闭 6A。
+> [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。提交 `b67b704` 的
+> [run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
+> 已确认完整 CI 全绿并关闭 6A；当前从数据角色识别与质量建议继续阶段 6。
+> 6B-1/6B-2 已完成本地实现，详见
+> [`v2.5/阶段6B实施记录.md`](./v2.5/阶段6B实施记录.md)；当前继续 6B-3 匿名代表性评测、
+> 双传输/Compose 恢复门禁和完整 CI。
 
 - 自动识别时间、指标、维度和 ID 角色；
 - 数据质量诊断与清洗建议；

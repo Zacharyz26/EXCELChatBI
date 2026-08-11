@@ -493,7 +493,20 @@ def _register_dataset(
         profile={
             "row_count": 3,
             "column_count": 2,
-            "columns": [{"name": "月份"}, {"name": "销售额"}],
+            "columns": [
+                {
+                    "name": "月份",
+                    "dtype": "datetime",
+                    "null_ratio": 0.0,
+                    "distinct_count": 3,
+                },
+                {
+                    "name": "销售额",
+                    "dtype": "float",
+                    "null_ratio": 0.0,
+                    "distinct_count": 3,
+                },
+            ],
         },
     )
 
@@ -1531,8 +1544,18 @@ async def test_duplicate_guard_does_not_block_distinct_steps_using_same_tool(
 
 @pytest.mark.asyncio
 async def test_retryable_failure_creates_new_plan_version_and_recovers(
-    store: SessionStore, conversation: Conversation
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
     _register_dataset(store, conversation)
     plan = {
         "schema_version": 1,
@@ -1557,7 +1580,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise ValueError("时间列不存在")
+            raise ValueError("趋势参数暂不可用")
         return {"series": [{"period": arguments.get("time_col", "月份")}]}
 
     gateway = PlannerAwareGateway(
@@ -1567,7 +1590,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
                     ToolCall(
                         id="trend-bad",
                         name="trend_analysis",
-                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"错误列"}'),
+                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"月份"}'),
                     )
                 ]
             },
@@ -1609,6 +1632,7 @@ async def test_retryable_failure_creates_new_plan_version_and_recovers(
     attempts_by_event = [
         payload["payload"]["attempt"] for name, payload in events if name == "step.started"
     ]
+    assert attempts == 2
     assert attempts_by_event == [1, 2]
 
 
@@ -1815,7 +1839,16 @@ async def test_tool_timeout_is_unknown_and_blocks_automatic_retry(
 async def test_ambiguous_metric_waits_for_user_without_calling_model(
     store: SessionStore,
     conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
     store.register_dataset(
         ref=_DATASET_REF,
         project_id=conversation.project_id,
@@ -1852,11 +1885,112 @@ async def test_ambiguous_metric_waits_for_user_without_calling_model(
     ], events
     waiting = dict(events)["waiting_user"]
     assert waiting["payload"]["about"] == "metric"
+    assert waiting["payload"]["answer_schema"] == {
+        "type": "string",
+        "enum": ["销售额", "销量"],
+    }
+    assert waiting["payload"]["data_role_request"] == {
+        "schema": "chatbi-data-role-confirmation-request-v1",
+        "schema_version": 1,
+        "dataset_ref": _DATASET_REF,
+        "role": "metric",
+        "candidates": ["销售额", "销量"],
+        "plan_version": 1,
+        "data_version_hash": TaskStore(store.db_path).data_version_hash(
+            cast(str, dict(events)["done"]["run_id"])
+        ),
+    }
     assert "销售额、销量" in dict(events)["text.delta"]["delta"]
     done = dict(events)["done"]
     assert done["run_status"] == "waiting_user"
     run = TaskStore(store.db_path).get_run(cast(str, done["run_id"]))
     assert run is not None and run.status == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_data_role_guard_rejects_mismatched_stats_before_invocation(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    store.register_dataset(
+        ref=_DATASET_REF,
+        project_id=conversation.project_id,
+        filename="回归.xlsx",
+        profile={
+            "row_count": 10,
+            "column_count": 2,
+            "columns": [
+                {
+                    "name": "金额",
+                    "dtype": "float",
+                    "null_ratio": 0.0,
+                    "distinct_count": 10,
+                },
+                {
+                    "name": "记录ID",
+                    "dtype": "str",
+                    "null_ratio": 0.0,
+                    "distinct_count": 10,
+                },
+            ],
+        },
+    )
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="role-mismatch",
+                        name="regression",
+                        arguments=json.dumps(
+                            {
+                                "dataset_ref": _DATASET_REF,
+                                "target": "金额",
+                                "features": ["记录ID"],
+                            }
+                        ),
+                    )
+                ]
+            },
+            {"deltas": ["无法继续执行。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {"regression": lambda _args: pytest.fail("角色不匹配时不得执行工具")}
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="执行既定分析",
+        enforce_plan=False,
+    )
+
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    assert registry.executed == []
+    assert tasks.list_invocations(run_id) == []
+    rejected = next(
+        payload["payload"]
+        for name, payload in events
+        if name == "step.completed"
+        and payload["payload"]["status"] == "rejected"
+    )
+    assert rejected["observation"]["code"] == "data_role_mismatch"
+    assert rejected["policy"]["data_role_preconditions"]["allowed"] is False
+    tool_end = next(payload for name, payload in events if name == "tool_end")
+    assert "需要 metric" in tool_end["message"]
 
 
 @pytest.mark.asyncio
@@ -2086,9 +2220,9 @@ async def test_compiled_definition_binds_data_evidence_and_numeric_claim(
     source_ref = "urn:domain-definition:grouped-measure:v1"
     compiled_arguments = {
         "dataset_ref": _DATASET_REF,
-        "group_col": "bucket_code",
+        "group_col": "月份",
         "agg": "sum",
-        "value_col": "measure_value",
+        "value_col": "销售额",
         "sort": "group",
         "limit": 100,
     }

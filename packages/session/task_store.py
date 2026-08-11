@@ -27,6 +27,8 @@ from packages.session.task_models import (
     Checkpoint,
     ClaimDraft,
     ClaimRecord,
+    DataRole,
+    DataRoleConfirmation,
     EvidenceLedgerEntry,
     EvidenceRecord,
     InvocationStatus,
@@ -230,6 +232,39 @@ class TaskStore:
             if scope is None:
                 raise ValueError(f"TaskRun 执行作用域不存在: {run_id}")
             return _data_version_hash(connection, run_id)
+
+    def list_data_role_confirmations(
+        self,
+        run_id: str,
+        *,
+        data_version_hash: str | None = None,
+    ) -> list[DataRoleConfirmation]:
+        """Project append-only role confirmations from clarification events."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM task_events
+                WHERE run_id = ? AND event_type = 'clarification.answered'
+                ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        confirmations: list[DataRoleConfirmation] = []
+        for row in rows:
+            payload = _load_object(str(row["payload_json"]))
+            raw = payload.get("data_role_confirmation")
+            if not isinstance(raw, dict):
+                continue
+            confirmation = _data_role_confirmation_from_payload(
+                run_id,
+                cast(JsonObject, raw),
+            )
+            if (
+                data_version_hash is None
+                or confirmation.data_version_hash == data_version_hash
+            ):
+                confirmations.append(confirmation)
+        return confirmations
 
     def list_cancellation_nodes(self, run_id: str) -> list[CancellationNode]:
         with self._connection() as connection:
@@ -860,6 +895,16 @@ class TaskStore:
             )
 
             ensure_transition(current.status, "planning")
+            next_version = current.state_version + 1
+            role_confirmation = _validated_data_role_confirmation(
+                connection,
+                current=current,
+                question_id=clean_question_id,
+                waiting_payload=waiting_payload,
+                answer=answer,
+                run_state_version=next_version,
+                confirmed_at=now,
+            )
             answer_text = _dump_json_value(answer)
             message = Message(
                 id=uuid.uuid4().hex,
@@ -886,7 +931,6 @@ class TaskStore:
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, current.conversation_id),
             )
-            next_version = current.state_version + 1
             connection.execute(
                 """
                 UPDATE task_runs
@@ -896,21 +940,26 @@ class TaskStore:
                 """,
                 (next_version, now, run_id, current.state_version),
             )
+            event_payload: JsonObject = {
+                "question_id": clean_question_id,
+                "answer": answer,
+                "user_message_id": message.id,
+                "control": {
+                    "command": "answer_clarification",
+                    "idempotency_key": clean_key,
+                    "request_hash": request_hash,
+                },
+            }
+            if role_confirmation is not None:
+                event_payload["data_role_confirmation"] = _data_role_confirmation_payload(
+                    role_confirmation
+                )
             event = TaskEvent(
                 event_id=uuid.uuid4().hex,
                 run_id=run_id,
                 sequence=_next_sequence(connection, run_id),
                 event_type="clarification.answered",
-                payload={
-                    "question_id": clean_question_id,
-                    "answer": answer,
-                    "user_message_id": message.id,
-                    "control": {
-                        "command": "answer_clarification",
-                        "idempotency_key": clean_key,
-                        "request_hash": request_hash,
-                    },
-                },
+                payload=event_payload,
                 occurred_at=now,
             )
             _insert_event(connection, event)
@@ -923,10 +972,19 @@ class TaskStore:
             answers = snapshot.get("clarification_answers")
             answer_map = dict(answers) if isinstance(answers, dict) else {}
             answer_map[clean_question_id] = answer
+            raw_confirmations = snapshot.get("data_role_confirmations")
+            role_confirmations = (
+                list(raw_confirmations) if isinstance(raw_confirmations, list) else []
+            )
+            if role_confirmation is not None:
+                role_confirmations.append(
+                    _data_role_confirmation_payload(role_confirmation)
+                )
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
                     "clarification_answers": answer_map,
+                    "data_role_confirmations": role_confirmations,
                 }
             )
             connection.execute(
@@ -5223,6 +5281,157 @@ def _valid_clarification_answer(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return len(encoded) <= 20_000
+
+
+_DATA_ROLES = frozenset({"time", "metric", "dimension", "identifier", "unknown"})
+
+
+def _validated_data_role_confirmation(
+    connection: sqlite3.Connection,
+    *,
+    current: TaskRun,
+    question_id: str,
+    waiting_payload: JsonObject,
+    answer: object,
+    run_state_version: int,
+    confirmed_at: str,
+) -> DataRoleConfirmation | None:
+    raw_request = waiting_payload.get("data_role_request")
+    if raw_request is None:
+        return None
+    if (
+        not isinstance(raw_request, dict)
+        or raw_request.get("schema") != "chatbi-data-role-confirmation-request-v1"
+        or raw_request.get("schema_version") != 1
+    ):
+        raise ControlConflict("数据角色确认请求格式非法")
+    request = cast(JsonObject, raw_request)
+    dataset_ref = request.get("dataset_ref")
+    role = request.get("role")
+    candidates = request.get("candidates")
+    data_hash = request.get("data_version_hash")
+    plan_version = request.get("plan_version")
+    if (
+        not isinstance(dataset_ref, str)
+        or not dataset_ref
+        or role not in _DATA_ROLES
+        or not isinstance(candidates, list)
+        or not candidates
+        or len(candidates) > 20
+        or not all(isinstance(item, str) and item.strip() for item in candidates)
+        or len(set(cast(list[str], candidates))) != len(candidates)
+        or not isinstance(data_hash, str)
+        or len(data_hash) != 64
+        or not isinstance(plan_version, int)
+        or isinstance(plan_version, bool)
+        or plan_version < 1
+    ):
+        raise ControlConflict("数据角色确认请求缺少有效的版本或候选字段")
+    if plan_version != current.plan_version:
+        raise ControlConflict("数据角色确认不属于当前计划版本")
+    if data_hash != _data_version_hash(connection, current.run_id):
+        raise ControlConflict("TaskRun 数据版本已变化，原角色确认请求已失效")
+    binding = connection.execute(
+        """
+        SELECT 1 FROM task_dataset_bindings
+        WHERE run_id = ? AND dataset_ref = ?
+        """,
+        (current.run_id, dataset_ref),
+    ).fetchone()
+    if binding is None:
+        raise ControlConflict("数据角色确认引用的数据集不属于当前 TaskRun")
+    answer_role: object = None
+    if isinstance(answer, str):
+        column = answer.strip()
+    elif isinstance(answer, dict):
+        raw_column = answer.get("column")
+        answer_role = answer.get("role")
+        if not isinstance(raw_column, str):
+            raise ControlConflict("数据角色确认答案必须包含 column")
+        column = raw_column.strip()
+    else:
+        raise ControlConflict("数据角色确认答案必须是候选列名或包含 column 的对象")
+    if column not in candidates:
+        raise ControlConflict("数据角色确认答案不在允许的候选列中")
+    if answer_role is not None and answer_role != role:
+        raise ControlConflict("数据角色确认答案中的 role 与问题不一致")
+    return DataRoleConfirmation(
+        confirmation_id=uuid.uuid4().hex,
+        run_id=current.run_id,
+        question_id=question_id,
+        dataset_ref=dataset_ref,
+        column=column,
+        role=cast(DataRole, role),
+        plan_version=plan_version,
+        data_version_hash=data_hash,
+        run_state_version=run_state_version,
+        confirmed_at=confirmed_at,
+    )
+
+
+def _data_role_confirmation_payload(
+    confirmation: DataRoleConfirmation,
+) -> JsonObject:
+    return {
+        "schema": "chatbi-data-role-confirmation-v1",
+        "schema_version": 1,
+        "confirmation_id": confirmation.confirmation_id,
+        "question_id": confirmation.question_id,
+        "dataset_ref": confirmation.dataset_ref,
+        "column": confirmation.column,
+        "role": confirmation.role,
+        "plan_version": confirmation.plan_version,
+        "data_version_hash": confirmation.data_version_hash,
+        "run_state_version": confirmation.run_state_version,
+        "confirmed_at": confirmation.confirmed_at,
+    }
+
+
+def _data_role_confirmation_from_payload(
+    run_id: str,
+    payload: JsonObject,
+) -> DataRoleConfirmation:
+    role = payload.get("role")
+    if (
+        payload.get("schema") != "chatbi-data-role-confirmation-v1"
+        or payload.get("schema_version") != 1
+        or role not in _DATA_ROLES
+    ):
+        raise RuntimeError("持久化的数据角色确认格式非法")
+    required_text_fields = (
+        "confirmation_id",
+        "question_id",
+        "dataset_ref",
+        "column",
+        "data_version_hash",
+        "confirmed_at",
+    )
+    values = {field: payload.get(field) for field in required_text_fields}
+    if not all(isinstance(value, str) and value for value in values.values()):
+        raise RuntimeError("持久化的数据角色确认缺少字段")
+    plan_version = payload.get("plan_version")
+    run_state_version = payload.get("run_state_version")
+    if (
+        not isinstance(plan_version, int)
+        or isinstance(plan_version, bool)
+        or plan_version < 1
+        or not isinstance(run_state_version, int)
+        or isinstance(run_state_version, bool)
+        or run_state_version < 1
+    ):
+        raise RuntimeError("持久化的数据角色确认版本非法")
+    return DataRoleConfirmation(
+        confirmation_id=cast(str, values["confirmation_id"]),
+        run_id=run_id,
+        question_id=cast(str, values["question_id"]),
+        dataset_ref=cast(str, values["dataset_ref"]),
+        column=cast(str, values["column"]),
+        role=cast(DataRole, role),
+        plan_version=plan_version,
+        data_version_hash=cast(str, values["data_version_hash"]),
+        run_state_version=run_state_version,
+        confirmed_at=cast(str, values["confirmed_at"]),
+    )
 
 
 def _utc_now() -> str:

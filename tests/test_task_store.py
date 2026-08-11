@@ -1834,6 +1834,121 @@ def test_clarification_answer_validates_token_and_is_idempotent(
     assert snapshot["clarification_answers"] == {"q_metric": "销售额"}
 
 
+def test_data_role_clarification_persists_versioned_confirmation(
+    tmp_path: Path,
+) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    dataset_ref = "d" * 32
+    contract = build_minimal_contract(
+        run_id="role-confirmation-run",
+        user_text="比较指标趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    run, plan, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "等待指标角色确认",
+            "steps": [],
+            "assumptions": [],
+            "clarifications": [
+                {
+                    "question_id": "metric",
+                    "about": "metric",
+                    "question": "请选择指标",
+                    "blocking": True,
+                }
+            ],
+        },
+        reason="initial:fast",
+        planner={"route": "fast"},
+    )
+    data_hash = tasks.data_version_hash(run.run_id)
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="waiting_user",
+        event_type="waiting_user",
+        payload={
+            "question_id": "metric",
+            "question": "请选择指标",
+            "plan_id": plan.plan_id,
+            "plan_version": plan.version,
+            "resume_token": "role-resume-token",
+            "data_role_request": {
+                "schema": "chatbi-data-role-confirmation-request-v1",
+                "schema_version": 1,
+                "dataset_ref": dataset_ref,
+                "role": "metric",
+                "candidates": ["销售额", "销量"],
+                "plan_version": plan.version,
+                "data_version_hash": data_hash,
+            },
+        },
+        checkpoint_reason="waiting_user",
+    )
+
+    with pytest.raises(ControlConflict, match="候选列"):
+        tasks.answer_clarification(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="invalid-role-answer",
+            question_id="metric",
+            resume_token="role-resume-token",
+            answer="利润",
+        )
+
+    planning, event, created = tasks.answer_clarification(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="valid-role-answer",
+        question_id="metric",
+        resume_token="role-resume-token",
+        answer={"column": "销售额", "role": "metric"},
+    )
+    replayed, replay_event, replay_created = tasks.answer_clarification(
+        run.run_id,
+        expected_version=run.state_version,
+        idempotency_key="valid-role-answer",
+        question_id="metric",
+        resume_token="role-resume-token",
+        answer={"column": "销售额", "role": "metric"},
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert replayed == planning
+    assert replay_event == event
+    confirmation = tasks.list_data_role_confirmations(
+        run.run_id,
+        data_version_hash=data_hash,
+    )[0]
+    assert confirmation.dataset_ref == dataset_ref
+    assert confirmation.column == "销售额"
+    assert confirmation.role == "metric"
+    assert confirmation.plan_version == plan.version
+    assert confirmation.data_version_hash == data_hash
+    assert confirmation.run_state_version == planning.state_version
+    assert event.payload["data_role_confirmation"]["confirmation_id"] == (
+        confirmation.confirmation_id
+    )
+    snapshot = tasks.get_snapshot(run.run_id)
+    assert snapshot is not None
+    assert snapshot["data_role_confirmations"] == [
+        event.payload["data_role_confirmation"]
+    ]
+
+
 def test_user_step_retry_creates_one_immutable_plan_revision(
     tmp_path: Path,
 ) -> None:

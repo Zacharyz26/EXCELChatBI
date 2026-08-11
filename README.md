@@ -28,9 +28,14 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 已确认 backend、frontend 与真实 Compose Resource 重连/CPU-GPU 配置门禁全绿，阶段 5
 工程关闭。真实 CPU/GPU 模型语义等价和领域代表性签字继续作为发布债务，不由配置门禁代替。
-当前进入阶段 6A：SQLite v9 为每个 TaskRun 固定不可变 capability/tool 目录快照，
+阶段 6A 已关闭：SQLite v9 为每个 TaskRun 固定不可变 capability/tool 目录快照，
 6A-2 已接入受治理目录换代和 profile 可用性；SQLite v10 进一步固定执行作用域、数据版本、
-取消树与 Evidence Ledger，并对同一 ready frontier 的受治理只读工具开启有界并行。
+取消树与 Evidence Ledger，并对同一 ready frontier 的受治理只读工具开启有界并行。提交
+`b67b704` 的 [CI run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
+已确认 backend、frontend 与真实 Compose 三项全绿。阶段 6B-1 已在本地实现确定性时间/指标/
+维度/ID 角色、置信度与歧义、只读质量建议、严格 MCP 输出契约、Planner 单次路由和 React
+Artifact 展示；6B-2 已增加绑定计划/数据版本的结构化角色确认，以及统计/聚合执行前的
+确定性角色门禁。当前等待完整 CI，下一步是代表性角色评测与双传输/Compose 恢复门禁。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -144,10 +149,11 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E、4A–4D 和阶段 5 工程门禁已完成并通过真实 Compose CI；阶段 6A-1～6A-3
-  已完成本地实现，并已加入双 MCP 服务受控并行及重启/离线恢复门禁，等待完整 CI 确认。
-  真实 CPU/GPU semantic 等价、领域代表性签字、
-  数据角色/质量能力和多数据集自主分析仍未完成；
+- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A 工程门禁已完成并通过真实 Compose CI。
+  6B-1/6B-2 数据角色、质量建议、结构化确认与执行门禁已完成本地实现，仍待完整 CI 和
+  代表性验收；真实
+  CPU/GPU semantic 等价、领域签字、假设筛选与结果驱动分析、统计/预测护栏和多数据集
+  自主分析仍未完成；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -190,9 +196,15 @@ v2.5 阶段 5（工程关闭；真实 CPU/GPU semantic 与领域签字债务保�
   SQLite v8 版本化定义 + 受控公式 + Evidence → MCP Resource list/read
   定义/数据 Claim + 旧报告复核 → 目录分页/订阅/通知 → 双传输/重连 → RAG 生命周期 → 代表性签字
 
-v2.5 阶段 6A（开发中；6A-1～6A-3 已实现，待完整 CI）
+v2.5 阶段 6A（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   SQLite v9 TaskRun capability/tool 快照 → tools/list_changed 换代 → profile 可用性
   SQLite v10 共享预算/固定数据版本/取消树/Evidence Ledger → ready frontier 有界并行
+
+v2.5 阶段 6B（开发中；6B-1/6B-2 本地实现完成，待完整 CI）
+  数据角色/置信度/歧义 + 只读质量建议 → 结构化角色确认/下游前置条件 → 代表性评测/部署门禁
+
+v2.5 阶段 6 后续
+  结果驱动分析/统计护栏 → 多数据集
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证

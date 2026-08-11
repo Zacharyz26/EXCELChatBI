@@ -1,8 +1,9 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.5-stage6a-in-progress · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3–5 工程关闭，
+> 版本：v2.5-stage6b-in-progress · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3–5、6A 工程关闭，
 > 提交 `0b5980c` 的完整 CI/Docker 恢复门禁全绿；G7 代表性评测/人工签字待完成；
-> 提交 `d5a672d` 的阶段 5 Compose 工程门禁全绿；当前入口为阶段 6A
+> 提交 `d5a672d` 的阶段 5 及提交 `b67b704` 的阶段 6A Compose 工程门禁全绿；
+> 阶段 6B-1/6B-2 本地实现完成，当前入口为代表性角色评测与部署门禁
 > · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
@@ -427,9 +428,12 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
    阶段 5 已交付 schema v8 版本化定义、受控公式和 Evidence，5B-1 已接入
    按签名 project/subject 过滤的 MCP Resource list/read，5B-2 已贯通定义与数据 Claim 并支持
    旧报告历史版本复核，5B-3 已实现项目目录、签名分页与订阅通知，5B-4/5 真实 Compose
-   工程门禁全绿。当前入口为阶段 6A：schema v9 固定 TaskRun capability/tool 目录并完成受治理
+   工程门禁全绿。阶段 6A 也已由提交 `b67b704` 的完整 CI 关闭：schema v9 固定 TaskRun
+   capability/tool 目录并完成受治理
    换代/profile 可用性，schema v10 建立共享预算、固定数据版本、取消树和 Evidence Ledger；
-   后续补数据角色、质量建议、自主分析和统计护栏。
+   6B-1 已补确定性数据角色、置信/歧义、只读质量建议及前端展示；6B-2 已补绑定 TaskRun
+   计划/数据版本的结构化角色确认与统计/聚合前置门禁，当前继续代表性评测和真实部署门禁，
+   后续再进入自主分析、统计/预测护栏和多数据集。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
 6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。
@@ -761,7 +765,8 @@ Executor/Gateway/Server 高风险审批执行链，详见 `docs/v2.5/阶段4A实
 `docs/v2.5/阶段4D实施记录.md`，提交 `7f81fe2` 的 Docker runner 已全绿并关闭阶段 4。
 阶段 5A 与 5B-1～5 已完成并通过真实 Compose 工程门禁，Resource list/read、Claim 绑定、
 旧报告复核、目录分页、订阅、重连和 RAG 生命周期见 `docs/v2.5/阶段5B实施记录.md`。
-阶段 6A-1 的 TaskRun capability 目录冻结见 `docs/v2.5/阶段6A实施记录.md`。阶段 5–6 在真实
+阶段 6A 的 TaskRun capability 目录冻结、受控并行和 CI 关闭证据见
+`docs/v2.5/阶段6A实施记录.md`。阶段 5–6 在真实
 需求尚未明确时不预置销售、利润或复购率专用语义和分析模板，
 必须等待代表性场景冻结后再宣称产品适用性。
 

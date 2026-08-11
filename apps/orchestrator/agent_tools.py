@@ -52,6 +52,7 @@ from mcp_servers.dataset_ops.schemas import (
     AGGREGATE_PREVIEW_SCHEMA,
     TRANSFORM_DATASET_SCHEMA,
 )
+from mcp_servers.excel_parser.advisor import diagnose_data_quality, infer_data_roles
 from packages.common.config import get_settings
 from packages.common.dataset_store import duplicate_row_count
 from packages.common.identifiers import DATASET_REF_PATTERN
@@ -70,8 +71,6 @@ _log = get_logger("orchestrator.agent_tools")
 
 # kb_search 单条片段与聚合表格的截断上限（token 经济，13.5：截断非门控）
 _KB_SNIPPET_MAX = 500
-_HIGH_NULL_RATIO = 0.3
-
 KB_SEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -709,13 +708,18 @@ def build_registry(
     specs: list[AgentToolSpec] = [
         _wrap_handler(
             name="get_data_profile",
-            description="获取数据集画像与质量概况：行列数、每列类型/空值率/统计摘要、整行重复数。回答字段含义、数据规模、质量问题时先调用本工具。",
+            description=(
+                "获取数据集画像、数据角色与只读质量建议：识别时间/指标/维度/ID，"
+                "返回置信度、歧义、空值/重复/常量问题及非自动清洗建议。"
+                "回答字段含义、数据规模、角色或质量问题时先调用本工具。"
+            ),
             parameters=excel._tools["infer_schema"].input_schema,
             handler=lambda args: _profile_with_quality(excel, args),
             output_schema=tool_output_schema("get_data_profile"),
             metadata=tool_metadata(
-                ("data.profile", "data.quality"),
+                ("data.profile", "data.roles", "data.quality"),
                 "profile",
+                tool_version="1.1.0",
             ),
         ),
         _wrap_mcp(
@@ -927,22 +931,16 @@ def _wrap_handler(
 
 
 def _profile_with_quality(excel: MCPServer, args: dict[str, Any]) -> dict[str, Any]:
-    """画像 + 质量概况（14.7：get_data_profile = infer_schema 封装 + 质量汇总）。"""
-    profile: dict[str, Any] = excel._tools["infer_schema"].invoke(args).to_dict()
-    columns = profile.get("columns") or []
-    high_null = [
-        {"name": c["name"], "null_ratio": c["null_ratio"]}
-        for c in columns
-        if isinstance(c.get("null_ratio"), int | float) and c["null_ratio"] >= _HIGH_NULL_RATIO
-    ]
-    quality: dict[str, Any] = {
-        "duplicate_rows": duplicate_row_count(args["dataset_ref"]),
-        "high_null_columns": high_null,
-        "constant_columns": [
-            c["name"] for c in columns if c.get("distinct_count") == 1
-        ],
-    }
-    return {"profile": profile, "quality": quality}
+    """画像 + 角色 + 只读质量建议；不创建衍生数据集。"""
+    data_profile = excel._tools["infer_schema"].invoke(args)
+    profile: dict[str, Any] = data_profile.to_dict()
+    roles = infer_data_roles(data_profile)
+    quality = diagnose_data_quality(
+        data_profile,
+        roles,
+        duplicate_rows=duplicate_row_count(args["dataset_ref"]),
+    )
+    return {"profile": profile, "roles": roles, "quality": quality}
 
 
 def _transform_with_lineage(
