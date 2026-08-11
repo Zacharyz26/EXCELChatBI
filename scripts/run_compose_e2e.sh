@@ -155,6 +155,38 @@ if (audit.parallel_tool_batches !== 1) {
 }
 '
 
+data_role_probe_log=".data/e2e/data-role-recovery.jsonl"
+"${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
+  python -m apps.api.data_role_recovery_probe \
+  >"$data_role_probe_log" 2>&1 &
+data_role_probe_pid=$!
+data_role_probe_ready=0
+for attempt in $(seq 1 120); do
+  if grep -q '"status":"ready"' "$data_role_probe_log"; then
+    data_role_probe_ready=1
+    break
+  fi
+  if ! kill -0 "$data_role_probe_pid" 2>/dev/null; then
+    wait "$data_role_probe_pid" || true
+    cat "$data_role_probe_log" >&2
+    echo "Compose data-role probe exited before its recovery checkpoint." >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [ "$data_role_probe_ready" != "1" ]; then
+  cat "$data_role_probe_log" >&2
+  echo "Compose data-role probe did not reach its recovery checkpoint." >&2
+  exit 1
+fi
+"${compose[@]}" restart data-tools
+if ! wait "$data_role_probe_pid"; then
+  cat "$data_role_probe_log" >&2
+  echo "Compose data-role transport and recovery probe failed." >&2
+  exit 1
+fi
+grep -q '"status":"passed"' "$data_role_probe_log"
+
 resource_probe_log=".data/e2e/mcp-resource-reconnect.jsonl"
 "${compose[@]}" exec -T api \
   python -m apps.api.mcp_resource_reconnect_probe \

@@ -47,6 +47,7 @@ _IDENTIFIER_HINTS = (
     "uuid",
     "guid",
     "identifier",
+    "code",
     "_id",
     "id_",
 )
@@ -90,6 +91,8 @@ _DIMENSION_HINTS = (
     "渠道",
     "产品",
     "部门",
+    "等级",
+    "级别",
     "region",
     "city",
     "country",
@@ -384,13 +387,17 @@ def _classify_column(column: ColumnProfile, row_count: int) -> dict[str, Any]:
 
         if column.dtype in _NUMERIC_DTYPES:
             metric_score = 0.95 if metric_hint else 0.82
-            if time_hint or identifier_hint:
+            if time_hint or identifier_hint or dimension_hint:
                 metric_score = 0.55
             propose("metric", metric_score, f"dtype:{column.dtype}")
             if metric_hint:
                 propose("metric", metric_score, "name:metric_hint")
-            if column.distinct_count <= 20 and unique_ratio < 0.5:
-                propose("dimension", 0.68, "cardinality:low_numeric")
+            if dimension_hint:
+                propose("dimension", 0.95, "name:dimension_hint")
+            elif column.distinct_count <= 20 and unique_ratio < 0.5:
+                # 无语义提示的低基数数值可能是指标，也可能是编码类维度。
+                # 保留 metric 主候选，但缩小候选差距以强制用户确认。
+                propose("dimension", 0.76, "cardinality:low_numeric")
         elif column.dtype == "bool":
             propose("dimension", 0.98, "dtype:bool")
         elif column.dtype == "str":

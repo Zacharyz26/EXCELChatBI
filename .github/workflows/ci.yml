@@ -86,6 +86,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Run deterministic data role and quality gate
+        id: data_role_quality
+        run: >-
+          uv run --frozen python scripts/data_role_quality_eval.py
+          --enforce --json-output .data/data-role-quality.json
+
+      - name: Upload data role and quality report
+        if: ${{ !cancelled() && steps.data_role_quality.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: data-role-quality
+          path: .data/data-role-quality.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run MCP Tool and Resource transport equivalence probe
         id: coref_mcp_transport
         run: >-
