@@ -69,7 +69,7 @@ from packages.session.memory_refs import (  # noqa: E402
 from packages.session.memory_store import MemoryStore  # noqa: E402
 from packages.session.models import Conversation  # noqa: E402
 from packages.session.store import SessionStore  # noqa: E402
-from packages.session.task_store import TaskStore  # noqa: E402
+from packages.session.task_store import ControlConflict, TaskStore  # noqa: E402
 from sse_starlette.sse import AppStatus  # noqa: E402
 
 _DATASET_REF = "d" * 32
@@ -1905,6 +1905,208 @@ async def test_ambiguous_metric_waits_for_user_without_calling_model(
     assert done["run_status"] == "waiting_user"
     run = TaskStore(store.db_path).get_run(cast(str, done["run_id"]))
     assert run is not None and run.status == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_open_exploration_persists_screened_hypotheses_before_execution(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    gateway = ScriptedGateway([{"deltas": ["不应调用执行模型"]}])
+    registry = FakeRegistry(
+        {
+            "trend_analysis": lambda _: None,
+            "anomaly_detect": lambda _: None,
+            "aggregate_preview": lambda _: None,
+            "correlation": lambda _: None,
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="请深入分析这份数据",
+    )
+
+    assert gateway.calls == []
+    waiting = dict(events)["waiting_user"]["payload"]
+    assert waiting["about"] == "hypothesis_selection"
+    request = waiting["hypothesis_request"]
+    assert request["schema"] == "chatbi-hypothesis-selection-request-v1"
+    assert request["plan_version"] == 1
+    assert len(request["candidates"]) == 2
+    assert waiting["answer_schema"] == {
+        "type": "string",
+        "enum": [item["statement"] for item in request["candidates"]],
+    }
+    run_id = cast(str, dict(events)["done"]["run_id"])
+    tasks = TaskStore(store.db_path)
+    snapshot = tasks.get_snapshot(run_id)
+    assert snapshot is not None
+    screening = snapshot["hypothesis_screening"]
+    assert screening["data_version_hash"] == tasks.data_version_hash(run_id)
+    assert screening["raw_rows_read"] is False
+    assert [item["status"] for item in screening["candidates"]] == [
+        "eligible",
+        "eligible",
+        "rejected",
+        "rejected",
+    ]
+    plan_event = tasks.list_events_by_type(run_id, "plan.created")[0]
+    assert plan_event.payload["planner"]["hypothesis_screening"] == screening
+    current = tasks.get_run(run_id)
+    assert current is not None
+    with pytest.raises(ControlConflict, match="不在允许的候选"):
+        tasks.answer_clarification(
+            run_id,
+            expected_version=current.state_version,
+            idempotency_key="invalid-hypothesis-selection",
+            question_id="analysis_goal",
+            resume_token=waiting["resume_token"],
+            answer="直接给我一个未经验证的结论",
+        )
+    selected_statement = request["candidates"][0]["statement"]
+    planning, answered, created = tasks.answer_clarification(
+        run_id,
+        expected_version=current.state_version,
+        idempotency_key="valid-hypothesis-selection",
+        question_id="analysis_goal",
+        resume_token=waiting["resume_token"],
+        answer=selected_statement,
+    )
+    assert created is True
+    assert planning.status == "planning"
+    selection = answered.payload["hypothesis_selection"]
+    assert selection["statement"] == selected_statement
+    assert selection["data_version_hash"] == screening["data_version_hash"]
+    assert selection["tested"] is False
+    selected_snapshot = tasks.get_snapshot(run_id)
+    assert selected_snapshot is not None
+    assert selected_snapshot["selected_hypothesis"] == selection
+
+    planning, execution_plan, execution_steps, plan_event = tasks.save_plan(
+        run_id,
+        expected_version=planning.state_version,
+        plan={
+            "schema_version": 1,
+            "summary": "验证选中的趋势候选",
+            "steps": [
+                {
+                    "step_id": "verify-selected-trend",
+                    "purpose": "取得趋势 Evidence",
+                    "capability": "stats.trend",
+                    "dependencies": [],
+                    "expected_evidence": ["趋势 Evidence"],
+                    "completion_conditions": ["趋势调用成功"],
+                    "fallback": [{"when": "失败", "action": "block"}],
+                }
+            ],
+            "assumptions": [],
+            "clarifications": [],
+        },
+        reason="clarification:analysis_goal",
+        planner={"route": "fast"},
+    )
+    assert execution_plan.version == 2
+    assert plan_event.payload["hypothesis_execution"]["status"] == "planned"
+    assert plan_event.payload["hypothesis_execution"]["hypothesis_id"] == (
+        selection["hypothesis_id"]
+    )
+    persisted_step = execution_steps[0]
+    running, _ = tasks.transition(
+        run_id,
+        expected_version=planning.state_version,
+        status="running",
+        event_type="run.started",
+        payload={"plan_version": execution_plan.version},
+    )
+    assistant_message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="开始验证趋势候选",
+    )
+    running, invocation, started_event, invocation_created = tasks.start_invocation_with_event(
+        run_id=run_id,
+        expected_version=running.state_version,
+        tool_call_id="selected-trend-call",
+        tool_name="trend_analysis",
+        arguments={
+            "dataset_ref": _DATASET_REF,
+            "time_col": "月份",
+            "value_col": "销售额",
+        },
+        idempotency_key="selected-trend-invocation",
+        policy_decision={"allowed": True, "code": "allowed"},
+        step_id=persisted_step.step_id,
+    )
+    assert invocation_created is True
+    assert started_event is not None
+    assert started_event.payload["hypothesis"]["status"] == "running"
+    running, _, evidence, _, completed_event, checkpoint = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=running.state_version,
+        assistant_message_id=assistant_message.id,
+        result={
+            "method": "ma",
+            "direction": "上升",
+            "slope": 1.0,
+            "n": 3,
+            "points": {},
+            "forecast": [],
+        },
+        evidence_kind="tool_result",
+        evidence_source={"tool": "trend_analysis"},
+        evidence_summary={"summary": "方向=上升，样本 n=3"},
+        artifact_draft=None,
+    )
+    assert completed_event.payload["hypothesis"] == {
+        "hypothesis_id": selection["hypothesis_id"],
+        "status": "evidence_collected",
+        "tested": True,
+        "evidence_outcome": "supported",
+        "outcome": "untested",
+    }
+    assert checkpoint.state["hypothesis_execution"]["evidence_ids"] == [
+        evidence.evidence_id
+    ]
+    verifying, _ = tasks.transition(
+        run_id,
+        expected_version=running.state_version,
+        status="verifying",
+        event_type="verification.started",
+        payload={"candidate_characters": 10},
+    )
+    completed, verification_event = tasks.transition(
+        run_id,
+        expected_version=verifying.state_version,
+        status="completed",
+        event_type="verification",
+        payload={"verdict": "PASS", "checks": []},
+    )
+    assert completed.status == "completed"
+    final_snapshot = tasks.get_snapshot(run_id)
+    assert final_snapshot is not None
+    final_execution = final_snapshot["hypothesis_execution"]
+    assert final_execution["status"] == "supported"
+    assert final_execution["outcome"] == "supported"
+    assert final_execution["verification"] == {
+        "verdict": "PASS",
+        "check_codes": [],
+        "event_sequence": verification_event.sequence,
+    }
+    assert final_execution["evidence_ledger_sequences"] == [1]
 
 
 @pytest.mark.asyncio

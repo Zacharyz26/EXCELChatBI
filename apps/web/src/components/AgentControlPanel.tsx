@@ -44,6 +44,38 @@ const AUTONOMY_LABELS: Record<AgentAutonomyMode, string> = {
   autonomous: "自主模式",
 };
 
+const HYPOTHESIS_KIND_LABELS = {
+  trend: "趋势",
+  anomaly: "异常",
+  segment_comparison: "分组对比",
+  correlation: "相关性",
+} as const;
+
+const HYPOTHESIS_STATUS_LABELS = {
+  eligible: "可验证",
+  needs_confirmation: "字段待确认",
+  rejected: "未通过门禁",
+} as const;
+
+const HYPOTHESIS_EXECUTION_LABELS = {
+  planned: "已绑定计划",
+  running: "验证执行中",
+  evidence_collected: "Evidence 已收集",
+  supported: "Evidence 支持",
+  not_supported: "Evidence 未支持",
+  inconclusive: "证据不充分",
+  partial: "部分完成",
+  failed: "验证失败",
+  cancelled: "已取消",
+} as const;
+
+const HYPOTHESIS_OUTCOME_LABELS = {
+  untested: "尚未形成验证结论",
+  supported: "支持候选",
+  not_supported: "未支持候选",
+  inconclusive: "无法确定",
+} as const;
+
 /** v2.5 4B：真实 TaskRun、计划、澄清、审批和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
@@ -325,6 +357,102 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                     <dd>v{detail.execution_control.evidence_ledger_version}</dd>
                   </div>
                 </dl>
+              </section>
+            )}
+
+            {detail.hypothesis_screening && (
+              <section className="agent-section" aria-label="候选假设筛选">
+                <div className="agent-section__title">
+                  <span>候选假设</span>
+                  <small>
+                    {detail.hypothesis_screening.eligible_candidate_ids.length}
+                    {` / ${detail.hypothesis_screening.candidates.length} 通过门禁`}
+                  </small>
+                </div>
+                <p className="agent-hypothesis-disclaimer">
+                  以下内容尚未验证，不是分析结论；确认后才会调用受治理工具取得 Evidence。
+                </p>
+                <div className="agent-hypothesis-list">
+                  {detail.hypothesis_screening.candidates.map((candidate) => (
+                    <article
+                      key={candidate.hypothesis_id}
+                      className={`agent-hypothesis-card agent-hypothesis-card--${candidate.status}`}
+                    >
+                      <div>
+                        <strong>{HYPOTHESIS_KIND_LABELS[candidate.kind]}</strong>
+                        <span>{HYPOTHESIS_STATUS_LABELS[candidate.status]}</span>
+                      </div>
+                      <p>{candidate.statement}</p>
+                      <small>
+                        {candidate.capability} · 预期 Evidence：{candidate.expected_evidence}
+                      </small>
+                      {detail.run.status === "waiting_user"
+                        && clarification?.about === "hypothesis_selection"
+                        && candidate.status === "eligible" && (
+                          <button
+                            type="button"
+                            onClick={() => setClarificationDraft(candidate.statement)}
+                            disabled={busy !== null}
+                          >
+                            选择此假设
+                          </button>
+                        )}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {detail.hypothesis_execution && (
+              <section className="agent-section" aria-label="候选假设验证状态">
+                <div className="agent-section__title">
+                  <span>假设验证链</span>
+                  <small>{HYPOTHESIS_EXECUTION_LABELS[detail.hypothesis_execution.status]}</small>
+                </div>
+                <article
+                  className={`agent-hypothesis-execution agent-hypothesis-execution--${detail.hypothesis_execution.status}`}
+                >
+                  <div>
+                    <strong>{detail.hypothesis_execution.statement}</strong>
+                    <span>
+                      {HYPOTHESIS_OUTCOME_LABELS[detail.hypothesis_execution.outcome]}
+                    </span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>计划步骤</dt>
+                      <dd>
+                        v{detail.hypothesis_execution.execution_plan_version}
+                        {` · ${detail.hypothesis_execution.logical_step_id}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>执行 / Evidence</dt>
+                      <dd>
+                        {detail.hypothesis_execution.invocation_ids.length}
+                        {` / ${detail.hypothesis_execution.evidence_ids.length}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Ledger</dt>
+                      <dd>
+                        {detail.hypothesis_execution.evidence_ledger_sequences.length > 0
+                          ? detail.hypothesis_execution.evidence_ledger_sequences.join(", ")
+                          : "尚无"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Verifier</dt>
+                      <dd>{detail.hypothesis_execution.verification?.verdict ?? "等待验证"}</dd>
+                    </div>
+                  </dl>
+                  {detail.hypothesis_execution.status === "evidence_collected" && (
+                    <p>工具 Evidence 已到达，但 Verifier 尚未 PASS，不能作为最终结论。</p>
+                  )}
+                  {detail.hypothesis_execution.last_failure_code && (
+                    <p>最近状态：{detail.hypothesis_execution.last_failure_code}</p>
+                  )}
+                </article>
               </section>
             )}
 

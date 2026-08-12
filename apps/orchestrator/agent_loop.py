@@ -108,6 +108,10 @@ from apps.orchestrator.control.data_role_guard import (
     tool_role_requirements,
     validate_data_role_preconditions,
 )
+from apps.orchestrator.control.hypotheses import (
+    requests_open_exploration,
+    screen_candidate_hypotheses,
+)
 from apps.orchestrator.control.plan_executor import (
     PlanSchedule,
     match_ready_step,
@@ -222,9 +226,6 @@ _UNSUPPORTED_CLAIM_INSTRUCTION = (
 _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION = (
     "候选答复中的知识结论没有引用本次知识工具返回的真实来源。请明确标注已返回的来源；"
     "如果检索没有命中，请如实说明无法回答。不得编造来源或知识结论。"
-)
-_OPEN_ANALYSIS_PATTERN = re.compile(
-    r"^(?:请)?(?:深入|全面|详细)?(?:分析|看看|看一下|研究)(?:一下)?(?:这份|这个)?数据[。！!？?]?$"
 )
 _TREND_PATTERN = re.compile(r"(?:趋势|随时间|变化|预测)")
 _ANOMALY_PATTERN = re.compile(r"(?:异常|离群)")
@@ -390,6 +391,7 @@ def _blocking_clarification(
     history: tuple[Any, ...] | list[Any],
     *,
     verified_dataset_refs: frozenset[str] = frozenset(),
+    hypothesis_screening: JsonObject | None = None,
 ) -> JsonObject | None:
     """识别会实质改变分析结论的阻塞歧义，只生成一个确定性问题。"""
     clean = user_text.strip()
@@ -400,13 +402,6 @@ def _blocking_clarification(
             "about": "metric_definition",
             "question": "知识库中存在多个冲突口径。请确认本次应采用哪一个具体定义？",
             "reason": "不同口径会改变计算结果。",
-        }
-    if _OPEN_ANALYSIS_PATTERN.search(clean):
-        return {
-            "question_id": "analysis_goal",
-            "about": "analysis_goal",
-            "question": "你希望优先分析哪类问题，例如趋势、异常、分组对比还是生成报告？",
-            "reason": "开放探索范围尚未确定。",
         }
     if (
         len(datasets) > 1
@@ -419,6 +414,51 @@ def _blocking_clarification(
             "about": "dataset",
             "question": f"当前项目有多个数据集（{choices}）。请确认本次使用哪一个？",
             "reason": "跨数据集静默选择可能产生错误结论。",
+        }
+    if requests_open_exploration(clean):
+        screening = hypothesis_screening or {}
+        raw_candidates = (
+            screening.get("candidates")
+            if screening
+            else None
+        )
+        candidates = [
+            cast(JsonObject, item)
+            for item in raw_candidates
+            if isinstance(item, dict) and item.get("status") == "eligible"
+        ] if isinstance(raw_candidates, list) else []
+        if candidates:
+            statements = [str(item["statement"]) for item in candidates]
+            choices = "；".join(
+                f"{index}. {statement}" for index, statement in enumerate(statements, 1)
+            )
+            return {
+                "question_id": "analysis_goal",
+                "about": "hypothesis_selection",
+                "question": f"请选择本轮优先验证的候选假设：{choices}",
+                "reason": "候选仅来自画像与能力门禁，尚未执行、不是分析结论。",
+                "hypothesis_request": {
+                    "schema": "chatbi-hypothesis-selection-request-v1",
+                    "schema_version": 1,
+                    "dataset_ref": screening.get("dataset_ref"),
+                    "data_version_hash": screening.get("data_version_hash"),
+                    "candidates": [
+                        {
+                            "hypothesis_id": item["hypothesis_id"],
+                            "kind": item["kind"],
+                            "statement": item["statement"],
+                            "capability": item["capability"],
+                            "expected_evidence": item["expected_evidence"],
+                        }
+                        for item in candidates
+                    ],
+                },
+            }
+        return {
+            "question_id": "analysis_goal",
+            "about": "analysis_goal",
+            "question": "当前画像没有通过字段角色与能力门禁的候选。请明确要分析的字段和目标。",
+            "reason": "开放探索范围尚未确定，且系统不会绕过门禁猜测字段用途。",
         }
     if not datasets:
         return None
@@ -650,14 +690,41 @@ def _waiting_user_payload(
     }
     if source_clarification is None or data_version_hash is None:
         return payload
+    raw_hypothesis_request = source_clarification.get("hypothesis_request")
+    if (
+        isinstance(raw_hypothesis_request, dict)
+        and source_clarification.get("question_id") == question.get("question_id")
+    ):
+        raw_candidates = raw_hypothesis_request.get("candidates")
+        candidates = (
+            [cast(JsonObject, item) for item in raw_candidates if isinstance(item, dict)]
+            if isinstance(raw_candidates, list)
+            else []
+        )
+        statements = [
+            str(item["statement"])
+            for item in candidates
+            if isinstance(item.get("statement"), str) and item["statement"]
+        ]
+        if candidates and len(statements) == len(candidates):
+            payload["hypothesis_request"] = {
+                **cast(JsonObject, raw_hypothesis_request),
+                "plan_version": plan_version,
+                "data_version_hash": data_version_hash,
+            }
+            payload["answer_schema"] = {
+                "type": "string",
+                "enum": statements,
+            }
+            return payload
     raw_request = source_clarification.get("data_role_request")
     if not isinstance(raw_request, dict):
         return payload
     if source_clarification.get("question_id") != question.get("question_id"):
         return payload
-    candidates = raw_request.get("candidates")
-    if not isinstance(candidates, list) or not all(
-        isinstance(item, str) and item for item in candidates
+    role_candidates = raw_request.get("candidates")
+    if not isinstance(role_candidates, list) or not all(
+        isinstance(item, str) and item for item in role_candidates
     ):
         return payload
     payload["data_role_request"] = {
@@ -667,7 +734,7 @@ def _waiting_user_payload(
     }
     payload["answer_schema"] = {
         "type": "string",
-        "enum": list(candidates),
+        "enum": list(role_candidates),
     }
     return payload
 
@@ -1430,6 +1497,29 @@ async def _stream_agent_chat_inner(
                 if memory_reference_resolution is not None
                 else None
             )
+            verified_dataset_refs = frozenset(
+                target.dataset_ref
+                for target in _verified_targets(
+                    reference_resolution,
+                    memory_reference_resolution,
+                )
+                if target.dataset_ref is not None
+            )
+            hypothesis_screening = (
+                None
+                if resume_existing or not requests_open_exploration(user_text)
+                else screen_candidate_hypotheses(
+                    user_text=user_text,
+                    datasets=datasets,
+                    capability_catalog=frozen_capability_catalog,
+                    data_version_hash=await run_in_threadpool(
+                        task_store.data_version_hash,
+                        run_id,
+                    ),
+                    verified_dataset_refs=verified_dataset_refs,
+                    candidate_limit=min(4, config.max_tool_calls),
+                )
+            )
             clarification = (
                 reference_clarification
                 or memory_reference_clarification
@@ -1440,14 +1530,8 @@ async def _stream_agent_chat_inner(
                         user_text,
                         datasets,
                         context.messages,
-                        verified_dataset_refs=frozenset(
-                            target.dataset_ref
-                            for target in _verified_targets(
-                                reference_resolution,
-                                memory_reference_resolution,
-                            )
-                            if target.dataset_ref is not None
-                        ),
+                        verified_dataset_refs=verified_dataset_refs,
+                        hypothesis_screening=hypothesis_screening,
                     )
                 )
             )
@@ -1484,6 +1568,14 @@ async def _stream_agent_chat_inner(
                         ),
                         memory_reference_resolution,
                     ),
+                    audit={
+                        **production_plan.audit,
+                        **(
+                            {"hypothesis_screening": hypothesis_screening}
+                            if hypothesis_screening is not None
+                            else {}
+                        ),
+                    },
                 )
                 (
                     run,
@@ -1560,7 +1652,10 @@ async def _stream_agent_chat_inner(
                 role_data_hash = (
                     await run_in_threadpool(task_store.data_version_hash, run_id)
                     if clarification is not None
-                    and isinstance(clarification.get("data_role_request"), dict)
+                    and (
+                        isinstance(clarification.get("data_role_request"), dict)
+                        or isinstance(clarification.get("hypothesis_request"), dict)
+                    )
                     and clarification.get("question_id") == question_id
                     else None
                 )
@@ -1771,7 +1866,10 @@ async def _stream_agent_chat_inner(
                     role_data_hash = (
                         await run_in_threadpool(task_store.data_version_hash, run_id)
                         if clarification is not None
-                        and isinstance(clarification.get("data_role_request"), dict)
+                        and (
+                            isinstance(clarification.get("data_role_request"), dict)
+                            or isinstance(clarification.get("hypothesis_request"), dict)
+                        )
                         and clarification.get("question_id")
                         == question_item.get("question_id")
                         else None

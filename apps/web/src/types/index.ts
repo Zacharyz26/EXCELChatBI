@@ -285,6 +285,80 @@ export interface AgentTaskStep {
   completed_at: string | null;
 }
 
+export type AgentHypothesisStatus = "eligible" | "needs_confirmation" | "rejected";
+
+export interface AgentHypothesisCandidate {
+  hypothesis_id: string;
+  kind: "trend" | "anomaly" | "segment_comparison" | "correlation";
+  statement: string;
+  capability: string;
+  required_roles: Array<{
+    role: "time" | "metric" | "dimension";
+    columns: string[];
+  }>;
+  expected_evidence: string;
+  status: AgentHypothesisStatus;
+  reason_codes: string[];
+  priority: number;
+  tested: false;
+}
+
+export interface AgentHypothesisScreening {
+  schema: "chatbi-hypothesis-screening-v1";
+  schema_version: 1;
+  triggered: boolean;
+  data_version_hash: string;
+  dataset_ref: string | null;
+  candidate_limit: number;
+  candidates: AgentHypothesisCandidate[];
+  eligible_candidate_ids: string[];
+  requires_confirmation: boolean;
+  blocking_reason: string;
+  raw_rows_read: false;
+}
+
+export type AgentHypothesisExecutionStatus =
+  | "planned"
+  | "running"
+  | "evidence_collected"
+  | "supported"
+  | "not_supported"
+  | "inconclusive"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+export interface AgentHypothesisExecution {
+  schema: "chatbi-hypothesis-execution-v1";
+  schema_version: 1;
+  hypothesis_id: string;
+  kind: AgentHypothesisCandidate["kind"];
+  statement: string;
+  capability: string;
+  dataset_ref: string;
+  data_version_hash: string;
+  selection_plan_version: number;
+  execution_plan_id: string;
+  execution_plan_version: number;
+  logical_step_id: string;
+  persisted_step_id: string;
+  status: AgentHypothesisExecutionStatus;
+  tested: boolean;
+  evidence_outcome: "untested" | "supported" | "not_supported" | "inconclusive";
+  outcome: "untested" | "supported" | "not_supported" | "inconclusive";
+  invocation_ids: string[];
+  failed_invocation_ids: string[];
+  evidence_ids: string[];
+  evidence_ledger_sequences: number[];
+  verification: {
+    verdict: "PASS" | "NEEDS_ACTION" | "WAITING_USER" | "BLOCKED" | "FAILED";
+    check_codes: string[];
+    event_sequence: number;
+  } | null;
+  last_failure_code: string | null;
+  updated_at: string;
+}
+
 export interface AgentRunDetail {
   run: AgentRun;
   contract: Record<string, unknown> | null;
@@ -294,6 +368,8 @@ export interface AgentRunDetail {
   execution_control: AgentExecutionControl | null;
   related_runs: AgentRun[];
   feedback: AgentRunFeedback[];
+  hypothesis_screening?: AgentHypothesisScreening | null;
+  hypothesis_execution?: AgentHypothesisExecution | null;
   state: Record<string, unknown> | null;
 }
 

@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from apps.orchestrator.control.contracts import TaskContract
+from apps.orchestrator.control.hypothesis_lifecycle import (
+    bind_hypothesis_to_plan,
+    finalize_hypothesis_execution,
+    hypothesis_evidence_collected,
+    hypothesis_invocation_failed,
+    hypothesis_invocation_started,
+)
 from apps.orchestrator.control.planner_contract import validate_task_plan
 from apps.orchestrator.control.state import AgentState, ensure_transition
 
@@ -905,6 +912,15 @@ class TaskStore:
                 run_state_version=next_version,
                 confirmed_at=now,
             )
+            hypothesis_selection = _validated_hypothesis_selection(
+                connection,
+                current=current,
+                question_id=clean_question_id,
+                waiting_payload=waiting_payload,
+                answer=answer,
+                run_state_version=next_version,
+                selected_at=now,
+            )
             answer_text = _dump_json_value(answer)
             message = Message(
                 id=uuid.uuid4().hex,
@@ -954,6 +970,8 @@ class TaskStore:
                 event_payload["data_role_confirmation"] = _data_role_confirmation_payload(
                     role_confirmation
                 )
+            if hypothesis_selection is not None:
+                event_payload["hypothesis_selection"] = hypothesis_selection
             event = TaskEvent(
                 event_id=uuid.uuid4().hex,
                 run_id=run_id,
@@ -980,13 +998,14 @@ class TaskStore:
                 role_confirmations.append(
                     _data_role_confirmation_payload(role_confirmation)
                 )
-            snapshot.update(
-                {
-                    "last_sequence": event.sequence,
-                    "clarification_answers": answer_map,
-                    "data_role_confirmations": role_confirmations,
-                }
-            )
+            snapshot_update: JsonObject = {
+                "last_sequence": event.sequence,
+                "clarification_answers": answer_map,
+                "data_role_confirmations": role_confirmations,
+            }
+            if hypothesis_selection is not None:
+                snapshot_update["selected_hypothesis"] = hypothesis_selection
+            snapshot.update(snapshot_update)
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -2269,6 +2288,34 @@ class TaskStore:
                 )
                 steps.append(step)
 
+            snapshot_row = connection.execute(
+                "SELECT state_json FROM task_snapshots WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            prior_snapshot = (
+                _load_object(str(snapshot_row["state_json"]))
+                if snapshot_row is not None
+                else {}
+            )
+            selected_hypothesis = prior_snapshot.get("selected_hypothesis")
+            prior_hypothesis_execution = prior_snapshot.get("hypothesis_execution")
+            hypothesis_execution = (
+                bind_hypothesis_to_plan(
+                    selection=cast(JsonObject, selected_hypothesis),
+                    existing=(
+                        cast(JsonObject, prior_hypothesis_execution)
+                        if isinstance(prior_hypothesis_execution, dict)
+                        else None
+                    ),
+                    plan_id=plan_record.plan_id,
+                    plan_version=plan_record.version,
+                    steps=steps,
+                    updated_at=now,
+                )
+                if isinstance(selected_hypothesis, dict)
+                else None
+            )
+
             next_state_version = current.state_version + 1
             connection.execute(
                 """
@@ -2304,6 +2351,8 @@ class TaskStore:
                 "clarifications": plan.get("clarifications", []),
                 "planner": planner,
             }
+            if hypothesis_execution is not None:
+                event_payload["hypothesis_execution"] = hypothesis_execution
             if control is not None:
                 clean_key, command, request_hash = control
                 event_payload["control"] = {
@@ -2333,6 +2382,11 @@ class TaskStore:
                     "active_plan": plan,
                 }
             )
+            hypothesis_screening = planner.get("hypothesis_screening")
+            if isinstance(hypothesis_screening, dict):
+                snapshot["hypothesis_screening"] = hypothesis_screening
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -2883,6 +2937,23 @@ class TaskStore:
                 payload_ref=None,
                 created_at=now,
             )
+            prior_hypothesis_execution = _snapshot_hypothesis_execution(connection, run_id)
+            matches_hypothesis = (
+                prior_hypothesis_execution is not None
+                and step_id == prior_hypothesis_execution.get("persisted_step_id")
+            )
+            hypothesis_execution = hypothesis_invocation_failed(
+                prior_hypothesis_execution,
+                persisted_step_id=step_id,
+                invocation_id=None,
+                failure_code=clean_code,
+                updated_at=now,
+            )
+            hypothesis_projection = (
+                _hypothesis_event_projection(hypothesis_execution)
+                if matches_hypothesis
+                else None
+            )
             next_version = current_run.state_version + 1
             connection.execute(
                 """
@@ -2911,6 +2982,11 @@ class TaskStore:
                     "observation": observation.to_dict(),
                     "evidence_ids": [],
                     "artifact_ids": [],
+                    **(
+                        {"hypothesis": hypothesis_projection}
+                        if hypothesis_projection is not None
+                        else {}
+                    ),
                 },
                 occurred_at=now,
             )
@@ -2927,6 +3003,8 @@ class TaskStore:
                     "last_observation": observation.to_dict(),
                 }
             )
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -3039,6 +3117,18 @@ class TaskStore:
                 ),
             )
             branch = _insert_invocation_branch(connection, invocation)
+            prior_hypothesis_execution = _snapshot_hypothesis_execution(connection, run_id)
+            matches_hypothesis = (
+                prior_hypothesis_execution is not None
+                and step_id == prior_hypothesis_execution.get("persisted_step_id")
+            )
+            hypothesis_execution = hypothesis_invocation_started(
+                prior_hypothesis_execution,
+                persisted_step_id=step_id,
+                invocation_id=invocation.invocation_id,
+                updated_at=now,
+            )
+            hypothesis_projection = _hypothesis_event_projection(hypothesis_execution)
             if step_id is not None:
                 connection.execute(
                     """
@@ -3074,6 +3164,12 @@ class TaskStore:
                     "data_version_hash": branch.data_version_hash,
                     "arguments_hash": args_hash,
                     "policy": policy_decision,
+                    **(
+                        {"hypothesis": hypothesis_projection}
+                        if hypothesis_projection is not None
+                        and matches_hypothesis
+                        else {}
+                    ),
                 },
                 occurred_at=now,
             )
@@ -3092,6 +3188,8 @@ class TaskStore:
                     "data_version_hash": branch.data_version_hash,
                 }
             )
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -3191,6 +3289,7 @@ class TaskStore:
             data_hash = _data_version_hash(connection, run_id)
             invocations: list[ToolInvocation] = []
             events: list[TaskEvent] = []
+            hypothesis_execution = _snapshot_hypothesis_execution(connection, run_id)
             for item in normalized:
                 arguments = cast(JsonObject, item["arguments"])
                 _validate_dataset_arguments(connection, run_id, arguments)
@@ -3233,6 +3332,21 @@ class TaskStore:
                 branch = _insert_invocation_branch(
                     connection, invocation, data_version_hash=data_hash
                 )
+                matches_hypothesis = (
+                    hypothesis_execution is not None
+                    and invocation.step_id == hypothesis_execution.get("persisted_step_id")
+                )
+                hypothesis_execution = hypothesis_invocation_started(
+                    hypothesis_execution,
+                    persisted_step_id=invocation.step_id,
+                    invocation_id=invocation.invocation_id,
+                    updated_at=now,
+                )
+                hypothesis_projection = (
+                    _hypothesis_event_projection(hypothesis_execution)
+                    if matches_hypothesis
+                    else None
+                )
                 connection.execute(
                     """
                     UPDATE task_steps
@@ -3264,6 +3378,11 @@ class TaskStore:
                         "arguments_hash": invocation.args_hash,
                         "policy": cast(JsonObject, item["policy_decision"]),
                         "parallel": True,
+                        **(
+                            {"hypothesis": hypothesis_projection}
+                            if hypothesis_projection is not None
+                            else {}
+                        ),
                     },
                     occurred_at=now,
                 )
@@ -3301,6 +3420,8 @@ class TaskStore:
                     "data_version_hash": data_hash,
                 }
             )
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -3444,6 +3565,26 @@ class TaskStore:
                 payload_ref=None,
                 created_at=now,
             )
+            prior_hypothesis_execution = _snapshot_hypothesis_execution(
+                connection, current_run.run_id
+            )
+            matches_hypothesis = (
+                prior_hypothesis_execution is not None
+                and invocation.step_id
+                == prior_hypothesis_execution.get("persisted_step_id")
+            )
+            hypothesis_execution = hypothesis_invocation_failed(
+                prior_hypothesis_execution,
+                persisted_step_id=invocation.step_id,
+                invocation_id=invocation.invocation_id,
+                failure_code=clean_code,
+                updated_at=now,
+            )
+            hypothesis_projection = (
+                _hypothesis_event_projection(hypothesis_execution)
+                if matches_hypothesis
+                else None
+            )
             next_version = current_run.state_version + 1
             connection.execute(
                 """
@@ -3474,6 +3615,11 @@ class TaskStore:
                     "observation": observation.to_dict(),
                     "evidence_ids": [],
                     "artifact_ids": [],
+                    **(
+                        {"hypothesis": hypothesis_projection}
+                        if hypothesis_projection is not None
+                        else {}
+                    ),
                 },
                 occurred_at=now,
             )
@@ -3492,6 +3638,8 @@ class TaskStore:
                     "last_observation": observation.to_dict(),
                 }
             )
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -3744,6 +3892,28 @@ class TaskStore:
                 result=result,
                 now=now,
             )
+            prior_hypothesis_execution = _snapshot_hypothesis_execution(
+                connection, current_run.run_id
+            )
+            matches_hypothesis = (
+                prior_hypothesis_execution is not None
+                and invocation.step_id
+                == prior_hypothesis_execution.get("persisted_step_id")
+            )
+            hypothesis_execution = hypothesis_evidence_collected(
+                prior_hypothesis_execution,
+                persisted_step_id=invocation.step_id,
+                invocation_id=invocation.invocation_id,
+                evidence_id=evidence.evidence_id,
+                ledger_sequence=ledger_entry.sequence,
+                result=result,
+                updated_at=now,
+            )
+            hypothesis_projection = (
+                _hypothesis_event_projection(hypothesis_execution)
+                if matches_hypothesis
+                else None
+            )
 
             next_version = current_run.state_version + 1
             connection.execute(
@@ -3786,6 +3956,11 @@ class TaskStore:
                     "observation": observation.to_dict(),
                     "evidence_ids": [evidence.evidence_id],
                     "artifact_ids": [artifact.id] if artifact is not None else [],
+                    **(
+                        {"hypothesis": hypothesis_projection}
+                        if hypothesis_projection is not None
+                        else {}
+                    ),
                 },
                 occurred_at=now,
             )
@@ -3810,6 +3985,8 @@ class TaskStore:
                     "completed_step_ids": _completed_step_ids(connection, current_run.run_id),
                 }
             )
+            if hypothesis_execution is not None:
+                snapshot["hypothesis_execution"] = hypothesis_execution
             connection.execute(
                 """
                 UPDATE task_snapshots
@@ -4356,7 +4533,63 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
     ).fetchone()
     snapshot = _load_object(str(row["state_json"])) if row is not None else {}
     snapshot.update(AgentState.from_run(run).to_dict())
+    raw_execution = snapshot.get("hypothesis_execution")
+    if isinstance(raw_execution, dict):
+        verification_row = connection.execute(
+            """
+            SELECT sequence, payload_json FROM task_events
+            WHERE run_id = ? AND event_type = 'verification'
+            ORDER BY sequence DESC
+            LIMIT 1
+            """,
+            (run.run_id,),
+        ).fetchone()
+        verification_payload = (
+            _load_object(str(verification_row["payload_json"]))
+            if verification_row is not None
+            else None
+        )
+        finalized = finalize_hypothesis_execution(
+            cast(JsonObject, raw_execution),
+            run_status=run.status,
+            verification_payload=verification_payload,
+            verification_sequence=(
+                int(verification_row["sequence"])
+                if verification_row is not None
+                else None
+            ),
+            terminal_reason=run.terminal_reason,
+            updated_at=run.updated_at,
+        )
+        if finalized is not None:
+            snapshot["hypothesis_execution"] = finalized
     return snapshot
+
+
+def _snapshot_hypothesis_execution(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> JsonObject | None:
+    row = connection.execute(
+        "SELECT state_json FROM task_snapshots WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = _load_object(str(row["state_json"])).get("hypothesis_execution")
+    return cast(JsonObject, raw) if isinstance(raw, dict) else None
+
+
+def _hypothesis_event_projection(execution: JsonObject | None) -> JsonObject | None:
+    if execution is None:
+        return None
+    return {
+        "hypothesis_id": execution["hypothesis_id"],
+        "status": execution["status"],
+        "tested": execution["tested"],
+        "evidence_outcome": execution["evidence_outcome"],
+        "outcome": execution["outcome"],
+    }
 
 
 def _next_sequence(connection: sqlite3.Connection, run_id: str) -> int:
@@ -5367,6 +5600,125 @@ def _validated_data_role_confirmation(
         run_state_version=run_state_version,
         confirmed_at=confirmed_at,
     )
+
+
+_HYPOTHESIS_KINDS = frozenset(
+    {"trend", "anomaly", "segment_comparison", "correlation"}
+)
+
+
+def _validated_hypothesis_selection(
+    connection: sqlite3.Connection,
+    *,
+    current: TaskRun,
+    question_id: str,
+    waiting_payload: JsonObject,
+    answer: object,
+    run_state_version: int,
+    selected_at: str,
+) -> JsonObject | None:
+    """Validate a 6C candidate against its immutable plan and data version."""
+    raw_request = waiting_payload.get("hypothesis_request")
+    if raw_request is None:
+        return None
+    if (
+        not isinstance(raw_request, dict)
+        or raw_request.get("schema") != "chatbi-hypothesis-selection-request-v1"
+        or raw_request.get("schema_version") != 1
+    ):
+        raise ControlConflict("候选假设选择请求格式非法")
+    request = cast(JsonObject, raw_request)
+    dataset_ref = request.get("dataset_ref")
+    data_hash = request.get("data_version_hash")
+    plan_version = request.get("plan_version")
+    raw_candidates = request.get("candidates")
+    candidates = (
+        [cast(JsonObject, item) for item in raw_candidates if isinstance(item, dict)]
+        if isinstance(raw_candidates, list)
+        else []
+    )
+    if (
+        not isinstance(dataset_ref, str)
+        or not dataset_ref
+        or not isinstance(data_hash, str)
+        or len(data_hash) != 64
+        or not isinstance(plan_version, int)
+        or isinstance(plan_version, bool)
+        or plan_version < 1
+        or not 1 <= len(candidates) <= 4
+        or len(candidates) != len(raw_candidates or [])
+    ):
+        raise ControlConflict("候选假设选择请求缺少有效的数据、计划或候选")
+    validated: list[JsonObject] = []
+    for candidate in candidates:
+        hypothesis_id = candidate.get("hypothesis_id")
+        kind = candidate.get("kind")
+        statement = candidate.get("statement")
+        capability = candidate.get("capability")
+        expected_evidence = candidate.get("expected_evidence")
+        identifier_suffix = (
+            hypothesis_id[4:]
+            if isinstance(hypothesis_id, str) and hypothesis_id.startswith("hyp_")
+            else ""
+        )
+        if (
+            len(identifier_suffix) != 16
+            or any(character not in "0123456789abcdef" for character in identifier_suffix)
+            or kind not in _HYPOTHESIS_KINDS
+            or not isinstance(statement, str)
+            or not statement.strip()
+            or len(statement) > 300
+            or not isinstance(capability, str)
+            or not capability
+            or len(capability) > 100
+            or not isinstance(expected_evidence, str)
+            or not expected_evidence
+            or len(expected_evidence) > 300
+        ):
+            raise ControlConflict("候选假设选择请求包含非法候选")
+        validated.append(candidate)
+    ids = [str(item["hypothesis_id"]) for item in validated]
+    statements = [str(item["statement"]) for item in validated]
+    if len(set(ids)) != len(ids) or len(set(statements)) != len(statements):
+        raise ControlConflict("候选假设选择请求包含重复候选")
+    if plan_version != current.plan_version:
+        raise ControlConflict("候选假设选择不属于当前计划版本")
+    if data_hash != _data_version_hash(connection, current.run_id):
+        raise ControlConflict("TaskRun 数据版本已变化，原候选假设已失效")
+    binding = connection.execute(
+        """
+        SELECT 1 FROM task_dataset_bindings
+        WHERE run_id = ? AND dataset_ref = ?
+        """,
+        (current.run_id, dataset_ref),
+    ).fetchone()
+    if binding is None:
+        raise ControlConflict("候选假设引用的数据集不属于当前 TaskRun")
+    if not isinstance(answer, str):
+        raise ControlConflict("候选假设答案必须是允许的候选陈述")
+    selected_statement = answer.strip()
+    selected = next(
+        (item for item in validated if item["statement"] == selected_statement),
+        None,
+    )
+    if selected is None:
+        raise ControlConflict("候选假设答案不在允许的候选中")
+    return {
+        "schema": "chatbi-hypothesis-selection-v1",
+        "schema_version": 1,
+        "question_id": question_id,
+        "hypothesis_id": selected["hypothesis_id"],
+        "kind": selected["kind"],
+        "statement": selected["statement"],
+        "capability": selected["capability"],
+        "expected_evidence": selected["expected_evidence"],
+        "dataset_ref": dataset_ref,
+        "plan_version": plan_version,
+        "data_version_hash": data_hash,
+        "run_state_version": run_state_version,
+        "selected_at": selected_at,
+        "tested": False,
+    }
 
 
 def _data_role_confirmation_payload(

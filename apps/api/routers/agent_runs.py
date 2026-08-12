@@ -558,6 +558,12 @@ async def get_agent_run(
         ),
         "related_runs": [_run_payload(item) for item in related_runs],
         "feedback": [_feedback_payload(event) for event in feedback_events],
+        "hypothesis_screening": (
+            snapshot.get("hypothesis_screening") if snapshot is not None else None
+        ),
+        "hypothesis_execution": (
+            snapshot.get("hypothesis_execution") if snapshot is not None else None
+        ),
         "state": snapshot,
     }
 

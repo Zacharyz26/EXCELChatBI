@@ -1,8 +1,8 @@
 # ChatBI Agent 自主化开发规划
 
 > 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-11
-> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–5 与 6A 工程关闭，
-> 当前开发入口为阶段 6B 双传输/Compose 恢复门禁
+> 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–5、6A 与 6B 工程关闭，
+> 当前开发入口为阶段 6C 受控候选假设与结果驱动探索
 > 当前进度：G1–G6 实测和 G7 自动签字门禁已完成；G7 仍待 Planner/Verifier
 > 代表性盲评、负责人签字与 ADR 接受。经负责人授权先行实施的阶段 2A 已落地混合
 > Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
@@ -30,10 +30,11 @@
 > TaskRun capability/tool 目录快照，6A-2 已实现受治理 Tool 换代与 profile 可用性，
 > 6A-3 已实现共享预算、固定数据版本、取消树、统一 Evidence Ledger 和有界并行；提交
 > `b67b704` 的完整 CI 与真实 Compose 恢复门禁全绿，6A 已关闭。
-> 6B-1 已本地实现 `data.roles`、角色置信/歧义、只读质量建议、严格 MCP 输出 schema、
-> Planner 单次路由和 React Artifact 展示；6B-2 已本地实现绑定计划/数据版本的结构化角色
-> 确认与统计/聚合执行门禁；6B-3 已冻结 16 场景/65 列匿名代表性评测集并接入
-> CI 强制门禁，当前等待真实部署恢复门禁和完整 CI。
+> 6B-1～6B-4 已由提交 `6b89ef6` 的
+> [run 31467721161](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31467721161)
+> 验证 backend、frontend 与真实 Compose 三项全绿并关闭。6C-1 已本地实现有界候选假设、
+> 确定性字段角色/capability 筛选、TaskRun 审计持久化和 React 人工选择入口；6C-2 已把
+> 选中候选绑定不可变计划、Invocation、Evidence Ledger 和 Verifier 终态，下一步为 6C-3。
 > CPU/GPU runtime semantic 与代表性场景签字
 > 仍是发布债务，不得由工程门禁替代。
 
@@ -334,10 +335,11 @@ v2.4 之后各阶段的记忆/前端/语义/自主分析、独立安全项目、
 > 取消树与 Evidence Ledger 并启用受限 ready-frontier 并行；实现与边界见
 > [`v2.5/阶段6A实施记录.md`](./v2.5/阶段6A实施记录.md)。提交 `b67b704` 的
 > [run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
-> 已确认完整 CI 全绿并关闭 6A；当前从数据角色识别与质量建议继续阶段 6。
-> 6B-1～6B-4 已完成本地实现，详见
+> 已确认完整 CI 全绿并关闭 6A；6B 也已由完整 CI 关闭。
+> 6B-1～6B-4 已由完整 CI 关闭，详见
 > [`v2.5/阶段6B实施记录.md`](./v2.5/阶段6B实施记录.md)；双传输与真实 `data-tools`
-> Compose 重启恢复门禁已接入，当前等待完整 CI 验证。
+> Compose 重启恢复门禁全绿。当前进入
+> [`v2.5/阶段6C实施记录.md`](./v2.5/阶段6C实施记录.md) 的受控候选假设与结果驱动探索。
 
 - 自动识别时间、指标、维度和 ID 角色；
 - 数据质量诊断与清洗建议；

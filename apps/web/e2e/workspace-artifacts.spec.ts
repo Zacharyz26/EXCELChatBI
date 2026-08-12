@@ -1457,6 +1457,56 @@ test("阻塞澄清提交答案后继续同一个 TaskRun", async ({ page }) => {
   await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
 });
 
+test("6C 候选假设验证链展示计划、Evidence 与 Verifier 终态", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请生成趋势图");
+  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+  const active = Object.values(state.agentRuns).at(-1);
+  expect(active).toBeTruthy();
+  active!.detail.hypothesis_execution = {
+    schema: "chatbi-hypothesis-execution-v1",
+    schema_version: 1,
+    hypothesis_id: "hyp_0123456789abcdef",
+    kind: "trend",
+    statement: "销售额可能随月份呈现时间变化，需要趋势 Evidence 验证。",
+    capability: "stats.trend",
+    dataset_ref: "sales-ref",
+    data_version_hash: "a".repeat(64),
+    selection_plan_version: 1,
+    execution_plan_id: "run-1-plan-1",
+    execution_plan_version: 2,
+    logical_step_id: "verify-selected-trend",
+    persisted_step_id: "run-1-step-1",
+    status: "supported",
+    tested: true,
+    evidence_outcome: "supported",
+    outcome: "supported",
+    invocation_ids: ["invocation-1"],
+    failed_invocation_ids: [],
+    evidence_ids: ["evidence-1"],
+    evidence_ledger_sequences: [1],
+    verification: {
+      verdict: "PASS",
+      check_codes: [],
+      event_sequence: 9,
+    },
+    last_failure_code: null,
+    updated_at: NOW,
+  };
+
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  const lifecycle = page.getByRole("region", { name: "候选假设验证状态" });
+  await expect(lifecycle).toContainText("假设验证链");
+  await expect(lifecycle).toContainText("Evidence 支持");
+  await expect(lifecycle).toContainText("支持候选");
+  await expect(lifecycle).toContainText("v2 · verify-selected-trend");
+  await expect(lifecycle).toContainText("PASS");
+});
+
 test("清空浏览器 Run 缓存后仍从服务端恢复最近 TaskRun", async ({ page }) => {
   await installMockApi(page);
   await page.goto("/");

@@ -1,6 +1,6 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；阶段 3–5 与 6A 工程关闭，阶段 6B-1～6B-4 本地实现完成，等待完整 CI
+> 状态：总体设计已完成；阶段 3–5、6A 与 6B 工程关闭，当前进入 6C 受控候选假设
 > · 更新日期：2026-08-11
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
@@ -33,7 +33,11 @@ SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence
 并以严格输出 schema、Planner 单次路由和 React Artifact 展示落地；6B-2 已补绑定计划/数据
 版本的结构化确认和统计/聚合前置门禁；6B-3 已接入匿名代表性评测与
 `data-role-quality` CI 门禁；6B-4 已接入 stdio/HTTP 契约等价、真实 `data-tools` Compose
-调用、目录重验和重启恢复门禁。当前等待完整 CI。
+调用、目录重验和重启恢复门禁；提交 `6b89ef6` 的
+[run 31467721161](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31467721161)
+已确认 backend、frontend 与 Compose 三项全绿并关闭 6B。6C-1 已把有界候选筛选结果
+绑定 TaskRun 数据版本、Planner 审计与 React 人工选择；6C-2 已继续绑定不可变计划步骤、
+Invocation、Evidence Ledger 与 Verifier 结果状态。
 
 ## 2. 不随阶段变化的边界
 
@@ -182,7 +186,9 @@ SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence
 > `tools/list_changed` 的运行时接收/新任务目录换代和 profile 可用性；6A-3 已增加 SQLite v10
 > 受控并行控制面和 ready-frontier 并行执行。提交 `b67b704` 的完整异步链与 Compose 门禁
 > 已通过 CI 并关闭 6A。6B-1 数据角色与质量建议、6B-2 结构化确认与统计/聚合门禁及
-> 6B-3 匿名代表性评测与 6B-4 双传输/Compose 恢复门禁已完成本地实现；当前等待完整 CI。
+> 6B-3 匿名代表性评测与 6B-4 双传输/Compose 恢复门禁已由完整 CI 关闭。6C-1/6C-2 已本地
+> 实现有界候选、角色/capability 筛选，以及 Plan/Invocation/Evidence/Verifier 状态绑定，
+> 下一步为 6C-3 结果驱动跟进。
 
 ### MCP 设计
 
