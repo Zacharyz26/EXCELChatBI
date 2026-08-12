@@ -1479,10 +1479,10 @@ test("6C 候选假设验证链展示计划、Evidence 与 Verifier 终态", asyn
     execution_plan_version: 2,
     logical_step_id: "verify-selected-trend",
     persisted_step_id: "run-1-step-1",
-    status: "supported",
+    status: "not_supported",
     tested: true,
-    evidence_outcome: "supported",
-    outcome: "supported",
+    evidence_outcome: "not_supported",
+    outcome: "not_supported",
     invocation_ids: ["invocation-1"],
     failed_invocation_ids: [],
     evidence_ids: ["evidence-1"],
@@ -1495,16 +1495,57 @@ test("6C 候选假设验证链展示计划、Evidence 与 Verifier 终态", asyn
     last_failure_code: null,
     updated_at: NOW,
   };
+  active!.detail.hypothesis_followup = {
+    schema: "chatbi-hypothesis-followup-v1",
+    schema_version: 1,
+    hypothesis_id: "hyp_0123456789abcdef",
+    data_version_hash: "a".repeat(64),
+    source_status: "not_supported",
+    source_outcome: "not_supported",
+    decision: "propose_next",
+    reason_codes: ["hypothesis_not_supported", "next_eligible_candidate"],
+    automatic_execution: false,
+    requires_user_confirmation: true,
+    proposed_candidate: {
+      hypothesis_id: "hyp_fedcba9876543210",
+      kind: "anomaly",
+      statement: "销售额可能存在异常点，需要异常 Evidence 验证。",
+      capability: "stats.anomaly",
+      expected_evidence: "异常点数量与位置",
+      priority: 2,
+    },
+    suggested_goal: "验证有界候选：销售额可能存在异常点，需要异常 Evidence 验证。",
+    limits: {
+      tool_attempts_used: 1,
+      max_tool_calls: 12,
+      tool_calls_remaining: 11,
+      replans_used: 0,
+      max_replans: 3,
+      replans_remaining: 3,
+      cancellation_root_status: "completed",
+    },
+    updated_at: NOW,
+  };
 
   const controlButton = page.getByRole("button", { name: "任务协作" });
   await expect(controlButton).toBeEnabled();
   await controlButton.click();
-  const lifecycle = page.getByRole("region", { name: "候选假设验证状态" });
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  const lifecycle = panel.getByRole("region", { name: "候选假设验证状态" });
   await expect(lifecycle).toContainText("假设验证链");
-  await expect(lifecycle).toContainText("Evidence 支持");
-  await expect(lifecycle).toContainText("支持候选");
+  await expect(lifecycle).toContainText("Evidence 未支持");
+  await expect(lifecycle).toContainText("未支持候选");
   await expect(lifecycle).toContainText("v2 · verify-selected-trend");
   await expect(lifecycle).toContainText("PASS");
+  const followup = panel.getByRole("region", { name: "结果驱动跟进" });
+  await expect(followup).toContainText("建议下一候选");
+  await expect(followup).toContainText("销售额可能存在异常点");
+  await expect(followup).toContainText("自动执行");
+  await followup.getByRole("button", { name: "填入新分支目标" }).click();
+  await expect(panel.getByRole("textbox", { name: "新分支目标" })).toHaveValue(
+    "验证有界候选：销售额可能存在异常点，需要异常 Evidence 验证。",
+  );
+  await expect(panel).toContainText("不会自动调用工具");
 });
 
 test("清空浏览器 Run 缓存后仍从服务端恢复最近 TaskRun", async ({ page }) => {

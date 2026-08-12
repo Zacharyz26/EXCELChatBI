@@ -1178,6 +1178,7 @@ async def _stream_agent_chat_inner(
                     budget={
                         "max_tool_calls": config.max_tool_calls,
                         "max_parallelism": config.max_parallel_tools,
+                        "max_replans": config.max_replans,
                         "autonomy_mode": effective_autonomy_mode,
                     },
                     parent_run_id=parent_run_id,

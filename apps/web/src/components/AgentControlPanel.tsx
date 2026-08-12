@@ -76,6 +76,32 @@ const HYPOTHESIS_OUTCOME_LABELS = {
   inconclusive: "无法确定",
 } as const;
 
+const HYPOTHESIS_FOLLOWUP_LABELS = {
+  stop: "停止探索",
+  degrade: "降级收尾",
+  supplement_evidence: "建议补充 Evidence",
+  propose_next: "建议下一候选",
+} as const;
+
+const HYPOTHESIS_FOLLOWUP_REASON_LABELS: Record<string, string> = {
+  cancellation_requested: "任务已进入取消边界",
+  hypothesis_supported: "当前候选已获支持",
+  post_hoc_expansion_blocked: "禁止结论后自动扩展探索",
+  hypothesis_not_supported: "当前候选未获支持",
+  next_eligible_candidate: "仍有一个通过门禁的候选",
+  candidate_set_exhausted: "候选集合已穷尽",
+  screening_unavailable: "原候选筛选快照不可用",
+  screening_context_mismatch: "候选的数据版本上下文不一致",
+  evidence_incomplete: "现有 Evidence 不足以形成结论",
+  evidence_inconclusive: "Evidence 与 Verifier 无法确定结果",
+  retryable_observation: "最近失败明确标记为可重试",
+  bounded_retry_available: "预算允许一次有界补证",
+  non_retryable_failure: "最近失败不允许自动重试",
+  tool_budget_exhausted: "共享工具预算已耗尽",
+  replan_budget_exhausted: "重规划预算已耗尽",
+  cancellation_boundary_unsettled: "取消树尚未进入可安全跟进的终态",
+};
+
 /** v2.5 4B：真实 TaskRun、计划、澄清、审批和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
@@ -233,6 +259,13 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
     setBranchDraft("");
     onClose();
     await startBranch(detail.run.run_id, goal);
+  }
+
+  function adoptFollowupGoal() {
+    const goal = detail?.hypothesis_followup?.suggested_goal;
+    if (!goal) return;
+    setBranchDraft(goal);
+    setNotice("后续动作已填入新分支目标；确认内容后再显式创建，不会自动调用工具。");
   }
 
   return (
@@ -451,6 +484,64 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   )}
                   {detail.hypothesis_execution.last_failure_code && (
                     <p>最近状态：{detail.hypothesis_execution.last_failure_code}</p>
+                  )}
+                </article>
+              </section>
+            )}
+
+            {detail.hypothesis_followup && (
+              <section className="agent-section" aria-label="结果驱动跟进">
+                <div className="agent-section__title">
+                  <span>结果驱动跟进</span>
+                  <small>
+                    {HYPOTHESIS_FOLLOWUP_LABELS[detail.hypothesis_followup.decision]}
+                  </small>
+                </div>
+                <article
+                  className={`agent-hypothesis-followup agent-hypothesis-followup--${detail.hypothesis_followup.decision}`}
+                >
+                  <p>
+                    {detail.hypothesis_followup.reason_codes
+                      .map((code) => HYPOTHESIS_FOLLOWUP_REASON_LABELS[code] ?? code)
+                      .join("；")}。
+                  </p>
+                  {detail.hypothesis_followup.proposed_candidate && (
+                    <div className="agent-hypothesis-followup__candidate">
+                      <strong>{detail.hypothesis_followup.proposed_candidate.statement}</strong>
+                      <small>
+                        {detail.hypothesis_followup.proposed_candidate.capability}
+                        {` · 预期 Evidence：${detail.hypothesis_followup.proposed_candidate.expected_evidence}`}
+                      </small>
+                    </div>
+                  )}
+                  <dl>
+                    <div>
+                      <dt>工具余量</dt>
+                      <dd>
+                        {detail.hypothesis_followup.limits.tool_calls_remaining}
+                        {` / ${detail.hypothesis_followup.limits.max_tool_calls}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>重规划余量</dt>
+                      <dd>
+                        {detail.hypothesis_followup.limits.replans_remaining}
+                        {` / ${detail.hypothesis_followup.limits.max_replans}`}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>自动执行</dt>
+                      <dd>禁止</dd>
+                    </div>
+                  </dl>
+                  {detail.hypothesis_followup.suggested_goal && (
+                    <button
+                      type="button"
+                      onClick={adoptFollowupGoal}
+                      disabled={busy !== null}
+                    >
+                      填入新分支目标
+                    </button>
                   )}
                 </article>
               </section>

@@ -90,6 +90,70 @@ verify_parallel_run() {
   '
 }
 
+verify_hypothesis_run() {
+  detail="$(
+    curl --fail --silent \
+      -H "$auth_header" \
+      "http://127.0.0.1:8080/api/agent/runs/${hypothesis_run_id}"
+  )"
+  DETAIL_JSON="$detail" node -e '
+  const detail = JSON.parse(process.env.DETAIL_JSON);
+  const screening = detail.hypothesis_screening;
+  const execution = detail.hypothesis_execution;
+  const followup = detail.hypothesis_followup;
+  if (detail.run.status !== "completed"
+      || !screening || screening.schema !== "chatbi-hypothesis-screening-v1"
+      || screening.raw_rows_read !== false || screening.candidates.length > 4
+      || !screening.candidates.every((item) => item.tested === false)
+      || !execution || execution.schema !== "chatbi-hypothesis-execution-v1"
+      || execution.kind !== "anomaly" || execution.status !== "not_supported"
+      || execution.tested !== true || execution.evidence_outcome !== "not_supported"
+      || execution.outcome !== "not_supported" || execution.evidence_ids.length !== 1
+      || execution.evidence_ledger_sequences.length !== 1
+      || execution.verification?.verdict !== "PASS"
+      || !followup || followup.schema !== "chatbi-hypothesis-followup-v1"
+      || followup.hypothesis_id !== execution.hypothesis_id
+      || followup.source_status !== "not_supported"
+      || followup.source_outcome !== "not_supported"
+      || followup.decision !== "propose_next"
+      || followup.automatic_execution !== false
+      || followup.requires_user_confirmation !== true
+      || followup.proposed_candidate?.kind !== "trend"
+      || followup.proposed_candidate?.capability !== "stats.trend"
+      || typeof followup.suggested_goal !== "string"
+      || followup.data_version_hash !== execution.data_version_hash
+      || execution.data_version_hash !== screening.data_version_hash) {
+    throw new Error("6C hypothesis projection did not survive recovery");
+  }
+  if (detail.tool_audits.length !== 1
+      || detail.tool_audits[0].tool_name !== "anomaly_detect"
+      || detail.tool_audits[0].status !== "succeeded"
+      || detail.tool_audits[0].evidence_id !== execution.evidence_ids[0]) {
+    throw new Error("6C selected hypothesis invocation/evidence binding drifted");
+  }
+  '
+  events="$(
+    curl --fail --silent \
+      -H "$auth_header" \
+      "http://127.0.0.1:8080/api/agent/runs/${hypothesis_run_id}/events"
+  )"
+  EVENTS_JSON="$events" node -e '
+  const payload = JSON.parse(process.env.EVENTS_JSON);
+  const verification = payload.events.filter(
+    (event) => event.event_type === "verification"
+      && event.payload.hypothesis_followup?.schema === "chatbi-hypothesis-followup-v1",
+  );
+  const succeeded = payload.events.filter(
+    (event) => event.event_type === "step.completed"
+      && event.payload.tool === "anomaly_detect"
+      && event.payload.status === "completed",
+  );
+  if (verification.length !== 1 || succeeded.length !== 1) {
+    throw new Error("6C terminal audit or exactly-once invocation did not survive recovery");
+  }
+  '
+}
+
 verify_reference_recovery() {
   "${compose[@]}" exec -T api \
     python -m apps.api.memory_recovery_probe verify \
@@ -152,6 +216,9 @@ if (audit.read_only_report_attempts < 1) {
 }
 if (audit.parallel_tool_batches !== 1) {
   throw new Error(`6A parallel batch was requested ${audit.parallel_tool_batches} times`);
+}
+if (audit.hypothesis_anomaly_tool_calls !== 1) {
+  throw new Error(`6C anomaly hypothesis was requested ${audit.hypothesis_anomaly_tool_calls} times`);
 }
 '
 
@@ -221,12 +288,15 @@ grep -q '"status":"passed"' "$resource_probe_log"
 
 run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.run_id)")"
 parallel_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.parallel_run_id)")"
+hypothesis_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.hypothesis_run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
 latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.read_only_run_id)")"
-"${compose[@]}" restart api report-tools web
+verify_hypothesis_run
+"${compose[@]}" restart api stats-tools report-tools web
 wait_for_application "Web/API/report-tools restart"
 verify_original_run
 verify_parallel_run
+verify_hypothesis_run
 CHATBI_COMPOSE_RECOVERY_ONLY=1 \
   CHATBI_COMPOSE_RECOVERY_RUN_ID="$run_id" \
   CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID="$latest_run_id" \
@@ -356,5 +426,6 @@ recovery_json="$(verify_reference_recovery)"
 printf '%s\n' "$recovery_json" > .data/e2e/memory-recovery-verified.json
 verify_original_run
 verify_parallel_run
+verify_hypothesis_run
 
-echo "Compose E2E, 6A parallel recovery, MCP Resource reconnect, offline restore and fixed reference recovery passed."
+echo "Compose E2E, 6A parallel recovery, 6C hypothesis recovery, MCP Resource reconnect, offline restore and fixed reference recovery passed."

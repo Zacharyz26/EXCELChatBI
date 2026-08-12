@@ -18,7 +18,8 @@ SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/G
 审批执行链；4B 已把 TaskRun、计划修订、结构化澄清、任务控制和审批接入 React。4C/4D
 的恢复、自主等级与反馈分支已关闭，阶段 5 领域定义与知识 Resource 已工程关闭；阶段 6A
 能力目录和受控并行已由完整 CI 关闭；6B-1～6B-4 数据角色、质量建议、结构化确认、执行前
-门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；当前进入 6C 受控自主探索：
+门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；6C-1～6C-4 受控自主探索已在
+本地实现，等待完整 CI 与真实 Compose 签字：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
@@ -170,9 +171,11 @@ tests/                 单元、集成与 Agent 行为评测
    `docs/v2.5/阶段6B实施记录.md`；提交 `6b89ef6` 的完整 CI 三项全绿，6B 已关闭。
 5. 6C-1 已实现最多四个 `tested=false` 候选、画像/角色/capability 确定性筛选、计划审计与
    React 人工选择；6C-2 已把选中候选严格绑定 Plan/TaskStep、Invocation、Evidence Ledger
-   与 Verifier，并区分支持、不支持、不确定、部分、失败和取消状态。下一步按
-   `docs/v2.5/阶段6C实施记录.md` 开发 6C-3 结果驱动跟进；预测和多数据集关联仍须逐项实现，
-   不得提前宣称阶段 6 完成。
+   与 Verifier，并区分支持、不支持、不确定、部分、失败和取消状态；6C-3 已实现确定性的
+   stop/degrade/补证/下一候选决策，并由共享工具预算、重规划上限、取消树和用户确认分支共同
+   收敛；6C-4 已加入 14 场景匿名确定性评测、CI 强制门禁及 Compose 浏览器/三次恢复探针。
+   当前本机缺少 Docker，只能等待完整 CI 对真实 Compose 签字后关闭 6C；预测和多数据集关联
+   仍须逐项实现，不得提前宣称阶段 6 完成。
 
 完整状态见 `/docs/v2.5/README.md`。
 

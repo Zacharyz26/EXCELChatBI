@@ -564,6 +564,9 @@ async def get_agent_run(
         "hypothesis_execution": (
             snapshot.get("hypothesis_execution") if snapshot is not None else None
         ),
+        "hypothesis_followup": (
+            snapshot.get("hypothesis_followup") if snapshot is not None else None
+        ),
         "state": snapshot,
     }
 

@@ -16,6 +16,7 @@ const READ_ONLY_GOAL = (
 const PARALLEL_GOAL = (
   "COMPOSE_6A_PARALLEL：请深入分析这份数据的画像和销售额时间趋势。"
 );
+const COMPOSE_6C_EXPLORATION = "请深入分析这份数据";
 const RUN_NOT_VISIBLE = "run_not_visible";
 
 interface RunDetailPayload {
@@ -47,6 +48,41 @@ interface RunDetailPayload {
     active_branch_count: number;
   } | null;
   feedback: Array<{ rating: string; comment: string | null }>;
+  hypothesis_screening?: {
+    schema: string;
+    data_version_hash: string;
+    raw_rows_read: boolean;
+    candidates: Array<{
+      kind: string;
+      status: string;
+      tested: boolean;
+    }>;
+  } | null;
+  hypothesis_execution?: {
+    schema: string;
+    hypothesis_id: string;
+    kind: string;
+    data_version_hash: string;
+    status: string;
+    tested: boolean;
+    evidence_outcome: string;
+    outcome: string;
+    evidence_ids: string[];
+    evidence_ledger_sequences: number[];
+    verification: { verdict: string } | null;
+  } | null;
+  hypothesis_followup?: {
+    schema: string;
+    hypothesis_id: string;
+    data_version_hash: string;
+    source_status: string;
+    source_outcome: string;
+    decision: string;
+    automatic_execution: boolean;
+    requires_user_confirmation: boolean;
+    proposed_candidate: { kind: string; capability: string; statement: string } | null;
+    suggested_goal: string | null;
+  } | null;
 }
 
 interface RunStatusResponse {
@@ -218,6 +254,97 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   });
   await expect(parallelAuditCards).toHaveCount(2);
   await expect(parallelAuditCards.first()).toContainText("Ledger #");
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+
+  // 6C：开放探索先等待候选选择，只执行选中的异常假设；未支持时只建议一个新候选。
+  await page.getByLabel("消息内容").fill(COMPOSE_6C_EXPLORATION);
+  const hypothesisResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/api/chat/stream")
+      && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "发送消息" }).click();
+  const hypothesisResponse = await hypothesisResponsePromise;
+  expect(hypothesisResponse.ok()).toBeTruthy();
+  const hypothesisRunId = await hypothesisResponse.headerValue("x-chatbi-run-id");
+  expect(hypothesisRunId).toBeTruthy();
+  await expect.poll(
+    async () => getRunStatusForPolling(page, hypothesisRunId!),
+    { timeout: 60_000 },
+  ).toBe("waiting_user");
+
+  await parallelControlButton.click();
+  let hypothesisPanel = page.getByRole("dialog", { name: "任务协作" });
+  const anomalyCandidate = hypothesisPanel.locator(".agent-hypothesis-card", {
+    hasText: "异常",
+  });
+  await expect(anomalyCandidate).toContainText("可验证", { timeout: 30_000 });
+  await anomalyCandidate.getByRole("button", { name: "选择此假设" }).click();
+  const hypothesisResumePromise = page.waitForResponse(
+    (response) => response.url().endsWith(
+      `/api/agent/runs/${hypothesisRunId}/clarifications/analysis_goal/answer/stream`,
+    ) && response.request().method() === "POST",
+  );
+  await hypothesisPanel.getByRole("button", { name: "提交答案并继续" }).click();
+  const hypothesisResume = await hypothesisResumePromise;
+  expect(hypothesisResume.ok()).toBeTruthy();
+  await expect.poll(
+    async () => getRunStatusForPolling(page, hypothesisRunId!),
+    { timeout: 120_000 },
+  ).toBe("completed");
+  await expect(page.getByText(
+    "Compose 6C 异常候选验证完成；Evidence 未支持该候选。",
+    { exact: true },
+  )).toBeVisible();
+
+  const hypothesisDetail = await getRunDetail(page, hypothesisRunId!);
+  expect(hypothesisDetail.hypothesis_screening).toEqual(expect.objectContaining({
+    schema: "chatbi-hypothesis-screening-v1",
+    raw_rows_read: false,
+  }));
+  expect(hypothesisDetail.hypothesis_execution).toEqual(expect.objectContaining({
+    schema: "chatbi-hypothesis-execution-v1",
+    kind: "anomaly",
+    status: "not_supported",
+    tested: true,
+    evidence_outcome: "not_supported",
+    outcome: "not_supported",
+  }));
+  expect(hypothesisDetail.hypothesis_followup).toEqual(expect.objectContaining({
+    schema: "chatbi-hypothesis-followup-v1",
+    decision: "propose_next",
+    automatic_execution: false,
+    requires_user_confirmation: true,
+    proposed_candidate: expect.objectContaining({
+      kind: "trend",
+      capability: "stats.trend",
+    }),
+  }));
+  expect(hypothesisDetail.hypothesis_execution?.data_version_hash).toBe(
+    hypothesisDetail.hypothesis_screening?.data_version_hash,
+  );
+  expect(hypothesisDetail.hypothesis_followup?.data_version_hash).toBe(
+    hypothesisDetail.hypothesis_screening?.data_version_hash,
+  );
+
+  hypothesisPanel = page.getByRole("dialog", { name: "任务协作" });
+  const followupRegion = hypothesisPanel.getByRole("region", { name: "结果驱动跟进" });
+  await expect(followupRegion).toContainText("建议下一候选");
+  await expect(followupRegion).toContainText("自动执行禁止");
+  await followupRegion.getByRole("button", { name: "填入新分支目标" }).click();
+  const branchDraft = hypothesisPanel.getByRole("textbox", { name: "新分支目标" });
+  await expect(branchDraft).not.toHaveValue("");
+  await expect(hypothesisPanel).toContainText("不会自动调用工具");
+  const relatedBeforeConfirmation = await page.request.get(
+    `/api/agent/runs/${encodeURIComponent(hypothesisRunId!)}`,
+    { headers: AUTH_HEADERS },
+  );
+  expect(relatedBeforeConfirmation.ok()).toBeTruthy();
+  const noAutomaticBranch = await relatedBeforeConfirmation.json() as {
+    related_runs: Array<{ parent_run_id: string | null }>;
+  };
+  expect(noAutomaticBranch.related_runs.filter(
+    (run) => run.parent_run_id === hypothesisRunId,
+  )).toHaveLength(0);
   await page.getByRole("button", { name: "关闭任务协作" }).click();
 
   await page.getByLabel("消息内容").fill(
@@ -477,6 +604,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
       pdf_url: reportPdfUrl,
       completed_event_count: 1,
       parallel_run_id: parallelRunId,
+      hypothesis_run_id: hypothesisRunId,
       assisted_run_id: assistedRunId,
       read_only_run_id: readOnlyRunId,
     }),

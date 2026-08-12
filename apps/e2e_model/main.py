@@ -22,6 +22,7 @@ _BRANCH_MARKER = "COMPOSE_4D_BRANCH"
 _FEEDBACK_MARKER = "COMPOSE_4D_FEEDBACK"
 _READ_ONLY_MARKER = "COMPOSE_4D_READ_ONLY"
 _PARALLEL_MARKER = "COMPOSE_6A_PARALLEL"
+_HYPOTHESIS_MARKER = "请深入分析这份数据"
 _REPORT_MARKER = "COMPOSE_REPORT"
 _audit: dict[str, int | bool] = {
     "planner_calls": 0,
@@ -29,6 +30,7 @@ _audit: dict[str, int | bool] = {
     "branch_profile_tool_calls": 0,
     "read_only_report_attempts": 0,
     "parallel_tool_batches": 0,
+    "hypothesis_anomaly_tool_calls": 0,
 }
 
 
@@ -158,6 +160,49 @@ async def _stream_turn(
         yield _sse_chunk(model, {}, finish_reason="tool_calls")
     elif (
         not has_current_tool_result
+        and scenario_marker == _HYPOTHESIS_MARKER
+        and "anomaly_detect" in tool_names
+    ):
+        dataset_refs = re.findall(r"最新数据集 ([0-9a-f]{32})", joined)
+        if not dataset_refs:
+            raise HTTPException(status_code=422, detail="dataset_ref missing")
+        _audit["hypothesis_anomaly_tool_calls"] = int(
+            _audit["hypothesis_anomaly_tool_calls"]
+        ) + 1
+        yield _sse_chunk(
+            model,
+            {
+                "role": "assistant",
+                "content": "我会只验证用户选中的异常候选，并等待 Evidence。",
+            },
+        )
+        yield _sse_chunk(
+            model,
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "anomaly_detect",
+                            "arguments": json.dumps(
+                                {
+                                    "dataset_ref": dataset_refs[-1],
+                                    "value_col": "销售额",
+                                    "method": "iqr",
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ]
+            },
+        )
+        yield _sse_chunk(model, {}, finish_reason="tool_calls")
+    elif (
+        not has_current_tool_result
         and scenario_marker == _BRANCH_MARKER
         and "get_data_profile" in tool_names
     ):
@@ -240,6 +285,15 @@ async def _stream_turn(
             {
                 "role": "assistant",
                 "content": "Compose 6A 受控并行画像与趋势分析已完成。",
+            },
+        )
+        yield _sse_chunk(model, {}, finish_reason="stop")
+    elif scenario_marker == _HYPOTHESIS_MARKER:
+        yield _sse_chunk(
+            model,
+            {
+                "role": "assistant",
+                "content": "Compose 6C 异常候选验证完成；Evidence 未支持该候选。",
             },
         )
         yield _sse_chunk(model, {}, finish_reason="stop")
@@ -402,6 +456,7 @@ def _latest_scenario_marker(messages: list[Any]) -> str | None:
         for marker in (
             _REPORT_MARKER,
             _PARALLEL_MARKER,
+            _HYPOTHESIS_MARKER,
             _READ_ONLY_MARKER,
             _BRANCH_MARKER,
         ):

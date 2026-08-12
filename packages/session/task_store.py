@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from apps.orchestrator.control.contracts import TaskContract
+from apps.orchestrator.control.hypothesis_followup import (
+    decide_hypothesis_followup,
+    validate_hypothesis_followup,
+)
 from apps.orchestrator.control.hypothesis_lifecycle import (
     bind_hypothesis_to_plan,
     finalize_hypothesis_execution,
@@ -495,6 +499,7 @@ class TaskStore:
             assert updated_row is not None
             updated = _run_from_row(updated_row)
             snapshot = _merged_snapshot(connection, updated)
+            event = _attach_hypothesis_followup_to_event(connection, event, snapshot)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -786,6 +791,7 @@ class TaskStore:
             assert updated_row is not None
             updated = _run_from_row(updated_row)
             snapshot = _merged_snapshot(connection, updated)
+            event = _attach_hypothesis_followup_to_event(connection, event, snapshot)
             snapshot.update(
                 {
                     "last_sequence": event.sequence,
@@ -2701,9 +2707,10 @@ class TaskStore:
             assert updated_row is not None
             updated = _run_from_row(updated_row)
             snapshot = _merged_snapshot(connection, updated)
+            event = _attach_hypothesis_followup_to_event(connection, event, snapshot)
             snapshot.update(
                 {
-                    "last_sequence": sequence,
+                    "last_sequence": event.sequence,
                     "completed_step_ids": _completed_step_ids(connection, run_id),
                 }
             )
@@ -4525,6 +4532,31 @@ def _insert_event(connection: sqlite3.Connection, event: TaskEvent) -> None:
     )
 
 
+def _attach_hypothesis_followup_to_event(
+    connection: sqlite3.Connection,
+    event: TaskEvent,
+    snapshot: JsonObject,
+) -> TaskEvent:
+    """Attach the terminal decision to the event that caused it, atomically."""
+    raw_followup = snapshot.get("hypothesis_followup")
+    if not isinstance(raw_followup, dict):
+        return event
+    payload = {**event.payload, "hypothesis_followup": raw_followup}
+    updated = TaskEvent(
+        event_id=event.event_id,
+        run_id=event.run_id,
+        sequence=event.sequence,
+        event_type=event.event_type,
+        payload=payload,
+        occurred_at=event.occurred_at,
+    )
+    connection.execute(
+        "UPDATE task_events SET payload_json = ? WHERE event_id = ?",
+        (_dump_json(payload), event.event_id),
+    )
+    return updated
+
+
 def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject:
     """刷新基础状态，同时保留活动计划和最近 Observation 等恢复扩展。"""
     row = connection.execute(
@@ -4563,7 +4595,103 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
         )
         if finalized is not None:
             snapshot["hypothesis_execution"] = finalized
+            raw_followup = snapshot.get("hypothesis_followup")
+            if (
+                isinstance(raw_followup, dict)
+                and raw_followup.get("hypothesis_id") == finalized.get("hypothesis_id")
+                and raw_followup.get("data_version_hash")
+                == finalized.get("data_version_hash")
+            ):
+                snapshot["hypothesis_followup"] = validate_hypothesis_followup(
+                    cast(JsonObject, raw_followup)
+                )
+                return snapshot
+            raw_screening = snapshot.get("hypothesis_screening")
+            screening = (
+                cast(JsonObject, raw_screening)
+                if isinstance(raw_screening, dict)
+                else None
+            )
+            scope_row = connection.execute(
+                "SELECT max_tool_calls FROM task_execution_scopes WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            invocation_row = connection.execute(
+                "SELECT COUNT(*) AS attempts FROM tool_invocations WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            cancellation_row = connection.execute(
+                """
+                SELECT status FROM task_cancellation_nodes
+                WHERE run_id = ? AND parent_node_id IS NULL
+                LIMIT 1
+                """,
+                (run.run_id,),
+            ).fetchone()
+            execution_plan_version = _safe_nonnegative_int(
+                finalized.get("execution_plan_version")
+            )
+            followup = decide_hypothesis_followup(
+                screening=screening,
+                execution=finalized,
+                run_status=run.status,
+                tool_attempts_used=max(
+                    _safe_nonnegative_int(run.usage.get("tool_attempts")),
+                    int(invocation_row["attempts"]) if invocation_row is not None else 0,
+                ),
+                max_tool_calls=(
+                    int(scope_row["max_tool_calls"]) if scope_row is not None else 0
+                ),
+                replans_used=max(0, run.plan_version - execution_plan_version),
+                max_replans=_safe_nonnegative_int(run.budget.get("max_replans")),
+                cancellation_root_status=(
+                    str(cancellation_row["status"])
+                    if cancellation_row is not None
+                    else None
+                ),
+                latest_observation=_latest_hypothesis_observation(
+                    connection,
+                    run.run_id,
+                    finalized,
+                ),
+                updated_at=run.updated_at,
+            )
+            if followup is not None:
+                snapshot["hypothesis_followup"] = followup
+            else:
+                snapshot.pop("hypothesis_followup", None)
     return snapshot
+
+
+def _latest_hypothesis_observation(
+    connection: sqlite3.Connection,
+    run_id: str,
+    execution: JsonObject,
+) -> JsonObject | None:
+    logical_step_id = execution.get("logical_step_id")
+    if not isinstance(logical_step_id, str):
+        return None
+    rows = connection.execute(
+        """
+        SELECT payload_json FROM task_events
+        WHERE run_id = ? AND event_type = 'step.completed'
+        ORDER BY sequence DESC
+        LIMIT 128
+        """,
+        (run_id,),
+    ).fetchall()
+    for row in rows:
+        payload = _load_object(str(row["payload_json"]))
+        observation = payload.get("observation")
+        if isinstance(observation, dict) and observation.get("step_id") == logical_step_id:
+            return cast(JsonObject, observation)
+    return None
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 0
+    return max(0, value)
 
 
 def _snapshot_hypothesis_execution(

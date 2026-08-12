@@ -359,6 +359,43 @@ export interface AgentHypothesisExecution {
   updated_at: string;
 }
 
+export type AgentHypothesisFollowupDecision =
+  | "stop"
+  | "degrade"
+  | "supplement_evidence"
+  | "propose_next";
+
+export interface AgentHypothesisFollowup {
+  schema: "chatbi-hypothesis-followup-v1";
+  schema_version: 1;
+  hypothesis_id: string;
+  data_version_hash: string;
+  source_status: Extract<
+    AgentHypothesisExecutionStatus,
+    "supported" | "not_supported" | "inconclusive" | "partial" | "failed" | "cancelled"
+  >;
+  source_outcome: AgentHypothesisExecution["outcome"];
+  decision: AgentHypothesisFollowupDecision;
+  reason_codes: string[];
+  automatic_execution: false;
+  requires_user_confirmation: boolean;
+  proposed_candidate: Pick<
+    AgentHypothesisCandidate,
+    "hypothesis_id" | "kind" | "statement" | "capability" | "expected_evidence" | "priority"
+  > | null;
+  suggested_goal: string | null;
+  limits: {
+    tool_attempts_used: number;
+    max_tool_calls: number;
+    tool_calls_remaining: number;
+    replans_used: number;
+    max_replans: number;
+    replans_remaining: number;
+    cancellation_root_status: "active" | "completed" | "cancel_requested" | "missing";
+  };
+  updated_at: string;
+}
+
 export interface AgentRunDetail {
   run: AgentRun;
   contract: Record<string, unknown> | null;
@@ -370,6 +407,7 @@ export interface AgentRunDetail {
   feedback: AgentRunFeedback[];
   hypothesis_screening?: AgentHypothesisScreening | null;
   hypothesis_execution?: AgentHypothesisExecution | null;
+  hypothesis_followup?: AgentHypothesisFollowup | null;
   state: Record<string, unknown> | null;
 }
 

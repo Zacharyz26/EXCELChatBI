@@ -2107,6 +2107,28 @@ async def test_open_exploration_persists_screened_hypotheses_before_execution(
         "event_sequence": verification_event.sequence,
     }
     assert final_execution["evidence_ledger_sequences"] == [1]
+    followup = final_snapshot["hypothesis_followup"]
+    assert followup["decision"] == "stop"
+    assert followup["reason_codes"] == [
+        "hypothesis_supported",
+        "post_hoc_expansion_blocked",
+    ]
+    assert followup["automatic_execution"] is False
+    persisted_verification = tasks.list_events_by_type(run_id, "verification")[-1]
+    assert persisted_verification.payload["hypothesis_followup"] == followup
+    terminal = tasks.get_run(run_id)
+    assert terminal is not None
+    tasks.record_user_feedback(
+        run_id,
+        expected_version=terminal.state_version,
+        idempotency_key="hypothesis-followup-immutable-after-feedback",
+        subject_user_id="local-user",
+        rating="helpful",
+        comment="验证终态保持不变",
+    )
+    feedback_snapshot = tasks.get_snapshot(run_id)
+    assert feedback_snapshot is not None
+    assert feedback_snapshot["hypothesis_followup"] == followup
 
 
 @pytest.mark.asyncio

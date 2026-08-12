@@ -101,6 +101,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Run deterministic hypothesis exploration quality gate
+        id: hypothesis_exploration
+        run: >-
+          uv run --frozen python scripts/hypothesis_exploration_eval.py
+          --enforce --json-output .data/hypothesis-exploration.json
+
+      - name: Upload hypothesis exploration quality report
+        if: ${{ !cancelled() && steps.hypothesis_exploration.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: hypothesis-exploration
+          path: .data/hypothesis-exploration.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run MCP Tool and Resource transport equivalence probe
         id: coref_mcp_transport
         run: >-

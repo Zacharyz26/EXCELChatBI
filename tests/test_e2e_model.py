@@ -13,7 +13,7 @@ from apps.e2e_model.main import (
     _stream_turn,
 )
 from apps.e2e_model.prepare_fixture import main as prepare_compose_fixture
-from mcp_servers.stats.tools import trend_analysis
+from mcp_servers.stats.tools import anomaly_detect, trend_analysis
 from packages.common.dataset_store import save_dataframe
 
 
@@ -73,6 +73,16 @@ def test_compose_fixture_selects_the_latest_marked_user_turn() -> None:
             ]
         )
         == "COMPOSE_4D_READ_ONLY"
+    )
+    assert (
+        _latest_scenario_marker(
+            [
+                {"role": "user", "content": "请深入分析这份数据"},
+                {"role": "assistant", "content": "请选择候选"},
+                {"role": "user", "content": "选择异常候选"},
+            ]
+        )
+        == "请深入分析这份数据"
     )
 
 
@@ -166,3 +176,56 @@ async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn(
     trend = trend_analysis(json.loads(trend_call["function"]["arguments"]))
     assert trend["method"] == "ma"
     assert trend["n"] == 6
+
+
+@pytest.mark.asyncio
+async def test_compose_hypothesis_fixture_requests_only_selected_anomaly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("E2E_FIXTURE_DIR", str(tmp_path))
+    prepare_compose_fixture()
+    dataset_ref = save_dataframe(pd.read_excel(tmp_path / "sales.xlsx"))
+    chunks = [
+        chunk
+        async for chunk in _stream_turn(
+            "chatbi-e2e",
+            [
+                {"role": "system", "content": f"最新数据集 {dataset_ref} 的画像"},
+                {"role": "user", "content": "请深入分析这份数据"},
+                {"role": "assistant", "content": "请选择候选"},
+                {"role": "user", "content": "销售额可能存在异常观测"},
+            ],
+            [
+                {
+                    "type": "function",
+                    "function": {"name": "anomaly_detect", "parameters": {}},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "trend_analysis", "parameters": {}},
+                },
+            ],
+        )
+    ]
+
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in "".join(chunks).splitlines()
+        if line.startswith("data: {")
+    ]
+    tool_calls = next(
+        choice["delta"]["tool_calls"]
+        for payload in payloads
+        for choice in payload["choices"]
+        if "tool_calls" in choice["delta"]
+    )
+    assert [call["function"]["name"] for call in tool_calls] == ["anomaly_detect"]
+    arguments = json.loads(tool_calls[0]["function"]["arguments"])
+    assert arguments == {
+        "dataset_ref": dataset_ref,
+        "value_col": "销售额",
+        "method": "iqr",
+    }
+    result = anomaly_detect(arguments)
+    assert result["n_anomalies"] == 0

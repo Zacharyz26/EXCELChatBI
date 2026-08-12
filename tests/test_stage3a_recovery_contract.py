@@ -50,7 +50,7 @@ def test_compose_e2e_runs_destructive_restore_and_joint_reference_gate() -> None
         "--lineage-edge-count",
         "reference-restart-verified.json",
         "verify_original_run",
-        "restart api report-tools web",
+        "restart api stats-tools report-tools web",
         "CHATBI_COMPOSE_RECOVERY_ONLY=1",
         "CHATBI_COMPOSE_RECOVERY_RUN_ID",
         "pnpm --dir apps/web test:e2e:compose",
