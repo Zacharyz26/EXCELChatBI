@@ -370,7 +370,8 @@ class StatsRequest(BaseModel):
     """
 
     dataset_ref: DatasetRef
-    kind: str  # trend | anomaly | regression | correlation | contribution | group_compare
+    # trend | forecast | anomaly | regression | correlation | contribution | group_compare
+    kind: str
     params: dict[str, Any] = {}
     interpret: bool = False        # 是否附带 LLM 中文解读（默认关，不平白付模型成本）
 

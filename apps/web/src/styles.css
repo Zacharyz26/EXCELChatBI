@@ -3380,6 +3380,128 @@ select {
   border-radius: 7px;
 }
 
+.forecast-artifact--limited {
+  border-color: #e7c68c;
+  background: #fffdf8;
+}
+
+.artifact-status--warning {
+  color: #96630b;
+  background: #fff1cf;
+  border-color: #ebcf91;
+}
+
+.forecast-artifact__reliability {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  flex-direction: column;
+  color: #455168;
+  font-size: 10.5px;
+  background: #f5f7fb;
+  border-radius: 8px;
+}
+
+.forecast-artifact--limited .forecast-artifact__reliability {
+  color: #73500f;
+  background: #fff4da;
+}
+
+.forecast-artifact__reliability strong {
+  color: #28354b;
+  font-size: 12px;
+}
+
+.forecast-artifact--limited .forecast-artifact__reliability strong {
+  color: #855906;
+}
+
+.forecast-artifact__predictions {
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
+.forecast-artifact__predictions > strong {
+  color: #3b465c;
+  font-size: 10.5px;
+}
+
+.forecast-artifact__predictions table {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+
+.forecast-artifact__predictions th,
+.forecast-artifact__predictions td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.forecast-artifact__predictions th {
+  color: #8893a5;
+  font-size: 9.5px;
+  background: #fafbfc;
+}
+
+.forecast-artifact__predictions p {
+  margin: 6px 0 0;
+  color: #8a95a7;
+  font-size: 9.5px;
+}
+
+.stats-artifact__evidence {
+  margin-top: 12px;
+  padding: 10px;
+  color: #4d586d;
+  font-size: 10.5px;
+  background: #f8f9fc;
+  border: 1px solid #e7eaf1;
+  border-radius: 8px;
+}
+
+.stats-artifact__evidence-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stats-artifact__evidence-heading strong {
+  color: #354057;
+  font-size: 11px;
+}
+
+.stats-artifact__evidence-heading span {
+  color: #7f8a9d;
+  font-size: 9.5px;
+}
+
+.stats-artifact__evidence > div + div {
+  margin-top: 8px;
+}
+
+.stats-artifact__evidence > div > span {
+  color: #677287;
+  font-weight: 600;
+}
+
+.stats-artifact__evidence ul {
+  margin: 4px 0 0;
+  padding-left: 17px;
+}
+
+.stats-artifact__evidence li + li {
+  margin-top: 3px;
+}
+
+.stats-artifact__limitations {
+  color: #765513;
+}
+
 .report-artifact__actions {
   display: flex;
   gap: 8px;

@@ -176,9 +176,10 @@ tests/                 单元、集成与 Agent 行为评测
    收敛；6C-4 已加入 14 场景匿名确定性评测、CI 强制门禁及 Compose 浏览器/三次恢复探针。
    提交 `d5005ee` 的
    [CI run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1 统一统计 Evidence 与
-   6D-2 受治理贡献、分群比较和回归诊断已完成本地验证并待远程完整 CI；预测和多数据集关联
-   仍须逐项实现，不得提前宣称阶段 6 完成。
+   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1 统一统计 Evidence、
+   6D-2 受治理贡献/分群比较/回归诊断、6D-3 独立预测 Tool/Profile，以及 6D-4 匿名质量
+   门禁、React 局限展示和预测双传输/Compose 恢复探针已完成本地验证；远程完整 CI 仍待
+   完成，多数据集关联仍须后续实现。
 
 完整状态见 `/docs/v2.5/README.md`。
 

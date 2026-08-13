@@ -512,6 +512,42 @@ async def test_prediction_request_fails_closed_on_governed_forecast_capability()
         )
 
 
+@pytest.mark.asyncio
+async def test_prediction_request_uses_forecast_when_capability_is_available() -> None:
+    contract = build_minimal_contract(
+        run_id="forecast-available",
+        user_text="预测未来四周的销售额",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    registry = AgentToolRegistry(
+        [
+            AgentToolSpec(
+                name="forecast",
+                description="受治理预测",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(capabilities=("stats.forecast",)),
+            )
+        ],
+        enabled_capability_profiles=frozenset({"forecast"}),
+    )
+
+    result = await create_production_plan(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=registry,
+        gateway=None,
+        blocking_clarification=None,
+    )
+
+    assert result.validation.valid is True
+    assert result.capabilities == {"stats.forecast"}
+
+
 @pytest.mark.parametrize(
     ("user_text", "expected"),
     [

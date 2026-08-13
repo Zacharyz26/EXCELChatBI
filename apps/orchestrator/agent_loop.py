@@ -164,6 +164,8 @@ _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助�
 显著性一律基于工具返回的 significant 字段表述；存在 adjusted_p_value 时不得用原始 p_value
 绕过多重检验校正。统计工具返回 statistical_evidence 时，最终答复必须披露其样本处理、
 方法假设和局限；异常根因只能称为待验证的候选解释因素。
+预测结论只能来自 forecast 工具；必须披露留出验证误差、基线比较、预测区间与 reliability，
+reliability=limited 或 beats_baseline=false 时不得表述为可靠预测。
 11. 输出格式：直接写简洁的中文段落，重点结论可用不超过 5 条的短列表；\
 不要输出表格、分隔线（---）、引用块（>）、多级标题或代码块；不要罗列原始 JSON。
 12. 用户明确要求图表、画图或可视化时，必须成功调用 gen_chart 后才能给最终答复；\
@@ -251,6 +253,7 @@ _CONFLICT_HISTORY_PATTERN = re.compile(r"(?:存在冲突口径|口径冲突|冲�
 _TOOL_LABELS = {
     "get_data_profile": "数据画像、角色与质量建议",
     "trend_analysis": "趋势分析",
+    "forecast": "受治理预测",
     "anomaly_detect": "异常检测",
     "regression": "回归分析",
     "correlation": "相关性分析",
@@ -269,6 +272,7 @@ _TOOL_LABELS = {
 _LEGACY_ARTIFACT_TYPES = {
     "get_data_profile": "profile",
     "trend_analysis": "stats",
+    "forecast": "stats",
     "anomaly_detect": "stats",
     "regression": "stats",
     "correlation": "stats",
@@ -5560,6 +5564,7 @@ def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
         return payload
     if tool in {
         "trend_analysis",
+        "forecast",
         "anomaly_detect",
         "regression",
         "correlation",
@@ -5618,6 +5623,9 @@ _ARG_LABELS = {
     "period": "周期",
     "ma_window": "窗口",
     "forecast_horizon": "预测步数",
+    "horizon": "预测期数",
+    "validation_size": "验证样本数",
+    "seasonal_period": "季节周期",
     "contamination": "异常比例",
     "target": "目标列",
     "features": "自变量",
@@ -5710,6 +5718,12 @@ def _summarize_result(tool: str, result: Any) -> str:
         )
     if tool == "trend_analysis":
         return f"方向={result.get('direction', '?')}，样本 n={result.get('n', '?')}"
+    if tool == "forecast":
+        metrics = result.get("validation_metrics") or {}
+        return (
+            f"方法={result.get('selected_method', '?')}，"
+            f"可靠性={result.get('reliability', '?')}，MAE={metrics.get('mae')}"
+        )
     if tool == "anomaly_detect":
         return f"共 {result.get('n_total', '?')} 点，检出异常 {result.get('n_anomalies', '?')} 个"
     if tool == "regression":
@@ -5761,6 +5775,7 @@ def _model_view(tool: str, result: Any, max_chars: int) -> str:
         view = {k: v for k, v in result.items() if k != "markdown"}
     elif tool in {
         "trend_analysis",
+        "forecast",
         "anomaly_detect",
         "regression",
         "correlation",

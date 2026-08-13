@@ -17,6 +17,7 @@ AGENT_MCP_SERVICE_TOOLS: dict[str, tuple[str, ...]] = {
         "correlation",
         "dimension_contribution",
         "group_compare",
+        "forecast",
     ),
     "chart-tools": (
         "gen_chart",

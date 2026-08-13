@@ -12,6 +12,7 @@ AnalysisKind = Literal[
     "correlation",
     "contribution",
     "group_comparison",
+    "forecast",
 ]
 
 
@@ -33,6 +34,7 @@ _MINIMUM_SAMPLE_SIZE: dict[AnalysisKind, int] = {
     "correlation": 5,
     "contribution": 5,
     "group_comparison": 10,
+    "forecast": 12,
 }
 
 

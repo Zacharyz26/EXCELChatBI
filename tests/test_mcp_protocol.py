@@ -968,7 +968,7 @@ def test_every_project_server_exports_governed_mcp_metadata() -> None:
     descriptors = [
         descriptor for server in servers for descriptor in server.as_mcp_adapter().list_tools()
     ]
-    assert len(descriptors) == 17
+    assert len(descriptors) == 18
     assert all(descriptor.metadata.capabilities for descriptor in descriptors)
     assert all(descriptor.output_schema.get("type") == "object" for descriptor in descriptors)
     assert all(

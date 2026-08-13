@@ -34,6 +34,7 @@ from mcp_servers.excel_parser.server import build_server as build_excel  # noqa:
 from mcp_servers.report.server import build_server as build_report  # noqa: E402
 from mcp_servers.stats.schemas import (  # noqa: E402
     DIMENSION_CONTRIBUTION_SCHEMA,
+    FORECAST_SCHEMA,
     GROUP_COMPARE_SCHEMA,
     REGRESSION_SCHEMA,
 )
@@ -48,6 +49,7 @@ from packages.session.store import SessionStore  # noqa: E402
 _EXPECTED_TOOLS = [
     "get_data_profile",
     "trend_analysis",
+    "forecast",
     "anomaly_detect",
     "regression",
     "correlation",
@@ -143,6 +145,7 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     """schema 同源（红线3）：喂模型的 parameters 就是 Tool.invoke 校验的 schema。"""
     defs = {d["function"]["name"]: d["function"]["parameters"] for d in _registry().openai_tools()}
     assert defs["regression"] is REGRESSION_SCHEMA
+    assert defs["forecast"] is FORECAST_SCHEMA
     assert defs["dimension_contribution"] is DIMENSION_CONTRIBUTION_SCHEMA
     assert defs["group_compare"] is GROUP_COMPARE_SCHEMA
     assert defs["kb_search"] is KB_SEARCH_SCHEMA
@@ -266,6 +269,36 @@ def test_enabled_forecast_profile_remains_unavailable_without_tool() -> None:
     )
     assert forecast["allowed"] is False
     assert forecast["unavailable_reason"] == "tool_unavailable"
+
+
+def test_forecast_tool_requires_profile_and_becomes_allowed_when_enabled() -> None:
+    disabled = _registry()
+    enabled = build_registry(
+        excel=build_excel(),
+        stats=build_stats(),
+        chart=build_chart(),
+        dataset_ops=build_ops(),
+        report=build_report(),
+        retriever=cast(HybridRetriever, _FakeRetriever()),
+        enabled_capability_profiles=frozenset({"stats", "browser", "forecast"}),
+    )
+
+    disabled_catalog = {
+        str(item["name"]): item for item in disabled.capability_catalog()
+    }
+    enabled_catalog = {
+        str(item["name"]): item for item in enabled.capability_catalog()
+    }
+    assert disabled_catalog["stats.forecast"]["allowed"] is False
+    assert disabled_catalog["stats.forecast"]["unavailable_reason"] == "profile_not_enabled"
+    assert enabled_catalog["stats.forecast"]["allowed"] is True
+    assert enabled_catalog["stats.forecast"]["required_profile"] == "forecast"
+    assert "forecast" not in disabled.tool_names_from_snapshot(
+        disabled.capability_catalog_snapshot()
+    )
+    assert "forecast" in enabled.tool_names_from_snapshot(
+        enabled.capability_catalog_snapshot()
+    )
 
 
 @pytest.mark.parametrize("raw", ["stats,stats", "stats,unknown", "stats,"])

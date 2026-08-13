@@ -46,6 +46,7 @@ _STATISTICAL_EVIDENCE_SCHEMA = _closed_object(
                 "correlation",
                 "contribution",
                 "group_comparison",
+                "forecast",
             ],
         },
         "method": _STRING,
@@ -241,6 +242,98 @@ _PAIRWISE_COMPARISON_SCHEMA = _closed_object(
     "adjusted_p_value",
     "significant",
     "effect_size_hedges_g",
+)
+
+_FORECAST_METRICS_SCHEMA = _closed_object(
+    {
+        "mae": _NUMBER_OR_NULL,
+        "rmse": _NUMBER_OR_NULL,
+        "smape": _NUMBER_OR_NULL,
+        "mape": _NUMBER_OR_NULL,
+    },
+    "mae",
+    "rmse",
+    "smape",
+    "mape",
+)
+_FORECAST_SPLIT_SCHEMA = _closed_object(
+    {
+        "total_observations": _INTEGER,
+        "training_observations": _INTEGER,
+        "validation_observations": _INTEGER,
+        "training_start": _STRING,
+        "training_end": _STRING,
+        "validation_start": _STRING,
+        "validation_end": _STRING,
+    },
+    "total_observations",
+    "training_observations",
+    "validation_observations",
+    "training_start",
+    "training_end",
+    "validation_start",
+    "validation_end",
+)
+_FORECAST_BASELINE_SCHEMA = _closed_object(
+    {
+        "method": {"const": "naive"},
+        "metrics": _FORECAST_METRICS_SCHEMA,
+        "beats_baseline": {"type": "boolean"},
+        "mae_improvement": _NUMBER_OR_NULL,
+        "mae_improvement_percent": _NUMBER_OR_NULL,
+    },
+    "method",
+    "metrics",
+    "beats_baseline",
+    "mae_improvement",
+    "mae_improvement_percent",
+)
+_FORECAST_INTERVAL_SCHEMA = _closed_object(
+    {
+        "level": {"const": 0.95},
+        "method": {"const": "empirical_absolute_error"},
+        "radius": _NUMBER_OR_NULL,
+        "validation_coverage": _NUMBER_OR_NULL,
+    },
+    "level",
+    "method",
+    "radius",
+    "validation_coverage",
+)
+_FORECAST_LEAKAGE_SCHEMA = _closed_object(
+    {
+        "passed": {"const": True},
+        "chronological_split": {"const": True},
+        "duplicate_timestamps": {"const": False},
+        "regular_frequency": {"const": True},
+        "future_target_rows_used": {"const": False},
+        "preprocessing_fit_on_training_only": {"const": True},
+    },
+    "passed",
+    "chronological_split",
+    "duplicate_timestamps",
+    "regular_frequency",
+    "future_target_rows_used",
+    "preprocessing_fit_on_training_only",
+)
+_FORECAST_POINT_SCHEMA = _closed_object(
+    {
+        "time": _STRING,
+        "point": _NUMBER_OR_NULL,
+        "lower": _NUMBER_OR_NULL,
+        "upper": _NUMBER_OR_NULL,
+    },
+    "time",
+    "point",
+    "lower",
+    "upper",
+)
+_FORECAST_CANDIDATE_METRICS_SCHEMA = _closed_object(
+    {
+        "naive": _FORECAST_METRICS_SCHEMA,
+        "drift": _FORECAST_METRICS_SCHEMA,
+        "seasonal_naive": _FORECAST_METRICS_SCHEMA,
+    }
 )
 
 _ROLE_CANDIDATE_SCHEMA = _closed_object(
@@ -440,6 +533,44 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
         "n",
         "points",
         "forecast",
+        "statistical_evidence",
+    ),
+    "forecast": _closed_object(
+        {
+            "requested_method": {
+                "type": "string",
+                "enum": ["auto", "naive", "drift", "seasonal_naive"],
+            },
+            "selected_method": {
+                "type": "string",
+                "enum": ["naive", "drift", "seasonal_naive"],
+            },
+            "reliability": {"type": "string", "enum": ["moderate", "limited"]},
+            "frequency": _STRING,
+            "horizon": _INTEGER,
+            "seasonal_period": {"type": ["integer", "null"]},
+            "split": _FORECAST_SPLIT_SCHEMA,
+            "validation_metrics": _FORECAST_METRICS_SCHEMA,
+            "baseline": _FORECAST_BASELINE_SCHEMA,
+            "prediction_interval": _FORECAST_INTERVAL_SCHEMA,
+            "leakage_checks": _FORECAST_LEAKAGE_SCHEMA,
+            "candidate_metrics": _FORECAST_CANDIDATE_METRICS_SCHEMA,
+            "predictions": {"type": "array", "items": _FORECAST_POINT_SCHEMA},
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
+        },
+        "requested_method",
+        "selected_method",
+        "reliability",
+        "frequency",
+        "horizon",
+        "seasonal_period",
+        "split",
+        "validation_metrics",
+        "baseline",
+        "prediction_interval",
+        "leakage_checks",
+        "candidate_metrics",
+        "predictions",
         "statistical_evidence",
     ),
     "anomaly_detect": _object(

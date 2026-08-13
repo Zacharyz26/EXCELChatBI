@@ -25,6 +25,7 @@ from mcp_servers.stats.tools import (  # noqa: E402
     anomaly_detect,
     correlation,
     dimension_contribution,
+    forecast,
     group_compare,
     regression,
     trend_analysis,
@@ -143,6 +144,215 @@ def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
     }
     assert evidence["inference"]["causal_claim_allowed"] is False
     assert any("时间泄漏" in item for item in evidence["limitations"])
+
+
+def test_forecast_uses_chronological_holdout_and_beats_naive_baseline() -> None:
+    values = np.arange(1, 31, dtype=float)
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=len(values), freq="D"),
+                "销量": values,
+            }
+        )
+    )
+
+    result = forecast(
+        {
+            "dataset_ref": ref,
+            "time_col": "日期",
+            "value_col": "销量",
+            "horizon": 3,
+            "method": "auto",
+            "validation_size": 6,
+        }
+    )
+
+    assert result["selected_method"] == "drift"
+    assert result["reliability"] == "moderate"
+    assert result["validation_metrics"]["mae"] == pytest.approx(0.0)
+    assert result["baseline"]["beats_baseline"] is True
+    assert result["split"]["training_observations"] == 24
+    assert result["split"]["validation_observations"] == 6
+    assert result["split"]["training_end"] < result["split"]["validation_start"]
+    assert result["leakage_checks"] == {
+        "passed": True,
+        "chronological_split": True,
+        "duplicate_timestamps": False,
+        "regular_frequency": True,
+        "future_target_rows_used": False,
+        "preprocessing_fit_on_training_only": True,
+    }
+    assert [item["point"] for item in result["predictions"]] == [31.0, 32.0, 33.0]
+    evidence = result["statistical_evidence"]
+    assert evidence["analysis_kind"] == "forecast"
+    assert any("留出窗口" in item for item in evidence["limitations"])
+    validate_json(
+        result,
+        tool_output_schema("forecast"),
+        code="invalid_tool_output",
+        label="预测输出",
+    )
+
+
+def test_forecast_seasonal_naive_uses_complete_cycles() -> None:
+    pattern = np.array([10.0, 20.0, 30.0, 40.0])
+    values = np.tile(pattern, 8)
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=len(values), freq="W"),
+                "销量": values,
+            }
+        )
+    )
+
+    result = forecast(
+        {
+            "dataset_ref": ref,
+            "time_col": "日期",
+            "value_col": "销量",
+            "horizon": 5,
+            "method": "seasonal_naive",
+            "seasonal_period": 4,
+            "validation_size": 8,
+        }
+    )
+
+    assert result["selected_method"] == "seasonal_naive"
+    assert [item["point"] for item in result["predictions"]] == [10.0, 20.0, 30.0, 40.0, 10.0]
+    assert result["prediction_interval"]["level"] == 0.95
+    assert result["validation_metrics"]["mae"] == pytest.approx(0.0)
+
+
+def test_forecast_validation_window_must_cover_horizon() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=24, freq="D"),
+                "销售额": np.arange(24, dtype=float),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="validation_size 至少覆盖 horizon"):
+        forecast(
+            {
+                "dataset_ref": ref,
+                "time_col": "日期",
+                "value_col": "销售额",
+                "horizon": 6,
+                "validation_size": 4,
+            }
+        )
+
+
+def test_forecast_that_does_not_beat_naive_is_explicitly_limited() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=20, freq="D"),
+                "销售额": np.repeat(100.0, 20),
+            }
+        )
+    )
+
+    result = forecast(
+        {
+            "dataset_ref": ref,
+            "time_col": "日期",
+            "value_col": "销售额",
+            "horizon": 2,
+        }
+    )
+
+    assert result["selected_method"] == "naive"
+    assert result["baseline"]["beats_baseline"] is False
+    assert result["reliability"] == "limited"
+    assert any(
+        "低置信参考" in item
+        for item in result["statistical_evidence"]["limitations"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("frame", "message"),
+    [
+        (
+            pd.DataFrame(
+                {
+                    "日期": pd.to_datetime(
+                        ["2025-01-01", "2025-01-02", "2025-01-04"]
+                    ),
+                    "值": [1.0, 2.0, 3.0],
+                }
+            ),
+            "时间间隔不规则",
+        ),
+        (
+            pd.DataFrame(
+                {
+                    "日期": pd.to_datetime(["2025-01-01"] * 12),
+                    "值": np.arange(12, dtype=float),
+                }
+            ),
+            "重复时间点",
+        ),
+    ],
+)
+def test_forecast_rejects_time_leakage_risks(frame: pd.DataFrame, message: str) -> None:
+    # Irregular case needs enough records to pass the sample-size gate first.
+    if len(frame) < 12:
+        frame = pd.concat([frame] * 4, ignore_index=True)
+        frame["日期"] = pd.to_datetime(
+            [
+                "2025-01-01",
+                "2025-01-02",
+                "2025-01-04",
+                "2025-01-05",
+                "2025-01-06",
+                "2025-01-08",
+                "2025-01-09",
+                "2025-01-10",
+                "2025-01-12",
+                "2025-01-13",
+                "2025-01-14",
+                "2025-01-16",
+            ]
+        )
+    ref = save_dataframe(frame)
+
+    with pytest.raises(ValueError, match=message):
+        forecast(
+            {
+                "dataset_ref": ref,
+                "time_col": "日期",
+                "value_col": "值",
+                "horizon": 2,
+            }
+        )
+
+
+def test_forecast_rejects_protected_values() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=20, freq="D"),
+                "值": np.arange(20, dtype=float),
+            }
+        )
+    )
+    save_metadata(ref, {"policy": {"columns": {"值": "exclude"}}})
+
+    with pytest.raises(ValueError, match="受数据策略保护"):
+        forecast(
+            {
+                "dataset_ref": ref,
+                "time_col": "日期",
+                "value_col": "值",
+                "horizon": 2,
+            }
+        )
 
 
 def test_anomaly_iqr_flags_outlier(anomaly_ref: str) -> None:

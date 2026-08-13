@@ -18,6 +18,7 @@ _WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.
         ("lineage_quality", "lineage-quality"),
         ("coref_mcp_transport", "coref-mcp-transport"),
         ("kb_quality", "kb-evaluation"),
+        ("forecast_quality", "forecast-quality"),
     ],
 )
 def test_quality_report_upload_only_runs_after_gate_execution(

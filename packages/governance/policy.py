@@ -31,6 +31,7 @@ DEFAULT_AGENT_TOOL_ALLOWLIST = frozenset(
         "correlation",
         "dimension_contribution",
         "group_compare",
+        "forecast",
         "gen_chart",
         "chart_screenshot",
         "transform_dataset",

@@ -84,6 +84,24 @@ def test_high_confidence_trend_roles_pass_without_confirmation() -> None:
     assert [item["effective_role"] for item in result.checks] == ["time", "metric"]
 
 
+def test_forecast_requires_time_and_metric_roles() -> None:
+    result = validate_data_role_preconditions(
+        tool_name="forecast",
+        arguments={
+            "dataset_ref": "d" * 32,
+            "time_col": "发生时间",
+            "value_col": "金额",
+            "horizon": 4,
+        },
+        dataset=_dataset(),
+        confirmations=(),
+        data_version_hash="a" * 64,
+    )
+
+    assert result is not None and result.allowed is True
+    assert [item["effective_role"] for item in result.checks] == ["time", "metric"]
+
+
 def test_ambiguous_group_role_requires_current_data_version_confirmation() -> None:
     arguments = {
         "dataset_ref": "d" * 32,

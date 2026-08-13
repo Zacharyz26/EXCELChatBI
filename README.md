@@ -36,8 +36,9 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 关闭；阶段 6C 的有界候选、验证生命周期、确定性跟进、匿名评测和 Compose 恢复门禁已由
 提交 `d5005ee` 的
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-验证关闭。当前进入 6D；6D-1 正在为四类现有统计 Tool 增加统一 Evidence 护栏，预测仍须
-使用独立 `stats.forecast` Tool/Profile。
+验证关闭。当前开发 6D；统一统计 Evidence、受治理高级统计、独立 `stats.forecast`
+Tool/Profile，以及匿名质量门禁、React 局限展示和预测双传输/Compose 恢复探针已完成
+本地验证，待远程完整 CI。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -152,8 +153,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
 - **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6C 工程门禁已完成并通过真实 Compose CI。
-  6D 统计/预测护栏与后续多数据集自主分析仍未完成；真实 CPU/GPU semantic 等价和领域签字
-  继续作为发布债务；
+  6D-1～6D-4 已完成本地验证但尚待远程完整 CI，后续多数据集自主分析亦未开始；
+  真实 CPU/GPU semantic 等价和领域签字继续作为发布债务；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -206,7 +207,7 @@ v2.5 阶段 6B（已关闭；完整 CI 与 Compose 恢复门禁全绿）
 v2.5 阶段 6C（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   有界候选筛选 → 用户选择 → Evidence/Verifier 生命周期 → 确定性跟进/发布门禁
 
-v2.5 阶段 6D（开发中；6D-1、6D-2 已完成本地验证并待远程完整 CI）
+v2.5 阶段 6D（开发中；6D-1～6D-4 已完成本地验证并待远程完整 CI）
   统一统计 Evidence → 受治理贡献/分群/回归诊断 → 独立预测 Tool/Profile → 发布门禁
 
 v2.5 阶段 6E（未开始）

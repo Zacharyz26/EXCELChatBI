@@ -20,6 +20,16 @@ def build_server() -> MCPServer:
     )
     server.register(
         Tool(
+            "forecast",
+            "受治理预测",
+            schemas.FORECAST_SCHEMA,
+            tools.forecast,
+            output_schema=tool_output_schema("forecast"),
+            metadata=tool_metadata("stats.forecast", "stats"),
+        )
+    )
+    server.register(
+        Tool(
             "anomaly_detect", "异常检测", schemas.ANOMALY_DETECT_SCHEMA,
             tools.anomaly_detect, output_schema=tool_output_schema("anomaly_detect"),
             metadata=tool_metadata("stats.anomaly", "stats", tool_version="1.1.0")

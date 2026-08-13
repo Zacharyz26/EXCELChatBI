@@ -130,6 +130,42 @@ def test_insight_summary_is_pure_concat() -> None:
     assert "上升" in res["summary_md"] and "订单数驱动" in res["summary_md"]
 
 
+def test_report_renders_governed_forecast_evidence() -> None:
+    stats = [
+        {
+            "kind": "forecast",
+            "caption": "销售额预测",
+            "result": {
+                "selected_method": "drift",
+                "reliability": "moderate",
+                "horizon": 2,
+                "validation_metrics": {"mae": 1.25, "rmse": 1.5},
+                "baseline": {"beats_baseline": True},
+                "predictions": [
+                    {
+                        "time": "2026-01-01T00:00:00",
+                        "point": 120.0,
+                        "lower": 117.0,
+                        "upper": 123.0,
+                    }
+                ],
+            },
+        }
+    ]
+
+    result = _report_tool("gen_report_md").invoke(
+        {
+            "title": "预测报告",
+            "profile": {"row_count": 30, "columns": []},
+            "stats": stats,
+        }
+    )
+
+    markdown = result["markdown"]
+    assert "drift" in markdown and "moderate" in markdown
+    assert "1.25" in markdown and "117" in markdown and "123" in markdown
+
+
 def test_export_pdf_produces_pdf() -> None:
     profile = {"row_count": 1, "column_count": 1, "columns": []}
     md = _report_tool("gen_report_md").invoke({"title": "PDF 测试", "profile": profile})

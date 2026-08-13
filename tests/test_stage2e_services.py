@@ -68,7 +68,7 @@ def test_five_service_catalog_is_complete_and_disjoint() -> None:
     flattened = [
         tool_name for tool_names in AGENT_MCP_SERVICE_TOOLS.values() for tool_name in tool_names
     ]
-    assert len(flattened) == 14
+    assert len(flattened) == 15
     assert len(flattened) == len(set(flattened))
 
 

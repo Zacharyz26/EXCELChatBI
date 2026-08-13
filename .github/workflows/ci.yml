@@ -116,6 +116,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Run deterministic governed forecast quality gate
+        id: forecast_quality
+        run: >-
+          uv run --frozen python scripts/forecast_quality_eval.py
+          --enforce --json-output .data/forecast-quality.json
+
+      - name: Upload governed forecast quality report
+        if: ${{ !cancelled() && steps.forecast_quality.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: forecast-quality
+          path: .data/forecast-quality.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run MCP Tool and Resource transport equivalence probe
         id: coref_mcp_transport
         run: >-

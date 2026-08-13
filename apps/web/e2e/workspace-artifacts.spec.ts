@@ -1316,6 +1316,80 @@ test("角色与质量建议 Artifact 展示置信边界且不宣称自动清洗"
   await expect(card).toContainText("不得静默用 0 替代");
 });
 
+test("预测 Artifact 显式展示基线、区间、泄漏检查和低置信局限", async ({ page }) => {
+  const state = await installMockApi(page);
+  const assistant = message("forecast-message", "assistant", "预测已完成，但可靠性受限。");
+  state.messages.push(assistant);
+  state.artifacts.push(artifact(
+    "forecast-artifact",
+    "forecast-message",
+    "stats",
+    {
+      kind: "forecast",
+      result: {
+        requested_method: "auto",
+        selected_method: "naive",
+        reliability: "limited",
+        frequency: "D",
+        horizon: 2,
+        seasonal_period: null,
+        validation_metrics: { mae: 3.25, rmse: 4.1, smape: 2.7, mape: 2.8 },
+        baseline: {
+          method: "naive",
+          metrics: { mae: 3.25, rmse: 4.1, smape: 2.7, mape: 2.8 },
+          beats_baseline: false,
+          mae_improvement: 0,
+          mae_improvement_percent: 0,
+        },
+        prediction_interval: {
+          level: 0.95,
+          method: "empirical_absolute_error",
+          radius: 6.5,
+          validation_coverage: 1,
+        },
+        leakage_checks: {
+          passed: true,
+          chronological_split: true,
+          duplicate_timestamps: false,
+          regular_frequency: true,
+          future_target_rows_used: false,
+          preprocessing_fit_on_training_only: true,
+        },
+        predictions: [
+          { time: "2026-01-01T00:00:00", point: 120, lower: 113.5, upper: 126.5 },
+          { time: "2026-01-02T00:00:00", point: 120, lower: 113.5, upper: 126.5 },
+        ],
+        statistical_evidence: {
+          sample: { total_rows: 24, valid_rows: 24 },
+          assumptions: ["时间列严格唯一且等间隔。"],
+          limitations: [
+            "所选方法未优于最后值朴素基线，应把预测视为低置信参考。",
+            "预测区间不等同于已校准概率区间。",
+          ],
+        },
+      },
+    },
+    "forecast",
+  ));
+
+  await page.goto("/");
+
+  const card = page.locator(".forecast-artifact");
+  await expect(card).toContainText("可靠性受限");
+  await expect(card.getByLabel("预测可靠性")).toContainText("受限（低置信参考）");
+  await expect(card).toContainText("未优于最后值朴素基线");
+  await expect(card).toContainText("留出 MAE");
+  await expect(card).toContainText("3.25");
+  await expect(card).toContainText("95% 经验区间半径");
+  await expect(card).toContainText("6.5");
+  await expect(card).toContainText("时间泄漏检查");
+  await expect(card.getByLabel("统计 Evidence 与局限")).toContainText("结论局限");
+  await expect(card).toContainText("不等同于已校准概率区间");
+
+  await page.reload();
+  await expect(page.locator(".forecast-artifact")).toContainText("低置信参考");
+});
+
 test("Chart Artifact 在生成后及刷新后都可见", async ({ page }) => {
   await installMockApi(page);
   await page.goto("/");

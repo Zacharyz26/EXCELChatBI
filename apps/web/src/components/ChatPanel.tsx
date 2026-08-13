@@ -681,18 +681,39 @@ function TableArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
 
 const STATS_KIND_LABELS: Record<string, string> = {
   trend_analysis: "趋势分析",
+  forecast: "受治理预测",
   anomaly_detect: "异常检测",
   regression: "回归分析",
   correlation: "相关性分析",
+  dimension_contribution: "维度贡献分析",
+  group_compare: "分群比较",
+};
+
+const STATS_FIELD_LABELS: Record<string, string> = {
+  method: "方法",
+  direction: "方向",
+  n: "有效样本",
+  n_obs: "有效样本",
+  n_total: "总样本",
+  n_anomalies: "异常数量",
+  r_squared: "R²",
+  adj_r_squared: "调整 R²",
+  group_count: "分组数量",
 };
 
 function StatsArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
   const payload = artifact.payload ?? {};
   const kind = stringOf(payload.kind) || artifact.source_tool || "stats";
   const result = isRecord(payload.result) ? payload.result : payload;
+  if (kind === "forecast") {
+    return <ForecastArtifact result={result} />;
+  }
   const highlights = Object.entries(result)
     .filter(([, value]) => typeof value === "number" || typeof value === "string")
     .slice(0, 4);
+  const evidence = isRecord(result.statistical_evidence)
+    ? result.statistical_evidence
+    : null;
   return (
     <section className="stats-artifact">
       <div className="stats-artifact__heading">
@@ -703,16 +724,120 @@ function StatsArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
         <dl>
           {highlights.map(([key, value]) => (
             <div key={key}>
-              <dt>{key}</dt>
+              <dt>{STATS_FIELD_LABELS[key] ?? key}</dt>
               <dd>{typeof value === "number" ? formatNumber(value) : String(value)}</dd>
             </div>
           ))}
         </dl>
       )}
+      {evidence && <StatisticalEvidence evidence={evidence} />}
       <details>
         <summary>完整结果</summary>
         <pre>{JSON.stringify(result, null, 2)}</pre>
       </details>
+    </section>
+  );
+}
+
+function ForecastArtifact({ result }: { result: Record<string, unknown> }) {
+  const metrics = isRecord(result.validation_metrics) ? result.validation_metrics : {};
+  const baseline = isRecord(result.baseline) ? result.baseline : {};
+  const interval = isRecord(result.prediction_interval) ? result.prediction_interval : {};
+  const leakage = isRecord(result.leakage_checks) ? result.leakage_checks : {};
+  const evidence = isRecord(result.statistical_evidence)
+    ? result.statistical_evidence
+    : null;
+  const predictions = Array.isArray(result.predictions)
+    ? result.predictions.filter(isRecord).slice(0, 12)
+    : [];
+  const reliability = stringOf(result.reliability);
+  const limited = reliability === "limited" || baseline.beats_baseline === false;
+  const reliabilityLabel = limited ? "受限（低置信参考）" : "中等";
+
+  return (
+    <section className={`stats-artifact forecast-artifact${limited ? " forecast-artifact--limited" : ""}`}>
+      <div className="stats-artifact__heading">
+        <span>受治理预测</span>
+        <span className={`artifact-status${limited ? " artifact-status--warning" : ""}`}>
+          {limited ? "可靠性受限" : "验证通过"}
+        </span>
+      </div>
+      <div className="forecast-artifact__reliability" aria-label="预测可靠性">
+        <strong>{reliabilityLabel}</strong>
+        <span>
+          {baseline.beats_baseline === true
+            ? "留出验证优于最后值朴素基线"
+            : "未优于最后值朴素基线，不应视为可靠预测"}
+        </span>
+      </div>
+      <dl>
+        <div><dt>所选方法</dt><dd>{stringOf(result.selected_method) || "—"}</dd></div>
+        <div><dt>预测期数</dt><dd>{formatNumber(result.horizon)}</dd></div>
+        <div><dt>留出 MAE</dt><dd>{formatNumber(metrics.mae)}</dd></div>
+        <div><dt>留出 RMSE</dt><dd>{formatNumber(metrics.rmse)}</dd></div>
+        <div>
+          <dt>95% 经验区间半径</dt>
+          <dd>{formatNumber(interval.radius)}</dd>
+        </div>
+        <div>
+          <dt>时间泄漏检查</dt>
+          <dd>{leakage.passed === true ? "通过" : "未通过"}</dd>
+        </div>
+      </dl>
+      {predictions.length > 0 && (
+        <div className="forecast-artifact__predictions">
+          <strong>预测值与经验区间</strong>
+          <table>
+            <thead><tr><th>时间</th><th>点预测</th><th>下界</th><th>上界</th></tr></thead>
+            <tbody>
+              {predictions.map((prediction, index) => (
+                <tr key={`${stringOf(prediction.time)}-${index}`}>
+                  <td>{formatForecastTime(prediction.time)}</td>
+                  <td>{formatNumber(prediction.point)}</td>
+                  <td>{formatNumber(prediction.lower)}</td>
+                  <td>{formatNumber(prediction.upper)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {Array.isArray(result.predictions) && result.predictions.length > predictions.length && (
+            <p>仅展示前 {predictions.length} 期，完整结果可在下方展开查看。</p>
+          )}
+        </div>
+      )}
+      {evidence && <StatisticalEvidence evidence={evidence} />}
+      <details>
+        <summary>完整结果</summary>
+        <pre>{JSON.stringify(result, null, 2)}</pre>
+      </details>
+    </section>
+  );
+}
+
+function StatisticalEvidence({ evidence }: { evidence: Record<string, unknown> }) {
+  const sample = isRecord(evidence.sample) ? evidence.sample : {};
+  const assumptions = stringArray(evidence.assumptions);
+  const limitations = stringArray(evidence.limitations);
+  return (
+    <section className="stats-artifact__evidence" aria-label="统计 Evidence 与局限">
+      <div className="stats-artifact__evidence-heading">
+        <strong>统计 Evidence 与局限</strong>
+        {typeof sample.valid_rows === "number" && typeof sample.total_rows === "number" && (
+          <span>有效样本 {formatNumber(sample.valid_rows)} / {formatNumber(sample.total_rows)}</span>
+        )}
+      </div>
+      {assumptions.length > 0 && (
+        <div>
+          <span>方法假设</span>
+          <ul>{assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      )}
+      {limitations.length > 0 && (
+        <div className="stats-artifact__limitations">
+          <span>结论局限</span>
+          <ul>{limitations.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+      )}
     </section>
   );
 }
@@ -796,6 +921,12 @@ function stringOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
 function numberValue(value: unknown): number | null {
   return typeof value === "number" ? value : null;
 }
@@ -804,6 +935,17 @@ function formatNumber(value: unknown): string {
   if (typeof value !== "number") return String(value ?? "—");
   if (Number.isInteger(value)) return value.toLocaleString("zh-CN");
   return value.toLocaleString("zh-CN", { maximumFractionDigits: 4 });
+}
+
+function formatForecastTime(value: unknown): string {
+  if (typeof value !== "string") return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }
 
 function formatTime(value: string): string {

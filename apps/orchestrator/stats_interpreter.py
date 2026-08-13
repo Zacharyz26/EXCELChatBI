@@ -38,6 +38,7 @@ _KIND_LABEL = {
     "correlation": "相关性分析",
     "contribution": "维度贡献分析",
     "group_compare": "分群比较",
+    "forecast": "预测分析",
 }
 
 _SYSTEM_PROMPT = """你是一名 BI 数据解读助手。你只会收到一次统计分析的**结果摘要**\
@@ -46,14 +47,21 @@ _SYSTEM_PROMPT = """你是一名 BI 数据解读助手。你只会收到一次�
 规则：
 - 只解读所给摘要中的数字，**禁止自己计算或编造任何新的数字/统计量**；\
 你引用的每个数值都必须能在摘要里找到。
-- 抓住关键结论：趋势的方向与预测、异常的规模与占比、回归中显著的驱动因素等。
+- 抓住关键结论：趋势方向、预测留出误差/基线/区间、异常规模、回归显著关联等。
 - 必须披露 statistical_evidence 中的样本处理、方法假设和局限；相关或回归不得改写成因果结论，
   异常根因只能表述为候选解释因素。
+- 预测必须披露 reliability 和 beats_baseline；任一表明受限时只能称为低置信参考。
 - 直接输出中文段落，不要输出 JSON、代码块或列表标记。"""
 
 
 def _columns_used(kind: str, params: dict[str, Any]) -> list[str]:
     """该次统计涉及的列名（用于查数据集安全策略的列级规则）。"""
+    if kind == "forecast":
+        return [
+            col
+            for col in (params.get("time_col"), params.get("value_col"))
+            if isinstance(col, str)
+        ]
     if kind in ("trend", "anomaly"):
         col = params.get("value_col")
         return [col] if isinstance(col, str) else []
@@ -92,7 +100,7 @@ def extract_summary(
     anomaly 的 anomalies[] 逐点 index/value/score。只保留聚合量与结论。
 
     Args:
-        kind: trend | anomaly | regression | correlation | contribution | group_compare。
+        kind: trend | forecast | anomaly | regression | correlation | contribution | group_compare。
         result: 统计工具的完整输出（含明细）。
         dataset_ref: 数据集引用，用于解析其安全策略。
         params: 该次统计的入参（含涉及的列名）。
@@ -105,6 +113,7 @@ def extract_summary(
     """
     if kind not in (
         "trend",
+        "forecast",
         "anomaly",
         "regression",
         "correlation",
@@ -133,6 +142,40 @@ def extract_summary(
                 # 只取首末时间点，不发逐行时间数组
                 time_start=time[0] if time else None,
                 time_end=time[-1] if time else None,
+            )
+    elif kind == "forecast":
+        summary = {
+            "requested_method": result.get("requested_method"),
+            "selected_method": result.get("selected_method"),
+            "reliability": result.get("reliability"),
+            "horizon": result.get("horizon"),
+            "seasonal_period": result.get("seasonal_period"),
+            "leakage_checks": result.get("leakage_checks"),
+            "statistical_evidence": result.get("statistical_evidence"),
+        }
+        split = result.get("split") or {}
+        if redacted:
+            summary["split"] = {
+                key: split.get(key)
+                for key in (
+                    "total_observations",
+                    "training_observations",
+                    "validation_observations",
+                )
+            }
+            baseline = result.get("baseline") or {}
+            summary["baseline"] = {
+                "method": baseline.get("method"),
+                "beats_baseline": baseline.get("beats_baseline"),
+            }
+        else:
+            summary.update(
+                frequency=result.get("frequency"),
+                split=split,
+                validation_metrics=result.get("validation_metrics"),
+                baseline=result.get("baseline"),
+                prediction_interval=result.get("prediction_interval"),
+                predictions=result.get("predictions"),
             )
     elif kind == "anomaly":
         n_total = result.get("n_total") or 0

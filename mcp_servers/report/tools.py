@@ -186,6 +186,7 @@ _KIND_LABEL = {
     "correlation": "相关性分析",
     "contribution": "维度贡献分析",
     "group_compare": "分群比较",
+    "forecast": "预测分析",
 }
 
 
@@ -204,6 +205,26 @@ def _stat_md(section: dict[str, Any]) -> list[str]:
             f"- 预测（未来 {len(fc)} 期）：{'、'.join(_fmt(v) for v in fc) or '—'}",
             "",
         ]
+    elif kind == "forecast":
+        metrics = result.get("validation_metrics") or {}
+        baseline = result.get("baseline") or {}
+        out += [
+            f"- 方法 {result.get('selected_method', '—')} · 可靠性 "
+            f"{result.get('reliability', '—')} · MAE {_fmt(metrics.get('mae'))} · "
+            f"RMSE {_fmt(metrics.get('rmse'))}",
+            f"- 优于朴素基线：{'是' if baseline.get('beats_baseline') else '否'} · "
+            f"预测期数 {_fmt(result.get('horizon'))}",
+            "",
+        ]
+        predictions = result.get("predictions") or []
+        if predictions:
+            out += ["| 时间 | 点预测 | 区间下界 | 区间上界 |", "|---|---|---|---|"]
+            out += [
+                f"| {item.get('time', '')} | {_fmt(item.get('point'))} | "
+                f"{_fmt(item.get('lower'))} | {_fmt(item.get('upper'))} |"
+                for item in predictions
+            ]
+            out.append("")
     elif kind == "anomaly":
         out += [
             f"- 方法 {result.get('method', '—')} · 样本 {_fmt(result.get('n_total'))}"

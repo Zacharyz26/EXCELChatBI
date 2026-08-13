@@ -31,6 +31,9 @@ from mcp_servers.stats.evidence import build_statistical_evidence, holm_adjust
 
 _MIN_POINTS = 5  # 统计分析所需的最小有效样本量
 _MAX_COMPARISON_GROUPS = 10
+_FORECAST_MIN_POINTS = 12
+_FORECAST_MIN_TRAINING_POINTS = 8
+_FORECAST_INTERVAL_LEVEL = 0.95
 
 
 # ── 共享工具 ──
@@ -263,6 +266,275 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
             assumptions=[
                 "有效记录按时间升序排列，缺失的时间或指标记录按完整案例剔除。",
                 "趋势方法假定当前时间粒度和用户指定周期适用于所选序列。",
+            ],
+            limitations=limitations,
+        ),
+    }
+
+
+# ── 受治理预测 ──
+
+def _forecast_values(
+    method: str,
+    history: np.ndarray,
+    horizon: int,
+    seasonal_period: int | None,
+) -> np.ndarray:
+    """Generate deterministic univariate predictions without reading future targets."""
+    if method == "naive":
+        return np.repeat(float(history[-1]), horizon)
+    if method == "drift":
+        slope = (float(history[-1]) - float(history[0])) / (len(history) - 1)
+        return np.asarray(
+            [float(history[-1]) + slope * step for step in range(1, horizon + 1)]
+        )
+    if method == "seasonal_naive":
+        if seasonal_period is None:
+            raise ValueError("seasonal_naive 需要提供 seasonal_period")
+        if len(history) < 2 * seasonal_period:
+            raise ValueError("seasonal_naive 的训练集至少需要两个完整季节周期")
+        season = history[-seasonal_period:]
+        return np.asarray([float(season[index % seasonal_period]) for index in range(horizon)])
+    raise ValueError(f"不支持的预测方法: {method}")
+
+
+def _forecast_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float | None]:
+    """Return fixed validation metrics; MAPE is unavailable when any target is zero."""
+    errors = actual - predicted
+    absolute = np.abs(errors)
+    denominator = np.abs(actual) + np.abs(predicted)
+    smape_terms = np.divide(
+        2 * absolute,
+        denominator,
+        out=np.zeros_like(absolute, dtype=float),
+        where=denominator > 0,
+    )
+    mape = None
+    if bool(np.all(np.abs(actual) > 1e-12)):
+        mape = _f(float(np.mean(absolute / np.abs(actual)) * 100))
+    return {
+        "mae": _f(float(np.mean(absolute))),
+        "rmse": _f(float(np.sqrt(np.mean(errors**2)))),
+        "smape": _f(float(np.mean(smape_terms) * 100)),
+        "mape": mape,
+    }
+
+
+def _regular_frequency(times: pd.Series) -> str:
+    """Require a regular datetime index so future timestamps are not guessed."""
+    try:
+        frequency = pd.infer_freq(pd.DatetimeIndex(times))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("无法从时间列推断规则频率，不能生成受治理预测") from exc
+    if frequency is None:
+        raise ValueError("时间间隔不规则，不能生成受治理预测；请先按固定粒度整理数据")
+    return str(frequency)
+
+
+def forecast(args: dict[str, Any]) -> dict[str, Any]:
+    """Forecast a regular univariate series with chronological holdout validation."""
+    dataset_ref: str = args["dataset_ref"]
+    time_col: str = args["time_col"]
+    value_col: str = args["value_col"]
+    horizon = int(args["horizon"])
+    requested_method: str = args.get("method", "auto")
+    seasonal_period_raw = args.get("seasonal_period")
+    seasonal_period = int(seasonal_period_raw) if seasonal_period_raw is not None else None
+
+    _require_model_visible_columns(dataset_ref, [time_col, value_col])
+    df = load_dataframe(dataset_ref)
+    total_rows = len(df)
+    _require_columns(df, [time_col, value_col])
+    data = df[[time_col, value_col]].copy()
+    data[time_col] = pd.to_datetime(data[time_col], errors="coerce")
+    data[value_col] = pd.to_numeric(data[value_col], errors="coerce")
+    data[value_col] = data[value_col].replace([np.inf, -np.inf], np.nan)
+    data = data.dropna(subset=[time_col, value_col]).sort_values(time_col).reset_index(drop=True)
+    if len(data) < _FORECAST_MIN_POINTS:
+        raise ValueError(
+            f"有效时间点不足（{len(data)} < {_FORECAST_MIN_POINTS}），无法执行预测"
+        )
+    if bool(data[time_col].duplicated().any()):
+        raise ValueError("时间列包含重复时间点，训练/验证边界不唯一；请先按固定粒度聚合")
+
+    frequency = _regular_frequency(data[time_col])
+    if requested_method == "seasonal_naive" and seasonal_period is None:
+        raise ValueError("seasonal_naive 需要提供 seasonal_period")
+    if seasonal_period is not None and len(data) < 3 * seasonal_period:
+        raise ValueError(
+            "带季节周期的预测至少需要三个完整周期"
+            f"（{len(data)} < {3 * seasonal_period}）"
+        )
+
+    # 留出窗口至少覆盖用户要求的预测步数，否则给出的误差与区间并未在同等
+    # 长度上接受验证，不能作为该 horizon 的受治理证据。
+    default_validation = max(4, horizon, math.ceil(len(data) * 0.2))
+    if seasonal_period is not None:
+        default_validation = max(default_validation, seasonal_period)
+    validation_size = int(args.get("validation_size", default_validation))
+    minimum_training = max(
+        _FORECAST_MIN_TRAINING_POINTS,
+        2 * seasonal_period if seasonal_period is not None else 0,
+    )
+    if validation_size >= len(data) or len(data) - validation_size < minimum_training:
+        raise ValueError(
+            "训练/验证切分后训练样本不足"
+            f"（训练 {len(data) - validation_size} < {minimum_training}）"
+        )
+    if validation_size < horizon:
+        raise ValueError("validation_size 至少覆盖 horizon")
+    if seasonal_period is not None and validation_size < seasonal_period:
+        raise ValueError("validation_size 至少覆盖一个 seasonal_period")
+
+    values = data[value_col].to_numpy(dtype=float)
+    times = data[time_col]
+    training = values[:-validation_size]
+    validation = values[-validation_size:]
+    if not bool(times.iloc[-validation_size - 1] < times.iloc[-validation_size]):
+        raise ValueError("训练结束时间必须严格早于验证开始时间")
+
+    candidates = ["naive", "drift"]
+    if seasonal_period is not None:
+        candidates.append("seasonal_naive")
+    if requested_method != "auto":
+        candidates = [requested_method]
+
+    validation_predictions: dict[str, np.ndarray] = {}
+    candidate_metrics: dict[str, dict[str, float | None]] = {}
+    for candidate in candidates:
+        predicted = _forecast_values(
+            candidate,
+            training,
+            validation_size,
+            seasonal_period,
+        )
+        validation_predictions[candidate] = predicted
+        candidate_metrics[candidate] = _forecast_metrics(validation, predicted)
+
+    baseline_prediction = _forecast_values("naive", training, validation_size, None)
+    baseline_metrics = _forecast_metrics(validation, baseline_prediction)
+    if requested_method == "auto":
+        preference = {"naive": 0, "seasonal_naive": 1, "drift": 2}
+
+        def candidate_mae(name: str) -> float:
+            value = candidate_metrics[name]["mae"]
+            return float(value) if value is not None else math.inf
+
+        selected_method = min(
+            candidates,
+            key=lambda name: (
+                candidate_mae(name),
+                preference[name],
+            ),
+        )
+    else:
+        selected_method = requested_method
+
+    selected_validation_prediction = validation_predictions[selected_method]
+    selected_metrics = candidate_metrics[selected_method]
+    selected_mae_value = selected_metrics["mae"]
+    baseline_mae_value = baseline_metrics["mae"]
+    selected_mae = (
+        float(selected_mae_value) if selected_mae_value is not None else math.inf
+    )
+    baseline_mae = (
+        float(baseline_mae_value) if baseline_mae_value is not None else math.inf
+    )
+    beats_baseline = selected_mae < baseline_mae - 1e-12
+    mae_improvement = baseline_mae - selected_mae
+    improvement_percent = (
+        _f(mae_improvement / baseline_mae * 100)
+        if math.isfinite(baseline_mae) and baseline_mae > 0
+        else None
+    )
+
+    residuals = validation - selected_validation_prediction
+    absolute_residuals = np.abs(residuals)
+    interval_radius = float(
+        np.quantile(absolute_residuals, _FORECAST_INTERVAL_LEVEL, method="higher")
+    )
+    validation_coverage = float(np.mean(absolute_residuals <= interval_radius))
+    future_values = _forecast_values(selected_method, values, horizon, seasonal_period)
+    future_times = pd.date_range(
+        start=times.iloc[-1],
+        periods=horizon + 1,
+        freq=frequency,
+    )[1:]
+    predictions = [
+        {
+            "time": timestamp.isoformat(),
+            "point": _f(point),
+            "lower": _f(point - interval_radius),
+            "upper": _f(point + interval_radius),
+        }
+        for timestamp, point in zip(future_times, future_values, strict=True)
+    ]
+
+    limitations = [
+        "模型只使用单变量历史值，未纳入外部驱动因素、结构突变或未来事件。",
+        "95% 区间由单次时间留出集的经验绝对误差构造，不等同于已校准概率区间。",
+        "预测表现只代表当前留出窗口，不能保证未来误差保持不变。",
+    ]
+    if requested_method == "auto":
+        limitations.append(
+            "同一时间留出窗口用于有限候选方法选择和结果评估，误差可能偏乐观。"
+        )
+    if selected_metrics["mape"] is None:
+        limitations.append("验证目标包含零值，因此 MAPE 不可定义，使用 MAE/RMSE/sMAPE。")
+    if not beats_baseline:
+        limitations.append("所选方法未优于最后值朴素基线，应把预测视为低置信参考。")
+    return {
+        "requested_method": requested_method,
+        "selected_method": selected_method,
+        "reliability": "moderate" if beats_baseline else "limited",
+        "frequency": frequency,
+        "horizon": horizon,
+        "seasonal_period": seasonal_period,
+        "split": {
+            "total_observations": len(data),
+            "training_observations": len(training),
+            "validation_observations": len(validation),
+            "training_start": times.iloc[0].isoformat(),
+            "training_end": times.iloc[-validation_size - 1].isoformat(),
+            "validation_start": times.iloc[-validation_size].isoformat(),
+            "validation_end": times.iloc[-1].isoformat(),
+        },
+        "validation_metrics": selected_metrics,
+        "baseline": {
+            "method": "naive",
+            "metrics": baseline_metrics,
+            "beats_baseline": beats_baseline,
+            "mae_improvement": _f(mae_improvement),
+            "mae_improvement_percent": improvement_percent,
+        },
+        "prediction_interval": {
+            "level": _FORECAST_INTERVAL_LEVEL,
+            "method": "empirical_absolute_error",
+            "radius": _f(interval_radius),
+            "validation_coverage": _f(validation_coverage),
+        },
+        "leakage_checks": {
+            "passed": True,
+            "chronological_split": True,
+            "duplicate_timestamps": False,
+            "regular_frequency": True,
+            "future_target_rows_used": False,
+            "preprocessing_fit_on_training_only": True,
+        },
+        "candidate_metrics": candidate_metrics,
+        "predictions": predictions,
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="forecast",
+            method=selected_method,
+            total_rows=total_rows,
+            valid_rows=len(data),
+            minimum_required=max(
+                _FORECAST_MIN_POINTS,
+                minimum_training + validation_size,
+            ),
+            assumptions=[
+                "时间列严格唯一且等间隔，训练记录全部早于验证记录。",
+                "固定时间留出集可代表近期预测误差，未来延续当前数据生成机制。",
             ],
             limitations=limitations,
         ),

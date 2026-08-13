@@ -41,8 +41,9 @@ Invocation、Evidence Ledger 与 Verifier 结果状态；6C-3 已实现受预算
 用户确认约束的确定性跟进；6C-4 已加入匿名评测、CI 强制门禁及 Compose 浏览器/三次恢复
 探针；提交 `d5005ee` 的
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。当前进入 6D，先升级
-stats Tool Contract 和确定性统计 Evidence，再独立实现 forecast Tool/Profile。
+已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1～6D-4 的统计
+Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和预测传输/恢复探针已完成
+本地验证，当前待远程完整 CI。
 
 ## 2. 不随阶段变化的边界
 
@@ -193,8 +194,9 @@ stats Tool Contract 和确定性统计 Evidence，再独立实现 forecast Tool/
 > 已通过 CI 并关闭 6A。6B-1 数据角色与质量建议、6B-2 结构化确认与统计/聚合门禁及
 > 6B-3 匿名代表性评测与 6B-4 双传输/Compose 恢复门禁已由完整 CI 关闭。6C-1～6C-4 的
 > 有界候选、角色/capability 筛选、Plan/Invocation/Evidence/Verifier 状态绑定、确定性跟进、
-> 匿名评测和 Compose 恢复门禁已由提交 `d5005ee` 的完整 CI 关闭。当前进入 6D；6D-1 先为
-> 四类现有统计 Tool 增加统一 Evidence 护栏，受治理 forecast 仍须独立 Tool/Profile。
+> 匿名评测和 Compose 恢复门禁已由提交 `d5005ee` 的完整 CI 关闭。6D-1～6D-4 的统一
+> Evidence、高级统计、独立 `stats.forecast` Tool/Profile、匿名质量门禁、React 局限展示
+> 和预测双传输/Compose 恢复探针已完成本地验证，当前待远程完整 CI。
 
 ### MCP 设计
 

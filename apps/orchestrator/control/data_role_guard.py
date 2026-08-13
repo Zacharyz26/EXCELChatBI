@@ -61,6 +61,9 @@ def tool_role_requirements(
     if tool_name == "trend_analysis":
         scalar("time_col", "time")
         scalar("value_col", "metric")
+    elif tool_name == "forecast":
+        scalar("time_col", "time")
+        scalar("value_col", "metric")
     elif tool_name == "anomaly_detect":
         scalar("value_col", "metric")
         scalar("time_col", "time")

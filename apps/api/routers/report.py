@@ -51,6 +51,7 @@ _STATS_TOOLS = {
     "correlation": "correlation",
     "contribution": "dimension_contribution",
     "group_compare": "group_compare",
+    "forecast": "forecast",
 }
 _KIND_LABEL = {
     "trend": "趋势分析",
@@ -59,6 +60,7 @@ _KIND_LABEL = {
     "correlation": "相关性分析",
     "contribution": "维度贡献分析",
     "group_compare": "分群比较",
+    "forecast": "预测分析",
 }
 
 

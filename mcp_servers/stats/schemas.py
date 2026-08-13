@@ -28,6 +28,24 @@ TREND_ANALYSIS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+FORECAST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **_DATASET,
+        "value_col": {"type": "string"},
+        "time_col": {"type": "string"},
+        "horizon": {"type": "integer", "minimum": 1, "maximum": 100},
+        "method": {
+            "type": "string",
+            "enum": ["auto", "naive", "drift", "seasonal_naive"],
+        },
+        "validation_size": {"type": "integer", "minimum": 4, "maximum": 365},
+        "seasonal_period": {"type": "integer", "minimum": 2, "maximum": 365},
+    },
+    "required": ["dataset_ref", "value_col", "time_col", "horizon"],
+    "additionalProperties": False,
+}
+
 ANOMALY_DETECT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

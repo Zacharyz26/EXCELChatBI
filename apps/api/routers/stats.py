@@ -36,6 +36,7 @@ _TOOLS = {
     "correlation": "correlation",
     "contribution": "dimension_contribution",
     "group_compare": "group_compare",
+    "forecast": "forecast",
 }
 
 

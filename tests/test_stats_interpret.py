@@ -30,6 +30,7 @@ from mcp_servers.stats.tools import (  # noqa: E402
     anomaly_detect,
     correlation,
     dimension_contribution,
+    forecast,
     group_compare,
     regression,
     trend_analysis,
@@ -124,6 +125,26 @@ def regression_case() -> Case:
     return Case(regression({"dataset_ref": ref, **params}), ref, params)
 
 
+@pytest.fixture
+def forecast_case() -> Case:
+    n = 30
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.date_range("2025-01-01", periods=n, freq="D"),
+                "销量": 10 + 2 * np.arange(n, dtype=float),
+            }
+        )
+    )
+    params = {
+        "time_col": "日期",
+        "value_col": "销量",
+        "horizon": 3,
+        "validation_size": 6,
+    }
+    return Case(forecast({"dataset_ref": ref, **params}), ref, params)
+
+
 # ── 摘要提取：白名单剔除明细（红线1）──
 
 def test_summary_trend_drops_rowwise_series(trend_case: Case) -> None:
@@ -134,6 +155,33 @@ def test_summary_trend_drops_rowwise_series(trend_case: Case) -> None:
                       "time_start", "time_end"}
     assert "policy_redacted" not in s                          # 普通数据集不降级
     assert isinstance(s["time_start"], str) and isinstance(s["time_end"], str)
+
+
+def test_summary_forecast_keeps_only_governed_prediction_evidence(
+    forecast_case: Case,
+) -> None:
+    summary = extract_summary(
+        "forecast", forecast_case.result, forecast_case.ref, forecast_case.params
+    )
+
+    assert set(summary) == {
+        "requested_method",
+        "selected_method",
+        "reliability",
+        "frequency",
+        "horizon",
+        "seasonal_period",
+        "split",
+        "validation_metrics",
+        "baseline",
+        "prediction_interval",
+        "leakage_checks",
+        "predictions",
+        "statistical_evidence",
+    }
+    assert "candidate_metrics" not in summary
+    assert summary["baseline"]["beats_baseline"] is True
+    assert len(summary["predictions"]) == 3
 
 
 def test_summary_anomaly_collapses_points_to_aggregate(anomaly_case: Case) -> None:
@@ -273,6 +321,28 @@ def test_summary_regression_excluded_column_drops_coefficients() -> None:
     assert '"coefficients"' not in build_messages("regression", s)[1].content
 
 
+def test_summary_forecast_sensitive_time_column_drops_future_points(
+    forecast_case: Case,
+) -> None:
+    # 模拟下游读取时策略收紧；摘要层仍须独立执行失效保护。
+    save_metadata(
+        forecast_case.ref,
+        {"policy": {"columns": {"日期": "exclude"}}},
+    )
+
+    summary = extract_summary(
+        "forecast", forecast_case.result, forecast_case.ref, forecast_case.params
+    )
+
+    assert summary["policy_redacted"] is True
+    assert "predictions" not in summary
+    assert "validation_metrics" not in summary
+    assert "prediction_interval" not in summary
+    payload = build_messages("forecast", summary)[1].content
+    assert '"predictions"' not in payload
+    assert "2025-01-01" not in payload
+
+
 # ── 发往模型的 payload 不含明细 ──
 
 def test_payload_excludes_trend_series(trend_case: Case) -> None:
@@ -376,3 +446,26 @@ def test_route_interpret_false_skips_llm(dataset_ref: str) -> None:
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["interpretation"] is None
+
+
+def test_route_forecast_returns_governed_result(dataset_ref: str) -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/analyze/stats",
+        json={
+            "dataset_ref": dataset_ref,
+            "kind": "forecast",
+            "params": {
+                "value_col": "销量",
+                "time_col": "日期",
+                "horizon": 3,
+                "validation_size": 12,
+            },
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["result"]
+    assert result["selected_method"] in {"naive", "drift"}
+    assert result["leakage_checks"]["passed"] is True
+    assert len(result["predictions"]) == 3

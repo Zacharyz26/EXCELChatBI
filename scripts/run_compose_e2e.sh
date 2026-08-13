@@ -254,6 +254,38 @@ if ! wait "$data_role_probe_pid"; then
 fi
 grep -q '"status":"passed"' "$data_role_probe_log"
 
+forecast_probe_log=".data/e2e/forecast-recovery.jsonl"
+"${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
+  python -m apps.api.forecast_recovery_probe \
+  >"$forecast_probe_log" 2>&1 &
+forecast_probe_pid=$!
+forecast_probe_ready=0
+for attempt in $(seq 1 120); do
+  if grep -q '"status":"ready"' "$forecast_probe_log"; then
+    forecast_probe_ready=1
+    break
+  fi
+  if ! kill -0 "$forecast_probe_pid" 2>/dev/null; then
+    wait "$forecast_probe_pid" || true
+    cat "$forecast_probe_log" >&2
+    echo "Compose forecast probe exited before its recovery checkpoint." >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [ "$forecast_probe_ready" != "1" ]; then
+  cat "$forecast_probe_log" >&2
+  echo "Compose forecast probe did not reach its recovery checkpoint." >&2
+  exit 1
+fi
+"${compose[@]}" restart stats-tools
+if ! wait "$forecast_probe_pid"; then
+  cat "$forecast_probe_log" >&2
+  echo "Compose forecast transport and recovery probe failed." >&2
+  exit 1
+fi
+grep -q '"status":"passed"' "$forecast_probe_log"
+
 resource_probe_log=".data/e2e/mcp-resource-reconnect.jsonl"
 "${compose[@]}" exec -T api \
   python -m apps.api.mcp_resource_reconnect_probe \

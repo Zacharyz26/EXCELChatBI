@@ -324,11 +324,10 @@ class AgentToolRegistry:
                 artifact_types.update(spec.metadata.artifact_types)
                 existing["artifact_types"] = sorted(artifact_types)
         forecast_enabled = "forecast" in self._enabled_capability_profiles
-        catalog.setdefault(
-            "stats.forecast",
-            {
+        if "stats.forecast" not in catalog:
+            catalog["stats.forecast"] = {
                 "name": "stats.forecast",
-                "description": "预测分析能力（当前部署尚未提供受治理执行工具）。",
+                "description": "预测分析能力（当前工具目录未提供受治理执行工具）。",
                 "allowed": False,
                 "risk": "low",
                 "read_only": True,
@@ -337,8 +336,7 @@ class AgentToolRegistry:
                 "unavailable_reason": (
                     "tool_unavailable" if forecast_enabled else "profile_not_enabled"
                 ),
-            },
-        )
+            }
         return [catalog[name] for name in sorted(catalog)]
 
     def capability_catalog_snapshot(self) -> JsonObject:
@@ -727,6 +725,13 @@ def build_registry(
             "趋势分析（STL 分解/移动平均/探索性外推）。需要时间列与数值列；"
             "输出统计 Evidence 护栏，但不替代受治理 stats.forecast 预测。",
             metadata=tool_metadata("stats.trend", "stats", tool_version="1.1.0"),
+        ),
+        _wrap_mcp(
+            stats,
+            "forecast",
+            "受治理单变量预测：固定候选方法按时间留出集验证，返回 MAE/RMSE/sMAPE、"
+            "朴素基线对比、时间泄漏检查和经验预测区间；需要 forecast profile。",
+            metadata=tool_metadata("stats.forecast", "stats"),
         ),
         _wrap_mcp(
             stats, "anomaly_detect",
