@@ -67,3 +67,27 @@ CORRELATION_SCHEMA: dict[str, Any] = {
     "required": ["dataset_ref", "columns"],
     "additionalProperties": False,
 }
+
+DIMENSION_CONTRIBUTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **_DATASET,
+        "dimension_col": {"type": "string"},
+        "value_col": {"type": "string"},
+        "method": {"type": "string", "enum": ["sum", "count"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    "required": ["dataset_ref", "dimension_col", "value_col"],
+    "additionalProperties": False,
+}
+
+GROUP_COMPARE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **_DATASET,
+        "group_col": {"type": "string"},
+        "value_col": {"type": "string"},
+    },
+    "required": ["dataset_ref", "group_col", "value_col"],
+    "additionalProperties": False,
+}

@@ -36,6 +36,8 @@ _KIND_LABEL = {
     "anomaly": "异常检测",
     "regression": "回归分析",
     "correlation": "相关性分析",
+    "contribution": "维度贡献分析",
+    "group_compare": "分群比较",
 }
 
 _SYSTEM_PROMPT = """你是一名 BI 数据解读助手。你只会收到一次统计分析的**结果摘要**\
@@ -45,6 +47,8 @@ _SYSTEM_PROMPT = """你是一名 BI 数据解读助手。你只会收到一次�
 - 只解读所给摘要中的数字，**禁止自己计算或编造任何新的数字/统计量**；\
 你引用的每个数值都必须能在摘要里找到。
 - 抓住关键结论：趋势的方向与预测、异常的规模与占比、回归中显著的驱动因素等。
+- 必须披露 statistical_evidence 中的样本处理、方法假设和局限；相关或回归不得改写成因果结论，
+  异常根因只能表述为候选解释因素。
 - 直接输出中文段落，不要输出 JSON、代码块或列表标记。"""
 
 
@@ -58,6 +62,18 @@ def _columns_used(kind: str, params: dict[str, Any]) -> list[str]:
         return [c for c in cols if isinstance(c, str)]
     if kind == "correlation":
         return [c for c in (params.get("columns") or []) if isinstance(c, str)]
+    if kind == "contribution":
+        return [
+            c
+            for c in (params.get("dimension_col"), params.get("value_col"))
+            if isinstance(c, str)
+        ]
+    if kind == "group_compare":
+        return [
+            c
+            for c in (params.get("group_col"), params.get("value_col"))
+            if isinstance(c, str)
+        ]
     return []
 
 
@@ -76,7 +92,7 @@ def extract_summary(
     anomaly 的 anomalies[] 逐点 index/value/score。只保留聚合量与结论。
 
     Args:
-        kind: trend | anomaly | regression。
+        kind: trend | anomaly | regression | correlation | contribution | group_compare。
         result: 统计工具的完整输出（含明细）。
         dataset_ref: 数据集引用，用于解析其安全策略。
         params: 该次统计的入参（含涉及的列名）。
@@ -87,7 +103,14 @@ def extract_summary(
     Raises:
         ValueError: 未知统计类型。
     """
-    if kind not in ("trend", "anomaly", "regression", "correlation"):
+    if kind not in (
+        "trend",
+        "anomaly",
+        "regression",
+        "correlation",
+        "contribution",
+        "group_compare",
+    ):
         raise ValueError(f"未知统计类型: {kind}")
 
     policy = resolve_policy(dataset_ref)
@@ -98,6 +121,7 @@ def extract_summary(
             "method": result.get("method"),
             "direction": result.get("direction"),  # 方向类结论，降级也保留
             "n": result.get("n"),
+            "statistical_evidence": result.get("statistical_evidence"),
         }
         if not redacted:
             time = result.get("time") or []
@@ -118,6 +142,7 @@ def extract_summary(
             "n_total": n_total,
             "n_anomalies": n_anom,
             "anomaly_rate": round(n_anom / n_total, 4) if n_total else None,
+            "statistical_evidence": result.get("statistical_evidence"),
         }
         # 小分组门控 + 列级降级：异常值聚合描述只在样本量足够且列非敏感时才给
         if not redacted and n_anom >= policy.small_group_min_size:
@@ -139,14 +164,20 @@ def extract_summary(
             "adj_r_squared": result.get("adj_r_squared"),
             "n_obs": result.get("n_obs"),
             "model_pvalue": result.get("model_pvalue"),
+            "diagnostics": result.get("diagnostics"),
+            "statistical_evidence": result.get("statistical_evidence"),
         }
         if not redacted:
             summary["coefficients"] = result.get("coefficients")
-    else:  # correlation
+    elif kind == "correlation":
         cols = result.get("columns") or []
         if redacted:
             # 相关对会暴露敏感列的关系 → 只留方法与列数
-            summary = {"method": result.get("method"), "n_columns": len(cols)}
+            summary = {
+                "method": result.get("method"),
+                "n_columns": len(cols),
+                "statistical_evidence": result.get("statistical_evidence"),
+            }
         else:
             # 只发聚合的强相关对，不发整个 n×n 矩阵（矩阵仅供前端热力图）
             summary = {
@@ -154,7 +185,34 @@ def extract_summary(
                 "columns": cols,
                 "n_obs": result.get("n_obs"),
                 "top_pairs": result.get("top_pairs"),
+                "statistical_evidence": result.get("statistical_evidence"),
             }
+    elif kind == "contribution":
+        summary = {
+            "method": result.get("method"),
+            "group_count": result.get("group_count"),
+            "truncated": result.get("truncated"),
+            "returned_share": result.get("returned_share"),
+            "small_group_protection": result.get("small_group_protection"),
+            "statistical_evidence": result.get("statistical_evidence"),
+        }
+        if not redacted:
+            summary.update(
+                total_value=result.get("total_value"),
+                groups=result.get("groups"),
+            )
+    else:  # group_compare
+        summary = {
+            "method": result.get("method"),
+            "small_group_protection": result.get("small_group_protection"),
+            "statistical_evidence": result.get("statistical_evidence"),
+        }
+        if not redacted:
+            summary.update(
+                groups=result.get("groups"),
+                overall=result.get("overall"),
+                pairwise=result.get("pairwise"),
+            )
 
     if redacted:
         # 让解读模型知道数据受限，并使 payload 日志能证明门控生效

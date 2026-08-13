@@ -187,11 +187,21 @@ def screen_candidate_hypotheses(
         )
 
     roles = _role_columns(inferred)
+    declared_capabilities = {
+        str(item.get("name"))
+        for item in capability_catalog
+        if isinstance(item.get("name"), str)
+    }
     allowed_capabilities = {
         str(item.get("name"))
         for item in capability_catalog
         if isinstance(item.get("name"), str) and item.get("allowed") is not False
     }
+    segment_capability = (
+        "stats.group_compare"
+        if "stats.group_compare" in declared_capabilities
+        else "data.aggregate"
+    )
     candidates = [
         _candidate(
             dataset_ref=dataset.ref,
@@ -217,7 +227,7 @@ def screen_candidate_hypotheses(
             dataset_ref=dataset.ref,
             data_version_hash=data_version_hash,
             kind="segment_comparison",
-            capability="data.aggregate",
+            capability=segment_capability,
             priority=3,
             role_requirements=(("dimension", 1), ("metric", 1)),
             roles=roles,
@@ -344,10 +354,10 @@ def _candidate(
     return {
         "hypothesis_id": f"hyp_{stable_hash(identity)[:16]}",
         "kind": kind,
-        "statement": _statement(kind, bindings),
+        "statement": _statement(kind, bindings, capability=capability),
         "capability": capability,
         "required_roles": required_roles,
-        "expected_evidence": _expected_evidence(kind),
+        "expected_evidence": _expected_evidence(kind, capability=capability),
         "status": status,
         "reason_codes": _unique(reason_codes),
         "priority": priority,
@@ -355,7 +365,12 @@ def _candidate(
     }
 
 
-def _statement(kind: str, bindings: dict[str, list[str]]) -> str:
+def _statement(
+    kind: str,
+    bindings: dict[str, list[str]],
+    *,
+    capability: str,
+) -> str:
     metric = _first(bindings.get("metric"), "指标")
     if kind == "trend":
         time = _first(bindings.get("time"), "时间字段")
@@ -364,18 +379,24 @@ def _statement(kind: str, bindings: dict[str, list[str]]) -> str:
         return f"{metric} 可能存在异常观测，需要异常检测 Evidence 验证。"
     if kind == "segment_comparison":
         dimension = _first(bindings.get("dimension"), "分组维度")
-        return f"不同 {dimension} 的 {metric} 可能存在差异，需要聚合 Evidence 验证。"
+        evidence_label = "分群比较" if capability == "stats.group_compare" else "聚合"
+        return f"不同 {dimension} 的 {metric} 可能存在差异，需要{evidence_label} Evidence 验证。"
     metrics = bindings.get("metric") or []
     left = metrics[0] if metrics else "指标一"
     right = metrics[1] if len(metrics) > 1 else "指标二"
     return f"{left} 与 {right} 可能存在相关关系，需要相关性 Evidence 验证。"
 
 
-def _expected_evidence(kind: str) -> str:
+def _expected_evidence(kind: str, *, capability: str) -> str:
+    if kind == "segment_comparison":
+        return (
+            "分组口径、Welch 整体检验、Holm 成对校正与小群体保护"
+            if capability == "stats.group_compare"
+            else "分组口径、聚合统计量与排序"
+        )
     return {
         "trend": "趋势统计量、时间范围与粒度",
         "anomaly": "异常方法、阈值与命中记录",
-        "segment_comparison": "分组口径、聚合统计量与排序",
         "correlation": "相关系数、显著性与样本范围",
     }[kind]
 

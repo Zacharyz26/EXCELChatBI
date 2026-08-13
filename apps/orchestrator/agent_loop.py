@@ -161,7 +161,9 @@ _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助�
 9. 完成分析后用简洁中文解读：先结论、再依据，依据必须引用工具返回的具体数字。
 10. 统计表述要严谨：相关性分析只能得出“共变/相关”结论，**相关不等于因果**，\
 禁止使用“驱动”“导致”“因为 A 所以 B”等因果措辞（回归分析也只能说“关联/预测作用”）；\
-显著性一律基于工具返回的 p_value 或 significant 字段表述。
+显著性一律基于工具返回的 significant 字段表述；存在 adjusted_p_value 时不得用原始 p_value
+绕过多重检验校正。统计工具返回 statistical_evidence 时，最终答复必须披露其样本处理、
+方法假设和局限；异常根因只能称为待验证的候选解释因素。
 11. 输出格式：直接写简洁的中文段落，重点结论可用不超过 5 条的短列表；\
 不要输出表格、分隔线（---）、引用块（>）、多级标题或代码块；不要罗列原始 JSON。
 12. 用户明确要求图表、画图或可视化时，必须成功调用 gen_chart 后才能给最终答复；\
@@ -231,6 +233,10 @@ _TREND_PATTERN = re.compile(r"(?:趋势|随时间|变化|预测)")
 _ANOMALY_PATTERN = re.compile(r"(?:异常|离群)")
 _REGRESSION_PATTERN = re.compile(r"(?:回归|预测因子)")
 _CORRELATION_PATTERN = re.compile(r"(?:相关|关系)")
+_CONTRIBUTION_PATTERN = re.compile(r"(?:贡献|占比|构成)")
+_GROUP_COMPARE_PATTERN = re.compile(
+    r"(?:分群比较|组间差异|群体差异|分组比较|群组比较|比较不同)"
+)
 _AGGREGATE_PATTERN = re.compile(
     r"(?:汇总|合计|平均|各地区|各产品|分组|group\s*by)",
     re.IGNORECASE,
@@ -248,6 +254,8 @@ _TOOL_LABELS = {
     "anomaly_detect": "异常检测",
     "regression": "回归分析",
     "correlation": "相关性分析",
+    "dimension_contribution": "维度贡献分析",
+    "group_compare": "分群比较",
     "gen_chart": "生成图表",
     "chart_screenshot": "图表截图",
     "transform_dataset": "数据集变换",
@@ -264,6 +272,8 @@ _LEGACY_ARTIFACT_TYPES = {
     "anomaly_detect": "stats",
     "regression": "stats",
     "correlation": "stats",
+    "dimension_contribution": "stats",
+    "group_compare": "stats",
     "gen_chart": "chart",
     "aggregate_preview": "table",
     "kb_search": "citations",
@@ -495,6 +505,44 @@ def _blocking_clarification(
             about="metric",
             label="本次异常检测指标",
             reason="不同指标会改变异常点和阈值结论。",
+        )
+    if _CONTRIBUTION_PATTERN.search(clean) is not None:
+        dimension_clarification = _role_selection_clarification(
+            clean,
+            dataset,
+            role="dimension",
+            question_id="contribution_dimension",
+            about="dimension",
+            label="本次贡献分析使用的维度列",
+            reason="维度不同会改变贡献构成和小群体保护结果。",
+        )
+        return dimension_clarification or _role_selection_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="metric",
+            about="metric",
+            label="本次贡献分析指标",
+            reason="贡献份额仅能对明确、可加总的指标计算。",
+        )
+    if _GROUP_COMPARE_PATTERN.search(clean) is not None:
+        dimension_clarification = _role_selection_clarification(
+            clean,
+            dataset,
+            role="dimension",
+            question_id="comparison_dimension",
+            about="dimension",
+            label="本次分群比较使用的维度列",
+            reason="分群维度不同会改变比较对象与小群体保护结果。",
+        )
+        return dimension_clarification or _role_selection_clarification(
+            clean,
+            dataset,
+            role="metric",
+            question_id="metric",
+            about="metric",
+            label="本次分群比较指标",
+            reason="指标不同会改变 Welch 检验和成对比较结论。",
         )
     if _REGRESSION_PATTERN.search(clean) is not None:
         target_clarification = _role_selection_clarification(
@@ -5510,7 +5558,14 @@ def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
         if result.get("pdf_path"):
             payload["pdf_url"] = f"/analyze/report/{report_id}.pdf"
         return payload
-    if tool in {"trend_analysis", "anomaly_detect", "regression", "correlation"}:
+    if tool in {
+        "trend_analysis",
+        "anomaly_detect",
+        "regression",
+        "correlation",
+        "dimension_contribution",
+        "group_compare",
+    }:
         return {"kind": tool, "result": result}
     return dict(result)
 
@@ -5567,6 +5622,7 @@ _ARG_LABELS = {
     "target": "目标列",
     "features": "自变量",
     "columns": "列",
+    "dimension_col": "维度列",
     "chart_type": "图型",
     "group_col": "分组列",
     "agg": "聚合",
@@ -5660,6 +5716,17 @@ def _summarize_result(tool: str, result: Any) -> str:
         return f"R²={result.get('r_squared')}，n={result.get('n_obs', '?')}"
     if tool == "correlation":
         return f"{len(result.get('columns', []))} 列相关矩阵，n={result.get('n_obs', '?')}"
+    if tool == "dimension_contribution":
+        return (
+            f"共 {result.get('group_count', '?')} 组，"
+            f"展示覆盖率={result.get('returned_share')}"
+        )
+    if tool == "group_compare":
+        overall = result.get("overall") or {}
+        return (
+            f"比较 {len(result.get('groups', []))} 组，"
+            f"整体显著={overall.get('significant', '?')}"
+        )
     if tool == "gen_chart":
         return f"已生成 {result.get('chart_type', '?')} 图"
     if tool == "chart_screenshot":
@@ -5692,6 +5759,25 @@ def _model_view(tool: str, result: Any, max_chars: int) -> str:
     view = result
     if tool == "generate_report" and isinstance(result, dict):
         view = {k: v for k, v in result.items() if k != "markdown"}
+    elif tool in {
+        "trend_analysis",
+        "anomaly_detect",
+        "regression",
+        "correlation",
+        "dimension_contribution",
+        "group_compare",
+    } and isinstance(result, dict):
+        # 逐点 trend/anomaly 明细可能超过模型结果预算；把强制披露的统计护栏置前，
+        # 保证通用尾部截断永远不会先删掉样本、假设、校正和因果边界。
+        guardrail = result.get("statistical_evidence")
+        view = (
+            {
+                "statistical_evidence": guardrail,
+                **{key: value for key, value in result.items() if key != "statistical_evidence"},
+            }
+            if isinstance(guardrail, dict)
+            else result
+        )
     text = json.dumps(view, ensure_ascii=False, separators=(",", ":"), default=str)
     if len(text) > max_chars:
         text = f"{text[:max_chars]}…（结果已截断，如需明细请缩小查询范围）"

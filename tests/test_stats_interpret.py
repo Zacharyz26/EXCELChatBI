@@ -29,6 +29,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.stats.tools import (  # noqa: E402
     anomaly_detect,
     correlation,
+    dimension_contribution,
+    group_compare,
     regression,
     trend_analysis,
 )
@@ -147,8 +149,56 @@ def test_summary_anomaly_collapses_points_to_aggregate(anomaly_case: Case) -> No
 def test_summary_regression_passthrough(regression_case: Case) -> None:
     s = extract_summary("regression", regression_case.result, regression_case.ref,
                         regression_case.params)
-    assert set(s) == {"kind", "r_squared", "adj_r_squared", "n_obs",
-                      "model_pvalue", "coefficients"}
+    assert set(s) == {
+        "kind",
+        "r_squared",
+        "adj_r_squared",
+        "n_obs",
+        "model_pvalue",
+        "coefficients",
+        "diagnostics",
+        "statistical_evidence",
+    }
+
+
+def test_summary_advanced_stats_keeps_only_governed_aggregates() -> None:
+    contribution_ref = save_dataframe(
+        pd.DataFrame({"组": ["甲"] * 5 + ["乙"] * 5, "值": [10.0] * 5 + [5.0] * 5})
+    )
+    contribution_params = {"dimension_col": "组", "value_col": "值"}
+    contribution = dimension_contribution(
+        {"dataset_ref": contribution_ref, **contribution_params}
+    )
+    contribution_summary = extract_summary(
+        "contribution", contribution, contribution_ref, contribution_params
+    )
+
+    assert "groups" in contribution_summary
+    assert "small_group_protection" in contribution_summary
+
+    rng = np.random.default_rng(31)
+    comparison_ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "组": ["甲"] * 8 + ["乙"] * 8,
+                "值": np.concatenate([rng.normal(0, 1, 8), rng.normal(3, 1, 8)]),
+            }
+        )
+    )
+    comparison_params = {"group_col": "组", "value_col": "值"}
+    comparison = group_compare({"dataset_ref": comparison_ref, **comparison_params})
+    comparison_summary = extract_summary(
+        "group_compare", comparison, comparison_ref, comparison_params
+    )
+
+    assert set(comparison_summary) == {
+        "method",
+        "groups",
+        "overall",
+        "pairwise",
+        "small_group_protection",
+        "statistical_evidence",
+    }
 
 
 def test_summary_unknown_kind_raises() -> None:
@@ -186,7 +236,7 @@ def test_summary_correlation_sends_pairs_not_matrix() -> None:
 
     s = extract_summary("correlation", result, ref, params)
     assert "matrix" not in s                       # n×n 矩阵不进 LLM（仅前端热力图）
-    assert set(s) == {"method", "columns", "n_obs", "top_pairs"}
+    assert set(s) == {"method", "columns", "n_obs", "top_pairs", "statistical_evidence"}
     assert s["top_pairs"][0]["significant"] is True
 
 
@@ -202,7 +252,7 @@ def test_summary_correlation_excluded_column_drops_pairs() -> None:
     s = extract_summary("correlation", result, ref, params)
     assert "top_pairs" not in s and "columns" not in s   # 相关对会暴露敏感列关系 → 去掉
     assert s.get("policy_redacted") is True
-    assert set(s) == {"method", "n_columns", "policy_redacted"}
+    assert set(s) == {"method", "n_columns", "statistical_evidence", "policy_redacted"}
 
 
 def test_summary_regression_excluded_column_drops_coefficients() -> None:
@@ -228,7 +278,8 @@ def test_summary_regression_excluded_column_drops_coefficients() -> None:
 def test_payload_excludes_trend_series(trend_case: Case) -> None:
     summary = extract_summary("trend", trend_case.result, trend_case.ref, trend_case.params)
     user = build_messages("trend", summary)[1].content
-    for marker in ('"points"', '"trend"', '"seasonal"', '"resid"', '"time"'):
+    # analysis_kind="trend" 是 Evidence 元数据；逐行 trend 数组仍只能位于 points 内。
+    for marker in ('"points"', '"seasonal"', '"resid"', '"time"'):
         assert marker not in user
 
 

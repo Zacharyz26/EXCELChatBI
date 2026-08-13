@@ -295,6 +295,10 @@ def choose_planner_route(user_text: str, context: JsonObject) -> PlannerRoute:
             "预测",
             "相关",
             "回归",
+            "贡献",
+            "占比",
+            "分群比较",
+            "组间差异",
         )
     ):
         return "template"
@@ -409,15 +413,31 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
     )
     if requests_transform:
         add("dataset.transform")
-    if "回归" in request:
+    contribution_requested = any(token in request for token in ("贡献", "占比", "构成"))
+    group_compare_requested = any(
+        token in request
+        for token in (
+            "分群比较",
+            "组间差异",
+            "群体差异",
+            "分组比较",
+            "群组比较",
+            "比较不同",
+        )
+    )
+    if contribution_requested:
+        add("stats.contribution")
+    elif group_compare_requested:
+        add("stats.group_compare")
+    elif "回归" in request:
         add("stats.regression")
     elif any(token in request for token in ("相关", "关系")):
         add("stats.correlation")
     if "预测" in request:
-        add("stats.trend")
+        add("stats.forecast")
     elif any(token in request for token in ("趋势", "随时间", "按月", "按周", "按季度")):
         add("stats.trend")
-    if any(
+    if not contribution_requested and not group_compare_requested and any(
         token in request
         for token in ("汇总", "合计", "平均", "各地区", "各产品", "多少", "转化率", "复购率")
     ):
@@ -577,6 +597,8 @@ def _capability_purpose(capability: str) -> str:
         "stats.forecast": "生成预测并披露可靠性",
         "stats.correlation": "计算相关关系并避免因果表述",
         "stats.regression": "执行受约束回归并返回统计 Evidence",
+        "stats.contribution": "计算受小群体保护的维度贡献与展示覆盖率",
+        "stats.group_compare": "执行 Welch 分群比较与 Holm 成对校正",
         "visualization.chart": "生成用户要求的真实图表工件",
         "report.generate": "生成可验证、可下载的报告工件",
     }.get(capability, f"执行 {capability} 能力")

@@ -31,6 +31,7 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
     ConversationLockPool,
     _enrich_tool_arguments,
+    _model_view,
     _preserve_host_reference_assumptions,
     stream_agent_chat,
 )
@@ -75,6 +76,24 @@ from sse_starlette.sse import AppStatus  # noqa: E402
 _DATASET_REF = "d" * 32
 _REPORT_ID = "e" * 32
 _TIMEOUT_TEST_RUN_BUDGET_SECONDS = 30
+
+
+def test_stats_model_view_preserves_guardrail_before_large_detail() -> None:
+    result = {
+        "method": "iqr",
+        "anomalies": [{"index": index, "value": index} for index in range(100)],
+        "statistical_evidence": {
+            "schema": "chatbi-statistical-evidence-v1",
+            "limitations": ["异常根因只能作为候选解释因素。"],
+        },
+    }
+
+    view = _model_view("anomaly_detect", result, 220)
+
+    assert view.startswith('{"statistical_evidence"')
+    assert "chatbi-statistical-evidence-v1" in view
+    assert "候选解释因素" in view
+    assert view.endswith("（结果已截断，如需明细请缩小查询范围）")
 
 
 class ScriptedGateway:
@@ -3920,6 +3939,18 @@ def test_humanize_args_translates_common_tools() -> None:
             {"dataset_ref": "a1b2c3d4e5f6", "columns": ["销售额", "订单数"], "method": "pearson"},
         )
         == "数据集: a1b2c3d4 · 列: 销售额、订单数 · 方法: pearson"
+    )
+
+    assert (
+        _humanize_args(
+            "dimension_contribution",
+            {
+                "dataset_ref": "a1b2c3d4e5f6",
+                "dimension_col": "地区",
+                "value_col": "销售额",
+            },
+        )
+        == "数据集: a1b2c3d4 · 维度列: 地区 · 数值列: 销售额"
     )
 
     assert (

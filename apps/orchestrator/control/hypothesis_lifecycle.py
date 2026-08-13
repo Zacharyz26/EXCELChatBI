@@ -391,6 +391,13 @@ def _evidence_outcome(kind: str, result: object) -> HypothesisOutcome:
         if significance and all(value is False for value in significance):
             return "not_supported"
         return "inconclusive"
+    if kind == "segment_comparison" and isinstance(result.get("overall"), dict):
+        significant = result["overall"].get("significant")
+        if significant is True:
+            return "supported"
+        if significant is False:
+            return "not_supported"
+        return "inconclusive"
     rows = result.get("rows")
     if not isinstance(rows, list) or len(rows) < 2:
         return "inconclusive"

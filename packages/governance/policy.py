@@ -29,6 +29,8 @@ DEFAULT_AGENT_TOOL_ALLOWLIST = frozenset(
         "anomaly_detect",
         "regression",
         "correlation",
+        "dimension_contribution",
+        "group_compare",
         "gen_chart",
         "chart_screenshot",
         "transform_dataset",

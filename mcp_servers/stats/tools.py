@@ -10,17 +10,27 @@
 from __future__ import annotations
 
 import math
+import warnings as py_warnings
+from itertools import combinations
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from packages.common.dataset_store import load_dataframe
+from packages.governance.aggregation_guard import GroupAgg, guard_small_groups
+from packages.governance.data_boundary import ColumnRule, resolve_policy
 from scipy import stats as scipy_stats
 from sklearn.ensemble import IsolationForest
+from statsmodels.stats.diagnostic import het_breuschpagan
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.stats.stattools import durbin_watson, jarque_bera
 from statsmodels.tsa.seasonal import STL
 
+from mcp_servers.stats.evidence import build_statistical_evidence, holm_adjust
+
 _MIN_POINTS = 5  # 统计分析所需的最小有效样本量
+_MAX_COMPARISON_GROUPS = 10
 
 
 # ── 共享工具 ──
@@ -51,12 +61,39 @@ def _numeric(series: pd.Series, col: str) -> pd.Series:
     return out
 
 
-def _ordered_series(args: dict[str, Any], require_time: bool) -> tuple[pd.Series, list[str] | None]:
+def _plain(value: Any) -> Any:
+    """Convert numpy/pandas scalars to JSON-safe native values."""
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    converted = value.item() if hasattr(value, "item") else value
+    if converted is None or isinstance(converted, str | int | float | bool):
+        return converted
+    return str(converted)
+
+
+def _require_model_visible_columns(dataset_ref: str, columns: list[str]) -> None:
+    """Prevent new stats tools from returning protected labels/aggregates to the model."""
+    policy = resolve_policy(dataset_ref)
+    blocked = [
+        column
+        for column in columns
+        if policy.rule_of(column) in {ColumnRule.MASK, ColumnRule.EXCLUDE}
+    ]
+    if blocked:
+        raise ValueError("列受数据策略保护，不能进入统计模型结果: " + "、".join(blocked))
+
+
+def _ordered_series(
+    args: dict[str, Any], require_time: bool
+) -> tuple[pd.Series, list[str] | None, int]:
     """读取 value_col（可选按 time_col 升序），返回 (数值序列, 时间标签)。
 
     序列已丢弃缺失、重置为 0 基定位索引；时间标签与序列位置一一对应，供前端 x 轴。
     """
     df = load_dataframe(args["dataset_ref"])
+    total_rows = len(df)
     value_col: str = args["value_col"]
     time_col: str | None = args.get("time_col")
     if require_time and not time_col:
@@ -76,7 +113,7 @@ def _ordered_series(args: dict[str, Any], require_time: bool) -> tuple[pd.Series
         raise ValueError(f"有效样本量不足（{len(df)} < {_MIN_POINTS}），无法做统计分析")
 
     labels = [str(t) for t in df[time_col]] if time_col else None
-    return df[value_col].astype(float), labels
+    return df[value_col].astype(float), labels, total_rows
 
 
 def _linear_slope(y: np.ndarray) -> tuple[float, float]:
@@ -157,7 +194,7 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         {method, direction, slope, seasonality_strength, ma_window, n,
          time?, points:{trend, seasonal, resid}, forecast}。
     """
-    series, labels = _ordered_series(args, require_time=True)
+    series, labels, total_rows = _ordered_series(args, require_time=True)
     y = series.to_numpy()
     n = len(y)
 
@@ -196,6 +233,14 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         trend, seasonal, resid = ma, np.zeros(n), y - ma
         forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
 
+    limitations = [
+        "趋势方向描述统计关联，不证明时间变化导致指标变化。",
+        "未执行训练/验证隔离、时间泄漏检测和预测区间评估。",
+    ]
+    if horizon > 0:
+        limitations.append(
+            "forecast 仅为探索性外推，不属于受治理 stats.forecast 预测结论。"
+        )
     return {
         "method": method,
         "direction": direction,
@@ -210,6 +255,17 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
             "resid": [_f(v) for v in resid],
         },
         "forecast": forecast,
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="trend",
+            method=method,
+            total_rows=total_rows,
+            valid_rows=n,
+            assumptions=[
+                "有效记录按时间升序排列，缺失的时间或指标记录按完整案例剔除。",
+                "趋势方法假定当前时间粒度和用户指定周期适用于所选序列。",
+            ],
+            limitations=limitations,
+        ),
     }
 
 
@@ -227,7 +283,7 @@ def anomaly_detect(args: dict[str, Any]) -> dict[str, Any]:
         anomalies 按 score 降序，全量返回供前端渲染（红线1：明细仅到前端）。
     """
     method: str = args.get("method", "iqr")
-    series, labels = _ordered_series(args, require_time=(method == "stl"))
+    series, labels, total_rows = _ordered_series(args, require_time=(method == "stl"))
     y = series.to_numpy()
     n = len(y)
 
@@ -277,11 +333,31 @@ def anomaly_detect(args: dict[str, Any]) -> dict[str, Any]:
         return -s if isinstance(s, int | float) else math.inf
 
     anomalies.sort(key=_score_key)
+    threshold_limit = {
+        "iqr": "异常阈值固定为 Q1-1.5×IQR 或 Q3+1.5×IQR。",
+        "3sigma": "异常阈值固定为距均值超过 3 个总体标准差。",
+        "isolation_forest": "异常数量受 contamination 参数和固定 random_state=0 影响。",
+        "stl": "异常阈值固定为 STL 残差绝对值超过 3 个残差标准差。",
+    }[method]
     return {
         "method": method,
         "n_total": n,
         "n_anomalies": len(anomalies),
         "anomalies": anomalies,
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="anomaly",
+            method=method,
+            total_rows=total_rows,
+            valid_rows=n,
+            assumptions=[
+                "缺失指标记录按完整案例剔除。",
+                "所选异常检测方法及其阈值适用于当前数据分布。",
+            ],
+            limitations=[
+                threshold_limit,
+                "异常点仅表示统计偏离，根因只能作为待验证的候选解释因素。",
+            ],
+        ),
     }
 
 
@@ -310,9 +386,13 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
     df = load_dataframe(args["dataset_ref"])
     _require_columns(df, [target, *features])
     used = [target, *features]
+    total_rows = len(df)
     data = df[used].apply(pd.to_numeric, errors="coerce").dropna()
-    if len(data) < _MIN_POINTS:
-        raise ValueError(f"有效样本量不足（{len(data)} < {_MIN_POINTS}），无法拟合回归")
+    minimum_required = max(10, 5 * (len(features) + 1))
+    if len(data) < minimum_required:
+        raise ValueError(
+            f"有效样本量不足（{len(data)} < {minimum_required}），无法拟合回归"
+        )
 
     x = sm.add_constant(data[features], has_constant="add")
     y = data[target]
@@ -330,16 +410,87 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
     else:  # schema 已限枚举，兜底防御
         raise ValueError(f"不支持的回归类型: {kind}")
 
+    coefficient_names = list(res.params.index)
+    tested_names = [name for name in coefficient_names if name != "const"]
+    raw_test_pvalues = [float(res.pvalues[name]) for name in tested_names]
+    adjusted_by_name = dict(zip(tested_names, holm_adjust(raw_test_pvalues), strict=True))
     coefficients = [
         {
             "name": name,
             "coef": _f(res.params[name]),
             "std_err": _f(res.bse[name]),
             "p_value": _f(res.pvalues[name]),
-            "significant": bool(res.pvalues[name] < 0.05),
+            "adjusted_p_value": (
+                _f(adjusted_by_name[name]) if name in adjusted_by_name else None
+            ),
+            "significant": bool(
+                adjusted_by_name.get(name, float(res.pvalues[name])) < 0.05
+            ),
         }
-        for name in res.params.index
+        for name in coefficient_names
     ]
+    raw_condition_number = float(np.linalg.cond(np.asarray(x, dtype=float)))
+    condition_number = _f(raw_condition_number)
+    vif_items: list[dict[str, Any]] = []
+    non_finite_vif = False
+    if len(features) == 1:
+        vif_items.append({"name": features[0], "vif": 1.0})
+    else:
+        design = np.asarray(x, dtype=float)
+        for index, name in enumerate(x.columns):
+            if name == "const":
+                continue
+            with py_warnings.catch_warnings():
+                py_warnings.simplefilter("ignore", RuntimeWarning)
+                raw_vif = float(variance_inflation_factor(design, index))
+            non_finite_vif = non_finite_vif or not math.isfinite(raw_vif)
+            vif_items.append({"name": str(name), "vif": _f(raw_vif)})
+    finite_vifs = [
+        float(item["vif"])
+        for item in vif_items
+        if isinstance(item.get("vif"), int | float)
+    ]
+    max_vif = _f(max(finite_vifs)) if finite_vifs else None
+    warnings: list[str] = []
+    normality: dict[str, Any] | None = None
+    heteroskedasticity: dict[str, Any] | None = None
+    autocorrelation: dict[str, Any] | None = None
+    if kind == "ols":
+        jb_stat, jb_pvalue, _, _ = jarque_bera(res.resid)
+        bp_stat, bp_pvalue, _, _ = het_breuschpagan(res.resid, x)
+        dw_stat = float(durbin_watson(res.resid))
+        normality = {
+            "test": "jarque_bera",
+            "statistic": _f(jb_stat),
+            "p_value": _f(jb_pvalue),
+            "passed": bool(jb_pvalue >= 0.05),
+        }
+        heteroskedasticity = {
+            "test": "breusch_pagan",
+            "statistic": _f(bp_stat),
+            "p_value": _f(bp_pvalue),
+            "passed": bool(bp_pvalue >= 0.05),
+        }
+        autocorrelation = {
+            "test": "durbin_watson",
+            "statistic": _f(dw_stat),
+            "passed": bool(1.5 <= dw_stat <= 2.5),
+        }
+        if not normality["passed"]:
+            warnings.append("residual_non_normal")
+        if not heteroskedasticity["passed"]:
+            warnings.append("heteroskedasticity_detected")
+        if not autocorrelation["passed"]:
+            warnings.append("residual_autocorrelation")
+    rank_deficient = bool(
+        non_finite_vif
+        or not math.isfinite(raw_condition_number)
+        or np.linalg.matrix_rank(np.asarray(x, dtype=float)) < x.shape[1]
+    )
+    if rank_deficient or (max_vif is not None and max_vif >= 5) or (
+        condition_number is not None and condition_number >= 30
+    ):
+        warnings.append("multicollinearity_risk")
     return {
         "kind": kind,
         "r_squared": r_squared,
@@ -347,6 +498,44 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
         "n_obs": int(res.nobs),
         "model_pvalue": model_pvalue,
         "coefficients": coefficients,
+        "diagnostics": {
+            "residual_normality": normality,
+            "heteroskedasticity": heteroskedasticity,
+            "autocorrelation": autocorrelation,
+            "multicollinearity": {
+                "condition_number": condition_number,
+                "max_vif": max_vif,
+                "vif": vif_items,
+                "rank_deficient": rank_deficient,
+            },
+            "warnings": warnings,
+        },
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="regression",
+            method=kind,
+            total_rows=total_rows,
+            valid_rows=int(res.nobs),
+            minimum_required=minimum_required,
+            tests_count=len(tested_names),
+            multiple_testing_method="holm" if len(tested_names) > 1 else "none",
+            assumptions=[
+                "目标列和全部特征均为数值，含缺失的记录按完整案例剔除。",
+                (
+                    "OLS 假定线性、独立、同方差且残差设定合理。"
+                    if kind == "ols"
+                    else "Logit 假定二元目标、独立观测和正确的 logit 线性设定。"
+                ),
+            ],
+            limitations=[
+                (
+                    "特征系数显著性按 Holm 方法控制同一模型内的多重检验。"
+                    if len(tested_names) > 1
+                    else "当前仅检验一个特征系数，无需额外多重检验校正。"
+                ),
+                "回归关系不证明因果，遗漏变量、共线性和选择偏差仍可能影响结果。",
+                "诊断告警只检查既定阈值，不会自动修改模型或选择其他特征。",
+            ],
+        ),
     }
 
 
@@ -367,6 +556,7 @@ def correlation(args: dict[str, Any]) -> dict[str, Any]:
 
     df = load_dataframe(args["dataset_ref"])
     _require_columns(df, columns)
+    total_rows = len(df)
     data = df[columns].apply(pd.to_numeric, errors="coerce")
     for col in columns:
         if data[col].notna().sum() == 0:
@@ -381,17 +571,24 @@ def correlation(args: dict[str, Any]) -> dict[str, Any]:
 
     # 上三角所有列对逐对补 p 值（scipy），按 |corr| 降序取前 5 作摘要
     pair_fn = scipy_stats.pearsonr if method == "pearson" else scipy_stats.spearmanr
-    pairs: list[dict[str, Any]] = []
+    raw_pairs: list[tuple[str, str, float, float]] = []
     for i in range(n):
         for j in range(i + 1, n):
             r, p = pair_fn(data[columns[i]], data[columns[j]])
-            pairs.append({
-                "a": columns[i],
-                "b": columns[j],
+            raw_pairs.append((columns[i], columns[j], float(r), float(p)))
+    adjusted = holm_adjust([pair[3] for pair in raw_pairs])
+    pairs: list[dict[str, Any]] = []
+    for (left, right, r, p), adjusted_p in zip(raw_pairs, adjusted, strict=True):
+        pairs.append(
+            {
+                "a": left,
+                "b": right,
                 "corr": _f(r),
                 "p_value": _f(p),
-                "significant": bool(p < 0.05),
-            })
+                "adjusted_p_value": _f(adjusted_p),
+                "significant": bool(adjusted_p < 0.05),
+            }
+        )
     pairs.sort(key=lambda d: abs(d["corr"]) if d["corr"] is not None else -1.0, reverse=True)
 
     return {
@@ -400,4 +597,283 @@ def correlation(args: dict[str, Any]) -> dict[str, Any]:
         "n_obs": int(len(data)),
         "matrix": matrix,
         "top_pairs": pairs[:5],
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="correlation",
+            method=method,
+            total_rows=total_rows,
+            valid_rows=int(len(data)),
+            tests_count=len(raw_pairs),
+            multiple_testing_method="holm" if len(raw_pairs) > 1 else "none",
+            assumptions=[
+                "所有所选列均为数值，任一列缺失的记录按完整案例剔除。",
+                (
+                    "Pearson 相关用于衡量线性关系并依赖独立观测。"
+                    if method == "pearson"
+                    else "Spearman 相关用于衡量单调关系并依赖独立观测。"
+                ),
+            ],
+            limitations=[
+                (
+                    "列对显著性按 Holm 方法控制同一分析内的多重检验。"
+                    if len(raw_pairs) > 1
+                    else "当前仅检验一个列对，无需额外多重检验校正。"
+                ),
+                "相关不等于因果，未观测混杂和共同趋势可能产生表面关系。",
+            ],
+        ),
+    }
+
+
+# ── 维度贡献 ──
+
+def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
+    """Compute additive dimension contribution with policy-driven small-group protection."""
+    dataset_ref: str = args["dataset_ref"]
+    dimension_col: str = args["dimension_col"]
+    value_col: str = args["value_col"]
+    method: str = args.get("method", "sum")
+    limit = int(args.get("limit", 20))
+
+    _require_model_visible_columns(dataset_ref, [dimension_col, value_col])
+    df = load_dataframe(dataset_ref)
+    total_rows = len(df)
+    _require_columns(df, [dimension_col, value_col])
+    data = df[[dimension_col, value_col]].copy()
+    data[value_col] = _numeric(data[value_col], value_col)
+    data = data.dropna(subset=[dimension_col, value_col])
+    if len(data) < _MIN_POINTS:
+        raise ValueError(f"有效样本量不足（{len(data)} < {_MIN_POINTS}），无法计算维度贡献")
+    if method == "sum" and bool((data[value_col] < 0).any()):
+        raise ValueError("sum 贡献要求度量值非负；含负值时贡献份额不可解释")
+
+    raw_groups: list[GroupAgg] = []
+    for key, frame in data.groupby(dimension_col, dropna=False, sort=False):
+        value = float(frame[value_col].sum()) if method == "sum" else float(len(frame))
+        raw_groups.append(GroupAgg(_plain(key), value, len(frame)))
+    total_value = sum(group.value for group in raw_groups)
+    if total_value <= 0:
+        raise ValueError("贡献总量必须大于 0")
+
+    policy = resolve_policy(dataset_ref)
+    protected = guard_small_groups(
+        raw_groups,
+        method,
+        policy.small_group_min_size,
+        mode=policy.small_group_mode,
+        other_label=policy.other_label,
+    )
+    protected.sort(key=lambda group: group.value, reverse=True)
+    shown = protected[:limit]
+    groups = [
+        {
+            "dimension": _plain(group.key),
+            "value": _f(group.value),
+            "count": group.count,
+            "share": _f(group.value / total_value),
+            "rank": rank,
+            "protected": not any(group is raw_group for raw_group in raw_groups),
+        }
+        for rank, group in enumerate(shown, 1)
+    ]
+    small = [group for group in raw_groups if group.count < policy.small_group_min_size]
+    returned_share = sum(group.value for group in shown) / total_value
+    return {
+        "method": method,
+        "dimension_col": dimension_col,
+        "value_col": value_col,
+        "total_value": _f(total_value),
+        "groups": groups,
+        "group_count": len(raw_groups),
+        "truncated": len(protected) > limit,
+        "returned_share": _f(returned_share),
+        "small_group_protection": {
+            "minimum_group_size": policy.small_group_min_size,
+            "mode": policy.small_group_mode,
+            "protected_group_count": len(small),
+            "protected_row_count": sum(group.count for group in small),
+        },
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="contribution",
+            method=method,
+            total_rows=total_rows,
+            valid_rows=len(data),
+            assumptions=[
+                "维度和度量缺失记录按完整案例剔除。",
+                "贡献份额仅对可加总的非负 sum 或非空记录 count 定义。",
+            ],
+            limitations=[
+                "小于策略阈值的群体已按数据策略合并或抑制，展示份额可能小于完整总量。",
+                "维度贡献是描述性构成，不证明该维度导致结果变化。",
+            ],
+        ),
+    }
+
+
+# ── 分群比较 ──
+
+def _welch_anova(samples: list[np.ndarray]) -> tuple[float, float, float, float]:
+    """Return Welch ANOVA statistic, p-value and degrees of freedom."""
+    count = len(samples)
+    sizes = np.asarray([len(sample) for sample in samples], dtype=float)
+    means = np.asarray([np.mean(sample) for sample in samples], dtype=float)
+    variances = np.asarray([np.var(sample, ddof=1) for sample in samples], dtype=float)
+    if bool(np.any(variances <= 0)):
+        raise ValueError("分群比较要求每个纳入群体都具有非零组内方差")
+    weights = sizes / variances
+    weight_total = float(np.sum(weights))
+    weighted_mean = float(np.sum(weights * means) / weight_total)
+    term = float(np.sum(((1 - weights / weight_total) ** 2) / (sizes - 1)))
+    df1 = float(count - 1)
+    df2 = float((count**2 - 1) / (3 * term))
+    numerator = float(np.sum(weights * ((means - weighted_mean) ** 2)) / df1)
+    denominator = 1 + (2 * (count - 2) / (count**2 - 1)) * term
+    statistic = numerator / denominator
+    return statistic, float(scipy_stats.f.sf(statistic, df1, df2)), df1, df2
+
+
+def _hedges_g(left: np.ndarray, right: np.ndarray) -> float | None:
+    """Return bias-corrected standardized mean difference for two groups."""
+    left_n, right_n = len(left), len(right)
+    pooled_numerator = (left_n - 1) * np.var(left, ddof=1) + (right_n - 1) * np.var(
+        right, ddof=1
+    )
+    pooled_variance = float(pooled_numerator / (left_n + right_n - 2))
+    if pooled_variance <= 0:
+        return None
+    correction = 1 - 3 / (4 * (left_n + right_n) - 9)
+    difference = float(np.mean(left)) - float(np.mean(right))
+    return _f(correction * difference / math.sqrt(pooled_variance))
+
+
+def group_compare(args: dict[str, Any]) -> dict[str, Any]:
+    """Compare governed cohorts with fixed Welch tests and Holm pairwise correction."""
+    dataset_ref: str = args["dataset_ref"]
+    group_col: str = args["group_col"]
+    value_col: str = args["value_col"]
+    _require_model_visible_columns(dataset_ref, [group_col, value_col])
+    df = load_dataframe(dataset_ref)
+    total_rows = len(df)
+    _require_columns(df, [group_col, value_col])
+    data = df[[group_col, value_col]].copy()
+    data[value_col] = _numeric(data[value_col], value_col)
+    data = data.dropna(subset=[group_col, value_col])
+
+    policy = resolve_policy(dataset_ref)
+    comparison_minimum = max(2, policy.small_group_min_size)
+    raw_groups = [
+        (_plain(key), frame[value_col].to_numpy(dtype=float))
+        for key, frame in data.groupby(group_col, dropna=False, sort=False)
+    ]
+    eligible = [
+        (key, sample)
+        for key, sample in raw_groups
+        if len(sample) >= comparison_minimum
+    ]
+    protected = [
+        (key, sample)
+        for key, sample in raw_groups
+        if len(sample) < comparison_minimum
+    ]
+    if len(eligible) < 2:
+        raise ValueError("小群体保护后不足两个可比较群体")
+    if len(eligible) > _MAX_COMPARISON_GROUPS:
+        raise ValueError(
+            f"可比较群体过多（{len(eligible)} > {_MAX_COMPARISON_GROUPS}），请先明确分析范围"
+        )
+    samples = [sample for _, sample in eligible]
+    if any(float(np.var(sample, ddof=1)) <= 0 for sample in samples):
+        raise ValueError("分群比较要求每个纳入群体都具有非零组内方差")
+    used_rows = sum(len(sample) for sample in samples)
+
+    summaries: list[dict[str, Any]] = []
+    for key, sample in eligible:
+        mean = float(np.mean(sample))
+        std = float(np.std(sample, ddof=1))
+        sem = std / math.sqrt(len(sample))
+        critical = float(scipy_stats.t.ppf(0.975, len(sample) - 1))
+        summaries.append(
+            {
+                "group": key,
+                "count": len(sample),
+                "mean": _f(mean),
+                "std": _f(std),
+                "median": _f(np.median(sample)),
+                "ci95_low": _f(mean - critical * sem),
+                "ci95_high": _f(mean + critical * sem),
+            }
+        )
+
+    if len(samples) == 2:
+        statistic, p_value = scipy_stats.ttest_ind(samples[0], samples[1], equal_var=False)
+        overall = {
+            "test": "welch_t",
+            "statistic": _f(statistic),
+            "p_value": _f(p_value),
+            "df1": None,
+            "df2": None,
+            "significant": bool(p_value < 0.05),
+        }
+    else:
+        statistic, p_value, df1, df2 = _welch_anova(samples)
+        overall = {
+            "test": "welch_anova",
+            "statistic": _f(statistic),
+            "p_value": _f(p_value),
+            "df1": _f(df1),
+            "df2": _f(df2),
+            "significant": bool(p_value < 0.05),
+        }
+
+    raw_pairs: list[tuple[Any, Any, np.ndarray, np.ndarray, float, float]] = []
+    for (left_key, left), (right_key, right) in combinations(eligible, 2):
+        statistic, p_value = scipy_stats.ttest_ind(left, right, equal_var=False)
+        raw_pairs.append(
+            (left_key, right_key, left, right, float(statistic), float(p_value))
+        )
+    adjusted = holm_adjust([pair[5] for pair in raw_pairs])
+    pairwise = [
+        {
+            "left": left_key,
+            "right": right_key,
+            "mean_difference": _f(float(np.mean(left)) - float(np.mean(right))),
+            "statistic": _f(statistic),
+            "p_value": _f(p_value),
+            "adjusted_p_value": _f(adjusted_p),
+            "significant": bool(adjusted_p < 0.05),
+            "effect_size_hedges_g": _hedges_g(left, right),
+        }
+        for (left_key, right_key, left, right, statistic, p_value), adjusted_p in zip(
+            raw_pairs, adjusted, strict=True
+        )
+    ]
+    return {
+        "method": str(overall["test"]),
+        "group_col": group_col,
+        "value_col": value_col,
+        "groups": summaries,
+        "overall": overall,
+        "pairwise": pairwise,
+        "small_group_protection": {
+            "minimum_group_size": comparison_minimum,
+            "mode": "drop",
+            "protected_group_count": len(protected),
+            "protected_row_count": sum(len(sample) for _, sample in protected),
+        },
+        "statistical_evidence": build_statistical_evidence(
+            analysis_kind="group_comparison",
+            method=str(overall["test"]),
+            total_rows=total_rows,
+            valid_rows=used_rows,
+            tests_count=len(pairwise),
+            multiple_testing_method="holm" if len(pairwise) > 1 else "none",
+            minimum_required=2 * comparison_minimum,
+            assumptions=[
+                "群体和度量缺失记录按完整案例剔除。",
+                "群体观测相互独立；Welch 方法不要求各群体方差相等。",
+            ],
+            limitations=[
+                "小于策略阈值的群体已完全抑制，未合并为统计上无意义的混合群体。",
+                "成对比较显著性按 Holm 方法校正；群体差异不证明群体属性导致结果变化。",
+            ],
+        ),
     }

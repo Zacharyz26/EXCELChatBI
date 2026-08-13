@@ -32,10 +32,12 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 6A-2 已接入受治理目录换代和 profile 可用性；SQLite v10 进一步固定执行作用域、数据版本、
 取消树与 Evidence Ledger，并对同一 ready frontier 的受治理只读工具开启有界并行。提交
 `b67b704` 的 [CI run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
-已确认 backend、frontend 与真实 Compose 三项全绿。阶段 6B-1 已在本地实现确定性时间/指标/
-维度/ID 角色、置信度与歧义、只读质量建议、严格 MCP 输出契约、Planner 单次路由和 React
-Artifact 展示；6B-2 已增加绑定计划/数据版本的结构化角色确认，以及统计/聚合执行前的
-确定性角色门禁。当前等待完整 CI，下一步是代表性角色评测与双传输/Compose 恢复门禁。
+已确认 backend、frontend 与真实 Compose 三项全绿。阶段 6B 已由提交 `6b89ef6` 的完整 CI
+关闭；阶段 6C 的有界候选、验证生命周期、确定性跟进、匿名评测和 Compose 恢复门禁已由
+提交 `d5005ee` 的
+[run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
+验证关闭。当前进入 6D；6D-1 正在为四类现有统计 Tool 增加统一 Evidence 护栏，预测仍须
+使用独立 `stats.forecast` Tool/Profile。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -149,11 +151,9 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A 工程门禁已完成并通过真实 Compose CI。
-  6B-1/6B-2 数据角色、质量建议、结构化确认与执行门禁已完成本地实现，仍待完整 CI 和
-  代表性验收；真实
-  CPU/GPU semantic 等价、领域签字、假设筛选与结果驱动分析、统计/预测护栏和多数据集
-  自主分析仍未完成；
+- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6C 工程门禁已完成并通过真实 Compose CI。
+  6D 统计/预测护栏与后续多数据集自主分析仍未完成；真实 CPU/GPU semantic 等价和领域签字
+  继续作为发布债务；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
 
@@ -200,11 +200,17 @@ v2.5 阶段 6A（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   SQLite v9 TaskRun capability/tool 快照 → tools/list_changed 换代 → profile 可用性
   SQLite v10 共享预算/固定数据版本/取消树/Evidence Ledger → ready frontier 有界并行
 
-v2.5 阶段 6B（开发中；6B-1/6B-2 本地实现完成，待完整 CI）
+v2.5 阶段 6B（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   数据角色/置信度/歧义 + 只读质量建议 → 结构化角色确认/下游前置条件 → 代表性评测/部署门禁
 
-v2.5 阶段 6 后续
-  结果驱动分析/统计护栏 → 多数据集
+v2.5 阶段 6C（已关闭；完整 CI 与 Compose 恢复门禁全绿）
+  有界候选筛选 → 用户选择 → Evidence/Verifier 生命周期 → 确定性跟进/发布门禁
+
+v2.5 阶段 6D（开发中；6D-1、6D-2 已完成本地验证并待远程完整 CI）
+  统一统计 Evidence → 受治理贡献/分群/回归诊断 → 独立预测 Tool/Profile → 发布门禁
+
+v2.5 阶段 6E（未开始）
+  多数据集选择/Join 门禁 → 版本/衍生数据集/血缘 → 发布门禁
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证

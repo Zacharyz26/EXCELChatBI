@@ -15,28 +15,48 @@ def build_server() -> MCPServer:
         Tool(
             "trend_analysis", "趋势分析", schemas.TREND_ANALYSIS_SCHEMA,
             tools.trend_analysis, output_schema=tool_output_schema("trend_analysis"),
-            metadata=tool_metadata("stats.trend", "stats")
+            metadata=tool_metadata("stats.trend", "stats", tool_version="1.1.0")
         )
     )
     server.register(
         Tool(
             "anomaly_detect", "异常检测", schemas.ANOMALY_DETECT_SCHEMA,
             tools.anomaly_detect, output_schema=tool_output_schema("anomaly_detect"),
-            metadata=tool_metadata("stats.anomaly", "stats")
+            metadata=tool_metadata("stats.anomaly", "stats", tool_version="1.1.0")
         )
     )
     server.register(
         Tool(
             "regression", "回归分析", schemas.REGRESSION_SCHEMA,
             tools.regression, output_schema=tool_output_schema("regression"),
-            metadata=tool_metadata("stats.regression", "stats")
+            metadata=tool_metadata("stats.regression", "stats", tool_version="1.1.0")
         )
     )
     server.register(
         Tool(
             "correlation", "相关性分析", schemas.CORRELATION_SCHEMA,
             tools.correlation, output_schema=tool_output_schema("correlation"),
-            metadata=tool_metadata("stats.correlation", "stats")
+            metadata=tool_metadata("stats.correlation", "stats", tool_version="1.1.0")
+        )
+    )
+    server.register(
+        Tool(
+            "dimension_contribution",
+            "维度贡献分析",
+            schemas.DIMENSION_CONTRIBUTION_SCHEMA,
+            tools.dimension_contribution,
+            output_schema=tool_output_schema("dimension_contribution"),
+            metadata=tool_metadata("stats.contribution", "stats"),
+        )
+    )
+    server.register(
+        Tool(
+            "group_compare",
+            "分群比较",
+            schemas.GROUP_COMPARE_SCHEMA,
+            tools.group_compare,
+            output_schema=tool_output_schema("group_compare"),
+            metadata=tool_metadata("stats.group_compare", "stats"),
         )
     )
     return server

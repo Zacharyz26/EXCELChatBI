@@ -363,14 +363,14 @@ class ChartResponse(BaseModel):
 
 
 class StatsRequest(BaseModel):
-    """统计分析请求：基于已上传数据集跑趋势/异常/回归。
+    """统计分析请求：基于已上传数据集执行受治理统计分析。
 
     params 为工具专属入参（如 value_col/time_col/target/features），
     与 dataset_ref 合并后经 Tool.invoke 做 JSON Schema 校验（红线3）。
     """
 
     dataset_ref: DatasetRef
-    kind: str                      # trend | anomaly | regression
+    kind: str  # trend | anomaly | regression | correlation | contribution | group_compare
     params: dict[str, Any] = {}
     interpret: bool = False        # 是否附带 LLM 中文解读（默认关，不平白付模型成本）
 

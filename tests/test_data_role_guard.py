@@ -130,6 +130,29 @@ def test_identifier_cannot_be_used_as_regression_metric() -> None:
     assert result.checks[-1]["effective_role"] == "identifier"
 
 
+def test_governed_group_tools_require_dimension_and_metric_roles() -> None:
+    for tool_name, arguments in (
+        (
+            "dimension_contribution",
+            {"dimension_col": "客户", "value_col": "金额"},
+        ),
+        ("group_compare", {"group_col": "客户", "value_col": "金额"}),
+    ):
+        result = validate_data_role_preconditions(
+            tool_name=tool_name,
+            arguments={"dataset_ref": "d" * 32, **arguments},
+            dataset=_dataset(),
+            confirmations=(_confirmation(),),
+            data_version_hash="a" * 64,
+        )
+
+        assert result is not None and result.allowed is True
+        assert [item["effective_role"] for item in result.checks] == [
+            "dimension",
+            "metric",
+        ]
+
+
 def test_incomplete_legacy_profile_fails_closed() -> None:
     dataset = _dataset()
     legacy = Dataset(

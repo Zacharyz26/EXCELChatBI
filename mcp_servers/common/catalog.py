@@ -32,6 +32,216 @@ _INTEGER = {"type": "integer"}
 _NUMBER_OR_NULL = {"type": ["number", "null"]}
 _ARRAY = {"type": "array"}
 _OBJECT = {"type": "object"}
+_SCALAR = {"type": ["string", "number", "boolean", "null"]}
+
+_STATISTICAL_EVIDENCE_SCHEMA = _closed_object(
+    {
+        "schema": {"const": "chatbi-statistical-evidence-v1"},
+        "analysis_kind": {
+            "type": "string",
+            "enum": [
+                "trend",
+                "anomaly",
+                "regression",
+                "correlation",
+                "contribution",
+                "group_comparison",
+            ],
+        },
+        "method": _STRING,
+        "sample": _closed_object(
+            {
+                "total_rows": _INTEGER,
+                "valid_rows": _INTEGER,
+                "excluded_rows": _INTEGER,
+                "missing_policy": {"const": "complete_case_drop"},
+                "minimum_required": _INTEGER,
+                "meets_minimum": {"type": "boolean"},
+            },
+            "total_rows",
+            "valid_rows",
+            "excluded_rows",
+            "missing_policy",
+            "minimum_required",
+            "meets_minimum",
+        ),
+        "inference": _closed_object(
+            {
+                "alpha": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+                "tests_count": _INTEGER,
+                "multiple_testing_method": {"type": "string", "enum": ["none", "holm"]},
+                "causal_claim_allowed": {"const": False},
+            },
+            "alpha",
+            "tests_count",
+            "multiple_testing_method",
+            "causal_claim_allowed",
+        ),
+        "assumptions": {"type": "array", "items": _STRING, "minItems": 1},
+        "limitations": {"type": "array", "items": _STRING, "minItems": 1},
+    },
+    "schema",
+    "analysis_kind",
+    "method",
+    "sample",
+    "inference",
+    "assumptions",
+    "limitations",
+)
+
+_SMALL_GROUP_PROTECTION_SCHEMA = _closed_object(
+    {
+        "minimum_group_size": _INTEGER,
+        "mode": {"type": "string", "enum": ["merge", "drop"]},
+        "protected_group_count": _INTEGER,
+        "protected_row_count": _INTEGER,
+    },
+    "minimum_group_size",
+    "mode",
+    "protected_group_count",
+    "protected_row_count",
+)
+
+_DIAGNOSTIC_TEST_SCHEMA = _closed_object(
+    {
+        "test": _STRING,
+        "statistic": _NUMBER_OR_NULL,
+        "p_value": _NUMBER_OR_NULL,
+        "passed": {"type": "boolean"},
+    },
+    "test",
+    "statistic",
+    "p_value",
+    "passed",
+)
+_AUTOCORRELATION_DIAGNOSTIC_SCHEMA = _closed_object(
+    {
+        "test": _STRING,
+        "statistic": _NUMBER_OR_NULL,
+        "passed": {"type": "boolean"},
+    },
+    "test",
+    "statistic",
+    "passed",
+)
+_VIF_SCHEMA = _closed_object(
+    {"name": _STRING, "vif": _NUMBER_OR_NULL},
+    "name",
+    "vif",
+)
+_REGRESSION_DIAGNOSTICS_SCHEMA = _closed_object(
+    {
+        "residual_normality": {
+            "oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]
+        },
+        "heteroskedasticity": {
+            "oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]
+        },
+        "autocorrelation": {
+            "oneOf": [_AUTOCORRELATION_DIAGNOSTIC_SCHEMA, {"type": "null"}]
+        },
+        "multicollinearity": _closed_object(
+            {
+                "condition_number": _NUMBER_OR_NULL,
+                "max_vif": _NUMBER_OR_NULL,
+                "vif": {"type": "array", "items": _VIF_SCHEMA},
+                "rank_deficient": {"type": "boolean"},
+            },
+            "condition_number",
+            "max_vif",
+            "vif",
+            "rank_deficient",
+        ),
+        "warnings": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "residual_non_normal",
+                    "heteroskedasticity_detected",
+                    "residual_autocorrelation",
+                    "multicollinearity_risk",
+                ],
+            },
+        },
+    },
+    "residual_normality",
+    "heteroskedasticity",
+    "autocorrelation",
+    "multicollinearity",
+    "warnings",
+)
+
+_CONTRIBUTION_GROUP_SCHEMA = _closed_object(
+    {
+        "dimension": _SCALAR,
+        "value": _NUMBER_OR_NULL,
+        "count": _INTEGER,
+        "share": _NUMBER_OR_NULL,
+        "rank": _INTEGER,
+        "protected": {"type": "boolean"},
+    },
+    "dimension",
+    "value",
+    "count",
+    "share",
+    "rank",
+    "protected",
+)
+_GROUP_SUMMARY_SCHEMA = _closed_object(
+    {
+        "group": _SCALAR,
+        "count": _INTEGER,
+        "mean": _NUMBER_OR_NULL,
+        "std": _NUMBER_OR_NULL,
+        "median": _NUMBER_OR_NULL,
+        "ci95_low": _NUMBER_OR_NULL,
+        "ci95_high": _NUMBER_OR_NULL,
+    },
+    "group",
+    "count",
+    "mean",
+    "std",
+    "median",
+    "ci95_low",
+    "ci95_high",
+)
+_GROUP_OVERALL_SCHEMA = _closed_object(
+    {
+        "test": {"type": "string", "enum": ["welch_t", "welch_anova"]},
+        "statistic": _NUMBER_OR_NULL,
+        "p_value": _NUMBER_OR_NULL,
+        "df1": _NUMBER_OR_NULL,
+        "df2": _NUMBER_OR_NULL,
+        "significant": {"type": "boolean"},
+    },
+    "test",
+    "statistic",
+    "p_value",
+    "df1",
+    "df2",
+    "significant",
+)
+_PAIRWISE_COMPARISON_SCHEMA = _closed_object(
+    {
+        "left": _SCALAR,
+        "right": _SCALAR,
+        "mean_difference": _NUMBER_OR_NULL,
+        "statistic": _NUMBER_OR_NULL,
+        "p_value": _NUMBER_OR_NULL,
+        "adjusted_p_value": _NUMBER_OR_NULL,
+        "significant": {"type": "boolean"},
+        "effect_size_hedges_g": _NUMBER_OR_NULL,
+    },
+    "left",
+    "right",
+    "mean_difference",
+    "statistic",
+    "p_value",
+    "adjusted_p_value",
+    "significant",
+    "effect_size_hedges_g",
+)
 
 _ROLE_CANDIDATE_SCHEMA = _closed_object(
     {
@@ -222,6 +432,7 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
             "n": _INTEGER,
             "points": _OBJECT,
             "forecast": _ARRAY,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
         },
         "method",
         "direction",
@@ -229,6 +440,7 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
         "n",
         "points",
         "forecast",
+        "statistical_evidence",
     ),
     "anomaly_detect": _object(
         {
@@ -236,11 +448,13 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
             "n_total": _INTEGER,
             "n_anomalies": _INTEGER,
             "anomalies": _ARRAY,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
         },
         "method",
         "n_total",
         "n_anomalies",
         "anomalies",
+        "statistical_evidence",
     ),
     "regression": _object(
         {
@@ -248,11 +462,15 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
             "r_squared": _NUMBER_OR_NULL,
             "n_obs": _INTEGER,
             "coefficients": _ARRAY,
+            "diagnostics": _REGRESSION_DIAGNOSTICS_SCHEMA,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
         },
         "kind",
         "r_squared",
         "n_obs",
         "coefficients",
+        "diagnostics",
+        "statistical_evidence",
     ),
     "correlation": _object(
         {
@@ -261,12 +479,58 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
             "n_obs": _INTEGER,
             "matrix": _ARRAY,
             "top_pairs": _ARRAY,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
         },
         "method",
         "columns",
         "n_obs",
         "matrix",
         "top_pairs",
+        "statistical_evidence",
+    ),
+    "dimension_contribution": _closed_object(
+        {
+            "method": {"type": "string", "enum": ["sum", "count"]},
+            "dimension_col": _STRING,
+            "value_col": _STRING,
+            "total_value": _NUMBER_OR_NULL,
+            "groups": {"type": "array", "items": _CONTRIBUTION_GROUP_SCHEMA},
+            "group_count": _INTEGER,
+            "truncated": {"type": "boolean"},
+            "returned_share": _NUMBER_OR_NULL,
+            "small_group_protection": _SMALL_GROUP_PROTECTION_SCHEMA,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
+        },
+        "method",
+        "dimension_col",
+        "value_col",
+        "total_value",
+        "groups",
+        "group_count",
+        "truncated",
+        "returned_share",
+        "small_group_protection",
+        "statistical_evidence",
+    ),
+    "group_compare": _closed_object(
+        {
+            "method": {"type": "string", "enum": ["welch_t", "welch_anova"]},
+            "group_col": _STRING,
+            "value_col": _STRING,
+            "groups": {"type": "array", "items": _GROUP_SUMMARY_SCHEMA},
+            "overall": _GROUP_OVERALL_SCHEMA,
+            "pairwise": {"type": "array", "items": _PAIRWISE_COMPARISON_SCHEMA},
+            "small_group_protection": _SMALL_GROUP_PROTECTION_SCHEMA,
+            "statistical_evidence": _STATISTICAL_EVIDENCE_SCHEMA,
+        },
+        "method",
+        "group_col",
+        "value_col",
+        "groups",
+        "overall",
+        "pairwise",
+        "small_group_protection",
+        "statistical_evidence",
     ),
     "gen_chart": _object(
         {"chart_id": _STRING, "chart_type": _STRING, "option": _OBJECT},

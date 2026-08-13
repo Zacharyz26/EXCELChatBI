@@ -49,12 +49,16 @@ _STATS_TOOLS = {
     "anomaly": "anomaly_detect",
     "regression": "regression",
     "correlation": "correlation",
+    "contribution": "dimension_contribution",
+    "group_compare": "group_compare",
 }
 _KIND_LABEL = {
     "trend": "趋势分析",
     "anomaly": "异常检测",
     "regression": "回归分析",
     "correlation": "相关性分析",
+    "contribution": "维度贡献分析",
+    "group_compare": "分群比较",
 }
 
 

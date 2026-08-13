@@ -34,6 +34,8 @@ _TOOLS = {
     "anomaly": "anomaly_detect",
     "regression": "regression",
     "correlation": "correlation",
+    "contribution": "dimension_contribution",
+    "group_compare": "group_compare",
 }
 
 
@@ -46,7 +48,7 @@ async def analyze_stats(
     store: SessionStore = Depends(session_store_dep),
     principal: Principal = Depends(current_principal_dep),
 ) -> StatsResponse:
-    """基于已上传数据集，跑趋势/异常/回归，返回结构化结果（可选中文解读）。"""
+    """基于已上传数据集执行受治理统计，返回结构化结果（可选中文解读）。"""
     require_dataset_access(
         store,
         req.dataset_ref,

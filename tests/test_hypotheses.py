@@ -28,13 +28,18 @@ def _dataset(*, ref: str = "d" * 32) -> Dataset:
     )
 
 
-def _catalog(*, correlation: bool = True) -> list[dict[str, object]]:
-    return [
+def _catalog(
+    *, correlation: bool = True, group_compare: bool | None = None
+) -> list[dict[str, object]]:
+    catalog: list[dict[str, object]] = [
         {"name": "stats.trend", "allowed": True},
         {"name": "stats.anomaly", "allowed": True},
         {"name": "data.aggregate", "allowed": True},
         {"name": "stats.correlation", "allowed": correlation},
     ]
+    if group_compare is not None:
+        catalog.append({"name": "stats.group_compare", "allowed": group_compare})
+    return catalog
 
 
 def test_open_exploration_produces_bounded_deterministic_untested_candidates() -> None:
@@ -61,6 +66,40 @@ def test_open_exploration_produces_bounded_deterministic_untested_candidates() -
     assert all(item["status"] == "eligible" for item in candidates)
     assert all(item["tested"] is False for item in candidates)
     assert len(first["eligible_candidate_ids"]) == 4
+
+
+def test_segment_candidate_upgrades_to_governed_group_compare_when_available() -> None:
+    result = screen_candidate_hypotheses(
+        user_text="请深入分析这份数据",
+        datasets=[_dataset()],
+        capability_catalog=_catalog(group_compare=True),
+        data_version_hash="a" * 64,
+    )
+
+    assert result is not None
+    segment = next(
+        item for item in result["candidates"] if item["kind"] == "segment_comparison"
+    )
+    assert segment["capability"] == "stats.group_compare"
+    assert "Welch" in segment["expected_evidence"]
+
+
+def test_declared_but_unavailable_group_compare_does_not_fallback_to_aggregate() -> None:
+    catalog = _catalog(group_compare=False)
+    result = screen_candidate_hypotheses(
+        user_text="请深入分析这份数据",
+        datasets=[_dataset()],
+        capability_catalog=catalog,
+        data_version_hash="a" * 64,
+    )
+
+    assert result is not None
+    segment = next(
+        item for item in result["candidates"] if item["kind"] == "segment_comparison"
+    )
+    assert segment["capability"] == "stats.group_compare"
+    assert segment["status"] == "rejected"
+    assert "capability_unavailable" in segment["reason_codes"]
 
 
 def test_capability_and_role_screening_fail_closed() -> None:

@@ -19,13 +19,17 @@ if str(ROOT) not in sys.path:
 
 from apps.api.main import app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from mcp_servers.common.catalog import tool_output_schema  # noqa: E402
+from mcp_servers.common.contracts import validate_json  # noqa: E402
 from mcp_servers.stats.tools import (  # noqa: E402
     anomaly_detect,
     correlation,
+    dimension_contribution,
+    group_compare,
     regression,
     trend_analysis,
 )
-from packages.common.dataset_store import save_dataframe  # noqa: E402
+from packages.common.dataset_store import save_dataframe, save_metadata  # noqa: E402
 
 
 @pytest.fixture
@@ -126,6 +130,19 @@ def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
     assert res["method"] == "ma"                   # 无 period 退化为移动平均
     assert res["seasonality_strength"] is None
     assert res["direction"] == "上升"
+    evidence = res["statistical_evidence"]
+    assert evidence["schema"] == "chatbi-statistical-evidence-v1"
+    assert evidence["analysis_kind"] == "trend"
+    assert evidence["sample"] == {
+        "total_rows": 48,
+        "valid_rows": 48,
+        "excluded_rows": 0,
+        "missing_policy": "complete_case_drop",
+        "minimum_required": 5,
+        "meets_minimum": True,
+    }
+    assert evidence["inference"]["causal_claim_allowed"] is False
+    assert any("时间泄漏" in item for item in evidence["limitations"])
 
 
 def test_anomaly_iqr_flags_outlier(anomaly_ref: str) -> None:
@@ -134,6 +151,9 @@ def test_anomaly_iqr_flags_outlier(anomaly_ref: str) -> None:
     assert res["n_anomalies"] >= 1
     assert res["anomalies"][0]["index"] == 10       # 最高分即植入的离群点
     assert res["anomalies"][0]["value"] == pytest.approx(500.0, abs=1e-6)
+    evidence = res["statistical_evidence"]
+    assert evidence["analysis_kind"] == "anomaly"
+    assert any("候选解释因素" in item for item in evidence["limitations"])
 
 
 def test_anomaly_isolation_forest_flags_outlier(anomaly_ref: str) -> None:
@@ -153,6 +173,11 @@ def test_regression_ols_recovers_coefficients(regression_ref: str) -> None:
     assert coef["const"]["coef"] == pytest.approx(5.0, abs=1e-6)
     assert res["r_squared"] == pytest.approx(1.0, abs=1e-6)
     assert coef["x1"]["significant"] is True
+    assert coef["x1"]["adjusted_p_value"] is not None
+    evidence = res["statistical_evidence"]
+    assert evidence["inference"]["tests_count"] == 2
+    assert evidence["inference"]["multiple_testing_method"] == "holm"
+    assert evidence["inference"]["causal_claim_allowed"] is False
 
 
 def test_regression_order_count_as_target(order_regression_ref: str) -> None:
@@ -167,6 +192,45 @@ def test_regression_order_count_as_target(order_regression_ref: str) -> None:
     assert res["n_obs"] == 24
     assert res["r_squared"] is not None and res["r_squared"] > 0.9
     assert {coef["name"] for coef in res["coefficients"]} == {"const", "销售额"}
+
+
+def test_regression_returns_diagnostics_and_detects_collinearity() -> None:
+    x1 = np.linspace(1, 40, 40)
+    x2 = 2 * x1
+    y = 3 + x1 + np.sin(x1)
+    ref = save_dataframe(pd.DataFrame({"y": y, "x1": x1, "x2": x2}))
+
+    result = regression(
+        {"dataset_ref": ref, "target": "y", "features": ["x1", "x2"]}
+    )
+
+    diagnostics = result["diagnostics"]
+    assert diagnostics["residual_normality"]["test"] == "jarque_bera"
+    assert diagnostics["heteroskedasticity"]["test"] == "breusch_pagan"
+    assert diagnostics["autocorrelation"]["test"] == "durbin_watson"
+    assert diagnostics["multicollinearity"]["rank_deficient"] is True
+    assert "multicollinearity_risk" in diagnostics["warnings"]
+    validate_json(
+        result,
+        tool_output_schema("regression"),
+        code="invalid_tool_output",
+        label="回归输出",
+    )
+
+
+def test_regression_enforces_feature_scaled_minimum_sample() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "y": np.arange(10, dtype=float),
+                "x1": np.arange(10, dtype=float),
+                "x2": np.linspace(2, 20, 10),
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=r"10 < 15"):
+        regression({"dataset_ref": ref, "target": "y", "features": ["x1", "x2"]})
 
 
 def test_regression_rejects_target_as_feature(order_regression_ref: str) -> None:
@@ -218,6 +282,37 @@ def test_correlation_matrix_and_pairs(correlation_ref: str) -> None:
     # a-b 强正相关排在最前
     top = res["top_pairs"][0]
     assert {top["a"], top["b"]} == {"a", "b"} and top["corr"] > 0.95 and top["significant"] is True
+    assert top["adjusted_p_value"] >= top["p_value"]
+    evidence = res["statistical_evidence"]
+    assert evidence["inference"] == {
+        "alpha": 0.05,
+        "tests_count": 3,
+        "multiple_testing_method": "holm",
+        "causal_claim_allowed": False,
+    }
+    assert any("相关不等于因果" in item for item in evidence["limitations"])
+
+
+def test_statistical_evidence_counts_complete_case_exclusions() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "a": [1.0, 2.0, None, 4.0, 5.0, 6.0],
+                "b": [2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+            }
+        )
+    )
+    res = correlation({"dataset_ref": ref, "columns": ["a", "b"]})
+    sample = res["statistical_evidence"]["sample"]
+    assert sample["total_rows"] == 6
+    assert sample["valid_rows"] == 5
+    assert sample["excluded_rows"] == 1
+    validate_json(
+        res,
+        tool_output_schema("correlation"),
+        code="invalid_tool_output",
+        label="统计工具输出",
+    )
 
 
 def test_correlation_spearman_and_non_numeric(correlation_ref: str) -> None:
@@ -226,6 +321,108 @@ def test_correlation_spearman_and_non_numeric(correlation_ref: str) -> None:
     ref = save_dataframe(pd.DataFrame({"名称": list("甲乙丙丁戊"), "x": [1, 2, 3, 4, 5]}))
     with pytest.raises(ValueError, match="不是数值型"):
         correlation({"dataset_ref": ref, "columns": ["名称", "x"]})
+
+
+def test_dimension_contribution_merges_small_groups_and_reports_coverage() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "地区": ["甲"] * 6 + ["乙"] * 5 + ["小一"] * 2 + ["小二"] * 3,
+                "销售额": [10.0] * 6 + [5.0] * 5 + [2.0] * 2 + [3.0] * 3,
+            }
+        )
+    )
+
+    result = dimension_contribution(
+        {
+            "dataset_ref": ref,
+            "dimension_col": "地区",
+            "value_col": "销售额",
+            "method": "sum",
+        }
+    )
+
+    assert result["group_count"] == 4
+    assert result["returned_share"] == pytest.approx(1.0)
+    protected = [item for item in result["groups"] if item["protected"]]
+    assert len(protected) == 1
+    assert protected[0]["dimension"] == "其他"
+    assert protected[0]["count"] == 5
+    assert result["small_group_protection"]["protected_group_count"] == 2
+    validate_json(
+        result,
+        tool_output_schema("dimension_contribution"),
+        code="invalid_tool_output",
+        label="贡献输出",
+    )
+
+
+def test_dimension_contribution_rejects_negative_or_protected_columns() -> None:
+    negative_ref = save_dataframe(pd.DataFrame({"地区": ["甲"] * 5, "值": [1, 2, -1, 3, 4]}))
+    with pytest.raises(ValueError, match="非负"):
+        dimension_contribution(
+            {"dataset_ref": negative_ref, "dimension_col": "地区", "value_col": "值"}
+        )
+
+    protected_ref = save_dataframe(pd.DataFrame({"地区": ["甲"] * 5, "值": range(5)}))
+    save_metadata(protected_ref, {"policy": {"columns": {"地区": "mask"}}})
+    with pytest.raises(ValueError, match="受数据策略保护"):
+        dimension_contribution(
+            {"dataset_ref": protected_ref, "dimension_col": "地区", "value_col": "值"}
+        )
+
+
+def test_group_compare_uses_welch_holm_and_suppresses_small_groups() -> None:
+    rng = np.random.default_rng(23)
+    frame = pd.DataFrame(
+        {
+            "群体": ["甲"] * 12 + ["乙"] * 12 + ["丙"] * 12 + ["不可见小群"] * 2,
+            "指标": np.concatenate(
+                [
+                    rng.normal(0, 1, 12),
+                    rng.normal(4, 1, 12),
+                    rng.normal(8, 1, 12),
+                    np.array([1000.0, 1100.0]),
+                ]
+            ),
+        }
+    )
+    ref = save_dataframe(frame)
+
+    result = group_compare(
+        {"dataset_ref": ref, "group_col": "群体", "value_col": "指标"}
+    )
+
+    assert result["method"] == "welch_anova"
+    assert result["overall"]["significant"] is True
+    assert len(result["groups"]) == 3
+    assert len(result["pairwise"]) == 3
+    assert all(item["adjusted_p_value"] >= item["p_value"] for item in result["pairwise"])
+    assert "不可见小群" not in str(result)
+    assert result["small_group_protection"] == {
+        "minimum_group_size": 5,
+        "mode": "drop",
+        "protected_group_count": 1,
+        "protected_row_count": 2,
+    }
+    evidence = result["statistical_evidence"]
+    assert evidence["analysis_kind"] == "group_comparison"
+    assert evidence["inference"]["multiple_testing_method"] == "holm"
+    validate_json(
+        result,
+        tool_output_schema("group_compare"),
+        code="invalid_tool_output",
+        label="分群输出",
+    )
+
+
+def test_group_compare_fails_closed_for_zero_variance_groups() -> None:
+    ref = save_dataframe(
+        pd.DataFrame({"群体": ["甲"] * 5 + ["乙"] * 5, "指标": [1.0] * 5 + [2.0] * 5})
+    )
+
+    with pytest.raises(ValueError, match="非零组内方差"):
+        group_compare({"dataset_ref": ref, "group_col": "群体", "value_col": "指标"})
 
 
 # ── 路由层（端到端，同 Excel 链路）──
@@ -286,6 +483,24 @@ def test_route_correlation_ok(correlation_ref: str) -> None:
     assert body["kind"] == "correlation"
     assert len(body["result"]["matrix"]) == 3
     assert body["result"]["top_pairs"][0]["significant"] is True
+
+
+def test_route_dimension_contribution_ok() -> None:
+    ref = save_dataframe(
+        pd.DataFrame({"地区": ["甲"] * 5 + ["乙"] * 5, "销售额": [10.0] * 5 + [5.0] * 5})
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/analyze/stats",
+        json={
+            "dataset_ref": ref,
+            "kind": "contribution",
+            "params": {"dimension_col": "地区", "value_col": "销售额"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["groups"][0]["share"] == pytest.approx(2 / 3)
 
 
 def test_route_regression_order_count_as_target(order_regression_ref: str) -> None:

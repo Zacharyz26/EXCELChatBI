@@ -9,6 +9,7 @@ import pytest
 from apps.orchestrator.agent_tools import AgentToolRegistry, AgentToolSpec
 from apps.orchestrator.control.contracts import build_minimal_contract
 from apps.orchestrator.control.production_planner import (
+    build_deterministic_plan,
     build_planner_context,
     create_production_plan,
 )
@@ -487,6 +488,50 @@ async def test_deterministic_path_rejects_present_but_unavailable_capability() -
             blocking_clarification=None,
             capability_catalog=catalog,
         )
+
+
+@pytest.mark.asyncio
+async def test_prediction_request_fails_closed_on_governed_forecast_capability() -> None:
+    contract = build_minimal_contract(
+        run_id="forecast-unavailable",
+        user_text="预测未来四周的销售额",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    with pytest.raises(ValueError, match="stats.forecast"):
+        await create_production_plan(
+            user_text=contract.goal,
+            contract=contract,
+            datasets=[_dataset()],
+            artifacts=[],
+            registry=_artifact_registry(),
+            gateway=None,
+            blocking_clarification=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("user_text", "expected"),
+    [
+        ("分析地区对销售额的贡献占比", "stats.contribution"),
+        ("比较不同地区的销售额是否有组间差异", "stats.group_compare"),
+    ],
+)
+def test_advanced_stats_requests_use_governed_capabilities_only(
+    user_text: str,
+    expected: str,
+) -> None:
+    plan = build_deterministic_plan(
+        user_text=user_text,
+        context={"datasets": [], "artifacts": []},
+        route="template",
+        available_capabilities={expected, "data.aggregate"},
+    )
+
+    capabilities = [step["capability"] for step in plan["steps"]]
+    assert capabilities == [expected]
 
 
 @pytest.mark.asyncio

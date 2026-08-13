@@ -724,25 +724,40 @@ def build_registry(
         ),
         _wrap_mcp(
             stats, "trend_analysis",
-            "趋势分析（STL 分解/移动平均/预测）。需要时间列与数值列。",
-            metadata=tool_metadata("stats.trend", "stats"),
+            "趋势分析（STL 分解/移动平均/探索性外推）。需要时间列与数值列；"
+            "输出统计 Evidence 护栏，但不替代受治理 stats.forecast 预测。",
+            metadata=tool_metadata("stats.trend", "stats", tool_version="1.1.0"),
         ),
         _wrap_mcp(
             stats, "anomaly_detect",
             "异常检测（3sigma/IQR/孤立森林/STL 残差）。返回异常点行号(index)与数值，"
             "可配合 transform_dataset 的 exclude_row_indices 排除异常后重算。",
-            metadata=tool_metadata("stats.anomaly", "stats"),
+            metadata=tool_metadata("stats.anomaly", "stats", tool_version="1.1.0"),
         ),
         _wrap_mcp(
             stats, "regression",
             "回归分析（OLS/Logit）：目标列 target 与自变量 features，输出系数、p 值、R²。",
-            metadata=tool_metadata("stats.regression", "stats"),
+            metadata=tool_metadata("stats.regression", "stats", tool_version="1.1.0"),
         ),
         _wrap_mcp(
             stats, "correlation",
             "相关性分析（Pearson/Spearman）：给定 ≥2 个数值列，输出相关矩阵与强相关对"
             "（含 p_value/significant）。结果仅支持共变关系结论，不支持因果推断。",
-            metadata=tool_metadata("stats.correlation", "stats"),
+            metadata=tool_metadata("stats.correlation", "stats", tool_version="1.1.0"),
+        ),
+        _wrap_mcp(
+            stats,
+            "dimension_contribution",
+            "维度贡献分析：仅对非负、可加总指标执行 sum/count 构成分析，"
+            "按数据策略合并或抑制小群体并返回实际展示覆盖率。",
+            metadata=tool_metadata("stats.contribution", "stats"),
+        ),
+        _wrap_mcp(
+            stats,
+            "group_compare",
+            "分群比较：两组使用 Welch t 检验，三组及以上使用 Welch ANOVA，"
+            "成对比较使用 Holm 校正；小群体完全抑制，结论不支持因果表述。",
+            metadata=tool_metadata("stats.group_compare", "stats"),
         ),
         _wrap_mcp(
             chart, "gen_chart",

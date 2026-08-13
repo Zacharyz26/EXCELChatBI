@@ -10,7 +10,7 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5 与 6A**。3A–3C 的历史
+当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5、6A～6C**。3A–3C 的历史
 发布门禁已关闭；3D-1–3D-3 的项目记忆治理与 3E-1–3E-3 的 SQLite v6 不可变
 Dataset 锚点、五阶段来源图、安全 React 查看、领域中立质量和联合恢复探针已由提交
 `0b5980c` 的 backend、frontend 与 Docker/Compose CI 验证并关闭。4A-1/4A-2 已落地
@@ -18,8 +18,8 @@ SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/G
 审批执行链；4B 已把 TaskRun、计划修订、结构化澄清、任务控制和审批接入 React。4C/4D
 的恢复、自主等级与反馈分支已关闭，阶段 5 领域定义与知识 Resource 已工程关闭；阶段 6A
 能力目录和受控并行已由完整 CI 关闭；6B-1～6B-4 数据角色、质量建议、结构化确认、执行前
-门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；6C-1～6C-4 受控自主探索已在
-本地实现，等待完整 CI 与真实 Compose 签字：
+门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；6C-1～6C-4 受控自主探索已由
+提交 `d5005ee` 的完整 CI 与真实 Compose 门禁关闭；当前进入 6D 统计证据与预测护栏：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
@@ -115,7 +115,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；TaskRun 协作面板、计划编辑、结构化澄清、任务控制、审批、恢复与执行审计 | 阶段 6 继续增加自主分析过程和统计护栏展示 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复；受治理 ready-frontier 并行 | 阶段 6 在共享预算、数据版本、取消树和 Evidence Ledger 上逐步增加自主分析能力 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5 与 6A 已关闭；后续阶段 6 能力继续复用不可变目录和受控并行控制面 |
+| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5、6A～6C 已关闭；后续阶段 6 能力继续复用不可变目录和受控并行控制面 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
 | 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
@@ -154,7 +154,7 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：v2.5 阶段 6C 受控候选假设与结果驱动探索
+### 6.2 当前任务：v2.5 阶段 6D 统计证据与预测护栏
 
 1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
    `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
@@ -174,15 +174,17 @@ tests/                 单元、集成与 Agent 行为评测
    与 Verifier，并区分支持、不支持、不确定、部分、失败和取消状态；6C-3 已实现确定性的
    stop/degrade/补证/下一候选决策，并由共享工具预算、重规划上限、取消树和用户确认分支共同
    收敛；6C-4 已加入 14 场景匿名确定性评测、CI 强制门禁及 Compose 浏览器/三次恢复探针。
-   当前本机缺少 Docker，只能等待完整 CI 对真实 Compose 签字后关闭 6C；预测和多数据集关联
+   提交 `d5005ee` 的
+   [CI run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
+   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1 统一统计 Evidence 与
+   6D-2 受治理贡献、分群比较和回归诊断已完成本地验证并待远程完整 CI；预测和多数据集关联
    仍须逐项实现，不得提前宣称阶段 6 完成。
 
 完整状态见 `/docs/v2.5/README.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.5：阶段 3–5、6A 与 6B 已工程关闭，当前进入有界候选假设与结果驱动自主分析；其后
-  再逐项进入统计/预测护栏和多数据集；
+- v2.5：阶段 3–5、6A～6C 已工程关闭，当前进入统计/预测护栏；其后再进入多数据集；
   同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker
   状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；

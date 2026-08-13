@@ -179,7 +179,14 @@ def _profile_md(profile: dict[str, Any]) -> list[str]:
     return out
 
 
-_KIND_LABEL = {"trend": "趋势分析", "anomaly": "异常检测", "regression": "回归分析"}
+_KIND_LABEL = {
+    "trend": "趋势分析",
+    "anomaly": "异常检测",
+    "regression": "回归分析",
+    "correlation": "相关性分析",
+    "contribution": "维度贡献分析",
+    "group_compare": "分群比较",
+}
 
 
 def _stat_md(section: dict[str, Any]) -> list[str]:
@@ -236,6 +243,39 @@ def _stat_md(section: dict[str, Any]) -> list[str]:
             out += [
                 f"| {cols[i]} | " + " | ".join(_fmt(v) for v in row) + " |"
                 for i, row in enumerate(matrix)
+            ]
+            out.append("")
+    elif kind == "contribution":
+        out += [
+            f"- 方法 {result.get('method', '—')} · 总量 {_fmt(result.get('total_value'))}"
+            f" · 展示覆盖率 {_fmt(result.get('returned_share'))}",
+            "",
+        ]
+        groups = result.get("groups") or []
+        if groups:
+            out += ["| 排名 | 维度 | 值 | 份额 | 样本 |", "|---|---|---|---|---|"]
+            out += [
+                f"| {_fmt(item.get('rank'))} | {item.get('dimension', '')} | "
+                f"{_fmt(item.get('value'))} | {_fmt(item.get('share'))} | "
+                f"{_fmt(item.get('count'))} |"
+                for item in groups
+            ]
+            out.append("")
+    elif kind == "group_compare":
+        overall = result.get("overall") or {}
+        out += [
+            f"- 方法 {result.get('method', '—')} · p 值 {_fmt(overall.get('p_value'))}"
+            f" · 显著 {'是' if overall.get('significant') else '否'}",
+            "",
+        ]
+        groups = result.get("groups") or []
+        if groups:
+            out += ["| 群体 | 样本 | 均值 | 中位数 | 95% CI |", "|---|---|---|---|---|"]
+            out += [
+                f"| {item.get('group', '')} | {_fmt(item.get('count'))} | "
+                f"{_fmt(item.get('mean'))} | {_fmt(item.get('median'))} | "
+                f"{_fmt(item.get('ci95_low'))}–{_fmt(item.get('ci95_high'))} |"
+                for item in groups
             ]
             out.append("")
 

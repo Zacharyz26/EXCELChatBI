@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from apps.orchestrator.control.hypothesis_lifecycle import (
     bind_hypothesis_to_plan,
     finalize_hypothesis_execution,
@@ -155,6 +156,28 @@ def test_failed_verification_keeps_collected_evidence_partial() -> None:
     assert final["status"] == "partial"
     assert final["outcome"] == "inconclusive"
     assert final["evidence_outcome"] == "supported"
+
+
+@pytest.mark.parametrize(
+    ("significant", "expected"),
+    [(True, "supported"), (False, "not_supported")],
+)
+def test_group_compare_evidence_drives_segment_outcome(
+    significant: bool,
+    expected: str,
+) -> None:
+    evidence = hypothesis_evidence_collected(
+        _planned(kind="segment_comparison", capability="stats.group_compare"),
+        persisted_step_id="persisted-step",
+        invocation_id="invocation-1",
+        evidence_id="evidence-1",
+        ledger_sequence=1,
+        result={"overall": {"significant": significant}},
+        updated_at="2026-08-13T00:00:03Z",
+    )
+
+    assert evidence is not None
+    assert evidence["evidence_outcome"] == expected
 
 
 def test_failure_without_evidence_and_cancellation_remain_distinct() -> None:

@@ -32,7 +32,11 @@ from mcp_servers.common.service_catalog import parse_capability_profiles  # noqa
 from mcp_servers.dataset_ops.server import build_server as build_ops  # noqa: E402
 from mcp_servers.excel_parser.server import build_server as build_excel  # noqa: E402
 from mcp_servers.report.server import build_server as build_report  # noqa: E402
-from mcp_servers.stats.schemas import REGRESSION_SCHEMA  # noqa: E402
+from mcp_servers.stats.schemas import (  # noqa: E402
+    DIMENSION_CONTRIBUTION_SCHEMA,
+    GROUP_COMPARE_SCHEMA,
+    REGRESSION_SCHEMA,
+)
 from mcp_servers.stats.server import build_server as build_stats  # noqa: E402
 from packages.common.dataset_store import load_dataframe, save_dataframe  # noqa: E402
 from packages.governance.policy import DEFAULT_AGENT_TOOL_ALLOWLIST  # noqa: E402
@@ -47,6 +51,8 @@ _EXPECTED_TOOLS = [
     "anomaly_detect",
     "regression",
     "correlation",
+    "dimension_contribution",
+    "group_compare",
     "gen_chart",
     "chart_screenshot",
     "transform_dataset",
@@ -137,6 +143,8 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     """schema 同源（红线3）：喂模型的 parameters 就是 Tool.invoke 校验的 schema。"""
     defs = {d["function"]["name"]: d["function"]["parameters"] for d in _registry().openai_tools()}
     assert defs["regression"] is REGRESSION_SCHEMA
+    assert defs["dimension_contribution"] is DIMENSION_CONTRIBUTION_SCHEMA
+    assert defs["group_compare"] is GROUP_COMPARE_SCHEMA
     assert defs["kb_search"] is KB_SEARCH_SCHEMA
     assert defs["generate_report"] is GENERATE_REPORT_SCHEMA
     descriptors = {item.name: item for item in _registry().mcp_descriptors()}

@@ -69,6 +69,12 @@ def tool_role_requirements(
         sequence("features", "metric")
     elif tool_name == "correlation":
         sequence("columns", "metric")
+    elif tool_name == "dimension_contribution":
+        scalar("dimension_col", "dimension")
+        scalar("value_col", "metric")
+    elif tool_name == "group_compare":
+        scalar("group_col", "dimension")
+        scalar("value_col", "metric")
     elif tool_name == "aggregate_preview":
         scalar("group_col", "dimension", "time")
         if arguments.get("agg") != "count":
