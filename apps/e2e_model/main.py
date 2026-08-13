@@ -482,9 +482,9 @@ def _latest_scenario_marker(messages: list[Any]) -> str | None:
         for marker in (
             _REPORT_MARKER,
             _PARALLEL_MARKER,
-            _HYPOTHESIS_MARKER,
             _READ_ONLY_MARKER,
             _BRANCH_MARKER,
+            _HYPOTHESIS_MARKER,
         ):
             if marker in content:
                 return marker

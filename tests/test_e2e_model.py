@@ -115,6 +115,30 @@ def test_compose_fixture_selects_the_latest_marked_user_turn() -> None:
         )
         == "请深入分析这份数据"
     )
+    assert (
+        _latest_scenario_marker(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "COMPOSE_4D_BRANCH：请深入分析这份数据的字段与规模，"
+                        "并根据父分支反馈调整计划。"
+                    ),
+                }
+            ]
+        )
+        == "COMPOSE_4D_BRANCH"
+    )
+    assert (
+        _latest_scenario_marker(
+            [
+                {"role": "user", "content": "COMPOSE_4D_BRANCH：请深入分析这份数据"},
+                {"role": "assistant", "content": "分支完成"},
+                {"role": "user", "content": "请深入分析这份数据"},
+            ]
+        )
+        == "请深入分析这份数据"
+    )
 
 
 @pytest.mark.asyncio
