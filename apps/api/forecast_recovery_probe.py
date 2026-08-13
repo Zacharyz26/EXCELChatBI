@@ -112,7 +112,10 @@ def _gateway(
     return ManagedMCPClientGateway(
         config=config,
         expected=expected,
-        allowed_tools=frozenset({"forecast"}),
+        # Discovery validates the complete service catalog. Limiting this to the
+        # one exercised tool would incorrectly classify every other reviewed
+        # stats tool returned by ``tools/list`` as unexpected catalog drift.
+        allowed_tools=frozenset(descriptor.name for descriptor in expected),
         transport_factory=lambda: OfficialSDKClientTransport(config),
     )
 
