@@ -62,6 +62,37 @@ def test_compose_planner_fixture_returns_two_independent_parallel_steps() -> Non
     assert [step["dependencies"] for step in plan["steps"]] == [[], []]
 
 
+def test_compose_planner_fixture_binds_the_selected_anomaly_capability() -> None:
+    content = _complete_json(
+        [
+            {"role": "system", "content": "你是受约束任务 Planner"},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "planning_request": (
+                            "请深入分析这份数据\n\n"
+                            "用户对澄清问题的回答：销售额可能存在异常观测"
+                        ),
+                        "capability_catalog": [
+                            {"name": "data.profile", "allowed": True},
+                            {"name": "stats.anomaly", "allowed": True},
+                            {"name": "stats.trend", "allowed": True},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+    )
+
+    plan = json.loads(content)
+    assert plan["summary"] == "只验证用户选中的异常候选。"
+    assert [step["capability"] for step in plan["steps"]] == ["stats.anomaly"]
+    assert plan["steps"][0]["dependencies"] == []
+    assert plan["clarifications"] == []
+
+
 def test_compose_fixture_selects_the_latest_marked_user_turn() -> None:
     assert (
         _latest_scenario_marker(

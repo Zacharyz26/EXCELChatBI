@@ -381,6 +381,32 @@ def _complete_json(messages: list[Any]) -> str:
         }
         if "data.profile" not in allowed:
             raise HTTPException(status_code=422, detail="data.profile unavailable")
+        if _HYPOTHESIS_MARKER in planning_request and "异常" in planning_request:
+            if "stats.anomaly" not in allowed:
+                raise HTTPException(status_code=422, detail="stats.anomaly unavailable")
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "summary": "只验证用户选中的异常候选。",
+                    "steps": [
+                        {
+                            "step_id": "verify_selected_anomaly",
+                            "purpose": "取得选中异常候选的 Evidence",
+                            "capability": "stats.anomaly",
+                            "dependencies": [],
+                            "expected_evidence": ["异常检测 Evidence"],
+                            "completion_conditions": [
+                                "异常工具成功并生成可追溯 Evidence"
+                            ],
+                            "fallback": [{"when": "异常检测失败", "action": "block"}],
+                        }
+                    ],
+                    "assumptions": [],
+                    "clarifications": [],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         if _PARALLEL_MARKER in planning_request:
             if "stats.trend" not in allowed:
                 raise HTTPException(status_code=422, detail="stats.trend unavailable")
