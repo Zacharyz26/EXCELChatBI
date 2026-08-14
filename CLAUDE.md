@@ -20,7 +20,7 @@ SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/G
 能力目录和受控并行已由完整 CI 关闭；6B-1～6B-4 数据角色、质量建议、结构化确认、执行前
 门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；6C-1～6C-4 受控自主探索已由
 提交 `d5005ee` 的完整 CI 与真实 Compose 门禁关闭；6D 已由提交 `3febd68` 的完整 CI 与
-真实 Compose 预测恢复门禁关闭；当前进入 6E 多数据集关联治理：
+真实 Compose 预测恢复门禁关闭；当前 6E-1～6E-4 已本地实现，待远程完整 CI 关闭 6E：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
@@ -116,7 +116,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；TaskRun 协作面板、计划编辑、结构化澄清、任务控制、审批、恢复与执行审计 | 阶段 6 继续增加自主分析过程和统计护栏展示 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复；受治理 ready-frontier 并行 | 阶段 6 在共享预算、数据版本、取消树和 Evidence Ledger 上逐步增加自主分析能力 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5、6A～6D 已关闭；6E 继续复用不可变目录和受控并行控制面 |
+| 对话持久层 | SQLite v11 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger/多父血缘 | 阶段 3–5、6A～6D 已关闭；6E 继续复用不可变目录和受控并行控制面 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
 | 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
@@ -180,8 +180,11 @@ tests/                 单元、集成与 Agent 行为评测
    已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1～6D-4 由提交
    `af0693e` 交付，提交 `3febd68` 修复完整 stats 目录校验；
    [CI run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
-   三项全绿并关闭 6D。当前 6E-1 已实现 `dataset.join.preflight` 只读预检；6E-2 已本地实现
-   `dataset.join.execute` 高风险审批、固定等值 Join、SQLite v11 双父血缘和派生策略继承。
+   三项全绿并关闭 6D。当前 6E-1 已实现 `dataset.join.preflight` 只读预检；6E-2 已实现
+   `dataset.join.execute` 高风险审批、固定等值 Join、SQLite v11 双父血缘和派生策略继承；
+   6E-3 已本地实现精确预检/数据版本门禁、React 审批恢复和完整双父血缘展示；
+   6E-4 已本地实现 17 场景脱敏评测、跨项目/敏感键/授权失败关闭、stdio/HTTP 等价、
+   `data-tools` 重启恢复和浏览器发布验收。未经远程三作业 CI 全绿前不标记 6E 工程关闭。
    未取得参数绑定授权或没有返回已登记的新 `dataset_ref` 时不得声称 Join 已执行。
 
 完整状态见 `/docs/v2.5/README.md`。

@@ -53,6 +53,8 @@ class LineageEdge:
     source: str
     target: str
     relation: LineageRelation
+    ordinal: int | None = None
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +155,7 @@ class LineageStore:
             ).fetchall()
             dataset_edge_rows = connection.execute(
                 """
-                SELECT child_ref, parent_ref, ordinal
+                SELECT child_ref, parent_ref, parent_role, ordinal
                 FROM dataset_lineage_edges
                 WHERE child_ref IN (
                     SELECT ref FROM dataset_lineage_anchors WHERE project_id = ?
@@ -229,13 +231,22 @@ class LineageStore:
 
         nodes: dict[str, LineageNode] = {}
         edges: set[tuple[str, str, LineageRelation]] = set()
+        edge_details: dict[
+            tuple[str, str, LineageRelation],
+            tuple[int | None, str | None],
+        ] = {}
         dataset_anchors: dict[str, sqlite3.Row] = {
             str(row["ref"]): row for row in dataset_rows
         }
         dataset_parents: dict[str, list[str]] = {}
+        dataset_edge_metadata: dict[tuple[str, str], tuple[int, str]] = {}
         for row in dataset_edge_rows:
-            dataset_parents.setdefault(str(row["child_ref"]), []).append(
-                str(row["parent_ref"])
+            child_ref = str(row["child_ref"])
+            parent_ref = str(row["parent_ref"])
+            dataset_parents.setdefault(child_ref, []).append(parent_ref)
+            dataset_edge_metadata[(child_ref, parent_ref)] = (
+                int(row["ordinal"]),
+                str(row["parent_role"]),
             )
         visible_dataset_refs = set(dataset_anchors)
         if conversation_id is not None:
@@ -300,7 +311,15 @@ class LineageStore:
             child = add_dataset(str(row["ref"]))
             for parent_ref in dataset_parents.get(str(row["ref"]), ()):
                 parent = add_dataset(parent_ref)
-                edges.add((parent, child, "derived_from"))
+                edge_key: tuple[str, str, LineageRelation] = (
+                    parent,
+                    child,
+                    "derived_from",
+                )
+                edges.add(edge_key)
+                edge_details[edge_key] = dataset_edge_metadata[
+                    (str(row["ref"]), parent_ref)
+                ]
 
         artifact_nodes: dict[str, str] = {}
         logical_analysis_sources: dict[str, str] = {}
@@ -494,7 +513,12 @@ class LineageStore:
             ),
         )
         all_edges = tuple(
-            LineageEdge(source, target, relation)
+            LineageEdge(
+                source,
+                target,
+                relation,
+                *edge_details.get((source, target, relation), (None, None)),
+            )
             for source, target, relation in sorted(edges)
         )
         graph_hash = _graph_hash(all_nodes, all_edges)

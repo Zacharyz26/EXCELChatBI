@@ -113,6 +113,11 @@ from apps.orchestrator.control.hypotheses import (
     requests_open_exploration,
     screen_candidate_hypotheses,
 )
+from apps.orchestrator.control.join_collaboration import (
+    JoinExecutionGuard,
+    build_join_evidence_context,
+    evaluate_join_execution_guard,
+)
 from apps.orchestrator.control.plan_executor import (
     PlanSchedule,
     match_ready_step,
@@ -888,6 +893,20 @@ def _evaluate_data_role_preconditions(
         dataset=dataset,
         confirmations=confirmations,
         data_version_hash=data_hash,
+    )
+
+
+def _evaluate_join_execution_preconditions(
+    task_store: TaskStore,
+    run_id: str,
+    arguments: JsonObject,
+) -> JoinExecutionGuard:
+    """Resolve the exact durable preflight dependency before approval or execution."""
+    return evaluate_join_execution_guard(
+        arguments=arguments,
+        invocations=task_store.list_invocations(run_id),
+        evidence=task_store.list_evidence(run_id),
+        current_data_version_hash=task_store.data_version_hash(run_id),
     )
 
 
@@ -2936,6 +2955,16 @@ async def _stream_agent_chat_inner(
                         resource_project_ids=tuple(resource_project_ids),
                     )
                 )
+                join_guard = (
+                    await run_in_threadpool(
+                        _evaluate_join_execution_preconditions,
+                        task_store,
+                        run_id,
+                        call_args,
+                    )
+                    if call.name == "join_datasets"
+                    else None
+                )
                 idempotency_key = invocation_idempotency_key(run_id, call.id, call.name, call_args)
                 signature_scope = (
                     f"plan:{offered_plan_version}:{planned_step.logical_id}"
@@ -3017,6 +3046,10 @@ async def _stream_agent_chat_inner(
                             "capability。请遵循当前计划，或等待 Replanner 生成新计划版本。"
                         )
                         failure_code = "tool_not_in_plan"
+                    failure_source = "policy"
+                elif join_guard is not None and not join_guard.allowed:
+                    feedback = f"未执行：{join_guard.message}"
+                    failure_code = join_guard.code
                     failure_source = "policy"
                 elif data_role_guard is not None and not data_role_guard.allowed:
                     feedback = f"未执行：{data_role_guard.message}"
@@ -3359,6 +3392,44 @@ async def _stream_agent_chat_inner(
                             "fields": fields,
                         },
                     )
+                    if failure_code in {
+                        "join_data_version_drift",
+                        "join_preflight_blocked",
+                    }:
+                        run, blocked_event = await run_in_threadpool(
+                            task_store.transition,
+                            run_id,
+                            expected_version=run.state_version,
+                            status="blocked",
+                            event_type="run.blocked",
+                            payload={
+                                "reason": failure_code,
+                                "message": feedback,
+                                "invocation_id": (
+                                    reserved_invocation.invocation_id
+                                    if reserved_invocation is not None
+                                    else None
+                                ),
+                            },
+                            terminal_reason=failure_code,
+                            usage=_tool_usage(
+                                calls_used,
+                                attempts_used,
+                                invalid_attempts_used,
+                            ),
+                        )
+                        yield _task_event(blocked_event, conversation_id)
+                        yield _event(
+                            "error",
+                            {
+                                "code": failure_code,
+                                "message": feedback,
+                                "retryable": False,
+                                "run_id": run_id,
+                                "run_status": run.status,
+                            },
+                        )
+                        return
                     controlled_run = await _controlled_run_boundary(
                         control,
                         task_store,
@@ -3832,6 +3903,12 @@ async def _stream_agent_chat_inner(
                         break
                     continue
                 summary = _summarize_result(call.name, result)
+                join_evidence_context = build_join_evidence_context(
+                    tool_name=call.name,
+                    arguments=call_args,
+                    result=result,
+                    data_version_hash=cancellation_branch.data_version_hash,
+                )
                 try:
                     (
                         run,
@@ -3858,6 +3935,11 @@ async def _stream_agent_chat_inner(
                             "tool": call.name,
                             "tool_call_id": call.id,
                             "dataset_ref": call_args.get("dataset_ref"),
+                            **(
+                                {"join": join_evidence_context}
+                                if join_evidence_context is not None
+                                else {}
+                            ),
                             **_definition_result_evidence_fields(call.name, result),
                             **(
                                 {"definition_execution": definition_execution}
@@ -5302,7 +5384,13 @@ async def _try_execute_parallel_frontier(
     executions = [task.result() for task in execution_tasks]
     messages: list[ModelMessage] = []
     unknown_error: tuple[str, str, str, str] | None = None
-    for item, invocation, execution in zip(prepared, invocations, executions, strict=True):
+    for item, invocation, branch, execution in zip(
+        prepared,
+        invocations,
+        branches,
+        executions,
+        strict=True,
+    ):
         current = await run_in_threadpool(task_store.get_run, run_id)
         if current is None or current.status != "running":
             _cleanup_uncommitted_report_files(item.call, execution.result)
@@ -5386,6 +5474,12 @@ async def _try_execute_parallel_frontier(
             artifact=artifact_draft,
         )
         summary = _summarize_result(item.call.name, result)
+        join_evidence_context = build_join_evidence_context(
+            tool_name=item.call.name,
+            arguments=item.arguments,
+            result=result,
+            data_version_hash=branch.data_version_hash,
+        )
         (
             run,
             _completed,
@@ -5412,6 +5506,11 @@ async def _try_execute_parallel_frontier(
                 "tool_call_id": item.call.id,
                 "dataset_ref": item.arguments.get("dataset_ref"),
                 "parallel": True,
+                **(
+                    {"join": join_evidence_context}
+                    if join_evidence_context is not None
+                    else {}
+                ),
                 **_definition_result_evidence_fields(item.call.name, result),
                 **(
                     {"definition_execution": item.definition_execution}

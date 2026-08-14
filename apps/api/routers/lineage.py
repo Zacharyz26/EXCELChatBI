@@ -62,6 +62,8 @@ def get_project_lineage(
                 source=edge.source,
                 target=edge.target,
                 relation=edge.relation,
+                ordinal=edge.ordinal,
+                role=edge.role,
             )
             for edge in graph.edges
         ],

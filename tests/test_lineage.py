@@ -178,9 +178,22 @@ def test_lineage_graph_exposes_both_join_parents(tmp_path: Path) -> None:
         for edge in graph.edges
         if edge.target == f"dataset:{child_ref}" and edge.relation == "derived_from"
     }
+    ordered_parent_edges = sorted(
+        (
+            edge.ordinal,
+            edge.role,
+            edge.source,
+        )
+        for edge in graph.edges
+        if edge.target == f"dataset:{child_ref}" and edge.relation == "derived_from"
+    )
     child = next(node for node in graph.nodes if node.resource_ref == child_ref)
 
     assert parent_edges == {f"dataset:{left_ref}", f"dataset:{right_ref}"}
+    assert ordered_parent_edges == [
+        (0, "primary", f"dataset:{left_ref}"),
+        (1, "secondary", f"dataset:{right_ref}"),
+    ]
     assert child.metadata == {"derived": True, "parent_count": 2}
     assert session.dataset_usage(right_ref)[1] == 1
 

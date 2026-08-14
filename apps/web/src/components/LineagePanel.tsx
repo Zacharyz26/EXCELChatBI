@@ -94,7 +94,8 @@ export function LineagePanel({
     }
     return grouped;
   }, [graph]);
-  const selected = graph?.nodes.find((node) => node.node_id === selectedId) ?? null;
+  const graphNodes = graph?.nodes ?? [];
+  const selected = graphNodes.find((node) => node.node_id === selectedId) ?? null;
   const graphEdges = graph?.edges ?? [];
   const selectedEdges = graph && selected
     ? graphEdges.filter(
@@ -222,8 +223,8 @@ export function LineagePanel({
                 <ul>
                   {selectedEdges.map((edge) => (
                     <li key={`${edge.source}-${edge.target}-${edge.relation}`}>
-                      <span>{RELATION_LABELS[edge.relation]}</span>
-                      <small>{otherEnd(edge, selected.node_id)}</small>
+                      <span>{edgeLabel(edge, selected.node_id)}</span>
+                      <small>{otherEnd(edge, selected.node_id, graphNodes)}</small>
                     </li>
                   ))}
                 </ul>
@@ -242,6 +243,10 @@ export function LineagePanel({
 function edgeSummary(node: LineageNode, edges: LineageEdge[]): string {
   const incoming = edges.filter((edge) => edge.target === node.node_id).length;
   const outgoing = edges.filter((edge) => edge.source === node.node_id).length;
+  const parents = edges.filter(
+    (edge) => edge.target === node.node_id && edge.relation === "derived_from",
+  ).length;
+  if (parents > 1) return `${parents} 个父版本 · ${outgoing} 出`;
   return `${incoming} 入 · ${outgoing} 出`;
 }
 
@@ -255,6 +260,7 @@ function safeFacts(node: LineageNode): [string, string][] {
     evidence_count: "证据数量",
     kind: "证据类型",
     derived: "派生数据",
+    parent_count: "父版本数量",
   };
   return Object.entries(labels).flatMap(([key, label]) => {
     const value = node.metadata[key];
@@ -263,9 +269,32 @@ function safeFacts(node: LineageNode): [string, string][] {
   });
 }
 
-function otherEnd(edge: LineageEdge, selectedId: string): string {
+function edgeLabel(edge: LineageEdge, selectedId: string): string {
+  if (
+    edge.relation === "derived_from"
+    && edge.target === selectedId
+    && edge.ordinal !== null
+  ) {
+    const role = edge.role === "primary"
+      ? "主输入"
+      : edge.role === "secondary"
+        ? "次输入"
+        : edge.role;
+    return `父版本 ${edge.ordinal + 1}${role ? ` · ${role}` : ""}`;
+  }
+  return RELATION_LABELS[edge.relation];
+}
+
+function otherEnd(
+  edge: LineageEdge,
+  selectedId: string,
+  nodes: LineageNode[],
+): string {
   const nodeId = edge.source === selectedId ? edge.target : edge.source;
-  return nodeId.replace(":", " · ").slice(0, 36);
+  const node = nodes.find((item) => item.node_id === nodeId);
+  return node
+    ? `${node.label} · ${node.resource_ref.slice(0, 12)}`
+    : nodeId.replace(":", " · ").slice(0, 36);
 }
 
 function formatDate(value: string | null): string {

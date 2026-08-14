@@ -3,6 +3,7 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import type {
   AgentApproval,
   AgentAutonomyMode,
+  AgentJoinCollaboration,
   AgentPlanDefinition,
   AgentRunStatus,
   AgentStepStatus,
@@ -102,6 +103,33 @@ const HYPOTHESIS_FOLLOWUP_REASON_LABELS: Record<string, string> = {
   cancellation_boundary_unsettled: "取消树尚未进入可安全跟进的终态",
 };
 
+const JOIN_STATUS_LABELS: Record<AgentJoinCollaboration["status"], string> = {
+  preflight_ready: "预检已就绪",
+  awaiting_approval: "等待确认",
+  approved: "已批准，等待恢复",
+  executing: "执行中",
+  completed: "关联已完成",
+  blocked: "已安全阻塞",
+  failed: "执行失败",
+  version_drift: "数据版本漂移",
+};
+
+const JOIN_TYPE_LABELS: Record<string, string> = {
+  inner: "Inner Join",
+  left: "Left Join",
+  right: "Right Join",
+  full: "Full Join",
+};
+
+const JOIN_RELATIONSHIP_LABELS: Record<string, string> = {
+  one_to_one: "一对一",
+  one_to_many: "一对多",
+  many_to_one: "多对一",
+  many_to_many: "多对多",
+  incompatible: "类型不兼容",
+  no_matches: "没有匹配键",
+};
+
 /** v2.5 4B：真实 TaskRun、计划、澄清、审批和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
@@ -148,11 +176,15 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   }, [editingPlan, onClose]);
 
   const pendingApprovals = useMemo(
-    () => approvals.filter((approval) => approval.status === "pending"),
+    () => approvals.filter(
+      (approval) => approval.status === "pending" && !approvalExpired(approval),
+    ),
     [approvals],
   );
   const decidedApprovals = useMemo(
-    () => approvals.filter((approval) => approval.status !== "pending").reverse(),
+    () => approvals.filter(
+      (approval) => approval.status !== "pending" || approvalExpired(approval),
+    ).reverse(),
     [approvals],
   );
   const run = detail?.run;
@@ -390,6 +422,105 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                     <dd>v{detail.execution_control.evidence_ledger_version}</dd>
                   </div>
                 </dl>
+              </section>
+            )}
+
+            {detail.join_collaboration && (
+              <section className="agent-section" aria-label="多数据集 Join 协作">
+                <div className="agent-section__title">
+                  <span>多数据集 Join</span>
+                  <small className={`agent-join-status agent-join-status--${detail.join_collaboration.status}`}>
+                    {JOIN_STATUS_LABELS[detail.join_collaboration.status]}
+                  </small>
+                </div>
+                <p className="agent-join-disclaimer">
+                  这里展示的是服务端固定预检、ApprovalRecord 与 Dataset 血缘；批准不会自动执行。
+                </p>
+                <div className="agent-join-inputs">
+                  <JoinInputCard label="左输入版本" input={detail.join_collaboration.left} />
+                  <JoinInputCard label="右输入版本" input={detail.join_collaboration.right} />
+                </div>
+                <dl className="agent-join-facts">
+                  <div>
+                    <dt>关联方式</dt>
+                    <dd>{JOIN_TYPE_LABELS[detail.join_collaboration.join_type]
+                      ?? detail.join_collaboration.join_type}</dd>
+                  </div>
+                  <div>
+                    <dt>匹配关系</dt>
+                    <dd>{JOIN_RELATIONSHIP_LABELS[detail.join_collaboration.relationship]
+                      ?? detail.join_collaboration.relationship}</dd>
+                  </div>
+                  <div>
+                    <dt>预估结果</dt>
+                    <dd>{detail.join_collaboration.estimated_output_rows ?? "未知"} 行</dd>
+                  </div>
+                  <div>
+                    <dt>膨胀比</dt>
+                    <dd>{detail.join_collaboration.expansion_ratio ?? "未知"}</dd>
+                  </div>
+                  <div>
+                    <dt>预检 Evidence</dt>
+                    <dd>{shortHash(detail.join_collaboration.preflight_evidence_id)}</dd>
+                  </div>
+                  <div>
+                    <dt>数据版本</dt>
+                    <dd>{detail.join_collaboration.data_version_matches
+                      ? `一致 · ${shortHash(detail.join_collaboration.data_version_hash)}`
+                      : "已漂移 · 禁止执行"}</dd>
+                  </div>
+                </dl>
+                {detail.join_collaboration.risks.length > 0 ? (
+                  <div className="agent-join-risks" aria-label="Join 风险">
+                    {detail.join_collaboration.risks.map((risk) => (
+                      <article key={risk.code} className={`agent-join-risk agent-join-risk--${risk.severity}`}>
+                        <strong>{risk.code}</strong>
+                        <p>{risk.message}</p>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="agent-join-safe">固定预检未发现需要额外披露的 Join 风险。</p>
+                )}
+                <div className="agent-join-confirmation">
+                  <strong>确认状态</strong>
+                  <span>{detail.join_collaboration.approval
+                    ? detail.join_collaboration.approval.expired
+                      ? "已过期，需要恢复任务以重新申请"
+                      : approvalStatusLabel(detail.join_collaboration.approval.status)
+                    : detail.join_collaboration.requires_confirmation
+                      ? "等待创建参数绑定授权"
+                      : "仍需高风险执行授权"}</span>
+                  {detail.join_collaboration.status === "approved" && (
+                    <p>授权已持久化。请使用顶部“继续执行”，恢复时 Host 会再次校验版本与完整参数。</p>
+                  )}
+                </div>
+                {detail.join_collaboration.output && (
+                  <article className="agent-join-output">
+                    <div>
+                      <strong>衍生数据集</strong>
+                      <span>{detail.join_collaboration.output.rows ?? "未知"} 行</span>
+                    </div>
+                    <code>{detail.join_collaboration.output.dataset_ref}</code>
+                    <ol>
+                      {detail.join_collaboration.output.parents.map((parent) => (
+                        <li key={`${parent.ordinal}-${parent.dataset_ref}`}>
+                          <span>{parent.role === "left" ? "左父版本" : "右父版本"}</span>
+                          <code>{parent.dataset_ref}</code>
+                        </li>
+                      ))}
+                    </ol>
+                    <p>{detail.join_collaboration.output.lineage_complete
+                      ? "完整双父血缘已登记并通过 TaskRun 投影核对。"
+                      : "双父血缘尚未完整登记，结果不能视为可交付。"}</p>
+                  </article>
+                )}
+                {detail.join_collaboration.failure && (
+                  <div className="agent-join-failure" role="alert">
+                    <strong>{detail.join_collaboration.failure.code}</strong>
+                    <p>{detail.join_collaboration.failure.message}</p>
+                  </div>
+                )}
               </section>
             )}
 
@@ -753,7 +884,10 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                 <div className="agent-approval-list">
                   {pendingApprovals.map((approval) => (
                     <article className="agent-approval agent-approval--pending" key={approval.approval_id}>
-                      <ApprovalFacts approval={approval} />
+                      <ApprovalFacts
+                        approval={approval}
+                        join={joinForApproval(detail.join_collaboration, approval)}
+                      />
                       <label>
                         决定原因
                         <textarea
@@ -795,7 +929,10 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   ))}
                   {decidedApprovals.slice(0, 5).map((approval) => (
                     <article className="agent-approval" key={approval.approval_id}>
-                      <ApprovalFacts approval={approval} />
+                      <ApprovalFacts
+                        approval={approval}
+                        join={joinForApproval(detail.join_collaboration, approval)}
+                      />
                       {approval.decision_reason && (
                         <p className="agent-approval__reason">{approval.decision_reason}</p>
                       )}
@@ -977,14 +1114,58 @@ function PlanStep({
   );
 }
 
-function ApprovalFacts({ approval }: { approval: AgentApproval }) {
-  const statusLabel: Record<AgentApproval["status"], string> = {
+function JoinInputCard({
+  label,
+  input,
+}: {
+  label: string;
+  input: AgentJoinCollaboration["left"];
+}) {
+  return (
+    <article>
+      <span>{label}</span>
+      <code>{input.dataset_ref}</code>
+      <strong>关联键：{input.key}</strong>
+      <small>
+        {input.row_count ?? "未知"} 行
+        {input.distinct_count !== null && ` · ${input.distinct_count} 个唯一键`}
+        {input.null_count !== null && ` · ${input.null_count} 个空键`}
+      </small>
+    </article>
+  );
+}
+
+function joinForApproval(
+  join: AgentJoinCollaboration | null | undefined,
+  approval: AgentApproval,
+): AgentJoinCollaboration | null {
+  return join?.approval?.approval_id === approval.approval_id ? join : null;
+}
+
+function approvalStatusLabel(status: AgentApproval["status"]): string {
+  const labels: Record<AgentApproval["status"], string> = {
     pending: "待决定",
     approved: "已批准",
     denied: "已拒绝",
     consumed: "已消费",
     revoked: "已撤销",
   };
+  return labels[status];
+}
+
+function approvalExpired(approval: AgentApproval): boolean {
+  if (approval.status !== "pending") return false;
+  const expiresAt = new Date(approval.expires_at).getTime();
+  return !Number.isFinite(expiresAt) || expiresAt <= Date.now();
+}
+
+function ApprovalFacts({
+  approval,
+  join,
+}: {
+  approval: AgentApproval;
+  join: AgentJoinCollaboration | null;
+}) {
   return (
     <>
       <div className="agent-approval__heading">
@@ -994,7 +1175,7 @@ function ApprovalFacts({ approval }: { approval: AgentApproval }) {
           </span>
           <strong>{approval.tool_name}</strong>
         </div>
-        <span>{statusLabel[approval.status]}</span>
+        <span>{approvalExpired(approval) ? "已过期" : approvalStatusLabel(approval.status)}</span>
       </div>
       <dl>
         <div><dt>计划/步骤</dt><dd>v{approval.plan_version} · {approval.step_id}</dd></div>
@@ -1002,6 +1183,21 @@ function ApprovalFacts({ approval }: { approval: AgentApproval }) {
         <div><dt>工具契约</dt><dd>{shortHash(approval.tool_schema_hash)}</dd></div>
         <div><dt>参数摘要</dt><dd>{shortHash(approval.parameter_summary_hash)}</dd></div>
       </dl>
+      {join && (
+        <div className="agent-approval__join-scope">
+          <strong>本次授权固定范围</strong>
+          <p>
+            {shortHash(join.left.dataset_ref)} · {join.left.key}
+            {" ↔ "}
+            {shortHash(join.right.dataset_ref)} · {join.right.key}
+            {` · ${JOIN_TYPE_LABELS[join.join_type] ?? join.join_type}`}
+          </p>
+          <small>
+            预检 {join.preflight_status} · 数据版本
+            {join.data_version_matches ? "一致" : "已漂移，禁止执行"}
+          </small>
+        </div>
+      )}
     </>
   );
 }

@@ -254,6 +254,38 @@ if ! wait "$data_role_probe_pid"; then
 fi
 grep -q '"status":"passed"' "$data_role_probe_log"
 
+join_probe_log=".data/e2e/join-recovery.jsonl"
+"${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
+  python -m apps.api.join_recovery_probe \
+  >"$join_probe_log" 2>&1 &
+join_probe_pid=$!
+join_probe_ready=0
+for attempt in $(seq 1 120); do
+  if grep -q '"status":"ready"' "$join_probe_log"; then
+    join_probe_ready=1
+    break
+  fi
+  if ! kill -0 "$join_probe_pid" 2>/dev/null; then
+    wait "$join_probe_pid" || true
+    cat "$join_probe_log" >&2
+    echo "Compose Join probe exited before its recovery checkpoint." >&2
+    exit 1
+  fi
+  sleep 1
+done
+if [ "$join_probe_ready" != "1" ]; then
+  cat "$join_probe_log" >&2
+  echo "Compose Join probe did not reach its recovery checkpoint." >&2
+  exit 1
+fi
+"${compose[@]}" restart data-tools
+if ! wait "$join_probe_pid"; then
+  cat "$join_probe_log" >&2
+  echo "Compose Join transport and recovery probe failed." >&2
+  exit 1
+fi
+grep -q '"status":"passed"' "$join_probe_log"
+
 forecast_probe_log=".data/e2e/forecast-recovery.jsonl"
 "${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
   python -m apps.api.forecast_recovery_probe \

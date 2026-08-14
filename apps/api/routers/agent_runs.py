@@ -64,6 +64,9 @@ from apps.orchestrator.agent_tools import (
     enabled_capability_profiles_from_settings,
     mcp_client_config_from_settings,
 )
+from apps.orchestrator.control.join_collaboration import (
+    build_join_collaboration_projection,
+)
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 
@@ -516,6 +519,12 @@ async def get_agent_run(
     dataset_bindings = await run_in_threadpool(tasks.list_dataset_bindings, run_id)
     cancellation_nodes = await run_in_threadpool(tasks.list_cancellation_nodes, run_id)
     evidence_ledger = await run_in_threadpool(tasks.list_evidence_ledger, run_id)
+    approvals = await run_in_threadpool(
+        tasks.list_approvals,
+        run_id,
+        tenant_id=principal.tenant_scope,
+        subject_user_id=principal.user_id,
+    )
     data_version_hash = (
         await run_in_threadpool(tasks.data_version_hash, run_id)
         if execution_scope is not None
@@ -525,6 +534,11 @@ async def get_agent_run(
         tasks.list_events_by_type,
         run_id,
         "step.started",
+    )
+    completed_events = await run_in_threadpool(
+        tasks.list_events_by_type,
+        run_id,
+        "step.completed",
     )
     related_runs = await run_in_threadpool(
         tasks.list_runs_for_conversation,
@@ -566,6 +580,25 @@ async def get_agent_run(
         ),
         "hypothesis_followup": (
             snapshot.get("hypothesis_followup") if snapshot is not None else None
+        ),
+        "join_collaboration": (
+            build_join_collaboration_projection(
+                invocations=invocations,
+                evidence=evidence,
+                approvals=approvals,
+                step_events=completed_events,
+                current_data_version_hash=data_version_hash,
+                dataset_parents={
+                    binding.dataset_ref: await run_in_threadpool(
+                        store.dataset_parent_refs,
+                        binding.dataset_ref,
+                    )
+                    for binding in dataset_bindings
+                    if binding.binding_kind == "derived"
+                },
+            )
+            if data_version_hash is not None
+            else None
         ),
         "state": snapshot,
     }

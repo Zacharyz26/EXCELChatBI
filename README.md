@@ -11,7 +11,7 @@
 当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
 Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
-SSE 展示。SQLite schema v10 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
+SSE 展示。SQLite schema v11 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
 幂等操作、不可变快照、资源关联、持久化对话压缩、ApprovalRecord、版本化领域定义与字段映射。
 阶段 3A 的离线一致备份/恢复、
@@ -38,8 +38,11 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
 验证关闭。阶段 6D 已由提交 `3febd68` 的
 [run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
-完整 CI 关闭。当前开发 6E；6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已本地
-实现参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承，待完整 CI 验证。
+完整 CI 关闭。当前开发 6E；6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已实现
+参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承；6E-3 已本地实现
+精确预检/数据版本门禁、React 审批恢复和完整双父血缘展示；6E-4 已本地实现 17 场景
+脱敏质量门禁、跨项目/敏感键/高风险授权发布契约、stdio/HTTP 等价、`data-tools`
+重启恢复和浏览器验收，待远程完整 CI 后关闭阶段。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -156,7 +159,7 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
 - **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6D 工程门禁已完成并通过真实 Compose CI。
-  6E-1 Join 只读预检和 6E-2 受治理执行/多父血缘已本地实现，React 协作与发布门禁尚未实现；
+  6E-1～6E-4 Join 预检、受治理执行/多父血缘、React 协作和发布门禁已本地实现，待远程完整 CI；
   真实 CPU/GPU semantic 等价和领域签字继续作为发布债务；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -213,7 +216,7 @@ v2.5 阶段 6C（已关闭；完整 CI 与 Compose 恢复门禁全绿）
 v2.5 阶段 6D（已关闭；完整 CI 与 Compose 预测恢复门禁全绿）
   统一统计 Evidence → 受治理贡献/分群/回归诊断 → 独立预测 Tool/Profile → 发布门禁
 
-v2.5 阶段 6E（开发中；6E-1/6E-2 已本地实现）
+v2.5 阶段 6E（收尾中；6E-1～6E-4 已本地实现，待远程完整 CI）
   双数据集选择/Join 预检 → 受治理执行/多父版本血缘 → React 协作 → 发布门禁
 
 横向交付轨

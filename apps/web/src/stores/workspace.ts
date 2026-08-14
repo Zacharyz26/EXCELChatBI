@@ -737,6 +737,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           item.approval_id === approvalId ? response.approval : item
         )),
       });
+      // 重新读取服务端派生投影，使 Join 确认/恢复状态与 ApprovalRecord 同步。
+      await get().refreshActiveRun(runId);
     } catch (error) {
       set({ error: errorMessage(error) });
       throw error;

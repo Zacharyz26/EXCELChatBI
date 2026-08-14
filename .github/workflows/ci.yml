@@ -131,6 +131,21 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Run deterministic governed Join quality gate
+        id: join_quality
+        run: >-
+          uv run --frozen python scripts/join_quality_eval.py
+          --enforce --json-output .data/join-quality.json
+
+      - name: Upload governed Join quality report
+        if: ${{ !cancelled() && steps.join_quality.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: join-quality
+          path: .data/join-quality.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run MCP Tool and Resource transport equivalence probe
         id: coref_mcp_transport
         run: >-

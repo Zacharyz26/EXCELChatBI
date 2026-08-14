@@ -298,6 +298,7 @@ function persistCollaborationTurn(
     };
   }
 
+  const governedJoin = prompt.includes("Join");
   const approvals = prompt.includes("高风险")
     ? [{
       approval_id: "a".repeat(32),
@@ -305,13 +306,13 @@ function persistCollaborationTurn(
       plan_id: `${runId}-plan-1`,
       plan_version: 1,
       step_id: "prepare",
-      tool_name: "high_risk_export",
+      tool_name: governedJoin ? "join_datasets" : "high_risk_export",
       tool_schema_hash: "b".repeat(64),
       parameter_summary_hash: "c".repeat(64),
       risk_level: "high",
       status: "pending",
       version: 1,
-      expires_at: "2026-07-31T12:00:00Z",
+      expires_at: "2099-07-31T12:00:00Z",
       decision_reason: null,
       requested_at: NOW,
       updated_at: NOW,
@@ -320,6 +321,60 @@ function persistCollaborationTurn(
     }]
     : [];
   state.agentRuns[runId] = mockAgentRun(runId, prompt, "paused", { approvals });
+  if (governedJoin) {
+    state.agentRuns[runId].detail.join_collaboration = {
+      schema: "chatbi-join-collaboration-v1",
+      schema_version: 1,
+      status: "awaiting_approval",
+      join_type: "left",
+      relationship: "many_to_many",
+      left: {
+        dataset_ref: "1".repeat(32),
+        key: "customer_id",
+        row_count: 10,
+        null_count: 0,
+        distinct_count: 8,
+      },
+      right: {
+        dataset_ref: "2".repeat(32),
+        key: "customer_code",
+        row_count: 12,
+        null_count: 0,
+        distinct_count: 8,
+      },
+      estimated_output_rows: 24,
+      expansion_ratio: 2.4,
+      matching_key_count: 8,
+      risks: [{
+        code: "many_to_many",
+        severity: "warning",
+        message: "关联键为多对多关系，执行前必须人工确认。",
+      }, {
+        code: "row_expansion",
+        severity: "warning",
+        message: "预估结果行数存在明显膨胀。",
+      }],
+      requires_confirmation: true,
+      preflight_status: "requires_confirmation",
+      preflight_evidence_id: "e".repeat(32),
+      data_version_hash: "a".repeat(64),
+      current_data_version_hash: "a".repeat(64),
+      data_version_matches: true,
+      approval: {
+        approval_id: approvals[0].approval_id,
+        status: "pending",
+        plan_version: 1,
+        step_id: "prepare",
+        expires_at: approvals[0].expires_at,
+        decision_reason: null,
+        expired: false,
+      },
+      output: null,
+      failure: null,
+      updated_at: NOW,
+      raw_rows_returned: false,
+    };
+  }
   if (approvals.length > 0) {
     state.agentRuns[runId].events.push(
       taskEvent(runId, 4, "approval.requested", {
@@ -354,7 +409,7 @@ function persistCollaborationTurn(
           run_id: runId,
           plan_version: 1,
           step_id: "prepare",
-          tool: "high_risk_export",
+          tool: approvals[0].tool_name,
           risk_level: "high",
           expires_at: approvals[0].expires_at,
         }] as [string, Record<string, unknown>],
@@ -962,6 +1017,13 @@ async function installMockApi(
       approval.decision_reason = body.reason;
       approval.decided_at = NOW;
       approval.updated_at = NOW;
+      if (run.detail.join_collaboration?.approval?.approval_id === approvalId) {
+        run.detail.join_collaboration.approval.status = body.decision;
+        run.detail.join_collaboration.approval.decision_reason = body.reason;
+        run.detail.join_collaboration.status = body.decision === "approved"
+          ? "approved"
+          : "blocked";
+      }
       run.detail.run.state_version += 1;
       run.detail.run.updated_at = NOW;
       const event = appendTaskEvent(run, runId, "approval.decided", {
@@ -1134,6 +1196,23 @@ async function installMockApi(
           "approval.consumed",
           { approval_id: approval.approval_id },
         )));
+      }
+      if (run.detail.join_collaboration) {
+        const join = run.detail.join_collaboration;
+        join.status = "completed";
+        join.current_data_version_hash = "d".repeat(64);
+        join.data_version_matches = true;
+        join.approval.status = "consumed";
+        join.output = {
+          dataset_ref: "3".repeat(32),
+          rows: 24,
+          parent_refs: ["1".repeat(32), "2".repeat(32)],
+          parents: [
+            { dataset_ref: "1".repeat(32), ordinal: 0, role: "left" },
+            { dataset_ref: "2".repeat(32), ordinal: 1, role: "right" },
+          ],
+          lineage_complete: true,
+        };
       }
       const completed = appendTaskEvent(run, runId, "run.completed", {
         terminal_reason: null,
@@ -1489,6 +1568,50 @@ test("高风险审批只记录决定，用户显式继续后才执行", async ({
     "并行上限",
   );
   await expect(panel).toContainText("已消费");
+});
+
+test("6E-4 Join 发布浏览器门禁：风险、审批恢复与完整双父血缘", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请执行 Join 高风险关联");
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await controlButton.click();
+  let panel = page.getByRole("dialog", { name: "任务协作" });
+  const collaboration = panel.getByRole("region", { name: "多数据集 Join 协作" });
+  await expect(collaboration).toContainText("等待确认");
+  await expect(collaboration).toContainText("左输入版本");
+  await expect(collaboration).toContainText("customer_id");
+  await expect(collaboration).toContainText("右输入版本");
+  await expect(collaboration).toContainText("customer_code");
+  await expect(collaboration).toContainText("多对多");
+  await expect(collaboration).toContainText("预估结果");
+  await expect(collaboration).toContainText("24 行");
+  await expect(collaboration).toContainText("膨胀比");
+  await expect(collaboration).toContainText("2.4");
+  await expect(collaboration).toContainText("执行前必须人工确认");
+  await expect(collaboration).toContainText("预估结果行数存在明显膨胀");
+  await expect(panel).toContainText("本次授权固定范围");
+
+  await panel.getByLabel("授权原因 join_datasets").fill("确认双父版本和多对多膨胀风险");
+  await panel.getByRole("button", { name: "批准一次" }).click();
+  await expect(collaboration).toContainText("已批准，等待恢复");
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+
+  await page.reload();
+  await controlButton.click();
+  panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.getByRole("region", { name: "多数据集 Join 协作" })).toContainText(
+    "授权已持久化",
+  );
+  await panel.getByRole("button", { name: "继续执行" }).click();
+
+  const completed = panel.getByRole("region", { name: "多数据集 Join 协作" });
+  await expect(completed).toContainText("关联已完成");
+  await expect(completed).toContainText("衍生数据集");
+  await expect(completed).toContainText("左父版本");
+  await expect(completed).toContainText("右父版本");
+  await expect(completed).toContainText("完整双父血缘已登记");
 });
 
 test("暂停态可以提交不可变计划新版本", async ({ page }) => {

@@ -174,6 +174,8 @@ export interface LineageEdge {
   source: string;
   target: string;
   relation: LineageRelation;
+  ordinal: number | null;
+  role: string | null;
 }
 
 export interface LineageIssue {
@@ -408,6 +410,7 @@ export interface AgentRunDetail {
   hypothesis_screening?: AgentHypothesisScreening | null;
   hypothesis_execution?: AgentHypothesisExecution | null;
   hypothesis_followup?: AgentHypothesisFollowup | null;
+  join_collaboration?: AgentJoinCollaboration | null;
   state: Record<string, unknown> | null;
 }
 
@@ -467,6 +470,77 @@ export interface AgentExecutionControl {
   root_status: "active" | "completed" | "cancel_requested" | null;
   active_branch_count: number;
   cancel_requested_branch_count: number;
+}
+
+export type AgentJoinCollaborationStatus =
+  | "preflight_ready"
+  | "awaiting_approval"
+  | "approved"
+  | "executing"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "version_drift";
+
+export interface AgentJoinInput {
+  dataset_ref: string;
+  key: string;
+  row_count: number | null;
+  null_count: number | null;
+  distinct_count: number | null;
+}
+
+export interface AgentJoinRisk {
+  code: string;
+  severity: string;
+  message: string;
+}
+
+export interface AgentJoinCollaboration {
+  schema: "chatbi-join-collaboration-v1";
+  schema_version: 1;
+  status: AgentJoinCollaborationStatus;
+  join_type: string;
+  relationship: string;
+  left: AgentJoinInput;
+  right: AgentJoinInput;
+  estimated_output_rows: number | null;
+  expansion_ratio: number | null;
+  matching_key_count: number | null;
+  risks: AgentJoinRisk[];
+  requires_confirmation: boolean;
+  preflight_status: "ready" | "requires_confirmation" | "blocked";
+  preflight_evidence_id: string;
+  data_version_hash: string;
+  current_data_version_hash: string;
+  data_version_matches: boolean;
+  approval: {
+    approval_id: string;
+    status: AgentApprovalStatus;
+    plan_version: number;
+    step_id: string;
+    expires_at: string;
+    decision_reason: string | null;
+    expired: boolean;
+  } | null;
+  output: {
+    dataset_ref: string;
+    rows: number | null;
+    parent_refs: string[];
+    parents: Array<{
+      dataset_ref: string;
+      ordinal: number;
+      role: "left" | "right";
+    }>;
+    lineage_complete: boolean;
+  } | null;
+  failure: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | null;
+  updated_at: string;
+  raw_rows_returned: false;
 }
 
 export interface LatestAgentRunResponse {

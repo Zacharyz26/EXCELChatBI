@@ -213,6 +213,8 @@ class LineageEdgeResponse(BaseModel):
     source: str
     target: str
     relation: LineageRelation
+    ordinal: int | None = None
+    role: str | None = None
 
 
 class LineageIssueResponse(BaseModel):
