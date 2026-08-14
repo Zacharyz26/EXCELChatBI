@@ -1,8 +1,10 @@
-"""数据集变换与聚合预览工具实现——纯数据操作，零 LLM（5.3 正式条款）。
+"""数据集变换、聚合预览与 Join 预检工具实现——纯数据操作，零 LLM。
 
 - transform_dataset：结构化白名单变换（决策 3 修订），产出**衍生数据集**
   （新 parquet + 血缘信息由调用方登记，见 agent_tools.register_derived_dataset）。
 - aggregate_preview：分组聚合出表格（封装 dataset_store.aggregate，DuckDB 下推）。
+- join_preflight：只读评估双数据集关联风险，不执行 Join、不返回原始行。
+- join_datasets：在同一固定预检门禁后物化等值 Join，不接受自由 SQL。
 
 所有数字来自真实数据计算（红线2）；本模块只被 Tool.invoke 调用（红线3）。
 """
@@ -12,10 +14,21 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from packages.common.dataset_store import aggregate, load_dataframe, save_dataframe
+from packages.common.dataset_store import (
+    aggregate,
+    delete_dataset,
+    join_key_statistics,
+    load_dataframe,
+    materialize_join,
+    save_dataframe,
+    save_metadata,
+)
+from packages.governance.data_boundary import ColumnRule, SensitivityLevel, resolve_policy
 
 # 变换操作的确定性执行顺序（文档化，模型与用户可预期）
 _OPERATION_ORDER = ("exclude_row_indices", "filters", "drop_nulls", "drop_duplicates", "sort")
+_JOIN_MAX_OUTPUT_ROWS = 500_000
+_JOIN_EXPANSION_CONFIRM_RATIO = 2.0
 
 
 def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +119,224 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
         "group_col": group_col,
         "value_col": None if agg == "count" and not args.get("value_col") else value_col,
     }
+
+
+def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
+    """只读评估两个已登记数据集的 Join 可行性、基数关系和行数风险。"""
+    left_ref: str = args["left_dataset_ref"]
+    right_ref: str = args["right_dataset_ref"]
+    left_key: str = args["left_key"]
+    right_key: str = args["right_key"]
+    join_type: str = args["join_type"]
+    if left_ref == right_ref:
+        raise ValueError("Join 左右数据集必须是两个不同的数据集")
+    _require_join_key_visible(left_ref, left_key, side="左侧")
+    _require_join_key_visible(right_ref, right_key, side="右侧")
+
+    stats = join_key_statistics(
+        left_ref,
+        right_ref,
+        left_key,
+        right_key,
+        join_type,
+    )
+    left = {"key": left_key, **stats["left"]}
+    right = {"key": right_key, **stats["right"]}
+    compatible = bool(stats["compatible_key_types"])
+    matching_key_count = int(stats["matching_key_count"])
+    estimated_rows = int(stats["estimated_output_rows"])
+    denominator = max(int(left["row_count"]), int(right["row_count"]), 1)
+    expansion_ratio = round(estimated_rows / denominator, 6)
+    relationship = _join_relationship(
+        compatible,
+        matching_key_count,
+        left_matching_max_rows_per_key=int(stats["left_matching_max_rows_per_key"]),
+        right_matching_max_rows_per_key=int(stats["right_matching_max_rows_per_key"]),
+    )
+
+    risks: list[dict[str, str]] = []
+    if not compatible:
+        risks.append(
+            _join_risk("incompatible_key_types", "blocking", "左右关联键的数据类型不兼容。")
+        )
+    elif matching_key_count == 0:
+        risks.append(_join_risk("no_matching_keys", "blocking", "两个关联键没有可匹配值。"))
+    if estimated_rows > _JOIN_MAX_OUTPUT_ROWS:
+        risks.append(
+            _join_risk(
+                "output_row_limit",
+                "blocking",
+                f"预估结果超过固定上限 {_JOIN_MAX_OUTPUT_ROWS} 行。",
+            )
+        )
+    if relationship == "many_to_many":
+        risks.append(
+            _join_risk("many_to_many", "warning", "关联键为多对多关系，执行前必须人工确认。")
+        )
+    if expansion_ratio > _JOIN_EXPANSION_CONFIRM_RATIO:
+        risks.append(
+            _join_risk("row_expansion", "warning", "预估结果行数存在明显膨胀。")
+        )
+    if int(left["null_count"]) > 0:
+        risks.append(_join_risk("left_null_keys", "warning", "左侧关联键包含空值。"))
+    if int(right["null_count"]) > 0:
+        risks.append(_join_risk("right_null_keys", "warning", "右侧关联键包含空值。"))
+
+    blocked = any(risk["severity"] == "blocking" for risk in risks)
+    requires_confirmation = not blocked and any(
+        risk["severity"] == "warning" for risk in risks
+    )
+    status = (
+        "blocked"
+        if blocked
+        else ("requires_confirmation" if requires_confirmation else "ready")
+    )
+    return {
+        "schema": "chatbi-join-preflight-v1",
+        "status": status,
+        "join_type": join_type,
+        "relationship": relationship,
+        "left": left,
+        "right": right,
+        "matching_key_count": matching_key_count,
+        "matched_left_rows": int(stats["matched_left_rows"]),
+        "matched_right_rows": int(stats["matched_right_rows"]),
+        "estimated_output_rows": estimated_rows,
+        "expansion_ratio": expansion_ratio,
+        "max_output_rows": _JOIN_MAX_OUTPUT_ROWS,
+        "risks": risks,
+        "requires_confirmation": requires_confirmation,
+        "executable": not blocked,
+        "mutates_data": False,
+        "raw_rows_returned": False,
+    }
+
+
+def join_datasets(args: dict[str, Any]) -> dict[str, Any]:
+    """通过固定预检后物化等值 Join；外层高风险契约负责显式用户授权。"""
+    preflight = join_preflight(args)
+    if preflight["status"] == "blocked":
+        codes = ", ".join(str(risk["code"]) for risk in preflight["risks"])
+        raise ValueError(f"Join 预检阻塞，禁止执行: {codes}")
+
+    left_ref = str(args["left_dataset_ref"])
+    right_ref = str(args["right_dataset_ref"])
+    materialized = materialize_join(
+        left_ref,
+        right_ref,
+        str(args["left_key"]),
+        str(args["right_key"]),
+        str(args["join_type"]),
+    )
+    actual_rows = int(materialized["rows"])
+    if actual_rows != int(preflight["estimated_output_rows"]):
+        # Parquet 版本应不可变；不一致说明执行输入已漂移，不能登记不可信结果。
+        delete_dataset(str(materialized["dataset_ref"]))
+        raise RuntimeError("Join 执行结果与预检行数不一致，已撤销输出")
+
+    try:
+        _save_join_policy(
+            output_ref=str(materialized["dataset_ref"]),
+            left_ref=left_ref,
+            right_ref=right_ref,
+            right_column_mapping=materialized["right_column_mapping"],
+        )
+    except Exception:
+        delete_dataset(str(materialized["dataset_ref"]))
+        raise
+    return {
+        "schema": "chatbi-join-result-v1",
+        "dataset_ref": materialized["dataset_ref"],
+        "parent_ref": left_ref,
+        "parent_refs": [left_ref, right_ref],
+        "join_type": args["join_type"],
+        "left_key": args["left_key"],
+        "right_key": args["right_key"],
+        "rows": actual_rows,
+        "columns": materialized["columns"],
+        "relationship": preflight["relationship"],
+        "preflight_status": preflight["status"],
+        "risks": preflight["risks"],
+        "mutates_data": True,
+        "raw_rows_returned": False,
+    }
+
+
+def _save_join_policy(
+    *,
+    output_ref: str,
+    left_ref: str,
+    right_ref: str,
+    right_column_mapping: dict[str, str],
+) -> None:
+    """把两侧更严格的数据边界映射到 Join 输出，避免派生后策略降级。"""
+    left = resolve_policy(left_ref)
+    right = resolve_policy(right_ref)
+    levels = {
+        SensitivityLevel.OPEN: 0,
+        SensitivityLevel.INTERNAL: 1,
+        SensitivityLevel.RESTRICTED: 2,
+    }
+    level = max((left.level, right.level), key=levels.__getitem__)
+    columns = {
+        name: rule.value
+        for name, rule in left.columns.items()
+        if rule is not ColumnRule.NORMAL
+    }
+    columns.update(
+        {
+            right_column_mapping.get(name, name): rule.value
+            for name, rule in right.columns.items()
+            if rule is not ColumnRule.NORMAL
+            and name in right_column_mapping
+        }
+    )
+    policy: dict[str, Any] = {
+        "level": level.value,
+        "small_group_min_size": max(
+            left.small_group_min_size, right.small_group_min_size
+        ),
+        "small_group_mode": (
+            "drop"
+            if "drop" in {left.small_group_mode, right.small_group_mode}
+            else "merge"
+        ),
+    }
+    if columns:
+        policy["columns"] = columns
+    save_metadata(output_ref, {"policy": policy})
+
+
+def _require_join_key_visible(dataset_ref: str, key: str, *, side: str) -> None:
+    rule = resolve_policy(dataset_ref).rule_of(key)
+    if rule in {ColumnRule.MASK, ColumnRule.EXCLUDE}:
+        raise ValueError(f"{side}关联键受数据策略保护，不能用于 Join: {key}")
+
+
+def _join_relationship(
+    compatible: bool,
+    matching_key_count: int,
+    *,
+    left_matching_max_rows_per_key: int,
+    right_matching_max_rows_per_key: int,
+) -> str:
+    if not compatible:
+        return "incompatible"
+    if matching_key_count == 0:
+        return "no_matches"
+    left_unique = left_matching_max_rows_per_key <= 1
+    right_unique = right_matching_max_rows_per_key <= 1
+    if left_unique and right_unique:
+        return "one_to_one"
+    if left_unique:
+        return "one_to_many"
+    if right_unique:
+        return "many_to_one"
+    return "many_to_many"
+
+
+def _join_risk(code: str, severity: str, message: str) -> dict[str, str]:
+    return {"code": code, "severity": severity, "message": message}
 
 
 # ── 内部：各变换操作 ──

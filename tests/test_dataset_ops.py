@@ -1,4 +1,4 @@
-"""dataset_ops 工具测试：白名单变换（决策3修订）+ 聚合预览。
+"""dataset_ops 工具测试：白名单变换、聚合预览与只读 Join 预检。
 
 红线2：所有数字来自真实数据计算；红线3：经 Tool.invoke 的 schema 校验拒绝越界入参。
 """
@@ -16,15 +16,20 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from mcp_servers.dataset_ops import tools as dataset_ops_tools  # noqa: E402
 from mcp_servers.dataset_ops.server import build_server  # noqa: E402
 from mcp_servers.dataset_ops.tools import (  # noqa: E402
     aggregate_preview,
+    join_datasets,
+    join_preflight,
     transform_dataset,
 )
 from packages.common.dataset_store import (  # noqa: E402
     duplicate_row_count,
     load_dataframe,
+    load_metadata,
     save_dataframe,
+    save_metadata,
 )
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
 
@@ -189,6 +194,234 @@ def test_aggregate_schema_rejects_unknown_agg(sales_ref: str) -> None:
     tool = build_server()._tools["aggregate_preview"]
     with pytest.raises(SchemaValidationError):
         tool.invoke({"dataset_ref": sales_ref, "group_col": "地区", "agg": "median"})
+
+
+# ── join_preflight：只读关联门禁 ──
+
+
+def test_join_preflight_one_to_one_is_ready() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"订单号": [1, 2, 3], "金额": [10, 20, 30]}))
+    right_ref = save_dataframe(pd.DataFrame({"订单ID": [1, 2, 4], "渠道": ["A", "B", "C"]}))
+
+    out = build_server()._tools["join_preflight"].invoke(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "订单号",
+            "right_key": "订单ID",
+            "join_type": "inner",
+        }
+    )
+
+    assert out["status"] == "ready"
+    assert out["relationship"] == "one_to_one"
+    assert out["matching_key_count"] == 2
+    assert out["matched_left_rows"] == 2
+    assert out["matched_right_rows"] == 2
+    assert out["estimated_output_rows"] == 2
+    assert out["risks"] == []
+    assert out["mutates_data"] is False
+    assert out["raw_rows_returned"] is False
+    assert load_dataframe(left_ref).shape == (3, 2)
+    assert load_dataframe(right_ref).shape == (3, 2)
+
+
+def test_join_preflight_many_to_many_requires_confirmation() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"key": [1, 1, 2]}))
+    right_ref = save_dataframe(pd.DataFrame({"key": [1, 1, 3]}))
+
+    out = join_preflight(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "key",
+            "right_key": "key",
+            "join_type": "left",
+        }
+    )
+
+    assert out["status"] == "requires_confirmation"
+    assert out["relationship"] == "many_to_many"
+    assert out["estimated_output_rows"] == 5
+    assert out["requires_confirmation"] is True
+    assert {risk["code"] for risk in out["risks"]} == {"many_to_many"}
+
+
+def test_join_relationship_uses_matching_keys_not_unmatched_duplicates() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"key": [1, 2, 2]}))
+    right_ref = save_dataframe(pd.DataFrame({"key": [1, 3, 3]}))
+
+    out = join_preflight(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "key",
+            "right_key": "key",
+            "join_type": "inner",
+        }
+    )
+
+    assert out["relationship"] == "one_to_one"
+    assert out["status"] == "ready"
+
+
+def test_join_preflight_blocks_incompatible_or_unmatched_keys() -> None:
+    numeric_ref = save_dataframe(pd.DataFrame({"key": [1, 2]}))
+    text_ref = save_dataframe(pd.DataFrame({"key": ["1", "2"]}))
+    other_numeric_ref = save_dataframe(pd.DataFrame({"key": [7, 8]}))
+    base_args = {
+        "left_dataset_ref": numeric_ref,
+        "left_key": "key",
+        "right_key": "key",
+        "join_type": "inner",
+    }
+
+    incompatible = join_preflight({**base_args, "right_dataset_ref": text_ref})
+    unmatched = join_preflight({**base_args, "right_dataset_ref": other_numeric_ref})
+
+    assert incompatible["status"] == "blocked"
+    assert incompatible["relationship"] == "incompatible"
+    assert incompatible["risks"][0]["code"] == "incompatible_key_types"
+    assert unmatched["status"] == "blocked"
+    assert unmatched["relationship"] == "no_matches"
+    assert unmatched["risks"][0]["code"] == "no_matching_keys"
+
+
+def test_join_preflight_warns_on_null_keys_and_blocks_fixed_row_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left_ref = save_dataframe(pd.DataFrame({"key": [1.0, 1.0, np.nan]}))
+    right_ref = save_dataframe(pd.DataFrame({"key": [1.0, 1.0]}))
+    monkeypatch.setattr(dataset_ops_tools, "_JOIN_MAX_OUTPUT_ROWS", 3)
+
+    out = join_preflight(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "key",
+            "right_key": "key",
+            "join_type": "left",
+        }
+    )
+
+    assert out["status"] == "blocked"
+    assert out["estimated_output_rows"] == 5
+    assert {risk["code"] for risk in out["risks"]} == {
+        "output_row_limit",
+        "many_to_many",
+        "left_null_keys",
+    }
+
+
+def test_join_preflight_rejects_protected_key_and_free_sql() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"secret_id": [1, 2]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [1, 2]}))
+    save_metadata(left_ref, {"policy": {"columns": {"secret_id": "mask"}}})
+    args = {
+        "left_dataset_ref": left_ref,
+        "right_dataset_ref": right_ref,
+        "left_key": "secret_id",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+
+    with pytest.raises(ValueError, match="受数据策略保护"):
+        join_preflight(args)
+    with pytest.raises(SchemaValidationError):
+        build_server()._tools["join_preflight"].invoke({**args, "sql": "SELECT *"})
+    with pytest.raises(ValueError, match="两个不同的数据集"):
+        join_preflight({**args, "right_dataset_ref": left_ref})
+
+
+# ── join_datasets：固定执行与派生策略 ──
+
+
+def test_join_datasets_materializes_fixed_inner_join_and_handles_collisions() -> None:
+    left_ref = save_dataframe(
+        pd.DataFrame({"客户ID": [1, 2, 3], "名称": ["甲", "乙", "丙"]})
+    )
+    right_ref = save_dataframe(
+        pd.DataFrame({"id": [1, 2, 4], "名称": ["A", "B", "D"], "等级": [1, 2, 3]})
+    )
+    args = {
+        "left_dataset_ref": left_ref,
+        "right_dataset_ref": right_ref,
+        "left_key": "客户ID",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+
+    out = build_server()._tools["join_datasets"].invoke(args)
+    joined = load_dataframe(out["dataset_ref"])
+
+    assert out["schema"] == "chatbi-join-result-v1"
+    assert out["parent_refs"] == [left_ref, right_ref]
+    assert out["rows"] == 2
+    assert list(joined.columns) == ["客户ID", "名称", "id", "名称_right", "等级"]
+    assert joined["客户ID"].tolist() == [1, 2]
+    assert out["mutates_data"] is True
+    assert out["raw_rows_returned"] is False
+
+
+def test_join_datasets_reruns_gate_and_rejects_blocked_join() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"id": [1, 2]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [7, 8]}))
+
+    with pytest.raises(ValueError, match="预检阻塞"):
+        join_datasets(
+            {
+                "left_dataset_ref": left_ref,
+                "right_dataset_ref": right_ref,
+                "left_key": "id",
+                "right_key": "id",
+                "join_type": "inner",
+            }
+        )
+
+
+def test_full_join_preserves_unmatched_shared_key() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "left": ["a", "b"]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [2, 3], "right": ["x", "y"]}))
+
+    out = join_datasets(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "id",
+            "right_key": "id",
+            "join_type": "full",
+        }
+    )
+
+    assert sorted(load_dataframe(out["dataset_ref"])["id"].tolist()) == [1, 2, 3]
+
+
+def test_join_datasets_propagates_stricter_policy_to_renamed_columns() -> None:
+    left_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "金额": [10, 20]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "金额": [30, 40]}))
+    save_metadata(
+        right_ref,
+        {"policy": {"level": "restricted", "columns": {"金额": "exclude"}}},
+    )
+
+    out = join_datasets(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "id",
+            "right_key": "id",
+            "join_type": "inner",
+        }
+    )
+
+    assert load_metadata(out["dataset_ref"]) == {
+        "policy": {
+            "level": "restricted",
+            "small_group_min_size": 5,
+            "small_group_mode": "merge",
+            "columns": {"金额_right": "exclude"},
+        }
+    }
 
 
 # ── dataset_store 新增 ──

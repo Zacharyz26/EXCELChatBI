@@ -299,6 +299,9 @@ def choose_planner_route(user_text: str, context: JsonObject) -> PlannerRoute:
             "占比",
             "分群比较",
             "组间差异",
+            "join",
+            "关联数据集",
+            "跨表关联",
         )
     ):
         return "template"
@@ -413,6 +416,31 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
     )
     if requests_transform:
         add("dataset.transform")
+    dataset_mentions = sum(
+        1
+        for dataset in cast(list[JsonObject], context.get("datasets") or [])
+        if str(dataset.get("filename", "")) in user_text
+        or str(dataset.get("ref", "")) in user_text
+    )
+    if any(
+        token in request
+        for token in ("join", "关联数据集", "数据集关联", "跨表关联", "表连接", "合并两表")
+    ) or (
+        dataset_mentions >= 2
+        and any(token in request for token in ("关联", "连接", "合并", "匹配"))
+    ):
+        add("dataset.join.preflight")
+        mentions_preflight = any(
+            token in request
+            for token in ("预检", "风险评估", "评估风险", "可行性", "先看看能否")
+        )
+        explicitly_executes = any(
+            token in request
+            for token in ("执行", "生成关联", "创建关联", "完成关联", "合并数据集")
+        )
+        preflight_only = mentions_preflight and not explicitly_executes
+        if not preflight_only:
+            add("dataset.join.execute")
     contribution_requested = any(token in request for token in ("贡献", "占比", "构成"))
     group_compare_requested = any(
         token in request
@@ -592,6 +620,8 @@ def _capability_purpose(capability: str) -> str:
         "knowledge.search": "检索并引用业务口径来源",
         "data.aggregate": "按用户指定维度聚合指标",
         "dataset.transform": "依据已有 Evidence 创建衍生数据集",
+        "dataset.join.preflight": "只读评估两个已确认数据集的 Join 可行性与膨胀风险",
+        "dataset.join.execute": "在预检 Evidence 与显式授权后生成双父血缘关联数据集",
         "stats.anomaly": "识别异常并记录方法与阈值",
         "stats.trend": "计算指定范围和粒度的趋势",
         "stats.forecast": "生成预测并披露可靠性",
@@ -611,4 +641,8 @@ def _capability_condition(capability: str) -> str:
         return "报告 Artifact 与所需文件均真实存在且可下载"
     if capability == "dataset.transform":
         return "衍生 dataset_ref 已登记血缘且属于当前项目"
+    if capability == "dataset.join.preflight":
+        return "已生成不含原始行且不修改数据的 Join 预检 Evidence"
+    if capability == "dataset.join.execute":
+        return "关联 dataset_ref 已登记完整双父血缘且执行参数与预检一致"
     return f"{capability} 调用成功并生成可追溯 Evidence"

@@ -36,9 +36,10 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 关闭；阶段 6C 的有界候选、验证生命周期、确定性跟进、匿名评测和 Compose 恢复门禁已由
 提交 `d5005ee` 的
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-验证关闭。当前开发 6D；统一统计 Evidence、受治理高级统计、独立 `stats.forecast`
-Tool/Profile，以及匿名质量门禁、React 局限展示和预测双传输/Compose 恢复探针已完成
-本地验证，待远程完整 CI。
+验证关闭。阶段 6D 已由提交 `3febd68` 的
+[run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
+完整 CI 关闭。当前开发 6E；6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已本地
+实现参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承，待完整 CI 验证。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -93,7 +94,7 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   提交失败时清理未引用文件，并保护已被 Evidence 引用的 Artifact；
 - 工具执行前经过静态准入、项目范围和预算策略；开始、失败和未知结果持久化为 v2 步骤事件与
   Observation，unknown 结果禁止完成；模型和工具调用输出有界 trace 与审计元数据；
-- 15 个底层工具及 Agent 的 11 个模型工具共用 MCP schema/能力元数据；官方 SDK
+- 当前 17 个生产 Agent 工具共用 MCP schema/能力元数据；官方 SDK
   `tools/list`/`tools/call`、Client Gateway 发现校验和无副作用影子比对已落地；
 - API/Web 多阶段镜像、非 root 健康检查、SSE/鉴权下载代理、根 Compose 和镜像构建 CI；
 - data/stats/chart/report/knowledge 五个独立 MCP 服务、逐服务认证/发现/健康、私网、
@@ -144,6 +145,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   运行中的新目录；
 - SQLite v10 为 TaskRun 原子固定共享预算、数据集版本绑定和取消树；独立只读幂等分支
   可有界并行，结果由 Host 按统一 Evidence Ledger 原子提交，不跨版本、不分裂预算；
+- SQLite v11 以不可变边表保存多父 Dataset 血缘和 TaskRun 双父版本绑定；受治理 Join 先预检、
+  再经参数哈希绑定的高风险审批执行，并继承两侧更严格的数据策略；
 - 知识库仍是实例级共享资源，尚未做租户级索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
@@ -152,8 +155,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6C 工程门禁已完成并通过真实 Compose CI。
-  6D-1～6D-4 已完成本地验证但尚待远程完整 CI，后续多数据集自主分析亦未开始；
+- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6D 工程门禁已完成并通过真实 Compose CI。
+  6E-1 Join 只读预检和 6E-2 受治理执行/多父血缘已本地实现，React 协作与发布门禁尚未实现；
   真实 CPU/GPU semantic 等价和领域签字继续作为发布债务；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -207,11 +210,11 @@ v2.5 阶段 6B（已关闭；完整 CI 与 Compose 恢复门禁全绿）
 v2.5 阶段 6C（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   有界候选筛选 → 用户选择 → Evidence/Verifier 生命周期 → 确定性跟进/发布门禁
 
-v2.5 阶段 6D（开发中；6D-1～6D-4 已完成本地验证并待远程完整 CI）
+v2.5 阶段 6D（已关闭；完整 CI 与 Compose 预测恢复门禁全绿）
   统一统计 Evidence → 受治理贡献/分群/回归诊断 → 独立预测 Tool/Profile → 发布门禁
 
-v2.5 阶段 6E（未开始）
-  多数据集选择/Join 门禁 → 版本/衍生数据集/血缘 → 发布门禁
+v2.5 阶段 6E（开发中；6E-1/6E-2 已本地实现）
+  双数据集选择/Join 预检 → 受治理执行/多父版本血缘 → React 协作 → 发布门禁
 
 横向交付轨
   MCP：单源契约 → Client Gateway → 五服务独立路由与认证

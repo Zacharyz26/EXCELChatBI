@@ -11,7 +11,7 @@ from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.governance.audit import AuditEvent
 from packages.governance.permissions import Principal
 from packages.session.lineage import LineageAccessDenied, LineageStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7, v8, v9, v10
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v6, v7, v8, v9, v10, v11
 from packages.session.models import ArtifactDraft
 from packages.session.store import SessionStore
 from packages.session.task_models import ClaimDraft
@@ -130,7 +130,6 @@ def test_lineage_scope_is_project_and_tenant_isolated(tmp_path: Path) -> None:
             project_id=project_id,
             principal=_OTHER_TENANT,
         )
-
     other_project = session.create_project(
         "其他项目",
         owner_user_id=_OWNER.user_id,
@@ -143,6 +142,58 @@ def test_lineage_scope_is_project_and_tenant_isolated(tmp_path: Path) -> None:
             conversation_id=other_conversation.id,
             principal=_OWNER,
         )
+
+
+def test_lineage_graph_exposes_both_join_parents(tmp_path: Path) -> None:
+    session = SessionStore(str(tmp_path / "multi-parent.db"))
+    project = session.create_project(
+        "Join 血缘",
+        owner_user_id=_OWNER.user_id,
+        tenant_id=_OWNER.tenant_scope,
+    )
+    left_ref, right_ref, child_ref = "1" * 32, "2" * 32, "3" * 32
+    for ref, filename in ((left_ref, "left.xlsx"), (right_ref, "right.xlsx")):
+        session.register_dataset(
+            ref=ref,
+            project_id=project.id,
+            filename=filename,
+            profile={},
+        )
+    session.register_dataset(
+        ref=child_ref,
+        project_id=project.id,
+        filename="joined.xlsx",
+        profile={},
+        parent_ref=left_ref,
+        parent_refs=(left_ref, right_ref),
+        transform={"operation": "join"},
+    )
+
+    graph = LineageStore(session, audit_recorder=lambda _event: None).build_graph(
+        project_id=project.id,
+        principal=_OWNER,
+    )
+    parent_edges = {
+        edge.source
+        for edge in graph.edges
+        if edge.target == f"dataset:{child_ref}" and edge.relation == "derived_from"
+    }
+    child = next(node for node in graph.nodes if node.resource_ref == child_ref)
+
+    assert parent_edges == {f"dataset:{left_ref}", f"dataset:{right_ref}"}
+    assert child.metadata == {"derived": True, "parent_count": 2}
+    assert session.dataset_usage(right_ref)[1] == 1
+
+    with sqlite3.connect(session.db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            connection.execute(
+                """
+                UPDATE dataset_lineage_edges SET ordinal = 2
+                WHERE child_ref = ? AND parent_ref = ?
+                """,
+                (child_ref, right_ref),
+            )
+    assert session.delete_project(project.id) is True
 
 
 def test_lineage_anchor_columns_reject_rewrite(tmp_path: Path) -> None:
@@ -217,6 +268,13 @@ def test_v5_database_is_backed_up_and_backfills_lineage_anchors(
     )
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
+        for trigger in v11.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v11.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v11.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v11.VERSION,))
         for trigger in v10.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v10.ADDED_INDEXES:

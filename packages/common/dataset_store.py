@@ -212,3 +212,250 @@ def aggregate(
     finally:
         con.close()
     return [(r[0], float(r[1]) if r[1] is not None else 0.0, int(r[2])) for r in rows]
+
+
+def join_key_statistics(
+    left_dataset_ref: str,
+    right_dataset_ref: str,
+    left_key: str,
+    right_key: str,
+    join_type: str,
+) -> dict[str, Any]:
+    """用 DuckDB 下推计算 Join 预检统计，不返回任何原始键值或数据行。"""
+    if join_type not in {"inner", "left", "right", "full"}:
+        raise ValueError(f"不支持的 Join 类型: {join_type}")
+
+    left_columns = dataset_columns(left_dataset_ref)
+    right_columns = dataset_columns(right_dataset_ref)
+    if left_key not in left_columns:
+        raise ValueError(f"左侧关联键不存在: {left_key}")
+    if right_key not in right_columns:
+        raise ValueError(f"右侧关联键不存在: {right_key}")
+
+    left_path = _path_of(left_dataset_ref)
+    right_path = _path_of(right_dataset_ref)
+    left_ident = _quote_ident(left_key)
+    right_ident = _quote_ident(right_key)
+    con = duckdb.connect()
+    try:
+        left_profile = _join_key_profile(con, left_path, left_ident)
+        right_profile = _join_key_profile(con, right_path, right_ident)
+        compatible = _duckdb_type_family(left_profile["dtype"]) == _duckdb_type_family(
+            right_profile["dtype"]
+        )
+        matching_key_count = 0
+        matched_left_rows = 0
+        matched_right_rows = 0
+        inner_rows = 0
+        left_matching_max_rows_per_key = 0
+        right_matching_max_rows_per_key = 0
+        if compatible:
+            sql = f"""
+                WITH left_keys AS (
+                    SELECT {left_ident} AS join_key, COUNT(*) AS key_rows
+                    FROM read_parquet(?)
+                    WHERE {left_ident} IS NOT NULL
+                    GROUP BY {left_ident}
+                ), right_keys AS (
+                    SELECT {right_ident} AS join_key, COUNT(*) AS key_rows
+                    FROM read_parquet(?)
+                    WHERE {right_ident} IS NOT NULL
+                    GROUP BY {right_ident}
+                )
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(left_keys.key_rows), 0),
+                    COALESCE(SUM(right_keys.key_rows), 0),
+                    COALESCE(SUM(left_keys.key_rows * right_keys.key_rows), 0),
+                    COALESCE(MAX(left_keys.key_rows), 0),
+                    COALESCE(MAX(right_keys.key_rows), 0)
+                FROM left_keys
+                INNER JOIN right_keys USING (join_key)
+            """
+            match = con.execute(
+                sql,
+                [left_path.as_posix(), right_path.as_posix()],
+            ).fetchone()
+            if match is not None:
+                matching_key_count = int(match[0])
+                matched_left_rows = int(match[1])
+                matched_right_rows = int(match[2])
+                inner_rows = int(match[3])
+                left_matching_max_rows_per_key = int(match[4])
+                right_matching_max_rows_per_key = int(match[5])
+    finally:
+        con.close()
+
+    unmatched_left = left_profile["row_count"] - matched_left_rows
+    unmatched_right = right_profile["row_count"] - matched_right_rows
+    estimated_rows = {
+        "inner": inner_rows,
+        "left": inner_rows + unmatched_left,
+        "right": inner_rows + unmatched_right,
+        "full": inner_rows + unmatched_left + unmatched_right,
+    }[join_type]
+    return {
+        "compatible_key_types": compatible,
+        "left": left_profile,
+        "right": right_profile,
+        "matching_key_count": matching_key_count,
+        "matched_left_rows": matched_left_rows,
+        "matched_right_rows": matched_right_rows,
+        "estimated_output_rows": estimated_rows,
+        "left_matching_max_rows_per_key": left_matching_max_rows_per_key,
+        "right_matching_max_rows_per_key": right_matching_max_rows_per_key,
+    }
+
+
+def materialize_join(
+    left_dataset_ref: str,
+    right_dataset_ref: str,
+    left_key: str,
+    right_key: str,
+    join_type: str,
+) -> dict[str, Any]:
+    """用固定等值 Join 生成新 Parquet；调用方必须先完成预检与授权。"""
+    if join_type not in {"inner", "left", "right", "full"}:
+        raise ValueError(f"不支持的 Join 类型: {join_type}")
+    left_path = _path_of(left_dataset_ref)
+    right_path = _path_of(right_dataset_ref)
+    for path, side in ((left_path, "左侧"), (right_path, "右侧")):
+        if not path.exists():
+            raise FileNotFoundError(f"{side}数据集不存在")
+
+    left_columns = dataset_columns(left_dataset_ref)
+    right_columns = dataset_columns(right_dataset_ref)
+    if left_key not in left_columns:
+        raise ValueError(f"左侧关联键不存在: {left_key}")
+    if right_key not in right_columns:
+        raise ValueError(f"右侧关联键不存在: {right_key}")
+
+    output_columns: list[str] = list(left_columns)
+    used_names = {column.casefold() for column in output_columns}
+    right_projection: list[tuple[str, str]] = []
+    for column in right_columns:
+        if column == right_key and right_key == left_key:
+            continue
+        output_name = column
+        suffix = 1
+        while output_name.casefold() in used_names:
+            tail = "_right" if suffix == 1 else f"_right_{suffix}"
+            output_name = f"{column}{tail}"
+            suffix += 1
+        used_names.add(output_name.casefold())
+        output_columns.append(output_name)
+        right_projection.append((column, output_name))
+
+    projections: list[str] = []
+    for column in left_columns:
+        source = f"left_data.{_quote_ident(column)}"
+        if (
+            column == left_key
+            and left_key == right_key
+            and join_type in {"right", "full"}
+        ):
+            source = (
+                f"COALESCE({source}, right_data.{_quote_ident(right_key)})"
+            )
+        projections.append(f"{source} AS {_quote_ident(column)}")
+    projections.extend(
+        f"right_data.{_quote_ident(column)} AS {_quote_ident(output_name)}"
+        for column, output_name in right_projection
+    )
+    join_keyword = {
+        "inner": "INNER JOIN",
+        "left": "LEFT JOIN",
+        "right": "RIGHT JOIN",
+        "full": "FULL OUTER JOIN",
+    }[join_type]
+    output_ref = uuid.uuid4().hex
+    output_path = _path_of(output_ref)
+    output_literal = output_path.as_posix().replace("'", "''")
+    query = f"""
+        COPY (
+            SELECT {', '.join(projections)}
+            FROM read_parquet(?) AS left_data
+            {join_keyword} read_parquet(?) AS right_data
+              ON left_data.{_quote_ident(left_key)} = right_data.{_quote_ident(right_key)}
+        ) TO '{output_literal}' (FORMAT PARQUET)
+    """
+    connection = duckdb.connect()
+    try:
+        connection.execute(query, [left_path.as_posix(), right_path.as_posix()])
+        row = connection.execute(
+            "SELECT COUNT(*) FROM read_parquet(?)", [output_path.as_posix()]
+        ).fetchone()
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        connection.close()
+    return {
+        "dataset_ref": output_ref,
+        "rows": int(row[0]) if row is not None else 0,
+        "columns": output_columns,
+        "right_column_mapping": {
+            source: output for source, output in right_projection
+        },
+    }
+
+
+def _join_key_profile(
+    connection: duckdb.DuckDBPyConnection,
+    path: Path,
+    key_ident: str,
+) -> dict[str, Any]:
+    cursor = connection.execute(
+        f"SELECT {key_ident} FROM read_parquet(?) LIMIT 0",
+        [path.as_posix()],
+    )
+    dtype = str(cursor.description[0][1])
+    row = connection.execute(
+        f"""
+        SELECT
+            COUNT(*),
+            COUNT({key_ident}),
+            COUNT(DISTINCT {key_ident})
+        FROM read_parquet(?)
+        """,
+        [path.as_posix()],
+    ).fetchone()
+    if row is None:  # pragma: no cover - aggregate query always yields one row
+        raise RuntimeError("Join 预检统计为空")
+    row_count = int(row[0])
+    non_null_count = int(row[1])
+    distinct_count = int(row[2])
+    return {
+        "dtype": dtype,
+        "row_count": row_count,
+        "non_null_count": non_null_count,
+        "null_count": row_count - non_null_count,
+        "distinct_count": distinct_count,
+        "duplicate_key_rows": non_null_count - distinct_count,
+        "unique_non_null": non_null_count > 0 and non_null_count == distinct_count,
+    }
+
+
+def _duckdb_type_family(dtype: str) -> str:
+    normalized = dtype.upper()
+    numeric_tokens = (
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "FLOAT",
+        "DOUBLE",
+        "DECIMAL",
+    )
+    if any(token in normalized for token in numeric_tokens):
+        return "numeric"
+    if normalized.startswith(("DATE", "TIMESTAMP")):
+        return "date_time"
+    if normalized.startswith("TIME"):
+        return "time"
+    if normalized == "VARCHAR":
+        return "string"
+    if normalized == "BOOLEAN":
+        return "boolean"
+    return f"exact:{normalized}"

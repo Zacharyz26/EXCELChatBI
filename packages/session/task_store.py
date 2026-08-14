@@ -27,7 +27,7 @@ from apps.orchestrator.control.hypothesis_lifecycle import (
 from apps.orchestrator.control.planner_contract import validate_task_plan
 from apps.orchestrator.control.state import AgentState, ensure_transition
 
-from packages.common.identifiers import validate_report_id
+from packages.common.identifiers import dataset_reference_arguments, validate_report_id
 from packages.session.models import Artifact, ArtifactDraft, Conversation, JsonObject, Message
 from packages.session.task_models import (
     ApprovalRecord,
@@ -4502,6 +4502,19 @@ def _insert_execution_scope(connection: sqlite3.Connection, run: TaskRun) -> Non
         """,
         (run.run_id, run.created_at, run.project_id, run.created_at),
     )
+    connection.execute(
+        """
+        INSERT INTO task_dataset_binding_parents(
+            run_id, dataset_ref, parent_ref, ordinal
+        )
+        SELECT binding.run_id, binding.dataset_ref, edge.parent_ref, edge.ordinal
+        FROM task_dataset_bindings AS binding
+        JOIN dataset_lineage_edges AS edge ON edge.child_ref = binding.dataset_ref
+        WHERE binding.run_id = ?
+        ORDER BY binding.dataset_ref, edge.ordinal
+        """,
+        (run.run_id,),
+    )
     data_hash = _data_version_hash(connection, run.run_id)
     connection.execute(
         """
@@ -5184,17 +5197,24 @@ def _data_version_hash(connection: sqlite3.Connection, run_id: str) -> str:
         """,
         (run_id,),
     ).fetchall()
-    payload = [
-        {
+    payload: list[JsonObject] = []
+    for row in rows:
+        parent_rows = connection.execute(
+            """
+            SELECT parent_ref FROM task_dataset_binding_parents
+            WHERE run_id = ? AND dataset_ref = ? ORDER BY ordinal
+            """,
+            (run_id, str(row["dataset_ref"])),
+        ).fetchall()
+        payload.append({
             "dataset_ref": str(row["dataset_ref"]),
             "binding_kind": str(row["binding_kind"]),
             "parent_ref": _optional_text(row["parent_ref"]),
+            "parent_refs": [str(parent["parent_ref"]) for parent in parent_rows],
             "producing_invocation_id": _optional_text(row["producing_invocation_id"]),
             "dataset_created_at": str(row["dataset_created_at"]),
-        }
-        for row in rows
-    ]
-    return _hash_text(_dump_json({"schema": "task-data-version-v1", "datasets": payload}))
+        })
+    return _hash_text(_dump_json({"schema": "task-data-version-v2", "datasets": payload}))
 
 
 def _validate_dataset_arguments(
@@ -5202,20 +5222,18 @@ def _validate_dataset_arguments(
     run_id: str,
     arguments: JsonObject,
 ) -> None:
-    if "dataset_ref" not in arguments:
-        return
-    dataset_ref = arguments.get("dataset_ref")
-    if not isinstance(dataset_ref, str) or not dataset_ref:
-        raise ControlConflict("工具调用的 dataset_ref 无效")
-    row = connection.execute(
-        """
-        SELECT 1 FROM task_dataset_bindings
-        WHERE run_id = ? AND dataset_ref = ?
-        """,
-        (run_id, dataset_ref),
-    ).fetchone()
-    if row is None:
-        raise ControlConflict("工具调用引用的数据集不属于 TaskRun 固定数据版本")
+    for argument_name, dataset_ref in dataset_reference_arguments(arguments):
+        if not isinstance(dataset_ref, str) or not dataset_ref:
+            raise ControlConflict(f"工具调用的 {argument_name} 无效")
+        row = connection.execute(
+            """
+            SELECT 1 FROM task_dataset_bindings
+            WHERE run_id = ? AND dataset_ref = ?
+            """,
+            (run_id, dataset_ref),
+        ).fetchone()
+        if row is None:
+            raise ControlConflict("工具调用引用的数据集不属于 TaskRun 固定数据版本")
 
 
 def _assert_tool_budget_available(
@@ -5352,21 +5370,35 @@ def _bind_derived_dataset_if_present(
     result: Any,
     now: str,
 ) -> None:
-    if invocation.tool_name != "transform_dataset" or not isinstance(result, dict):
+    if invocation.tool_name not in {
+        "transform_dataset",
+        "join_datasets",
+    } or not isinstance(result, dict):
         return
     dataset_ref = result.get("dataset_ref")
     parent_ref = result.get("parent_ref")
     if not isinstance(dataset_ref, str) or not isinstance(parent_ref, str):
         raise ControlConflict("衍生数据集结果缺少版本引用")
-    parent = connection.execute(
-        """
-        SELECT 1 FROM task_dataset_bindings
-        WHERE run_id = ? AND dataset_ref = ?
-        """,
-        (run.run_id, parent_ref),
-    ).fetchone()
-    if parent is None:
-        raise ControlConflict("衍生数据集的父版本不属于当前 TaskRun")
+    raw_parent_refs = result.get("parent_refs")
+    parent_refs = (
+        tuple(raw_parent_refs)
+        if isinstance(raw_parent_refs, list)
+        and raw_parent_refs
+        and all(isinstance(item, str) for item in raw_parent_refs)
+        else (parent_ref,)
+    )
+    if parent_refs[0] != parent_ref or len(set(parent_refs)) != len(parent_refs):
+        raise ControlConflict("衍生数据集结果的多父版本无效")
+    for lineage_parent in parent_refs:
+        parent = connection.execute(
+            """
+            SELECT 1 FROM task_dataset_bindings
+            WHERE run_id = ? AND dataset_ref = ?
+            """,
+            (run.run_id, lineage_parent),
+        ).fetchone()
+        if parent is None:
+            raise ControlConflict("衍生数据集的父版本不属于当前 TaskRun")
     anchor = connection.execute(
         """
         SELECT ref, project_id, parent_ref, created_at
@@ -5380,6 +5412,15 @@ def _bind_derived_dataset_if_present(
         or str(anchor["parent_ref"]) != parent_ref
     ):
         raise ControlConflict("衍生数据集版本未通过项目与血缘校验")
+    edge_rows = connection.execute(
+        """
+        SELECT parent_ref FROM dataset_lineage_edges
+        WHERE child_ref = ? ORDER BY ordinal
+        """,
+        (dataset_ref,),
+    ).fetchall()
+    if tuple(str(row["parent_ref"]) for row in edge_rows) != parent_refs:
+        raise ControlConflict("衍生数据集的多父血缘未通过校验")
     existing = connection.execute(
         """
         SELECT binding_kind, parent_ref, producing_invocation_id
@@ -5411,6 +5452,17 @@ def _bind_derived_dataset_if_present(
             str(anchor["created_at"]),
             now,
         ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO task_dataset_binding_parents(
+            run_id, dataset_ref, parent_ref, ordinal
+        ) VALUES (?, ?, ?, ?)
+        """,
+        [
+            (run.run_id, dataset_ref, lineage_parent, ordinal)
+            for ordinal, lineage_parent in enumerate(parent_refs)
+        ],
     )
 
 

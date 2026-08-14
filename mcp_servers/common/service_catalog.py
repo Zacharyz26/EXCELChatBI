@@ -9,6 +9,8 @@ AGENT_MCP_SERVICE_TOOLS: dict[str, tuple[str, ...]] = {
         "get_data_profile",
         "transform_dataset",
         "aggregate_preview",
+        "join_preflight",
+        "join_datasets",
     ),
     "stats-tools": (
         "trend_analysis",

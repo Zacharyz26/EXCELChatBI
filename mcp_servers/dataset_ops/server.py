@@ -33,6 +33,31 @@ def build_server() -> MCPServer:
             metadata=tool_metadata("data.aggregate", "table"),
         )
     )
+    server.register(
+        Tool(
+            "join_preflight",
+            "只读评估两个数据集的 Join 基数、行数膨胀和安全风险（不执行 Join）",
+            schemas.JOIN_PREFLIGHT_SCHEMA,
+            tools.join_preflight,
+            output_schema=tool_output_schema("join_preflight"),
+            metadata=tool_metadata("dataset.join.preflight"),
+        )
+    )
+    server.register(
+        Tool(
+            "join_datasets",
+            "在预检与显式授权后执行固定等值 Join，并生成双父血缘衍生数据集",
+            schemas.JOIN_DATASETS_SCHEMA,
+            tools.join_datasets,
+            output_schema=tool_output_schema("join_datasets"),
+            metadata=tool_metadata(
+                "dataset.join.execute",
+                read_only=False,
+                idempotent=False,
+                risk_level="high",
+            ),
+        )
+    )
     return server
 
 

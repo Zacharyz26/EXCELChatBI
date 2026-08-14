@@ -1,7 +1,7 @@
 # v2.5 记忆、自主性与协作
 
-> 状态：阶段 3–5、6A～6C 工程关闭；6D-1～6D-4 已完成本地验证并待远程完整 CI
-> 更新日期：2026-08-13
+> 状态：阶段 3–5、6A～6D 工程关闭；当前进入 6E 多数据集关联治理
+> 更新日期：2026-08-14
 > 基线：v2.4 阶段 2A–2E 已实现，最新 Compose/容器 CI 全绿；G7 因人工评测
 > 代表性不足继续保持 `review_required`
 
@@ -19,7 +19,7 @@
 | 3：记忆系统 | 工作/对话/项目记忆、上下文压缩、指代消解、Evidence 血缘与恢复 | 已完成并通过真实 Docker/Compose CI |
 | 4：人机协作 | 计划干预、审批、任务控制、恢复、自主等级、分支与反馈 | 已完成并通过真实 Docker/Compose CI |
 | 5：知识与数据联合推理 | 版本化领域定义、公式、口径冲突与知识 Resource | 工程关闭并通过真实 Compose CI；CPU/GPU runtime semantic 与代表性签字是发布债务 |
-| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 6A～6C 已由完整 CI 关闭；6D-1～6D-4 已完成本地验证并待远程完整 CI |
+| 6：自主分析 | 数据角色、结果驱动分析、多数据集、受控并行与统计护栏 | 6A～6D 已由完整 CI 关闭；6E-1/6E-2 已本地实现 |
 
 受限 SQL 和 Code Interpreter 仍属于独立安全项目，不随 v2.5 普通功能自动启用。
 
@@ -85,10 +85,11 @@ Verifier 状态并在 API 与 React 展示；6C-3 已实现受预算、重规划
 确定性评测、CI 强制门禁和真实 Compose 浏览器/三次恢复探针。提交 `d5005ee` 的
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
 已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。当前进入
-[阶段6D](./阶段6D实施记录.md)：6D-1 统一统计 Evidence、6D-2 受治理贡献/分群比较/回归
-诊断、6D-3 独立 `stats.forecast` Tool/Profile 和 6D-4 匿名质量门禁、React 局限展示及
-预测双传输/Compose 恢复探针已完成本地验证；默认 Profile 仍不开放预测，显式启用后才会
-进入新 TaskRun 的冻结目录。当前待远程 backend、frontend 与 containers/Compose 完整 CI。
+[阶段6D](./阶段6D实施记录.md) 已由提交 `3febd68` 的
+[run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
+完整 CI 关闭。当前进入 [阶段6E](./阶段6E实施记录.md)：6E-1 已实现只读 Join 预检，
+6E-2 已本地实现高风险参数绑定审批、固定 Join 执行、SQLite v11 多父血缘、TaskRun 双父
+版本绑定和派生策略继承；React 协作与阶段发布门禁尚未实现。
 
 阶段 3 关闭状态：
 
@@ -126,3 +127,4 @@ Verifier 状态并在 API 与 React 展示；6C-3 已实现受预算、重规划
 - [`./阶段6B实施记录.md`](./阶段6B实施记录.md)：数据角色、质量建议契约与未完成边界。
 - [`./阶段6C实施记录.md`](./阶段6C实施记录.md)：受控候选假设、结果驱动探索与当前边界。
 - [`./阶段6D实施记录.md`](./阶段6D实施记录.md)：统计 Evidence、预测护栏与当前边界。
+- [`./阶段6E实施记录.md`](./阶段6E实施记录.md)：多数据集 Join 预检、授权与后续版本治理。

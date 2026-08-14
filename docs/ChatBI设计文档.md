@@ -1,9 +1,9 @@
 # ChatBI 智能体应用 — 技术设计文档（详细）
 
-> 版本：v2.5-stage6d-in-progress · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3–5、6A～6C 工程关闭，
+> 版本：v2.5-stage6e-in-progress · 状态：v2.4 阶段 2A–2E 与 v2.5 阶段 3–5、6A～6D 工程关闭，
 > 提交 `0b5980c` 的完整 CI/Docker 恢复门禁全绿；G7 代表性评测/人工签字待完成；
 > 提交 `d5a672d` 的阶段 5 及提交 `b67b704` 的阶段 6A Compose 工程门禁全绿；
-> 提交 `d5005ee` 的阶段 6C 完整 CI 全绿；当前进入 6D 统计证据与预测护栏
+> 提交 `3febd68` 的阶段 6D 完整 CI 全绿；当前进入 6E 多数据集关联治理
 > · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 
@@ -251,7 +251,7 @@ SessionState {
 ### 5.3 MCP 工具层
 
 > **当前形态**：Agent Executor 已通过受治理 MCP Client Gateway 执行；Tool Capability
-> Contract、15 个底层工具的官方 SDK Server adapter、stdio/认证 Streamable HTTP、
+> Contract、当前 17 个生产 Agent 工具的官方 SDK Server adapter、stdio/认证 Streamable HTTP、
 > Host 上下文 HMAC、固定目录发现、超时/取消、健康代次和受控降级均已实现。进程内适配
 > 只保留为兼容/测试，兼容直调 API 不受本次切换影响；所有路径继续共用同一 schema 与中央
 > 策略网关。阶段 2E 已负责独立工具服务 Compose，v3.0 再负责第三方/跨网络服务的动态发现、
@@ -440,7 +440,8 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
    候选投影，后续动作禁止自动执行并受预算、重规划、取消树和人工分支确认约束；6C-4 已加入
    14 场景匿名评测、CI 强制门禁和 Compose 浏览器/三次恢复探针；提交 `d5005ee` 的
    [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-   已全绿并关闭 6C。当前进入 6D 统计/预测护栏，其后再实现多数据集。
+   已全绿并关闭 6C。6D 已由提交 `3febd68` 的完整 CI 关闭；当前进入 6E 多数据集治理。
+   6E-1 只读 Join 预检及 6E-2 参数绑定审批、固定 Join 执行与 SQLite v11 双父血缘已本地实现。
 4. **独立安全项目**：受限 SQL 与受限 Code Interpreter；未通过安全评审前不得进入生产 Agent。
 5. **横向交付轨**：v2.4 完成全项目 MCP 协议化（阶段 0 设计、阶段 1 全量接口、阶段 2 规范执行路径）和 Docker 容器化（阶段 0 拓扑、阶段 1 基础镜像、阶段 2 单机完整 Compose）；v2.5 按阶段 3–6 扩展记忆引用、审批、知识 Resource、能力目录、状态恢复和重型工具 profile。
 6. **v3.0 企业自主 Agent**：阶段 7 数据连接器、后台/主动任务、外部 MCP 治理和容器发布供应链；阶段 8 多 Agent、多租户和企业治理。

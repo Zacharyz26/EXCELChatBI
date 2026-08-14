@@ -117,6 +117,34 @@ def test_plan_validation_rejects_steps_while_waiting_for_blocking_clarification(
     assert "clarification:blocking_requires_empty_steps" in result.issues
 
 
+def test_plan_validation_rejects_join_execution_without_preflight_dependency() -> None:
+    plan: dict[str, Any] = {
+        "schema_version": 1,
+        "summary": "非法跳过 Join 预检",
+        "steps": [
+            {
+                "step_id": "execute",
+                "purpose": "执行 Join",
+                "capability": "dataset.join.execute",
+                "dependencies": [],
+                "expected_evidence": ["结果"],
+                "completion_conditions": ["双父血缘已登记"],
+                "fallback": [{"when": "失败", "action": "block"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+
+    result = validate_task_plan(
+        plan,
+        capabilities={"dataset.join.preflight", "dataset.join.execute"},
+    )
+
+    assert result.dependencies_valid is False
+    assert "dependencies:join_execute_requires_preflight" in result.issues
+
+
 def test_strict_plan_parser_does_not_accept_markdown_fence() -> None:
     with pytest.raises(ValueError, match="严格 JSON"):
         parse_task_plan("```json\n{}\n```")

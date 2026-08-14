@@ -14,6 +14,7 @@ from apps.orchestrator.agent_tools import (
     build_registry,
 )
 from packages.common.config import Settings, get_settings
+from packages.common.identifiers import dataset_reference_arguments
 from packages.common.logging import get_logger
 from packages.knowledge.domain_models import DomainDefinition
 from packages.knowledge.domain_store import DomainAccessDenied, DomainDefinitionStore
@@ -238,8 +239,9 @@ class AgentServiceRuntime:
                 "project_scope_violation",
                 "MCP 对话不属于请求项目",
             )
-        dataset_ref = arguments.get("dataset_ref")
-        if isinstance(dataset_ref, str):
+        for _argument_name, dataset_ref in dataset_reference_arguments(arguments):
+            if not isinstance(dataset_ref, str):
+                raise MCPProtocolError("invalid_arguments", "数据集引用格式非法")
             dataset = self.store.get_dataset(dataset_ref)
             if dataset is None:
                 raise MCPProtocolError("resource_not_found", "数据集未登记")

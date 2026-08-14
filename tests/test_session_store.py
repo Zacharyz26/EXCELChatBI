@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from packages.session import ConversationCache, SessionStore
-from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9, v10
+from packages.session.migrations import CURRENT_SCHEMA_VERSION, v4, v5, v6, v7, v8, v9, v10, v11
 
 
 @pytest.fixture
@@ -83,6 +83,13 @@ def test_v9_database_is_backed_up_and_migrated_to_v10(tmp_path: Path) -> None:
     db_path = tmp_path / "v9.db"
     SessionStore(str(db_path))
     with sqlite3.connect(db_path) as connection:
+        for trigger in v11.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v11.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v11.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v11.VERSION,))
         for trigger in v10.ADDED_TRIGGERS:
             connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
         for index in v10.ADDED_INDEXES:
@@ -97,7 +104,7 @@ def test_v9_database_is_backed_up_and_migrated_to_v10(tmp_path: Path) -> None:
 
     migrated = SessionStore(str(db_path))
 
-    assert migrated.schema_version == v10.VERSION
+    assert migrated.schema_version == CURRENT_SCHEMA_VERSION
     assert len(list(tmp_path.glob("v9.db.v9-backup.*.sqlite3"))) == 1
     with sqlite3.connect(db_path) as connection:
         table = connection.execute(
@@ -105,6 +112,42 @@ def test_v9_database_is_backed_up_and_migrated_to_v10(tmp_path: Path) -> None:
             (v10.ADDED_TABLES[0],),
         ).fetchone()
     assert table is not None
+
+
+def test_v10_database_is_backed_up_and_backfills_multi_parent_edges(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v10.db"
+    store = SessionStore(str(db_path))
+    project = store.create_project("v11 多父血缘")
+    store.register_dataset(
+        ref="a" * 32,
+        project_id=project.id,
+        filename="parent.xlsx",
+        profile={},
+    )
+    store.register_dataset(
+        ref="b" * 32,
+        project_id=project.id,
+        filename="child.xlsx",
+        profile={},
+        parent_ref="a" * 32,
+    )
+    with sqlite3.connect(db_path) as connection:
+        for trigger in v11.ADDED_TRIGGERS:
+            connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+        for index in v11.ADDED_INDEXES:
+            connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+        for table in v11.ADDED_TABLES:
+            connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (v11.VERSION,))
+        connection.execute(f"PRAGMA user_version = {v10.VERSION}")
+
+    migrated = SessionStore(str(db_path))
+
+    assert migrated.schema_version == v11.VERSION
+    assert len(list(tmp_path.glob("v10.db.v10-backup.*.sqlite3"))) == 1
+    assert migrated.dataset_parent_refs("b" * 32) == ("a" * 32,)
 
 
 def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None:
@@ -121,7 +164,7 @@ def test_readiness_rejects_v2_5_migration_checksum_drift(tmp_path: Path) -> None
         "capability_catalog_control_plane": "ready",
         "controlled_parallel_control_plane": "ready",
     }
-    migrations = (v4, v5, v6, v7, v8, v9, v10)
+    migrations = (v4, v5, v6, v7, v8, v9, v10, v11)
     for index, migration in enumerate(migrations):
         with sqlite3.connect(db_path) as connection:
             if index > 0:

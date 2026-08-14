@@ -67,6 +67,47 @@ def test_policy_denies_before_execution(
     assert events[0].outcome == "denied"
 
 
+@pytest.mark.parametrize("tool_name", ["join_preflight", "join_datasets"])
+def test_policy_authorizes_every_join_dataset_reference(tool_name: str) -> None:
+    arguments = {
+        "left_dataset_ref": "a" * 32,
+        "right_dataset_ref": "b" * 32,
+        "left_key": "id",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+    gateway = ToolPolicyGateway(audit_recorder=lambda _event: None)
+
+    allowed = gateway.authorize(
+        _request(
+            tool_name=tool_name,
+            arguments=arguments,
+            resource_project_id=None,
+            resource_project_ids=("project-1", "project-1"),
+        )
+    )
+    foreign_right = gateway.authorize(
+        _request(
+            tool_name=tool_name,
+            arguments=arguments,
+            resource_project_id=None,
+            resource_project_ids=("project-1", "project-2"),
+        )
+    )
+    missing_right = gateway.authorize(
+        _request(
+            tool_name=tool_name,
+            arguments=arguments,
+            resource_project_id=None,
+            resource_project_ids=("project-1", None),
+        )
+    )
+
+    assert allowed.allowed is True
+    assert foreign_right.code == "cross_project_resource_denied"
+    assert missing_right.code == "unregistered_resource_denied"
+
+
 def test_trace_records_completion_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 

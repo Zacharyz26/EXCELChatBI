@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -17,12 +18,14 @@ from packages.session.task_store import ControlConflict, TaskStore
 _SOURCE_REF = "a" * 32
 _DERIVED_REF = "b" * 32
 _LATE_REF = "c" * 32
+_RIGHT_REF = "d" * 32
 
 
 def _running_parallel_run(
     tmp_path: Path,
     *,
     max_tool_calls: int = 2,
+    include_right: bool = False,
 ) -> tuple[SessionStore, TaskStore, TaskRun, list[TaskStepRecord]]:
     session = SessionStore(str(tmp_path / "chatbi.db"))
     project = session.create_project("controlled parallel")
@@ -32,6 +35,13 @@ def _running_parallel_run(
         filename="source.xlsx",
         profile={"columns": [{"name": "period"}, {"name": "value"}]},
     )
+    if include_right:
+        session.register_dataset(
+            ref=_RIGHT_REF,
+            project_id=project.id,
+            filename="right.xlsx",
+            profile={"columns": [{"name": "period"}]},
+        )
     conversation = session.create_conversation(project.id)
     _, message = session.start_user_turn(
         conversation_id=conversation.id,
@@ -324,3 +334,67 @@ def test_derived_dataset_is_append_only_but_unrelated_late_dataset_is_denied(
     )
     assert created is True
     assert derived_call.args["dataset_ref"] == _DERIVED_REF
+
+
+def test_join_result_binds_both_frozen_parents_to_task_data_version(
+    tmp_path: Path,
+) -> None:
+    session, tasks, running, _ = _running_parallel_run(
+        tmp_path,
+        max_tool_calls=1,
+        include_right=True,
+    )
+    invocation, _ = tasks.start_invocation(
+        run_id=running.run_id,
+        tool_call_id="join",
+        tool_name="join_datasets",
+        arguments={
+            "left_dataset_ref": _SOURCE_REF,
+            "right_dataset_ref": _RIGHT_REF,
+            "left_key": "period",
+            "right_key": "period",
+            "join_type": "inner",
+        },
+        idempotency_key="join-once",
+    )
+    session.register_dataset(
+        ref=_DERIVED_REF,
+        project_id=running.project_id,
+        filename="joined.xlsx",
+        profile={"columns": []},
+        parent_ref=_SOURCE_REF,
+        parent_refs=(_SOURCE_REF, _RIGHT_REF),
+        transform={"operation": "join"},
+    )
+    assistant = session.append_message(
+        conversation_id=running.conversation_id,
+        role="assistant",
+        content="join",
+    )
+
+    tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=running.state_version,
+        assistant_message_id=assistant.id,
+        result={
+            "dataset_ref": _DERIVED_REF,
+            "parent_ref": _SOURCE_REF,
+            "parent_refs": [_SOURCE_REF, _RIGHT_REF],
+            "registered": True,
+        },
+        evidence_kind="tool_result",
+        evidence_source={"tool": "join_datasets"},
+        evidence_summary={"summary": "joined"},
+        artifact_draft=None,
+    )
+
+    with sqlite3.connect(session.db_path) as connection:
+        parents = connection.execute(
+            """
+            SELECT parent_ref, ordinal
+            FROM task_dataset_binding_parents
+            WHERE run_id = ? AND dataset_ref = ? ORDER BY ordinal
+            """,
+            (running.run_id, _DERIVED_REF),
+        ).fetchall()
+    assert parents == [(_SOURCE_REF, 0), (_RIGHT_REF, 1)]

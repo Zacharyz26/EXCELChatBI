@@ -869,6 +869,56 @@ def test_invocation_is_idempotent_and_success_creates_evidence(tmp_path: Path) -
     assert tasks.list_claims("run-2") == claims
 
 
+def test_join_invocation_requires_both_refs_in_fixed_data_version(tmp_path: Path) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="join-data-version",
+        user_text="预检两个数据集的 Join",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    late_ref = "e" * 32
+    session.register_dataset(
+        ref=late_ref,
+        project_id=project_id,
+        filename="late.xlsx",
+        profile={"columns": []},
+    )
+    base_arguments = {
+        "left_dataset_ref": "d" * 32,
+        "left_key": "id",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+
+    invocation, created = tasks.start_invocation(
+        run_id=run.run_id,
+        tool_call_id="join-bound",
+        tool_name="join_preflight",
+        arguments={**base_arguments, "right_dataset_ref": "sales"},
+        idempotency_key="join-bound-once",
+    )
+
+    assert created is True
+    assert invocation.args["right_dataset_ref"] == "sales"
+    with pytest.raises(ControlConflict, match="不属于 TaskRun 固定数据版本"):
+        tasks.start_invocation(
+            run_id=run.run_id,
+            tool_call_id="join-late",
+            tool_name="join_preflight",
+            arguments={**base_arguments, "right_dataset_ref": late_ref},
+            idempotency_key="join-late-once",
+        )
+
+
 def test_definition_execution_requires_exact_compiled_arguments(tmp_path: Path) -> None:
     session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
     contract = build_minimal_contract(

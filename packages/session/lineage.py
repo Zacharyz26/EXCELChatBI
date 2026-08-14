@@ -151,6 +151,17 @@ class LineageStore:
                 """,
                 (project_id,),
             ).fetchall()
+            dataset_edge_rows = connection.execute(
+                """
+                SELECT child_ref, parent_ref, ordinal
+                FROM dataset_lineage_edges
+                WHERE child_ref IN (
+                    SELECT ref FROM dataset_lineage_anchors WHERE project_id = ?
+                )
+                ORDER BY child_ref, ordinal
+                """,
+                (project_id,),
+            ).fetchall()
             scope_sql, scope_args = _conversation_scope(conversation_id)
             artifact_rows = connection.execute(
                 f"""
@@ -221,6 +232,11 @@ class LineageStore:
         dataset_anchors: dict[str, sqlite3.Row] = {
             str(row["ref"]): row for row in dataset_rows
         }
+        dataset_parents: dict[str, list[str]] = {}
+        for row in dataset_edge_rows:
+            dataset_parents.setdefault(str(row["child_ref"]), []).append(
+                str(row["parent_ref"])
+            )
         visible_dataset_refs = set(dataset_anchors)
         if conversation_id is not None:
             visible_dataset_refs = {
@@ -237,15 +253,11 @@ class LineageStore:
                 )
             frontier = list(visible_dataset_refs)
             while frontier:
-                row = dataset_anchors.get(frontier.pop())
-                parent_ref = (
-                    _optional_text(row["lineage_parent_ref"])
-                    if row is not None
-                    else None
-                )
-                if parent_ref is not None and parent_ref not in visible_dataset_refs:
-                    visible_dataset_refs.add(parent_ref)
-                    frontier.append(parent_ref)
+                child_ref = frontier.pop()
+                for parent_ref in dataset_parents.get(child_ref, ()):
+                    if parent_ref not in visible_dataset_refs:
+                        visible_dataset_refs.add(parent_ref)
+                        frontier.append(parent_ref)
 
         def add_node(node: LineageNode) -> None:
             nodes.setdefault(node.node_id, node)
@@ -271,8 +283,9 @@ class LineageStore:
                     run_id=None,
                     metadata={
                         "derived": bool(
-                            row is not None and row["lineage_parent_ref"] is not None
-                        )
+                            row is not None and dataset_parents.get(dataset_ref)
+                        ),
+                        "parent_count": len(dataset_parents.get(dataset_ref, ())),
                     },
                     created_at=(
                         str(row["created_at"]) if row is not None else None
@@ -285,8 +298,7 @@ class LineageStore:
             if str(row["ref"]) not in visible_dataset_refs:
                 continue
             child = add_dataset(str(row["ref"]))
-            parent_ref = _optional_text(row["lineage_parent_ref"])
-            if parent_ref is not None:
+            for parent_ref in dataset_parents.get(str(row["ref"]), ()):
                 parent = add_dataset(parent_ref)
                 edges.add((parent, child, "derived_from"))
 
@@ -546,6 +558,10 @@ def inspect_lineage_connection(connection: sqlite3.Connection) -> dict[str, obje
             "ref, project_id, parent_ref, created_at, deleted_at",
         ),
         (
+            "dataset_lineage_edges",
+            "child_ref, parent_ref, parent_role, ordinal, created_at",
+        ),
+        (
             "artifacts",
             "id, conversation_id, lineage_dataset_ref, source_tool, created_at",
         ),
@@ -580,7 +596,7 @@ def inspect_lineage_connection(connection: sqlite3.Connection) -> dict[str, obje
         separators=(",", ":"),
     ).encode("utf-8")
     return {
-        "version": "lineage-v1",
+        "version": "lineage-v2",
         "integrity": "ok" if not issues else "degraded",
         "content_hash": hashlib.sha256(encoded).hexdigest(),
         "counts": counts,
@@ -647,8 +663,9 @@ def _integrity_issues(
         "dataset_parent_cross_project": (
             """
             SELECT COUNT(*)
-            FROM dataset_lineage_anchors AS child
-            JOIN dataset_lineage_anchors AS parent ON parent.ref = child.parent_ref
+            FROM dataset_lineage_edges AS edge
+            JOIN dataset_lineage_anchors AS child ON child.ref = edge.child_ref
+            JOIN dataset_lineage_anchors AS parent ON parent.ref = edge.parent_ref
             WHERE child.project_id != parent.project_id
               AND (? IS NULL OR child.project_id = ?)
             """,
@@ -677,6 +694,20 @@ def _integrity_issues(
             )
             """,
             (project_id, project_id, project_id, project_id),
+        ),
+        "dataset_lineage_edge_drift": (
+            """
+            SELECT COUNT(*)
+            FROM dataset_lineage_anchors AS anchor
+            LEFT JOIN dataset_lineage_edges AS edge
+              ON edge.child_ref = anchor.ref AND edge.ordinal = 0
+            WHERE (
+                    (anchor.parent_ref IS NULL AND edge.parent_ref IS NOT NULL)
+                    OR (anchor.parent_ref IS NOT edge.parent_ref)
+                  )
+              AND (? IS NULL OR anchor.project_id = ?)
+            """,
+            (project_id, project_id),
         ),
     }
     issues: list[LineageIssue] = []
@@ -759,7 +790,11 @@ def _dataset_refs(value: object) -> set[str]:
     refs: set[str] = set()
     if isinstance(value, dict):
         for key, item in value.items():
-            if key == "dataset_ref" and isinstance(item, str):
+            if key in {
+                "dataset_ref",
+                "left_dataset_ref",
+                "right_dataset_ref",
+            } and isinstance(item, str):
                 refs.add(item)
             elif key == "dataset_refs" and isinstance(item, list):
                 refs.update(entry for entry in item if isinstance(entry, str))
@@ -780,7 +815,7 @@ def _graph_hash(
     edges: tuple[LineageEdge, ...],
 ) -> str:
     payload = {
-        "version": "lineage-v1",
+        "version": "lineage-v2",
         "nodes": [asdict(node) for node in nodes],
         "edges": [asdict(edge) for edge in edges],
     }

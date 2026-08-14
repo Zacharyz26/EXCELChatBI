@@ -29,6 +29,7 @@ from packages.session.migrations import (
     v8,
     v9,
     v10,
+    v11,
 )
 from packages.session.models import (
     Artifact,
@@ -172,12 +173,15 @@ class SessionStore:
                 "task_dataset_bindings",
                 "task_cancellation_nodes",
                 "evidence_ledger_entries",
+                "dataset_lineage_edges",
+                "task_dataset_binding_parents",
             }
+            placeholders = ", ".join("?" for _ in required_tables)
             rows = connection.execute(
-                """
+                f"""
                 SELECT name FROM sqlite_master
                 WHERE type = 'table'
-                  AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  AND name IN ({placeholders})
                 """,
                 tuple(sorted(required_tables)),
             ).fetchall()
@@ -187,7 +191,7 @@ class SessionStore:
             migrations = connection.execute(
                 """
                 SELECT version, name, checksum FROM schema_migrations
-                WHERE version IN (?, ?, ?, ?, ?, ?, ?)
+                WHERE version IN (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     v4.VERSION,
@@ -197,6 +201,7 @@ class SessionStore:
                     v8.VERSION,
                     v9.VERSION,
                     v10.VERSION,
+                    v11.VERSION,
                 ),
             ).fetchall()
             actual_migrations = {
@@ -210,6 +215,7 @@ class SessionStore:
                 v8.VERSION: (v8.NAME, v8.CHECKSUM),
                 v9.VERSION: (v9.NAME, v9.CHECKSUM),
                 v10.VERSION: (v10.NAME, v10.CHECKSUM),
+                v11.VERSION: (v11.NAME, v11.CHECKSUM),
             }
             if actual_migrations != expected_migrations:
                 raise RuntimeError("SQLite v2.5 migration checksum 不匹配")
@@ -419,27 +425,42 @@ class SessionStore:
         filename: str,
         profile: JsonObject,
         parent_ref: str | None = None,
+        parent_refs: tuple[str, ...] | None = None,
         transform: JsonObject | None = None,
     ) -> Dataset:
         """登记一个已由 dataset_store 落盘的数据集。"""
         clean_ref = _required_text(ref, "数据集引用")
         clean_filename = _required_text(filename, "文件名")
+        lineage_parents = (
+            parent_refs
+            if parent_refs is not None
+            else (() if parent_ref is None else (parent_ref,))
+        )
+        if not lineage_parents and parent_ref is not None:
+            raise ValueError("父数据集引用不一致")
+        if len(set(lineage_parents)) != len(lineage_parents):
+            raise ValueError("父数据集引用不能重复")
+        if clean_ref in lineage_parents:
+            raise ValueError("数据集不能以自身作为父版本")
+        primary_parent = lineage_parents[0] if lineage_parents else None
+        if parent_ref is not None and parent_ref != primary_parent:
+            raise ValueError("parent_ref 必须等于 parent_refs 的首个父版本")
         dataset = Dataset(
             ref=clean_ref,
             project_id=project_id,
             filename=clean_filename,
             profile=profile,
-            parent_ref=parent_ref,
+            parent_ref=primary_parent,
             transform=transform,
             created_at=_utc_now(),
         )
         with self._connection() as connection, connection:
-            if parent_ref is not None:
+            for lineage_parent in lineage_parents:
                 parent = connection.execute(
-                    "SELECT project_id FROM datasets WHERE ref = ?", (parent_ref,)
+                    "SELECT project_id FROM datasets WHERE ref = ?", (lineage_parent,)
                 ).fetchone()
                 if parent is None:
-                    raise ValueError(f"父数据集不存在: {parent_ref}")
+                    raise ValueError(f"父数据集不存在: {lineage_parent}")
                 if _row_text(parent, "project_id") != project_id:
                     raise ValueError("父数据集与衍生数据集必须属于同一项目")
             connection.execute(
@@ -459,7 +480,28 @@ class SessionStore:
                     dataset.created_at,
                 ),
             )
+            for ordinal, lineage_parent in enumerate(lineage_parents[1:], 1):
+                connection.execute(
+                    """
+                    INSERT INTO dataset_lineage_edges(
+                        child_ref, parent_ref, parent_role, ordinal, created_at
+                    ) VALUES (?, ?, 'secondary', ?, ?)
+                    """,
+                    (dataset.ref, lineage_parent, ordinal, dataset.created_at),
+                )
         return dataset
+
+    def dataset_parent_refs(self, dataset_ref: str) -> tuple[str, ...]:
+        """按稳定父序返回数据集的完整血缘；普通衍生数据集只有一个父版本。"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT parent_ref FROM dataset_lineage_edges
+                WHERE child_ref = ? ORDER BY ordinal
+                """,
+                (dataset_ref,),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
 
     def get_dataset(self, dataset_ref: str) -> Dataset | None:
         """按 dataset_ref 读取登记项。"""
@@ -509,7 +551,13 @@ class SessionStore:
                 (dataset_ref,),
             ).fetchone()
             derived = connection.execute(
-                "SELECT COUNT(*) FROM datasets WHERE parent_ref = ?", (dataset_ref,)
+                """
+                SELECT COUNT(*)
+                FROM dataset_lineage_edges AS edge
+                JOIN datasets AS child ON child.ref = edge.child_ref
+                WHERE edge.parent_ref = ?
+                """,
+                (dataset_ref,),
             ).fetchone()
         return int(conversations[0]), int(derived[0])
 

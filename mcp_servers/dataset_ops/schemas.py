@@ -96,3 +96,44 @@ AGGREGATE_PREVIEW_SCHEMA: dict[str, Any] = {
     "required": ["dataset_ref", "group_col", "agg"],
     "additionalProperties": False,
 }
+
+
+JOIN_PREFLIGHT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "left_dataset_ref": {
+            "type": "string",
+            "pattern": DATASET_REF_PATTERN,
+            "description": "左侧数据集引用",
+        },
+        "right_dataset_ref": {
+            "type": "string",
+            "pattern": DATASET_REF_PATTERN,
+            "description": "右侧数据集引用",
+        },
+        "left_key": {"type": "string", "minLength": 1, "description": "左侧关联键"},
+        "right_key": {"type": "string", "minLength": 1, "description": "右侧关联键"},
+        "join_type": {
+            "type": "string",
+            "enum": ["inner", "left", "right", "full"],
+            "description": "待评估的关联类型",
+        },
+    },
+    "required": [
+        "left_dataset_ref",
+        "right_dataset_ref",
+        "left_key",
+        "right_key",
+        "join_type",
+    ],
+    "additionalProperties": False,
+}
+
+# Join 执行只接受与预检完全相同的固定参数。高风险授权由 Host/MCP 契约绑定到
+# 这份完整参数对象，因此没有自由 SQL、表达式、输出路径或模型可控确认位。
+JOIN_DATASETS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": dict(JOIN_PREFLIGHT_SCHEMA["properties"]),
+    "required": list(JOIN_PREFLIGHT_SCHEMA["required"]),
+    "additionalProperties": False,
+}

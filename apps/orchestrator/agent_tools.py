@@ -50,11 +50,13 @@ from mcp_servers.common.service_catalog import (
 from mcp_servers.common.tool import Tool
 from mcp_servers.dataset_ops.schemas import (
     AGGREGATE_PREVIEW_SCHEMA,
+    JOIN_DATASETS_SCHEMA,
+    JOIN_PREFLIGHT_SCHEMA,
     TRANSFORM_DATASET_SCHEMA,
 )
 from mcp_servers.excel_parser.advisor import diagnose_data_quality, infer_data_roles
 from packages.common.config import get_settings
-from packages.common.dataset_store import duplicate_row_count
+from packages.common.dataset_store import delete_dataset, duplicate_row_count
 from packages.common.identifiers import DATASET_REF_PATTERN
 from packages.common.logging import get_logger
 from packages.knowledge.domain_store import DomainDefinitionStore
@@ -580,17 +582,29 @@ class AgentToolRegistry:
         )
         execution = replace(execution, service_name=service_name)
         if (
-            name == "transform_dataset"
+            name in {"transform_dataset", "join_datasets"}
             and self._context is not None
             and execution.result.get("registered") is not True
         ):
             result = dict(execution.result)
-            _register_transformed_dataset(
-                excel=self._lineage_excel,
-                context=self._context,
-                args=arguments,
-                result=result,
-            )
+            if name == "transform_dataset":
+                _register_transformed_dataset(
+                    excel=self._lineage_excel,
+                    context=self._context,
+                    args=arguments,
+                    result=result,
+                )
+            else:
+                try:
+                    _register_joined_dataset(
+                        excel=self._lineage_excel,
+                        context=self._context,
+                        args=arguments,
+                        result=result,
+                    )
+                except Exception:
+                    delete_dataset(str(result.get("dataset_ref", "")))
+                    raise
             execution = replace(execution, result=result)
         return execution
 
@@ -805,6 +819,32 @@ def build_registry(
             '回答"各X的Y是多少"类取数问题。',
             override_schema=AGGREGATE_PREVIEW_SCHEMA,
             metadata=tool_metadata("data.aggregate", "table"),
+        ),
+        _wrap_mcp(
+            dataset_ops,
+            "join_preflight",
+            "只读评估两个不同数据集按指定键关联的可行性：返回基数关系、匹配覆盖、"
+            "预估结果行数及多对多/空键/行数膨胀风险；不执行 Join、不生成数据集、"
+            "不返回原始行。status 非 ready 时不得自动进入 Join 执行。",
+            override_schema=JOIN_PREFLIGHT_SCHEMA,
+            metadata=tool_metadata("dataset.join.preflight"),
+        ),
+        AgentToolSpec(
+            name="join_datasets",
+            description=(
+                "在成功 Join 预检后执行同一组固定等值关联参数并生成衍生数据集。"
+                "本工具是高风险写操作，执行前必须取得与完整参数绑定的用户授权；"
+                "不支持自由 SQL、表达式或模型指定输出路径。"
+            ),
+            parameters=JOIN_DATASETS_SCHEMA,
+            runner=lambda args: _join_with_lineage(dataset_ops, excel, context, args),
+            output_schema=tool_output_schema("join_datasets"),
+            metadata=tool_metadata(
+                "dataset.join.execute",
+                read_only=False,
+                idempotent=False,
+                risk_level="high",
+            ),
         ),
         _wrap_handler(
             name="kb_search",
@@ -1021,6 +1061,84 @@ def _register_transformed_dataset(
         "agent_tool.lineage",
         dataset_ref=result["dataset_ref"],
         parent_ref=result["parent_ref"],
+        project_id=context.project_id,
+    )
+
+
+def _join_with_lineage(
+    dataset_ops: MCPServer,
+    excel: MCPServer,
+    context: AgentContext | None,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """执行固定 Join，并在本地兼容路径登记双父血缘。"""
+    if context is not None:
+        _require_join_parents(context, args)
+    result: dict[str, Any] = dataset_ops._tools["join_datasets"].invoke(args)
+    if context is not None:
+        try:
+            _register_joined_dataset(
+                excel=excel,
+                context=context,
+                args=args,
+                result=result,
+            )
+        except Exception:
+            delete_dataset(str(result.get("dataset_ref", "")))
+            raise
+    return result
+
+
+def _require_join_parents(
+    context: AgentContext,
+    args: dict[str, Any],
+) -> tuple[Any, Any]:
+    left = context.store.get_dataset(str(args["left_dataset_ref"]))
+    right = context.store.get_dataset(str(args["right_dataset_ref"]))
+    if left is None or right is None:
+        raise AgentToolError("Join 源数据集未登记到当前工作区")
+    if left.project_id != context.project_id or right.project_id != context.project_id:
+        raise AgentToolError("Join 源数据集不属于当前项目")
+    return left, right
+
+
+def _register_joined_dataset(
+    *,
+    excel: MCPServer | None,
+    context: AgentContext,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """在 Host 唯一 SQLite writer 中登记 Join 结果及完整双父血缘。"""
+    left, right = _require_join_parents(context, args)
+    if excel is None:
+        raise AgentToolError("Host 缺少 Join 衍生数据集画像依赖")
+    parent_refs = (left.ref, right.ref)
+    if result.get("parent_refs") != list(parent_refs):
+        raise AgentToolError("Join 结果父版本与 Host 固定参数不一致")
+    profile: JsonObject = excel._tools["infer_schema"].invoke(
+        {"dataset_ref": result["dataset_ref"]}
+    ).to_dict()
+    transform: JsonObject = {
+        "operation": "join",
+        "join_type": args["join_type"],
+        "left_key": args["left_key"],
+        "right_key": args["right_key"],
+    }
+    context.store.register_dataset(
+        ref=str(result["dataset_ref"]),
+        project_id=context.project_id,
+        filename=f"{left.filename} × {right.filename}（关联）",
+        profile=profile,
+        parent_ref=left.ref,
+        parent_refs=parent_refs,
+        transform=transform,
+    )
+    result["registered"] = True
+    _log.info(
+        "agent_tool.join_lineage",
+        dataset_ref=result["dataset_ref"],
+        parent_refs=list(parent_refs),
         project_id=context.project_id,
     )
 

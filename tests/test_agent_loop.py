@@ -30,6 +30,7 @@ from apps.orchestrator import agent_loop as agent_loop_module  # noqa: E402
 from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
     ConversationLockPool,
+    _blocking_clarification,
     _enrich_tool_arguments,
     _model_view,
     _preserve_host_reference_assumptions,
@@ -269,6 +270,8 @@ class FakeRegistry:
             "chart_screenshot": "visualization.screenshot",
             "transform_dataset": "dataset.transform",
             "aggregate_preview": "data.aggregate",
+            "join_preflight": "dataset.join.preflight",
+            "join_datasets": "dataset.join.execute",
             "kb_search": "knowledge.search",
             "generate_report": "report.generate",
         }
@@ -528,6 +531,94 @@ def _register_dataset(
             ],
         },
     )
+
+
+def test_join_clarification_requires_exactly_two_datasets_and_explicit_keys(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    store.register_dataset(
+        ref="a" * 32,
+        project_id=conversation.project_id,
+        filename="订单.xlsx",
+        profile={"columns": [{"name": "客户ID"}, {"name": "金额"}]},
+    )
+    store.register_dataset(
+        ref="b" * 32,
+        project_id=conversation.project_id,
+        filename="客户.xlsx",
+        profile={"columns": [{"name": "客户编号"}, {"name": "地区"}]},
+    )
+    datasets = store.list_datasets(conversation.project_id)
+
+    missing_dataset = _blocking_clarification("做跨表关联", datasets, [])
+    missing_key = _blocking_clarification(
+        "把订单.xlsx和客户.xlsx做 Join",
+        datasets,
+        [],
+    )
+    missing_type = _blocking_clarification(
+        "把订单.xlsx的客户ID与客户.xlsx的客户编号做 Join",
+        datasets,
+        [],
+    )
+    ready = _blocking_clarification(
+        "把订单.xlsx的客户ID与客户.xlsx的客户编号做 inner Join",
+        datasets,
+        [],
+    )
+
+    assert missing_dataset is not None
+    assert missing_dataset["question_id"] == "join_datasets"
+    assert missing_key is not None
+    assert missing_key["question_id"] == "join_keys"
+    assert missing_type is not None
+    assert missing_type["question_id"] == "join_type"
+    assert ready is None
+
+
+def test_join_enrichment_pins_model_arguments_to_host_selected_datasets(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    store.register_dataset(
+        ref="a" * 32,
+        project_id=conversation.project_id,
+        filename="订单.xlsx",
+        profile={"columns": [{"name": "客户ID"}]},
+    )
+    store.register_dataset(
+        ref="b" * 32,
+        project_id=conversation.project_id,
+        filename="客户.xlsx",
+        profile={"columns": [{"name": "客户编号"}]},
+    )
+    contract = build_minimal_contract(
+        run_id="join-enrichment",
+        user_text="把订单.xlsx的客户ID与客户.xlsx的客户编号做 inner Join",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    for tool_name in ("join_preflight", "join_datasets"):
+        enriched = _enrich_tool_arguments(
+            tool_name,
+            {
+                "left_dataset_ref": "c" * 32,
+                "right_dataset_ref": "d" * 32,
+                "left_key": "客户ID",
+                "right_key": "客户编号",
+                "join_type": "left",
+            },
+            contract=contract,
+            artifacts=[],
+            datasets=store.list_datasets(conversation.project_id),
+        )
+
+        assert enriched["left_dataset_ref"] == "a" * 32
+        assert enriched["right_dataset_ref"] == "b" * 32
+        assert enriched["join_type"] == "inner"
 
 
 def _remember_agent_reference(

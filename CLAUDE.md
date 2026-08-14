@@ -10,7 +10,7 @@
 
 ## 2. 当前状态与目标架构
 
-当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5、6A～6C**。3A–3C 的历史
+当前生产基线是 **v2.4 阶段 2E + 已关闭的 v2.5 阶段 3–5、6A～6D**。3A–3C 的历史
 发布门禁已关闭；3D-1–3D-3 的项目记忆治理与 3E-1–3E-3 的 SQLite v6 不可变
 Dataset 锚点、五阶段来源图、安全 React 查看、领域中立质量和联合恢复探针已由提交
 `0b5980c` 的 backend、frontend 与 Docker/Compose CI 验证并关闭。4A-1/4A-2 已落地
@@ -19,12 +19,13 @@ SQLite v7、用户计划修订、ApprovalRecord 后端契约，以及 Executor/G
 的恢复、自主等级与反馈分支已关闭，阶段 5 领域定义与知识 Resource 已工程关闭；阶段 6A
 能力目录和受控并行已由完整 CI 关闭；6B-1～6B-4 数据角色、质量建议、结构化确认、执行前
 门禁、匿名代表性评测及双传输恢复门禁已由完整 CI 关闭；6C-1～6C-4 受控自主探索已由
-提交 `d5005ee` 的完整 CI 与真实 Compose 门禁关闭；当前进入 6D 统计证据与预测护栏：
+提交 `d5005ee` 的完整 CI 与真实 Compose 门禁关闭；6D 已由提交 `3febd68` 的完整 CI 与
+真实 Compose 预测恢复门禁关闭；当前进入 6E 多数据集关联治理：
 
 ```text
 React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
                     → ready capability 白名单 → Observation Replanner → MCP Client Gateway
-                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot/Approval → SQLite v10 + 文件
+                    → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot/Approval → SQLite v11 + 文件
 ```
 
 - v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
@@ -115,7 +116,7 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 | 前端 | React 18、ECharts 5、Zustand、SSE；TaskRun 协作面板、计划编辑、结构化澄清、任务控制、审批、恢复与执行审计 | 阶段 6 继续增加自主分析过程和统计护栏展示 |
 | 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复；受治理 ready-frontier 并行 | 阶段 6 在共享预算、数据版本、取消树和 Evidence Ledger 上逐步增加自主分析能力 |
 | 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
-| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5、6A～6C 已关闭；后续阶段 6 能力继续复用不可变目录和受控并行控制面 |
+| 对话持久层 | SQLite v10 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ApprovalRecord/ExecutionScope/CancellationTree/EvidenceLedger | 阶段 3–5、6A～6D 已关闭；6E 继续复用不可变目录和受控并行控制面 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
 | 部署 | API/Web/五个 MCP 服务根 Compose；独立 Milvus 运维入口 | v2.5 继续 RAG/重型工具 profile；v3.0 镜像供应链和多实例运维 |
@@ -154,7 +155,7 @@ tests/                 单元、集成与 Agent 行为评测
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
 - 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
 
-### 6.2 当前任务：v2.5 阶段 6D 统计证据与预测护栏
+### 6.2 当前任务：v2.5 阶段 6E 多数据集关联治理
 
 1. G1–G6 实测、冻结报告和 G7 自动签字门禁已完成；不得把缺少人工盲评与负责人签字的
    `review_required` 改写成 G7 通过，也不得提前把 ADR 改为“接受”。
@@ -176,16 +177,18 @@ tests/                 单元、集成与 Agent 行为评测
    收敛；6C-4 已加入 14 场景匿名确定性评测、CI 强制门禁及 Compose 浏览器/三次恢复探针。
    提交 `d5005ee` 的
    [CI run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
-   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1 统一统计 Evidence、
-   6D-2 受治理贡献/分群比较/回归诊断、6D-3 独立预测 Tool/Profile，以及 6D-4 匿名质量
-   门禁、React 局限展示和预测双传输/Compose 恢复探针已完成本地验证；远程完整 CI 仍待
-   完成，多数据集关联仍须后续实现。
+   已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1～6D-4 由提交
+   `af0693e` 交付，提交 `3febd68` 修复完整 stats 目录校验；
+   [CI run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
+   三项全绿并关闭 6D。当前 6E-1 已实现 `dataset.join.preflight` 只读预检；6E-2 已本地实现
+   `dataset.join.execute` 高风险审批、固定等值 Join、SQLite v11 双父血缘和派生策略继承。
+   未取得参数绑定授权或没有返回已登记的新 `dataset_ref` 时不得声称 Join 已执行。
 
 完整状态见 `/docs/v2.5/README.md`。
 
 ### 6.3 已纳入未来版本，不再视为永久禁区
 
-- v2.5：阶段 3–5、6A～6C 已工程关闭，当前进入统计/预测护栏；其后再进入多数据集；
+- v2.5：阶段 3–5、6A～6D 已工程关闭，当前进入多数据集关联治理；
   同步演进 MCP 记忆/Evidence 引用、知识 Resource、前端审批、能力目录和 Docker
   状态恢复/资源 profile；
 - 独立安全项目：隔离的 `sql-tools` 和 Code Interpreter façade/sandbox；
@@ -286,7 +289,9 @@ Milvus Lite 对本地数据库使用独占文件锁；常驻后端与测试不�
 5. SQLite 是当前本地持久真相源；v2.4 必须增加 schema 迁移、任务事件和 Checkpoint。
 6. 前端使用 Zustand；自然语言对话继续作为唯一主入口。
 7. `Scenario.AGENT` 的 fallback 不得包含不支持 function-calling 的模型；未来还必须满足 TaskContract 所需的结构化能力。
-8. 当前数据变换继续走结构化 `transform_dataset` / `aggregate_preview` 并记录血缘。
+8. 当前数据变换继续走结构化 `transform_dataset` / `aggregate_preview` 并记录血缘；跨数据集
+   必须先走 `join_preflight`，再由高风险、参数绑定审批的 `join_datasets` 固定执行并登记双父
+   血缘；禁止自由 SQL、模型指定路径和绕过预检/审批直接执行。
 9. 原“自由 SQL 永久不做”已被废止，改为独立受限 SQL 安全项目；通过评审前仍禁止接入生产 Agent。
 10. 标准 MCP 接口提前进入 v2.4：stdio 与 Streamable HTTP 是目标传输，独立 HTTP+SSE 不作为新实现；v2.5 在同一 Gateway 上扩展记忆/知识/审批/自主分析契约，v3.0 再扩展外部 MCP 治理。
 11. Docker 是 v2.4 的正式交付要求；v2.5 演进状态恢复与资源 profile，v3.0 演进外置状态、镜像供应链和多实例。容器不替代 Code Interpreter 安全沙箱，不向业务容器挂载 Docker Socket。

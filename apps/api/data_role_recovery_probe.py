@@ -36,6 +36,8 @@ _PRINCIPAL = Principal(user_id="local-user", tenant_id="local")
 _EXPECTED_TOOL_NAMES = (
     "aggregate_preview",
     "get_data_profile",
+    "join_datasets",
+    "join_preflight",
     "transform_dataset",
 )
 

@@ -7,9 +7,9 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from packages.session.migrations import v2, v3, v4, v5, v6, v7, v8, v9, v10
+from packages.session.migrations import v2, v3, v4, v5, v6, v7, v8, v9, v10, v11
 
-CURRENT_SCHEMA_VERSION = v10.VERSION
+CURRENT_SCHEMA_VERSION = v11.VERSION
 
 
 def migrate_database(
@@ -41,6 +41,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == 1:
         backup = _backup_v1(connection, db_path)
@@ -53,6 +54,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v2.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -65,6 +67,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v3.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -77,6 +80,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v4.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -89,6 +93,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v5.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -101,6 +106,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v6.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -113,6 +119,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=None)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v7.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -125,6 +132,7 @@ def migrate_database(
         _apply_v8(connection, source_version=7, backup=backup)
         _apply_v9(connection, source_version=8, backup=None)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v8.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -137,6 +145,7 @@ def migrate_database(
         backup = _backup_database(connection, db_path, "v8-backup")
         _apply_v9(connection, source_version=8, backup=backup)
         _apply_v10(connection, source_version=9, backup=None)
+        _apply_v11(connection, source_version=10, backup=None)
         return
     if version == v9.VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -149,6 +158,20 @@ def migrate_database(
         _validate_migration_checksum(connection, v9.VERSION, v9.NAME, v9.CHECKSUM)
         backup = _backup_database(connection, db_path, "v9-backup")
         _apply_v10(connection, source_version=9, backup=backup)
+        _apply_v11(connection, source_version=10, backup=None)
+        return
+    if version == v10.VERSION:
+        _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
+        _validate_migration_checksum(connection, v3.VERSION, v3.NAME, v3.CHECKSUM)
+        _validate_migration_checksum(connection, v4.VERSION, v4.NAME, v4.CHECKSUM)
+        _validate_migration_checksum(connection, v5.VERSION, v5.NAME, v5.CHECKSUM)
+        _validate_migration_checksum(connection, v6.VERSION, v6.NAME, v6.CHECKSUM)
+        _validate_migration_checksum(connection, v7.VERSION, v7.NAME, v7.CHECKSUM)
+        _validate_migration_checksum(connection, v8.VERSION, v8.NAME, v8.CHECKSUM)
+        _validate_migration_checksum(connection, v9.VERSION, v9.NAME, v9.CHECKSUM)
+        _validate_migration_checksum(connection, v10.VERSION, v10.NAME, v10.CHECKSUM)
+        backup = _backup_database(connection, db_path, "v10-backup")
+        _apply_v11(connection, source_version=10, backup=backup)
         return
     if version == CURRENT_SCHEMA_VERSION:
         _validate_migration_checksum(connection, v2.VERSION, v2.NAME, v2.CHECKSUM)
@@ -160,6 +183,7 @@ def migrate_database(
         _validate_migration_checksum(connection, v8.VERSION, v8.NAME, v8.CHECKSUM)
         _validate_migration_checksum(connection, v9.VERSION, v9.NAME, v9.CHECKSUM)
         _validate_migration_checksum(connection, v10.VERSION, v10.NAME, v10.CHECKSUM)
+        _validate_migration_checksum(connection, v11.VERSION, v11.NAME, v11.CHECKSUM)
         return
     raise RuntimeError(
         f"不支持的 ChatBI 数据库版本 {version}，当前代码仅支持 0 到 " f"{CURRENT_SCHEMA_VERSION}"
@@ -187,9 +211,10 @@ def downgrade_v2_to_v1(db_path: str | Path) -> Path:
             v8.VERSION,
             v9.VERSION,
             v10.VERSION,
+            v11.VERSION,
         }:
             raise RuntimeError(
-                f"只能从 schema v2/v3/v4/v5/v6/v7/v8/v9/v10 回滚，当前版本为 {version}"
+                f"只能从 schema v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 回滚，当前版本为 {version}"
             )
         active = connection.execute(
             """
@@ -203,6 +228,13 @@ def downgrade_v2_to_v1(db_path: str | Path) -> Path:
             connection.backup(export_connection)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if version >= v11.VERSION:
+                for trigger in v11.ADDED_TRIGGERS:
+                    connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+                for index in v11.ADDED_INDEXES:
+                    connection.execute(f'DROP INDEX IF EXISTS "{index}"')
+                for table in v11.ADDED_TABLES:
+                    connection.execute(f'DROP TABLE IF EXISTS "{table}"')
             if version >= v10.VERSION:
                 for trigger in v10.ADDED_TRIGGERS:
                     connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
@@ -562,6 +594,40 @@ def _apply_v10(
             ),
         )
         connection.execute(f"PRAGMA user_version = {v10.VERSION}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _apply_v11(
+    connection: sqlite3.Connection,
+    *,
+    source_version: int,
+    backup: tuple[Path, str] | None,
+) -> None:
+    backup_path = str(backup[0]) if backup is not None else None
+    source_sha256 = backup[1] if backup is not None else None
+    try:
+        connection.executescript(f"BEGIN IMMEDIATE;\n{v11.DDL}\n")
+        connection.execute(
+            """
+            INSERT INTO schema_migrations(
+                version, name, checksum, source_version, backup_path,
+                source_sha256, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                v11.VERSION,
+                v11.NAME,
+                v11.CHECKSUM,
+                source_version,
+                backup_path,
+                source_sha256,
+                _utc_now(),
+            ),
+        )
+        connection.execute(f"PRAGMA user_version = {v11.VERSION}")
         connection.commit()
     except Exception:
         connection.rollback()

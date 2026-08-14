@@ -6,6 +6,7 @@ transform 血缘落库、generate_report 按工件组装。
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import cast
@@ -59,6 +60,8 @@ _EXPECTED_TOOLS = [
     "chart_screenshot",
     "transform_dataset",
     "aggregate_preview",
+    "join_preflight",
+    "join_datasets",
     "kb_search",
     "domain_definition_lookup",
     "generate_report",
@@ -153,6 +156,9 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     descriptors = {item.name: item for item in _registry().mcp_descriptors()}
     assert descriptors["regression"].input_schema is REGRESSION_SCHEMA
     assert descriptors["gen_chart"].metadata.artifact_types == ("chart",)
+    assert descriptors["join_datasets"].metadata.read_only is False
+    assert descriptors["join_datasets"].metadata.idempotent is False
+    assert descriptors["join_datasets"].metadata.risk_level == "high"
     assert descriptors["generate_report"].output_schema["required"] == [
         "report_id",
         "md_path",
@@ -497,6 +503,50 @@ def test_transform_without_context_skips_registration(sales_ref: str) -> None:
         "transform_dataset", f'{{"dataset_ref": "{sales_ref}", "drop_duplicates": []}}'
     )
     assert "registered" not in out  # 无上下文只做变换，不登记
+
+
+def test_join_registers_complete_two_parent_lineage(
+    workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    left_ref = save_dataframe(pd.DataFrame({"客户ID": [1, 2], "金额": [10, 20]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "地区": ["东", "西"]}))
+    store.register_dataset(
+        ref=left_ref,
+        project_id=context.project_id,
+        filename="订单.xlsx",
+        profile={"columns": []},
+    )
+    store.register_dataset(
+        ref=right_ref,
+        project_id=context.project_id,
+        filename="客户.xlsx",
+        profile={"columns": []},
+    )
+    args = json.dumps(
+        {
+            "left_dataset_ref": left_ref,
+            "right_dataset_ref": right_ref,
+            "left_key": "客户ID",
+            "right_key": "id",
+            "join_type": "inner",
+        }
+    )
+
+    out = _registry(context=context).execute("join_datasets", args)
+    derived = store.get_dataset(out["dataset_ref"])
+
+    assert out["registered"] is True
+    assert derived is not None
+    assert derived.parent_ref == left_ref
+    assert store.dataset_parent_refs(derived.ref) == (left_ref, right_ref)
+    assert derived.transform == {
+        "operation": "join",
+        "join_type": "inner",
+        "left_key": "客户ID",
+        "right_key": "id",
+    }
+    assert derived.filename == "订单.xlsx × 客户.xlsx（关联）"
 
 
 # ── generate_report：按工件组装 ──

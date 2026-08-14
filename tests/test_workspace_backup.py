@@ -62,6 +62,25 @@ def _seed_workspace(
         profile={"row_count": 2, "column_count": 1},
     )
     (datasets / f"{dataset_ref}.parquet").write_bytes(b"dataset-v1")
+    right_ref = "e" * 32
+    joined_ref = "f" * 32
+    session.register_dataset(
+        ref=right_ref,
+        project_id=project.id,
+        filename="requesters.xlsx",
+        profile={"row_count": 2, "column_count": 1},
+    )
+    session.register_dataset(
+        ref=joined_ref,
+        project_id=project.id,
+        filename="tickets-requesters.xlsx",
+        profile={"row_count": 2, "column_count": 2},
+        parent_ref=dataset_ref,
+        parent_refs=(dataset_ref, right_ref),
+        transform={"operation": "join"},
+    )
+    (datasets / f"{right_ref}.parquet").write_bytes(b"dataset-v2")
+    (datasets / f"{joined_ref}.parquet").write_bytes(b"dataset-joined")
     report_file = artifacts / "reports" / "recovery.md"
     report_file.parent.mkdir()
     report_file.write_text("# recovery artifact", encoding="utf-8")
@@ -163,8 +182,10 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
     assert counts["conversation_compactions"] == 1
     assert counts["conversation_compaction_items"] == 2
     assert counts["artifacts"] == 1
-    assert counts["datasets"] == 1
-    assert counts["dataset_lineage_anchors"] == 1
+    assert counts["datasets"] == 3
+    assert counts["dataset_lineage_anchors"] == 3
+    assert counts["dataset_lineage_edges"] == 2
+    assert counts["task_dataset_binding_parents"] == 2
     assert counts["task_plans"] == 0
     assert counts["task_steps"] == 0
     assert counts["claims"] == 0
@@ -205,6 +226,7 @@ def test_offline_backup_verify_and_exact_restore(tmp_path: Path) -> None:
     project = reopened.get_project(project_id)
     assert project is not None and project.name == "恢复项目"
     assert reopened.list_report_artifacts()[0].id == artifact_id
+    assert reopened.dataset_parent_refs("f" * 32) == ("d" * 32, "e" * 32)
     snapshot = MemoryStore(reopened).get_snapshot(
         snapshot_id,
         principal=Principal(user_id="owner", tenant_id="tenant-a"),

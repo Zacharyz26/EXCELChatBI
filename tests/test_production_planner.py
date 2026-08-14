@@ -49,6 +49,27 @@ def _registry() -> AgentToolRegistry:
                     risk_level="medium",
                 ),
             ),
+            AgentToolSpec(
+                name="join_preflight",
+                description="只读 Join 预检",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(
+                    capabilities=("dataset.join.preflight",)
+                ),
+            ),
+            AgentToolSpec(
+                name="join_datasets",
+                description="受治理 Join 执行",
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(
+                    capabilities=("dataset.join.execute",),
+                    read_only=False,
+                    idempotent=False,
+                    risk_level="high",
+                ),
+            ),
         ]
     )
 
@@ -568,6 +589,54 @@ def test_advanced_stats_requests_use_governed_capabilities_only(
 
     capabilities = [step["capability"] for step in plan["steps"]]
     assert capabilities == [expected]
+
+
+def test_join_request_plans_preflight_then_governed_execution() -> None:
+    plan = build_deterministic_plan(
+        user_text="把订单数据集和客户数据集按客户ID做 Join",
+        context={"datasets": [], "artifacts": []},
+        route="template",
+        available_capabilities={
+            "dataset.join.preflight",
+            "dataset.join.execute",
+            "dataset.transform",
+        },
+    )
+
+    assert [step["capability"] for step in plan["steps"]] == [
+        "dataset.join.preflight",
+        "dataset.join.execute",
+    ]
+    assert "不修改数据" in plan["steps"][0]["completion_conditions"][0]
+    assert plan["steps"][1]["dependencies"] == [plan["steps"][0]["step_id"]]
+    assert "双父血缘" in plan["steps"][1]["completion_conditions"][0]
+
+
+def test_explicit_join_preflight_request_remains_read_only() -> None:
+    plan = build_deterministic_plan(
+        user_text="预检订单和客户数据集按客户ID Join 的风险",
+        context={"datasets": [], "artifacts": []},
+        route="template",
+        available_capabilities={"dataset.join.preflight", "dataset.join.execute"},
+    )
+
+    assert [step["capability"] for step in plan["steps"]] == [
+        "dataset.join.preflight"
+    ]
+
+
+def test_join_request_can_explicitly_preflight_then_execute() -> None:
+    plan = build_deterministic_plan(
+        user_text="先预检订单和客户按ID Join 的风险，再执行并生成关联数据集",
+        context={"datasets": [], "artifacts": []},
+        route="template",
+        available_capabilities={"dataset.join.preflight", "dataset.join.execute"},
+    )
+
+    assert [step["capability"] for step in plan["steps"]] == [
+        "dataset.join.preflight",
+        "dataset.join.execute",
+    ]
 
 
 @pytest.mark.asyncio

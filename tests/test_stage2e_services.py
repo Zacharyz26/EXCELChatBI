@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from apps.orchestrator.agent_tools import AgentContext, build_registry
 from mcp_servers.agent_service.server import AgentServiceRuntime
 from mcp_servers.chart.server import build_server as build_chart
 from mcp_servers.common.client_gateway import MCPClientConfig
-from mcp_servers.common.contracts import MCPRequestContext
+from mcp_servers.common.contracts import MCPRequestContext, stable_hash
 from mcp_servers.common.service_catalog import (
     AGENT_MCP_SERVICE_TOOLS,
     AGENT_MCP_SERVICES,
@@ -68,7 +69,7 @@ def test_five_service_catalog_is_complete_and_disjoint() -> None:
     flattened = [
         tool_name for tool_names in AGENT_MCP_SERVICE_TOOLS.values() for tool_name in tool_names
     ]
-    assert len(flattened) == 15
+    assert len(flattened) == 17
     assert len(flattened) == len(set(flattened))
 
 
@@ -174,6 +175,13 @@ def test_service_rejects_cross_project_dataset_and_reports_readiness(
         filename="other.xlsx",
         profile={},
     )
+    allowed_ref = save_dataframe(pd.DataFrame({"id": [1, 2]}))
+    writer.register_dataset(
+        ref=allowed_ref,
+        project_id=project.id,
+        filename="allowed.xlsx",
+        profile={},
+    )
     runtime = AgentServiceRuntime("data-tools", settings)
 
     result = runtime.adapter.call_tool(
@@ -181,12 +189,80 @@ def test_service_rejects_cross_project_dataset_and_reports_readiness(
         {"dataset_ref": dataset_ref},
         _context(project.id, conversation.id),
     )
+    join_result = runtime.adapter.call_tool(
+        "join_preflight",
+        {
+            "left_dataset_ref": allowed_ref,
+            "right_dataset_ref": dataset_ref,
+            "left_key": "id",
+            "right_key": "value",
+            "join_type": "inner",
+        },
+        _context(project.id, conversation.id),
+    )
     ready, details = runtime.readiness()
     get_settings.cache_clear()
 
     assert result.is_error is True
     assert result.error_code == "project_scope_violation"
+    assert join_result.is_error is True
+    assert join_result.error_code == "project_scope_violation"
     assert ready is True
-    assert details == {"tool_count": 3, "storage": "ready"}
+    assert details == {"tool_count": 5, "storage": "ready"}
+
+
+def test_join_execution_requires_exact_high_risk_approval(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    monkeypatch.setenv("CHAT_DB_PATH", settings.chat_db_path)
+    monkeypatch.setenv("DATASET_DIR", settings.dataset_dir)
+    get_settings.cache_clear()
+    store = SessionStore(settings.chat_db_path)
+    project = store.create_project("join approval")
+    conversation = store.create_conversation(project.id)
+    left_ref = save_dataframe(pd.DataFrame({"id": [1, 2]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "value": [3, 4]}))
+    for ref in (left_ref, right_ref):
+        store.register_dataset(
+            ref=ref,
+            project_id=project.id,
+            filename=f"{ref}.xlsx",
+            profile={},
+        )
+    runtime = AgentServiceRuntime("data-tools", settings)
+    arguments = {
+        "left_dataset_ref": left_ref,
+        "right_dataset_ref": right_ref,
+        "left_key": "id",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+    descriptor = next(
+        item for item in runtime.adapter.list_tools() if item.name == "join_datasets"
+    )
+    base_context = _context(project.id, conversation.id)
+
+    denied = runtime.adapter.call_tool("join_datasets", arguments, base_context)
+    approved_context = replace(
+        base_context,
+        approval_id="a" * 32,
+        approval_version=1,
+        approval_contract_hash=descriptor.contract_hash,
+        approval_parameter_hash=stable_hash(arguments),
+    )
+    approved = runtime.adapter.call_tool(
+        "join_datasets",
+        arguments,
+        approved_context,
+    )
+    get_settings.cache_clear()
+
+    assert denied.is_error is True
+    assert denied.error_code == "approval_required"
+    assert approved.is_error is False
+    assert approved.structured_content is not None
+    assert approved.structured_content["parent_refs"] == [left_ref, right_ref]
     with pytest.raises(sqlite3.OperationalError, match="readonly"):
         runtime.store.create_project("must-not-write")

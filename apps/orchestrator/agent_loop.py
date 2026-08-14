@@ -36,6 +36,7 @@ from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from openai import OpenAIError
 from packages.common.config import get_settings
+from packages.common.identifiers import dataset_reference_arguments
 from packages.common.logging import get_logger
 from packages.governance.observability import trace_span
 from packages.governance.permissions import Principal
@@ -155,6 +156,9 @@ _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助�
 5. 调用工具前，先用一句话说明你对需求的理解和将要执行的操作（会作为“理解卡”展示给用户）。
 6. 数据集用 dataset_ref 引用，可用数据集见下方清单；transform_dataset 产生的衍生数据集带血缘，\
 后续分析应在衍生数据集上进行（除非用户要求用原数据）。
+6a. 跨数据集关联必须先调用 join_preflight；status=blocked 时停止。只有预检 Evidence 成功后，\
+才能用完全相同的双数据集、双键和 Join 类型调用 join_datasets。join_datasets 是高风险写操作，\
+Host 会在执行前要求用户对完整参数显式授权；只有返回已登记的新 dataset_ref 后才能声称完成关联。
 7. 用户追问修改分析（如“换成按月”“排除异常后重算”）时，参考“分析登记表”中已执行分析的参数，\
 只改需要变化的参数后重新调用工具。
 8. 用户要生成报告时调用 generate_report，analysis_ids 从分析登记表中选择相关分析的 ID。
@@ -248,6 +252,26 @@ _METRIC_HINT_PATTERN = re.compile(
 )
 _TIME_COLUMN_PATTERN = re.compile(r"(?:时间|日期|月份|月|年|周|季度)")
 _CONFLICT_HISTORY_PATTERN = re.compile(r"(?:存在冲突口径|口径冲突|冲突定义)")
+_JOIN_REQUEST_PATTERN = re.compile(
+    r"(?:\bjoin\b|关联数据集|数据集关联|跨表关联|表连接|连接两表|合并两表|"
+    r"(?:关联|连接|合并).{0,8}(?:数据集|表)|(?:数据集|表).{0,8}(?:关联|连接|合并)|按.+匹配)",
+    re.IGNORECASE,
+)
+_JOIN_TYPE_PATTERNS = {
+    "inner": re.compile(r"(?:\binner(?:\s+join)?\b|内连接|只保留匹配|仅保留匹配)", re.IGNORECASE),
+    "left": re.compile(
+        r"(?:\bleft(?:\s+outer)?(?:\s+join)?\b|左(?:外)?连接|保留左表)",
+        re.IGNORECASE,
+    ),
+    "right": re.compile(
+        r"(?:\bright(?:\s+outer)?(?:\s+join)?\b|右(?:外)?连接|保留右表)",
+        re.IGNORECASE,
+    ),
+    "full": re.compile(
+        r"(?:\bfull(?:\s+outer)?(?:\s+join)?\b|全(?:外)?连接|保留两表)",
+        re.IGNORECASE,
+    ),
+}
 
 # 工具的中文人话标签（tool_start/plan 事件展示用）
 _TOOL_LABELS = {
@@ -263,6 +287,8 @@ _TOOL_LABELS = {
     "chart_screenshot": "图表截图",
     "transform_dataset": "数据集变换",
     "aggregate_preview": "分组聚合取数",
+    "join_preflight": "跨数据集 Join 只读预检",
+    "join_datasets": "执行受治理 Join",
     "kb_search": "知识库检索",
     "domain_definition_lookup": "解析指标定义",
     "generate_report": "生成报告",
@@ -417,10 +443,55 @@ def _blocking_clarification(
             "question": "知识库中存在多个冲突口径。请确认本次应采用哪一个具体定义？",
             "reason": "不同口径会改变计算结果。",
         }
+    mentioned_dataset_refs = {
+        dataset.ref
+        for dataset in datasets
+        if dataset.ref in clean or dataset.filename in clean
+    }
+    selected_dataset_refs = mentioned_dataset_refs | set(verified_dataset_refs)
+    requests_join = _JOIN_REQUEST_PATTERN.search(clean) is not None or (
+        len(mentioned_dataset_refs) >= 2
+        and any(token in clean for token in ("关联", "连接", "合并", "匹配"))
+    )
+    if len(datasets) > 1 and requests_join and len(selected_dataset_refs) != 2:
+        choices = "、".join(dataset.filename for dataset in datasets[:5])
+        return {
+            "question_id": "join_datasets",
+            "about": "dataset_join",
+            "question": f"当前项目有多个数据集（{choices}）。请明确选择本次 Join 的两个数据集？",
+            "reason": "Join 预检必须绑定恰好两个已确认的数据集，不能静默选择。",
+        }
+    if requests_join and len(selected_dataset_refs) == 2:
+        selected = [dataset for dataset in datasets if dataset.ref in selected_dataset_refs]
+        mentioned_keys_by_dataset = [
+            [
+                str(column["name"])
+                for column in cast(list[JsonObject], dataset.profile.get("columns") or [])
+                if isinstance(column, dict)
+                and isinstance(column.get("name"), str)
+                and str(column["name"]) in clean
+            ]
+            for dataset in selected
+        ]
+        if any(len(keys) != 1 for keys in mentioned_keys_by_dataset):
+            return {
+                "question_id": "join_keys",
+                "about": "dataset_join_keys",
+                "question": "请明确本次 Join 左右两个数据集各自使用哪个关联键？",
+                "reason": "关联键会决定匹配覆盖、基数关系和结果行数，不能静默推断。",
+            }
+        if _explicit_join_type(clean) is None:
+            return {
+                "question_id": "join_type",
+                "about": "dataset_join_type",
+                "question": "请明确本次预检使用 inner、left、right 还是 full Join？",
+                "reason": "Join 类型会改变保留行与预估结果行数，不能由模型静默选择。",
+            }
     if (
         len(datasets) > 1
+        and not requests_join
         and len(verified_dataset_refs) != 1
-        and not any(dataset.ref in clean or dataset.filename in clean for dataset in datasets)
+        and not mentioned_dataset_refs
     ):
         choices = "、".join(dataset.filename for dataset in datasets[:5])
         return {
@@ -1037,6 +1108,7 @@ async def _stream_agent_chat_inner(
         reference_resolution: ReferenceResolution | None = None
         memory_reference_resolution: MemoryReferenceResolution | None = None
         reference_query = user_text
+        effective_request_text = user_text
         effective_autonomy_mode = autonomy_mode
         capability_snapshot: CapabilityCatalogSnapshot | None = None
         try:
@@ -1542,6 +1614,7 @@ async def _stream_agent_chat_inner(
                 feedback_context = _branch_feedback_context(parent_feedback)
                 if feedback_context:
                     planning_text = f"{planning_text}\n\n{feedback_context}"
+            effective_request_text = planning_text
             reference_clarification = (
                 reference_resolution.clarification() if reference_resolution is not None else None
             )
@@ -1577,15 +1650,20 @@ async def _stream_agent_chat_inner(
                 reference_clarification
                 or memory_reference_clarification
                 or (
-                    None
-                    if resume_existing
-                    else _blocking_clarification(
-                        user_text,
+                    _blocking_clarification(
+                        planning_text,
                         datasets,
                         context.messages,
                         verified_dataset_refs=verified_dataset_refs,
                         hypothesis_screening=hypothesis_screening,
                     )
+                    if not resume_existing
+                    or clarification_question_id in {
+                        "join_datasets",
+                        "join_keys",
+                        "join_type",
+                    }
+                    else None
                 )
             )
             try:
@@ -1790,6 +1868,7 @@ async def _stream_agent_chat_inner(
             clarified_text = (
                 f"{user_text}\n\n用户对澄清问题“{question}”的回答：" f"{str(answer)[:20_000]}"
             )
+            effective_request_text = clarified_text
             working.append(ModelMessage(role="user", content=clarified_text))
             try:
                 clarified_reference_query = f"{user_text}\n\n用户澄清：{str(answer)[:20_000]}"
@@ -1817,9 +1896,27 @@ async def _stream_agent_chat_inner(
                     clarified_planning_text = memory_reference_resolution.annotate(
                         clarified_planning_text
                     )
+                effective_request_text = clarified_planning_text
                 clarification = (
                     reference_resolution.clarification()
                     or memory_reference_resolution.clarification()
+                    or (
+                        _blocking_clarification(
+                            clarified_planning_text,
+                            datasets,
+                            context.messages,
+                            verified_dataset_refs=frozenset(
+                                target.dataset_ref
+                                for target in _verified_targets(
+                                    reference_resolution,
+                                    memory_reference_resolution,
+                                )
+                                if target.dataset_ref is not None
+                            ),
+                        )
+                        if question_id in {"join_datasets", "join_keys", "join_type"}
+                        else None
+                    )
                 )
                 async with asyncio.timeout(
                     _active_operation_timeout(
@@ -2669,6 +2766,11 @@ async def _stream_agent_chat_inner(
                     config=config,
                     control=control,
                     event_queue=parallel_event_queue,
+                    contract=contract,
+                    datasets=datasets,
+                    references=reference_resolution,
+                    memory_references=memory_reference_resolution,
+                    request_text=effective_request_text,
                 )
             )
             while not parallel_task.done() or not parallel_event_queue.empty():
@@ -2761,9 +2863,16 @@ async def _stream_agent_chat_inner(
                     offered_step_ids.discard(planned_step.step_id)
                 logical_step_id = planned_step.logical_id if planned_step is not None else call.id
                 call_args = _parse_args(call.arguments)
-                if call.name in {"gen_chart", "generate_report"}:
-                    current_artifacts = await run_in_threadpool(
-                        store.list_artifacts, conversation_id
+                if call.name in {
+                    "gen_chart",
+                    "generate_report",
+                    "join_preflight",
+                    "join_datasets",
+                }:
+                    current_artifacts = (
+                        await run_in_threadpool(store.list_artifacts, conversation_id)
+                        if call.name in {"gen_chart", "generate_report"}
+                        else []
                     )
                     call_args = _enrich_tool_arguments(
                         call.name,
@@ -2773,6 +2882,7 @@ async def _stream_agent_chat_inner(
                         datasets=datasets,
                         references=reference_resolution,
                         memory_references=memory_reference_resolution,
+                        request_text=effective_request_text,
                     )
                 definition_execution: JsonObject | None = None
                 definition_execution_error: str | None = None
@@ -2793,12 +2903,18 @@ async def _stream_agent_chat_inner(
                     None,
                 )
                 descriptor = descriptor_lookup(call.name) if callable(descriptor_lookup) else None
-                resource_project_id: str | None = None
-                dataset_ref = call_args.get("dataset_ref")
-                if isinstance(dataset_ref, str) and dataset_ref:
-                    referenced_dataset = await run_in_threadpool(store.get_dataset, dataset_ref)
-                    if referenced_dataset is not None:
-                        resource_project_id = referenced_dataset.project_id
+                resource_project_ids: list[str | None] = []
+                for _argument_name, dataset_ref in dataset_reference_arguments(call_args):
+                    referenced_dataset = (
+                        await run_in_threadpool(store.get_dataset, dataset_ref)
+                        if isinstance(dataset_ref, str) and dataset_ref
+                        else None
+                    )
+                    resource_project_ids.append(
+                        referenced_dataset.project_id
+                        if referenced_dataset is not None
+                        else None
+                    )
                 data_role_guard = await run_in_threadpool(
                     _evaluate_data_role_preconditions,
                     task_store=task_store,
@@ -2817,7 +2933,7 @@ async def _stream_agent_chat_inner(
                         arguments=call_args,
                         calls_used=attempts_before_call,
                         max_tool_calls=config.max_tool_calls,
-                        resource_project_id=resource_project_id,
+                        resource_project_ids=tuple(resource_project_ids),
                     )
                 )
                 idempotency_key = invocation_idempotency_key(run_id, call.id, call.name, call_args)
@@ -4665,6 +4781,7 @@ def _enrich_tool_arguments(
     datasets: list[Dataset],
     references: ReferenceResolution | None = None,
     memory_references: MemoryReferenceResolution | None = None,
+    request_text: str | None = None,
 ) -> dict[str, Any]:
     """按 TaskContract 与 Host 已验证引用约束工具参数和交付血缘。"""
     enriched = dict(arguments)
@@ -4697,6 +4814,34 @@ def _enrich_tool_arguments(
             enriched["title"] = "数据分析报告"
         return enriched
 
+    if tool_name in {"join_preflight", "join_datasets"}:
+        join_request_text = request_text or contract.goal
+        selected = _selected_join_dataset_refs(
+            join_request_text,
+            datasets,
+            references,
+            memory_references,
+        )
+        if len(selected) == 2:
+            enriched["left_dataset_ref"] = selected[0]
+            enriched["right_dataset_ref"] = selected[1]
+            datasets_by_ref = {dataset.ref: dataset for dataset in datasets}
+            left_key = _single_mentioned_column(
+                join_request_text,
+                datasets_by_ref[selected[0]],
+            )
+            right_key = _single_mentioned_column(
+                join_request_text,
+                datasets_by_ref[selected[1]],
+            )
+            if left_key is not None and right_key is not None:
+                enriched["left_key"] = left_key
+                enriched["right_key"] = right_key
+            join_type = _explicit_join_type(join_request_text)
+            if join_type is not None:
+                enriched["join_type"] = join_type
+        return enriched
+
     if tool_name != "gen_chart":
         return enriched
 
@@ -4725,6 +4870,63 @@ def _enrich_tool_arguments(
     if datasets:
         enriched["dataset_ref"] = datasets[-1].ref
     return enriched
+
+
+def _selected_join_dataset_refs(
+    user_text: str,
+    datasets: list[Dataset],
+    references: ReferenceResolution | None,
+    memory_references: MemoryReferenceResolution | None,
+) -> list[str]:
+    """按用户文本出现顺序绑定两个 Join 数据集，拒绝让模型替换 Host 选择。"""
+    ordered = sorted(
+        (
+            (
+                min(
+                    position
+                    for position in (
+                        user_text.find(dataset.filename),
+                        user_text.find(dataset.ref),
+                    )
+                    if position >= 0
+                ),
+                dataset.ref,
+            )
+            for dataset in datasets
+            if dataset.filename in user_text or dataset.ref in user_text
+        ),
+        key=lambda item: item[0],
+    )
+    selected = [dataset_ref for _position, dataset_ref in ordered]
+    valid_dataset_refs = {dataset.ref for dataset in datasets}
+    for dataset_ref in _referenced_dataset_refs(
+        references,
+        memory_references,
+        valid_dataset_refs=valid_dataset_refs,
+    ):
+        if dataset_ref not in selected:
+            selected.append(dataset_ref)
+    return selected
+
+
+def _single_mentioned_column(user_text: str, dataset: Dataset) -> str | None:
+    mentioned = [
+        str(column["name"])
+        for column in cast(list[JsonObject], dataset.profile.get("columns") or [])
+        if isinstance(column, dict)
+        and isinstance(column.get("name"), str)
+        and str(column["name"]) in user_text
+    ]
+    return mentioned[0] if len(mentioned) == 1 else None
+
+
+def _explicit_join_type(user_text: str) -> str | None:
+    matches = [
+        join_type
+        for join_type, pattern in _JOIN_TYPE_PATTERNS.items()
+        if pattern.search(user_text) is not None
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _referenced_analysis_ids(
@@ -4870,6 +5072,11 @@ async def _try_execute_parallel_frontier(
     config: AgentLoopConfig,
     control: RunControl | None,
     event_queue: asyncio.Queue[dict[str, str]],
+    contract: TaskContract,
+    datasets: list[Dataset],
+    references: ReferenceResolution | None,
+    memory_references: MemoryReferenceResolution | None,
+    request_text: str,
 ) -> _ParallelBatchOutcome | None:
     """Execute one fully governed read-only ready frontier concurrently.
 
@@ -4915,6 +5122,17 @@ async def _try_execute_parallel_frontier(
         ):
             return None
         arguments = _parse_args(call.arguments)
+        if call.name == "join_preflight":
+            arguments = _enrich_tool_arguments(
+                call.name,
+                arguments,
+                contract=contract,
+                artifacts=[],
+                datasets=datasets,
+                references=references,
+                memory_references=memory_references,
+                request_text=request_text,
+            )
         try:
             definition_execution = await run_in_threadpool(
                 task_store.resolve_definition_execution,
@@ -4924,12 +5142,14 @@ async def _try_execute_parallel_frontier(
             )
         except ControlConflict:
             return None
-        resource_project_id: str | None = None
-        dataset_ref = arguments.get("dataset_ref")
-        if isinstance(dataset_ref, str) and dataset_ref:
-            dataset = await run_in_threadpool(store.get_dataset, dataset_ref)
-            if dataset is not None:
-                resource_project_id = dataset.project_id
+        resource_project_ids: list[str | None] = []
+        for _argument_name, dataset_ref in dataset_reference_arguments(arguments):
+            dataset = (
+                await run_in_threadpool(store.get_dataset, dataset_ref)
+                if isinstance(dataset_ref, str) and dataset_ref
+                else None
+            )
+            resource_project_ids.append(dataset.project_id if dataset is not None else None)
         data_role_guard = await run_in_threadpool(
             _evaluate_data_role_preconditions,
             task_store=task_store,
@@ -4952,7 +5172,7 @@ async def _try_execute_parallel_frontier(
                 arguments=arguments,
                 calls_used=attempts_used + index,
                 max_tool_calls=config.max_tool_calls,
-                resource_project_id=resource_project_id,
+                resource_project_ids=tuple(resource_project_ids),
             )
         )
         if not decision.allowed:
@@ -5617,6 +5837,11 @@ def _artifact_payload(artifact: Artifact) -> dict[str, Any]:
 # 参数键 → 中文标签（人话参数摘要用；未列出的键按原名展示）
 _ARG_LABELS = {
     "dataset_ref": "数据集",
+    "left_dataset_ref": "左数据集",
+    "right_dataset_ref": "右数据集",
+    "left_key": "左关联键",
+    "right_key": "右关联键",
+    "join_type": "Join 类型",
     "value_col": "数值列",
     "time_col": "时间列",
     "method": "方法",
@@ -5674,7 +5899,7 @@ def _humanize_args(tool: str, args: dict[str, Any]) -> str:
 
 def _humanize_value(key: str, value: Any) -> str:
     """单个参数值的人话展示：短标识、列表截断、布尔汉化。"""
-    if key == "dataset_ref" and isinstance(value, str):
+    if key.endswith("dataset_ref") and isinstance(value, str):
         return value[:8]
     if isinstance(value, bool):
         return "是" if value else "否"
@@ -5753,6 +5978,17 @@ def _summarize_result(tool: str, result: Any) -> str:
     if tool == "aggregate_preview":
         rows = result.get("rows") or []
         return f"{result.get('group_total', '?')} 组，返回前 {len(rows)} 组"
+    if tool == "join_preflight":
+        return (
+            f"状态={result.get('status', '?')}，"
+            f"关系={result.get('relationship', '?')}，"
+            f"预估 {result.get('estimated_output_rows', '?')} 行"
+        )
+    if tool == "join_datasets":
+        return (
+            f"已生成 {result.get('rows', '?')} 行关联数据集 "
+            f"{str(result.get('dataset_ref', ''))[:12]}，双父血缘已登记"
+        )
     if tool == "kb_search":
         hits = result.get("hits") or []
         return f"命中 {len(hits)} 条片段" if hits else "未检索到相关内容"

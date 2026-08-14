@@ -191,7 +191,13 @@ def validate_task_plan(
         if dep not in step_ids
     }
     cyclic = _has_cycle(steps)
-    dependencies_valid = not duplicate_ids and not unknown_dependencies and not cyclic
+    join_execution_guarded = _join_execution_has_preflight_dependency(steps)
+    dependencies_valid = (
+        not duplicate_ids
+        and not unknown_dependencies
+        and not cyclic
+        and join_execution_guarded
+    )
     if duplicate_ids:
         issues.append("dependencies:duplicate_step_id")
     if unknown_dependencies:
@@ -200,6 +206,8 @@ def validate_task_plan(
         )
     if cyclic:
         issues.append("dependencies:cycle")
+    if not join_execution_guarded:
+        issues.append("dependencies:join_execute_requires_preflight")
 
     used_capabilities = {str(step["capability"]) for step in steps}
     unknown_capabilities = used_capabilities - capabilities
@@ -279,3 +287,34 @@ def _has_cycle(steps: list[dict[str, Any]]) -> bool:
         return False
 
     return any(visit(node) for node in graph)
+
+
+def _join_execution_has_preflight_dependency(
+    steps: list[dict[str, Any]],
+) -> bool:
+    """Every Join execution step must transitively depend on Join preflight."""
+    by_id = {str(step["step_id"]): step for step in steps}
+
+    def ancestors(step: dict[str, Any]) -> set[str]:
+        pending = list(cast(list[str], step["dependencies"]))
+        visited: set[str] = set()
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = by_id.get(dependency_id)
+            if dependency is not None:
+                pending.extend(cast(list[str], dependency["dependencies"]))
+        return visited
+
+    for step in steps:
+        if step["capability"] != "dataset.join.execute":
+            continue
+        if not any(
+            by_id[step_id]["capability"] == "dataset.join.preflight"
+            for step_id in ancestors(step)
+            if step_id in by_id
+        ):
+            return False
+    return True

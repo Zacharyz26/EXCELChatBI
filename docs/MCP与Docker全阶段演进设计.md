@@ -1,7 +1,7 @@
 # MCP 与 Docker 全阶段演进设计
 
-> 状态：总体设计已完成；阶段 3–5、6A～6C 工程关闭，当前进入 6D 统计证据与预测护栏
-> · 更新日期：2026-08-13
+> 状态：总体设计已完成；阶段 3–5、6A～6D 工程关闭，当前进入 6E 多数据集关联治理
+> · 更新日期：2026-08-14
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
 
 ## 1. 文档定位
@@ -42,8 +42,10 @@ Invocation、Evidence Ledger 与 Verifier 结果状态；6C-3 已实现受预算
 探针；提交 `d5005ee` 的
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
 已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6C。6D-1～6D-4 的统计
-Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和预测传输/恢复探针已完成
-本地验证，当前待远程完整 CI。
+Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和预测传输/恢复探针已由
+提交 `3febd68` 的
+[run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
+完整 CI 关闭。当前 6E-1 只读预检和 6E-2 高风险固定 Join/多父血缘已本地实现。
 
 ## 2. 不随阶段变化的边界
 
@@ -196,7 +198,9 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 > 有界候选、角色/capability 筛选、Plan/Invocation/Evidence/Verifier 状态绑定、确定性跟进、
 > 匿名评测和 Compose 恢复门禁已由提交 `d5005ee` 的完整 CI 关闭。6D-1～6D-4 的统一
 > Evidence、高级统计、独立 `stats.forecast` Tool/Profile、匿名质量门禁、React 局限展示
-> 和预测双传输/Compose 恢复探针已完成本地验证，当前待远程完整 CI。
+> 和预测双传输/Compose 恢复探针已由完整 CI 关闭。当前 6E-1 已实现只读 Join 预检、
+> 双数据集 Host/MCP/TaskRun 授权和显式数据集/关联键澄清；6E-2 已本地实现参数哈希绑定
+> 的高风险授权、固定 Join 执行、SQLite v11 双父血缘和派生策略继承。
 
 ### MCP 设计
 
