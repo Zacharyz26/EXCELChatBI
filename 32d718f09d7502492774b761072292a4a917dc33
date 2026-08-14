@@ -1,0 +1,1 @@
+阶段 6D 收尾与 6E-1/6E-2：完成受控多数据集 Join 工作流，包括只读预检证据、Planner 强制依赖、参数绑定高风险执行、Host/MCP/TaskRun 三层双数据集校验、SQLite v11 多父血缘、完整父版本绑定与派生策略继承。文档同步更新。验证：后端测试 685 passed、2 skipped；Ruff、strict mypy 与 git diff --check 均通过。远端完整 CI 待本提交推送后验证。
