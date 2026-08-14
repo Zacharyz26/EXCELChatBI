@@ -38,11 +38,13 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
 验证关闭。阶段 6D 已由提交 `3febd68` 的
 [run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
-完整 CI 关闭。当前开发 6E；6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已实现
-参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承；6E-3 已本地实现
-精确预检/数据版本门禁、React 审批恢复和完整双父血缘展示；6E-4 已本地实现 17 场景
+完整 CI 关闭。6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已实现
+参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承；6E-3 已实现
+精确预检/数据版本门禁、React 审批恢复和完整双父血缘展示；6E-4 已实现 17 场景
 脱敏质量门禁、跨项目/敏感键/高风险授权发布契约、stdio/HTTP 等价、`data-tools`
-重启恢复和浏览器验收，待远程完整 CI 后关闭阶段。
+重启恢复和浏览器验收。提交 `92a6f02` 的
+[CI run 31767613363](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31767613363)
+已确认 backend、frontend 与真实 Compose 三项全绿，v2.5 阶段 6 全部工程关闭。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -158,8 +160,7 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
   数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
-- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6D 工程门禁已完成并通过真实 Compose CI。
-  6E-1～6E-4 Join 预检、受治理执行/多父血缘、React 协作和发布门禁已本地实现，待远程完整 CI；
+- **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6E 工程门禁已完成并通过真实 Compose CI；
   真实 CPU/GPU semantic 等价和领域签字继续作为发布债务；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
 - **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
@@ -216,7 +217,7 @@ v2.5 阶段 6C（已关闭；完整 CI 与 Compose 恢复门禁全绿）
 v2.5 阶段 6D（已关闭；完整 CI 与 Compose 预测恢复门禁全绿）
   统一统计 Evidence → 受治理贡献/分群/回归诊断 → 独立预测 Tool/Profile → 发布门禁
 
-v2.5 阶段 6E（收尾中；6E-1～6E-4 已本地实现，待远程完整 CI）
+v2.5 阶段 6E（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   双数据集选择/Join 预检 → 受治理执行/多父版本血缘 → React 协作 → 发布门禁
 
 横向交付轨
@@ -234,7 +235,7 @@ v3.0
 
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
 v2.4 详细设计与阶段 1–2E 实施状态见 [`docs/v2.4/README.md`](./docs/v2.4/README.md)。
-v2.5 当前入口、阶段 3 交付记录与
+v2.5 阶段 3–6 关闭证据与
 [阶段 4A](./docs/v2.5/阶段4A实施记录.md)/
 [阶段 4B](./docs/v2.5/阶段4B实施记录.md)实施记录见
 [`docs/v2.5/README.md`](./docs/v2.5/README.md)。
@@ -289,7 +290,9 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 
 ## 快速开始
 
-本机开发：
+本机开发推荐先使用确定性轻量 RAG（`hashing + lexical + local`）。当前 API 启动时会
+注册统计路由和 Agent 统计工具，因此 `stats` 是本地启动的最小 extra；只执行不带 extra
+的 `uv sync` 会移除 `statsmodels/scikit-learn` 等可选包，随后 API 将无法导入。
 
 ```bash
 # 1. 配置
@@ -297,19 +300,45 @@ cp .env.example .env
 cp config/models.example.yaml config/models.yaml
 cp config/data_policy.example.yaml config/data_policy.yaml  # 可选
 
-# 2. 安装后端依赖
-uv sync
+# 2. 安装可启动 API 的最小依赖；不要改成单独的 `uv sync`
+uv sync --extra stats
 
-# 3. 启动后端
-uv run uvicorn apps.api.main:app --reload
+# 3. 启动后端；重复声明 extra，保证 uv 校验环境时保留统计依赖
+uv run --extra stats uvicorn apps.api.main:app --reload
 
-# 4. 启动前端
+# 4. 另开终端启动前端
 cd apps/web
 pnpm install
 pnpm dev
 ```
 
 默认地址：后端 `http://127.0.0.1:8000`，前端 `http://127.0.0.1:5173`。
+`.env.example` 默认已经设置：
+
+```dotenv
+RAG_EMBEDDER=hashing
+RAG_RERANKER=lexical
+RAG_STORE=local
+RAG_RUNTIME_PROFILE=auto
+```
+
+如果现有 `.env` 已切换为 `RAG_EMBEDDER=bge`、`RAG_RERANKER=bge`、
+`RAG_STORE=milvus`，则必须同时安装并保留 `stats` 和 `rag`：
+
+```bash
+uv sync --extra stats --extra rag
+uv run --extra stats --extra rag uvicorn apps.api.main:app --reload
+```
+
+该档位会在启动时 fail-fast 加载 bge-m3、bge-reranker 和 Milvus；需要可访问
+Hugging Face，或把 `EMBEDDING_MODEL`、`RERANK_MODEL` 配置为已侧载的本地权重目录。
+仅临时切回轻量档位而不修改 `.env` 时可以运行：
+
+```bash
+RAG_EMBEDDER=hashing RAG_RERANKER=lexical RAG_STORE=local \
+  RAG_RUNTIME_PROFILE=baseline \
+  uv run --extra stats uvicorn apps.api.main:app --reload
+```
 
 单机容器部署：
 
@@ -356,24 +385,30 @@ uv run python -m apps.api.workspace_admin restore \
 恢复会先在 `WORKSPACE_BACKUP_DIR` 生成 `pre-restore-*` 覆盖前副本。知识库不在这个
 工作区备份中，继续使用独立的 `kb_admin` / Milvus 备份流程。
 
-## 可选能力依赖
+## 依赖档位
+
+`uv sync` 会把当前虚拟环境精确同步到本次命令声明的依赖集合。不要依次执行多个只带
+一个 extra 的命令来“累加”能力，后一次同步可能移除前一次安装的 extra。应在同一条命令
+中声明所有需要的 extras，或者使用 `--all-extras`。
 
 ```bash
-# 统计
+# 最小本地 API：统计为当前启动必需
 uv sync --extra stats
 
-# 图表截图
-uv sync --extra chart-screenshot
+# 确定性 RAG + 统计 + 报告 + 截图（常用本地完整档位）
+uv sync --extra stats --extra report --extra chart-screenshot
 uv run playwright install --with-deps chromium
 
-# PDF 报告
-uv sync --extra report
+# 真实 bge/Milvus 语义检索
+uv sync --extra stats --extra rag
 
-# bge-m3、reranker、Milvus
-uv sync --extra rag
+# 安装全部可选能力；体积较大
+uv sync --all-extras
 ```
 
-离线环境需提前侧载模型权重。`EMBEDDING_DEVICE=auto/cpu/cuda` 可切换推理设备而不改代码。
+启动命令应使用与安装命令相同的 `--extra ...` 或 `--all-extras`；也可以在完成同步后使用
+`uv run --no-sync ...`，但此时由使用者负责保证环境没有漂移。离线环境需提前侧载模型
+权重。`EMBEDDING_DEVICE=auto/cpu/cuda` 可切换推理设备而不改代码。
 
 ## 知识库运维入口
 
