@@ -1,8 +1,5 @@
 // 后端 API 客户端
 import type {
-  AgentApproval,
-  AgentApprovalDecisionResponse,
-  AgentAutonomyMode,
   AgentControlResponse,
   AgentPlanDefinition,
   AgentPlanRevisionResponse,
@@ -310,15 +307,6 @@ export async function getAgentRunEvents(
   return resp.json();
 }
 
-/** 读取当前认证主体可见的高风险授权摘要。 */
-export async function listAgentApprovals(runId: string): Promise<AgentApproval[]> {
-  const resp = await apiFetch(
-    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/approvals`,
-  );
-  if (!resp.ok) return asError(resp);
-  return resp.json();
-}
-
 /** 在无活动工具调用的安全边界暂停 TaskRun。 */
 export async function pauseAgentRun(
   runId: string,
@@ -454,36 +442,6 @@ export async function reviseAgentPlan(
   return resp.json();
 }
 
-/** 对固定版本 ApprovalRecord 做批准或拒绝；决定本身不会恢复任务。 */
-export async function decideAgentApproval(
-  runId: string,
-  stateVersion: number,
-  approvalId: string,
-  approvalVersion: number,
-  decision: "approved" | "denied",
-  reason: string,
-): Promise<AgentApprovalDecisionResponse> {
-  const resp = await apiFetch(
-    `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/approvals/`
-      + `${encodeURIComponent(approvalId)}/decision`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "If-Match": String(stateVersion),
-        "Idempotency-Key": operationKey("approval-decision"),
-      },
-      body: JSON.stringify({
-        expected_version: approvalVersion,
-        decision,
-        reason,
-      }),
-    },
-  );
-  if (!resp.ok) return asError(resp);
-  return resp.json();
-}
-
 /**
  * 通过 fetch 消费 POST SSE。原生 EventSource 不支持 POST，因此在这里解析事件帧；
  * 支持代理常见的 CRLF、分块边界和多行 data。
@@ -494,7 +452,6 @@ export async function streamChat(
   onEvent: (event: ChatStreamEvent) => void,
   onOpen?: (runId: string) => void,
   options: {
-    autonomyMode?: AgentAutonomyMode;
     parentRunId?: string;
   } = {},
 ): Promise<void> {
@@ -504,7 +461,6 @@ export async function streamChat(
     body: JSON.stringify({
       conversation_id: conversationId,
       message,
-      autonomy_mode: options.autonomyMode ?? "read_only",
       parent_run_id: options.parentRunId ?? null,
     }),
   });
@@ -549,6 +505,15 @@ export async function recordAgentRunFeedback(
 }
 
 const STREAM_RECONNECT_DELAYS_MS = [200, 400, 800, 1_200, 2_000, 2_000, 2_000, 2_000];
+const STREAM_FIRST_EVENT_TIMEOUT_MS = 30_000;
+const STREAM_IDLE_EVENT_TIMEOUT_MS = 150_000;
+
+class MeaningfulEventTimeout extends Error {
+  constructor() {
+    super("任务流长时间没有返回有效事件，请刷新任务状态后重试。");
+    this.name = "MeaningfulEventTimeout";
+  }
+}
 
 /**
  * POST SSE 断开后不重放控制 POST，而以持久 sequence 通过只读 GET 流续接。
@@ -582,6 +547,7 @@ async function consumeTaskStream(
   try {
     await consumeEventStream(initialResponse, dispatch);
   } catch (error) {
+    if (error instanceof MeaningfulEventTimeout) throw error;
     lastError = error;
   }
   if (terminal) return;
@@ -607,6 +573,7 @@ async function consumeTaskStream(
       if (terminal) return;
       lastError = new Error("任务重连流在终态事件前中断");
     } catch (error) {
+      if (error instanceof MeaningfulEventTimeout) throw error;
       lastError = error;
     }
   }
@@ -624,25 +591,47 @@ async function consumeEventStream(
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let meaningfulEventSeen = false;
+  let eventDeadline = Date.now() + STREAM_FIRST_EVENT_TIMEOUT_MS;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    buffer = buffer.replace(/\r\n/g, "\n");
+  try {
+    while (true) {
+      const remainingMs = Math.max(1, eventDeadline - Date.now());
+      const { done, value } = await readStreamChunk(reader, remainingMs);
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n");
 
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      emitSseBlock(buffer.slice(0, boundary), onEvent);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        if (emitSseBlock(buffer.slice(0, boundary), onEvent)) {
+          meaningfulEventSeen = true;
+          eventDeadline = Date.now() + STREAM_IDLE_EVENT_TIMEOUT_MS;
+        }
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+      if (done) break;
     }
-    if (done) break;
+
+    if (buffer.trim() && emitSseBlock(buffer, onEvent)) meaningfulEventSeen = true;
+  } catch (error) {
+    try {
+      await reader.cancel();
+    } catch {
+      /* 连接已关闭时无需再处理 cancel 错误。 */
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
 
-  if (buffer.trim()) emitSseBlock(buffer, onEvent);
+  if (!meaningfulEventSeen) throw new MeaningfulEventTimeout();
 }
 
-function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void): void {
+function emitSseBlock(
+  block: string,
+  onEvent: (event: ChatStreamEvent) => void,
+): boolean {
   let eventId: string | undefined;
   let eventName = "message";
   const dataLines: string[] = [];
@@ -652,7 +641,7 @@ function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void):
     if (line.startsWith("event:")) eventName = line.slice(6).trim();
     if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
-  if (dataLines.length === 0) return;
+  if (dataLines.length === 0) return false;
 
   const raw = dataLines.join("\n");
   let data: Record<string, unknown>;
@@ -665,6 +654,27 @@ function emitSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void):
     data = { value: raw };
   }
   onEvent({ id: eventId, event: eventName, data });
+  return true;
+}
+
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeoutId: number | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = window.setTimeout(
+          () => reject(new MeaningfulEventTimeout()),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  }
 }
 
 function stringField(value: unknown): string {

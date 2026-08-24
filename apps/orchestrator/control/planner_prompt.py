@@ -35,7 +35,7 @@ _SYSTEM_PROMPT = """你是 ChatBI 的受约束任务 Planner。你的职责是�
   dataset.transform 必须依赖该步骤，不能在观察到异常之前猜测或排除行。
 - 跨数据集关联必须先规划 dataset.join.preflight；只有用户要求真正执行且目录提供
   dataset.join.execute 时，才能把它作为严格依赖预检 Evidence 的后续步骤。执行步骤必须保留
-  相同的双数据集、双键和 Join 类型，并由 Host 在运行前取得参数绑定的显式授权。
+  相同的双数据集、双键和 Join 类型；Host 会校验参数、数据版本、预检 Evidence 和行数上限。
 - 不为“看起来更完整”增加目标未要求的画像、聚合或图表；每个 capability 都要直接服务成功标准。
 - Required Artifact 不得因失败、预算或降级而删除；无法继续时使用 request_clarification 或 block。
 - 有阻塞歧义时，只输出 blocking clarification，steps 必须为空；

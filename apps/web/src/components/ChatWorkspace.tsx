@@ -27,7 +27,6 @@ export function ChatWorkspace() {
   const activeConversationId = useWorkspaceStore((state) => state.activeConversationId);
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
   const activeRun = useWorkspaceStore((state) => state.activeRun);
-  const approvals = useWorkspaceStore((state) => state.approvals);
   const pendingClarification = useWorkspaceStore((state) => state.pendingClarification);
   const selectProject = useWorkspaceStore((state) => state.selectProject);
   const selectConversation = useWorkspaceStore((state) => state.selectConversation);
@@ -72,7 +71,8 @@ export function ChatWorkspace() {
   const activeConversation = conversations.find((item) => item.id === activeConversationId);
   const busy = loading || uploading || streaming;
   const taskNeedsAttention = !!pendingClarification
-    || approvals.some((approval) => approval.status === "pending");
+    || activeRun?.run.status === "paused"
+    || activeRun?.run.status === "waiting_user";
 
   async function submitProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

@@ -34,6 +34,15 @@ class RunControl(Protocol):
     def active_elapsed_seconds(self) -> float: ...
 
 
+class ActiveConversationRunError(RuntimeError):
+    """A conversation already has a live execution host in this process."""
+
+    def __init__(self, conversation_id: str, run_id: str) -> None:
+        self.conversation_id = conversation_id
+        self.run_id = run_id
+        super().__init__(f"对话已有活动执行宿主: {conversation_id} ({run_id})")
+
+
 @dataclass(slots=True)
 class ManagedRunControl:
     """一个活动 run 的协作式暂停、取消和澄清信号。"""
@@ -110,6 +119,7 @@ class ManagedRunControl:
 @dataclass(slots=True)
 class _ManagedRun:
     control: ManagedRunControl
+    conversation_id: str | None = None
     subscribers: set[asyncio.Queue[object]] = field(default_factory=set)
     task: asyncio.Task[None] | None = None
     finished: bool = False
@@ -120,18 +130,33 @@ class AgentRunManager:
 
     def __init__(self) -> None:
         self._runs: dict[str, _ManagedRun] = {}
+        self._conversation_runs: dict[str, str] = {}
 
     def start(
         self,
         run_id: str,
         source_factory: Callable[[ManagedRunControl], AsyncIterator[SseItem]],
+        *,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[SseItem, None]:
         if run_id in self._runs:
             raise RuntimeError(f"TaskRun 已有活动执行宿主: {run_id}")
-        entry = _ManagedRun(control=ManagedRunControl())
+        if conversation_id is not None:
+            active_run_id = self._conversation_runs.get(conversation_id)
+            if active_run_id is not None:
+                active_entry = self._runs.get(active_run_id)
+                if active_entry is not None and not active_entry.finished:
+                    raise ActiveConversationRunError(conversation_id, active_run_id)
+                self._conversation_runs.pop(conversation_id, None)
+        entry = _ManagedRun(
+            control=ManagedRunControl(),
+            conversation_id=conversation_id,
+        )
         queue: asyncio.Queue[object] = asyncio.Queue()
         entry.subscribers.add(queue)
         self._runs[run_id] = entry
+        if conversation_id is not None:
+            self._conversation_runs[conversation_id] = run_id
         source = source_factory(entry.control)
         entry.task = asyncio.create_task(
             self._produce(run_id, entry, source),
@@ -208,6 +233,7 @@ class AgentRunManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._runs.clear()
+        self._conversation_runs.clear()
 
     async def _produce(
         self,
@@ -236,6 +262,11 @@ class AgentRunManager:
                 queue.put_nowait(item)
         finally:
             entry.finished = True
+            if (
+                entry.conversation_id is not None
+                and self._conversation_runs.get(entry.conversation_id) == run_id
+            ):
+                self._conversation_runs.pop(entry.conversation_id, None)
             for queue in tuple(entry.subscribers):
                 queue.put_nowait(_END)
             if not entry.subscribers:

@@ -149,20 +149,6 @@ def _arguments(fixture: JoinProbeFixture, *, right_ref: str | None = None) -> di
     }
 
 
-def _approved_context(
-    context: MCPRequestContext,
-    descriptor: MCPToolDescriptor,
-    arguments: dict[str, Any],
-) -> MCPRequestContext:
-    return replace(
-        context,
-        approval_id="a" * 32,
-        approval_version=1,
-        approval_contract_hash=descriptor.contract_hash,
-        approval_parameter_hash=stable_hash(arguments),
-    )
-
-
 def _gateway(
     config: MCPClientConfig,
     expected: tuple[MCPToolDescriptor, ...],
@@ -201,9 +187,9 @@ def _assert_catalog(
         or execute.metadata.capabilities != ("dataset.join.execute",)
         or execute.metadata.read_only
         or execute.metadata.idempotent
-        or execute.metadata.risk_level != "high"
+        or execute.metadata.risk_level != "medium"
     ):
-        raise RuntimeError("join_datasets 高风险元数据漂移")
+        raise RuntimeError("join_datasets 受控写工具元数据漂移")
     required = [
         "left_dataset_ref",
         "right_dataset_ref",
@@ -228,7 +214,7 @@ def _assert_preflight(result: dict[str, Any]) -> None:
     ] if isinstance(risks, list) else []
     if (
         result.get("schema") != "chatbi-join-preflight-v1"
-        or result.get("status") != "requires_confirmation"
+        or result.get("status") != "ready"
         or result.get("relationship") != "many_to_many"
         or result.get("matching_key_count") != 1
         or result.get("matched_left_rows") != 3
@@ -236,7 +222,7 @@ def _assert_preflight(result: dict[str, Any]) -> None:
         or result.get("estimated_output_rows") != 12
         or result.get("expansion_ratio") != 2.4
         or risk_codes != ["many_to_many", "row_expansion"]
-        or result.get("requires_confirmation") is not True
+        or result.get("requires_confirmation") is not False
         or result.get("executable") is not True
         or result.get("mutates_data") is not False
         or result.get("raw_rows_returned") is not False
@@ -259,7 +245,7 @@ def _assert_execution(
         or result.get("parent_ref") != fixture.left_ref
         or result.get("rows") != 12
         or result.get("relationship") != "many_to_many"
-        or result.get("preflight_status") != "requires_confirmation"
+        or result.get("preflight_status") != "ready"
         or risk_codes != ["many_to_many", "row_expansion"]
         or result.get("mutates_data") is not True
         or result.get("raw_rows_returned") is not False
@@ -347,14 +333,6 @@ async def run_probe() -> dict[str, Any]:
     )
     if not protected.is_error or protected.error_code != "tool_business_error":
         raise RuntimeError("Join 受保护关联键未失败关闭")
-    missing_approval = canonical_runtime.adapter.call_tool(
-        "join_datasets",
-        arguments,
-        initial_context,
-    )
-    if not missing_approval.is_error or missing_approval.error_code != "approval_required":
-        raise RuntimeError("Join 高风险执行缺少授权时未失败关闭")
-
     raw_tokens = json.loads(settings.agent_mcp_service_tokens_json)
     service_token = raw_tokens.get("data-tools") if isinstance(raw_tokens, dict) else None
     if not service_token or not settings.agent_mcp_context_signing_key:
@@ -415,14 +393,14 @@ async def run_probe() -> dict[str, Any]:
         } != {direct_hash}:
             raise RuntimeError("join_preflight 在直接调用、stdio 与 HTTP 间结果不等价")
 
-        approved = await http_gateway.execute(
+        automatic = await http_gateway.execute(
             "join_datasets",
             arguments,
-            _approved_context(initial_context, execute_descriptor, arguments),
+            initial_context,
             timeout_seconds=20,
         )
-        _assert_execution(approved.result, fixture=fixture)
-        raw_output_ref = approved.result.get("dataset_ref")
+        _assert_execution(automatic.result, fixture=fixture)
+        raw_output_ref = automatic.result.get("dataset_ref")
         if not isinstance(raw_output_ref, str):
             raise RuntimeError("Join 授权执行未返回 Dataset reference")
         output_ref = raw_output_ref
@@ -462,8 +440,8 @@ async def run_probe() -> dict[str, Any]:
             "connection_generation": http_gateway.health.generation,
             "cross_project_rejected": True,
             "sensitive_key_rejected": True,
-            "missing_approval_rejected": True,
-            "approved_execution_passed": True,
+            "approval_not_required": True,
+            "automatic_execution_passed": True,
             "many_to_many_detected": True,
             "row_expansion_detected": True,
             "two_parent_result_verified": True,

@@ -621,7 +621,7 @@ def _capability_purpose(capability: str) -> str:
         "data.aggregate": "按用户指定维度聚合指标",
         "dataset.transform": "依据已有 Evidence 创建衍生数据集",
         "dataset.join.preflight": "只读评估两个已确认数据集的 Join 可行性与膨胀风险",
-        "dataset.join.execute": "在预检 Evidence 与显式授权后生成双父血缘关联数据集",
+        "dataset.join.execute": "在预检 Evidence 和数据版本校验后生成双父血缘关联数据集",
         "stats.anomaly": "识别异常并记录方法与阈值",
         "stats.trend": "计算指定范围和粒度的趋势",
         "stats.forecast": "生成预测并披露可靠性",

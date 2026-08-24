@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
-  AgentApproval,
-  AgentAutonomyMode,
   AgentJoinCollaboration,
   AgentPlanDefinition,
   AgentRunStatus,
@@ -38,12 +36,6 @@ const TERMINAL_STATUSES = new Set<AgentRunStatus>([
   "failed",
   "cancelled",
 ]);
-
-const AUTONOMY_LABELS: Record<AgentAutonomyMode, string> = {
-  assisted: "辅助模式",
-  read_only: "标准只读",
-  autonomous: "自主模式",
-};
 
 const HYPOTHESIS_KIND_LABELS = {
   trend: "趋势",
@@ -105,8 +97,6 @@ const HYPOTHESIS_FOLLOWUP_REASON_LABELS: Record<string, string> = {
 
 const JOIN_STATUS_LABELS: Record<AgentJoinCollaboration["status"], string> = {
   preflight_ready: "预检已就绪",
-  awaiting_approval: "等待确认",
-  approved: "已批准，等待恢复",
   executing: "执行中",
   completed: "关联已完成",
   blocked: "已安全阻塞",
@@ -130,11 +120,10 @@ const JOIN_RELATIONSHIP_LABELS: Record<string, string> = {
   no_matches: "没有匹配键",
 };
 
-/** v2.5 4B：真实 TaskRun、计划、澄清、审批和运行控制的统一协作面板。 */
+/** 真实 TaskRun、计划、澄清和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
   const detail = useWorkspaceStore((state) => state.activeRun);
-  const approvals = useWorkspaceStore((state) => state.approvals);
   const clarification = useWorkspaceStore((state) => state.pendingClarification);
   const busy = useWorkspaceStore((state) => state.collaborationBusy);
   const error = useWorkspaceStore((state) => state.error);
@@ -145,17 +134,14 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const answer = useWorkspaceStore((state) => state.answerClarification);
   const retryStep = useWorkspaceStore((state) => state.retryActiveStep);
   const revisePlan = useWorkspaceStore((state) => state.reviseActivePlan);
-  const decideApproval = useWorkspaceStore((state) => state.decideApproval);
   const submitRunFeedback = useWorkspaceStore((state) => state.submitActiveRunFeedback);
   const startBranch = useWorkspaceStore((state) => state.startBranch);
-  const autonomyMode = useWorkspaceStore((state) => state.autonomyMode);
   const [clarificationDraft, setClarificationDraft] = useState("");
   const [editingPlan, setEditingPlan] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [reasonDraft, setReasonDraft] = useState("");
   const [purposeDrafts, setPurposeDrafts] = useState<Record<string, string>>({});
   const [skippedStepIds, setSkippedStepIds] = useState<Set<string>>(new Set());
-  const [approvalReasons, setApprovalReasons] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("");
   const [feedbackRating, setFeedbackRating] = useState<"helpful" | "not_helpful" | null>(null);
   const [feedbackComment, setFeedbackComment] = useState("");
@@ -175,18 +161,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [editingPlan, onClose]);
 
-  const pendingApprovals = useMemo(
-    () => approvals.filter(
-      (approval) => approval.status === "pending" && !approvalExpired(approval),
-    ),
-    [approvals],
-  );
-  const decidedApprovals = useMemo(
-    () => approvals.filter(
-      (approval) => approval.status !== "pending" || approvalExpired(approval),
-    ).reverse(),
-    [approvals],
-  );
   const run = detail?.run;
   const canCancel = !!run && !TERMINAL_STATUSES.has(run.status);
   const comparisonRuns = useMemo(() => {
@@ -249,28 +223,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
-  async function decide(
-    approval: AgentApproval,
-    decision: "approved" | "denied",
-  ) {
-    const reason = (approvalReasons[approval.approval_id] ?? "").trim();
-    if (!reason || busy) return;
-    try {
-      await decideApproval(approval.approval_id, decision, reason);
-      setApprovalReasons((current) => ({
-        ...current,
-        [approval.approval_id]: "",
-      }));
-      setNotice(
-        decision === "approved"
-          ? "授权已批准。请检查任务状态后显式点击“继续执行”。"
-          : "授权已拒绝；对应高风险工具不会执行。",
-      );
-    } catch {
-      /* 详细冲突由共享错误提示展示。 */
-    }
-  }
-
   async function submitFeedback(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!feedbackRating || busy) return;
@@ -310,16 +262,12 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
       >
         <header className="agent-control-header">
           <div>
-            <span>HUMAN CONTROL</span>
+            <span>AGENT RUN</span>
             <h2 id="agent-control-title">任务协作</h2>
-            <p>计划、澄清与审批均以服务端 TaskRun 为准</p>
+            <p>计划、澄清与执行状态均以服务端 TaskRun 为准</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭任务协作">×</button>
         </header>
-
-        <div className="agent-control-safety">
-          浏览器不能直接授权工具。批准只更新后端 ApprovalRecord，任务必须显式恢复后才能继续。
-        </div>
 
         {!activeRunId ? (
           <p className="agent-control-empty">
@@ -348,7 +296,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
               <h3>{detail.run.goal}</h3>
               <p>
                 Run {shortHash(detail.run.run_id)} · 计划 v{detail.run.plan_version}
-                {` · ${AUTONOMY_LABELS[detail.run.autonomy_mode]}`}
                 {detail.run.terminal_reason && ` · ${detail.run.terminal_reason}`}
               </p>
               <div className="agent-run-actions">
@@ -366,14 +313,9 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                     type="button"
                     className="agent-primary-button"
                     onClick={() => void resume()}
-                    disabled={busy !== null || pendingApprovals.length > 0}
-                    title={pendingApprovals.length > 0 ? "请先决定待处理授权" : ""}
+                    disabled={busy !== null}
                   >
-                    {busy === "resume"
-                      ? "恢复中…"
-                      : detail.run.autonomy_mode === "assisted"
-                        ? "确认计划并执行"
-                        : "继续执行"}
+                    {busy === "resume" ? "恢复中…" : "继续执行"}
                   </button>
                 )}
                 {canCancel && (
@@ -434,7 +376,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   </small>
                 </div>
                 <p className="agent-join-disclaimer">
-                  这里展示的是服务端固定预检、ApprovalRecord 与 Dataset 血缘；批准不会自动执行。
+                  这里展示服务端固定预检与 Dataset 血缘；Agent 会在数据版本和参数校验通过后自动执行。
                 </p>
                 <div className="agent-join-inputs">
                   <JoinInputCard label="左输入版本" input={detail.join_collaboration.left} />
@@ -483,17 +425,12 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   <p className="agent-join-safe">固定预检未发现需要额外披露的 Join 风险。</p>
                 )}
                 <div className="agent-join-confirmation">
-                  <strong>确认状态</strong>
-                  <span>{detail.join_collaboration.approval
-                    ? detail.join_collaboration.approval.expired
-                      ? "已过期，需要恢复任务以重新申请"
-                      : approvalStatusLabel(detail.join_collaboration.approval.status)
-                    : detail.join_collaboration.requires_confirmation
-                      ? "等待创建参数绑定授权"
-                      : "仍需高风险执行授权"}</span>
-                  {detail.join_collaboration.status === "approved" && (
-                    <p>授权已持久化。请使用顶部“继续执行”，恢复时 Host 会再次校验版本与完整参数。</p>
-                  )}
+                  <strong>预检状态</strong>
+                  <span>{detail.join_collaboration.preflight_status === "ready"
+                    ? "已就绪"
+                    : detail.join_collaboration.preflight_status === "blocked"
+                      ? "已阻止"
+                      : "需要参数确认"}</span>
                 </div>
                 {detail.join_collaboration.output && (
                   <article className="agent-join-output">
@@ -778,7 +715,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                     <p>{candidate.goal}</p>
                     <small>
                       {shortHash(candidate.run_id)} · v{candidate.plan_version}
-                      {` · ${AUTONOMY_LABELS[candidate.autonomy_mode]}`}
                       {` · ${Number(candidate.usage.tool_calls ?? 0)} 次工具`}
                     </small>
                     {candidate.run_id !== detail.run.run_id && (
@@ -807,7 +743,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                       required
                     />
                   </label>
-                  <p>将使用当前选择的“{AUTONOMY_LABELS[autonomyMode]}”，并继承本 Run 的反馈作为规划上下文。</p>
+                  <p>新分支将继承本 Run 的反馈作为规划上下文。</p>
                   <button type="submit" disabled={!branchDraft.trim() || busy !== null}>
                     创建分析分支
                   </button>
@@ -873,74 +809,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
               )}
             </section>
 
-            <section className="agent-section">
-              <div className="agent-section__title">
-                <span>高风险审批</span>
-                <small>{approvals.length} 条记录</small>
-              </div>
-              {pendingApprovals.length === 0 && decidedApprovals.length === 0 ? (
-                <p className="agent-section__empty">当前任务没有高风险授权请求。</p>
-              ) : (
-                <div className="agent-approval-list">
-                  {pendingApprovals.map((approval) => (
-                    <article className="agent-approval agent-approval--pending" key={approval.approval_id}>
-                      <ApprovalFacts
-                        approval={approval}
-                        join={joinForApproval(detail.join_collaboration, approval)}
-                      />
-                      <label>
-                        决定原因
-                        <textarea
-                          value={approvalReasons[approval.approval_id] ?? ""}
-                          onChange={(event) => setApprovalReasons((current) => ({
-                            ...current,
-                            [approval.approval_id]: event.target.value,
-                          }))}
-                          maxLength={500}
-                          placeholder="说明批准范围或拒绝原因"
-                          aria-label={`授权原因 ${approval.tool_name}`}
-                        />
-                      </label>
-                      <div className="agent-approval__actions">
-                        <button
-                          type="button"
-                          className="agent-danger-button"
-                          disabled={
-                            busy !== null
-                            || !(approvalReasons[approval.approval_id] ?? "").trim()
-                          }
-                          onClick={() => void decide(approval, "denied")}
-                        >
-                          拒绝
-                        </button>
-                        <button
-                          type="button"
-                          className="agent-primary-button"
-                          disabled={
-                            busy !== null
-                            || !(approvalReasons[approval.approval_id] ?? "").trim()
-                          }
-                          onClick={() => void decide(approval, "approved")}
-                        >
-                          批准一次
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                  {decidedApprovals.slice(0, 5).map((approval) => (
-                    <article className="agent-approval" key={approval.approval_id}>
-                      <ApprovalFacts
-                        approval={approval}
-                        join={joinForApproval(detail.join_collaboration, approval)}
-                      />
-                      {approval.decision_reason && (
-                        <p className="agent-approval__reason">{approval.decision_reason}</p>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
           </div>
         )}
 
@@ -1132,73 +1000,6 @@ function JoinInputCard({
         {input.null_count !== null && ` · ${input.null_count} 个空键`}
       </small>
     </article>
-  );
-}
-
-function joinForApproval(
-  join: AgentJoinCollaboration | null | undefined,
-  approval: AgentApproval,
-): AgentJoinCollaboration | null {
-  return join?.approval?.approval_id === approval.approval_id ? join : null;
-}
-
-function approvalStatusLabel(status: AgentApproval["status"]): string {
-  const labels: Record<AgentApproval["status"], string> = {
-    pending: "待决定",
-    approved: "已批准",
-    denied: "已拒绝",
-    consumed: "已消费",
-    revoked: "已撤销",
-  };
-  return labels[status];
-}
-
-function approvalExpired(approval: AgentApproval): boolean {
-  if (approval.status !== "pending") return false;
-  const expiresAt = new Date(approval.expires_at).getTime();
-  return !Number.isFinite(expiresAt) || expiresAt <= Date.now();
-}
-
-function ApprovalFacts({
-  approval,
-  join,
-}: {
-  approval: AgentApproval;
-  join: AgentJoinCollaboration | null;
-}) {
-  return (
-    <>
-      <div className="agent-approval__heading">
-        <div>
-          <span className={`agent-risk agent-risk--${approval.risk_level}`}>
-            {approval.risk_level === "critical" ? "严重风险" : "高风险"}
-          </span>
-          <strong>{approval.tool_name}</strong>
-        </div>
-        <span>{approvalExpired(approval) ? "已过期" : approvalStatusLabel(approval.status)}</span>
-      </div>
-      <dl>
-        <div><dt>计划/步骤</dt><dd>v{approval.plan_version} · {approval.step_id}</dd></div>
-        <div><dt>有效期</dt><dd>{formatDate(approval.expires_at)}</dd></div>
-        <div><dt>工具契约</dt><dd>{shortHash(approval.tool_schema_hash)}</dd></div>
-        <div><dt>参数摘要</dt><dd>{shortHash(approval.parameter_summary_hash)}</dd></div>
-      </dl>
-      {join && (
-        <div className="agent-approval__join-scope">
-          <strong>本次授权固定范围</strong>
-          <p>
-            {shortHash(join.left.dataset_ref)} · {join.left.key}
-            {" ↔ "}
-            {shortHash(join.right.dataset_ref)} · {join.right.key}
-            {` · ${JOIN_TYPE_LABELS[join.join_type] ?? join.join_type}`}
-          </p>
-          <small>
-            预检 {join.preflight_status} · 数据版本
-            {join.data_version_matches ? "一致" : "已漂移，禁止执行"}
-          </small>
-        </div>
-      )}
-    </>
   );
 }
 

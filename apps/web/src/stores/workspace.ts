@@ -4,14 +4,12 @@ import {
   cancelAgentRun,
   createConversation as createConversationRequest,
   createProject as createProjectRequest,
-  decideAgentApproval,
   deleteConversation as deleteConversationRequest,
   deleteDataset as deleteDatasetRequest,
   getAgentRun,
   getAgentRunEvents,
   getConversation,
   getLatestAgentRun,
-  listAgentApprovals,
   listConversations,
   listDatasets,
   listProjects,
@@ -26,8 +24,6 @@ import {
   uploadExcel,
 } from "@/api/client";
 import type {
-  AgentApproval,
-  AgentAutonomyMode,
   AgentClarification,
   AgentPlanDefinition,
   AgentRunDetail,
@@ -61,10 +57,8 @@ interface WorkspaceState {
   /** 当前对话最近一次已知 TaskRun；runId 在收到响应头时即建立，详情按需刷新。 */
   activeRunId: string | null;
   activeRun: AgentRunDetail | null;
-  approvals: AgentApproval[];
   pendingClarification: AgentClarification | null;
   collaborationBusy: string | null;
-  autonomyMode: AgentAutonomyMode;
   initialize: () => Promise<void>;
   selectProject: (projectId: string) => Promise<void>;
   addProject: (name: string) => Promise<void>;
@@ -79,7 +73,6 @@ interface WorkspaceState {
   /** 删除数据集；被引用时不删除并返回后端的影响面警告文案（由调用方二次确认后 force） */
   removeDataset: (datasetRef: string, force?: boolean) => Promise<string | null>;
   uploadFile: (file: File) => Promise<void>;
-  setAutonomyMode: (mode: AgentAutonomyMode) => void;
   sendMessage: (
     message: string,
     options?: { parentRunId?: string },
@@ -100,11 +93,6 @@ interface WorkspaceState {
     plan: AgentPlanDefinition,
     reason: string,
     skippedStepIds: string[],
-  ) => Promise<void>;
-  decideApproval: (
-    approvalId: string,
-    decision: "approved" | "denied",
-    reason: string,
   ) => Promise<void>;
   clearError: () => void;
 }
@@ -134,10 +122,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   liveTurn: [],
   activeRunId: null,
   activeRun: null,
-  approvals: [],
   pendingClarification: null,
   collaborationBusy: null,
-  autonomyMode: initialAutonomyMode(),
 
   initialize: async () => {
     if (get().initialized || get().loading) return;
@@ -171,7 +157,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       liveTurn: [],
       activeRunId: null,
       activeRun: null,
-      approvals: [],
       pendingClarification: null,
       loading: true,
       error: null,
@@ -234,7 +219,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         liveTurn: [],
         activeRunId: null,
         activeRun: null,
-        approvals: [],
         pendingClarification: null,
       }));
     } catch (error) {
@@ -258,7 +242,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       liveTurn: [],
       activeRunId: null,
       activeRun: null,
-      approvals: [],
       pendingClarification: null,
       loading: true,
       error: null,
@@ -344,7 +327,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       liveTurn: [],
       activeRunId: null,
       activeRun: null,
-      approvals: [],
       pendingClarification: null,
       loading: true,
     });
@@ -401,11 +383,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  setAutonomyMode: (mode) => {
-    window.sessionStorage.setItem("chatbi.autonomyMode", mode);
-    set({ autonomyMode: mode });
-  },
-
   sendMessage: async (message, options = {}) => {
     const content = message.trim();
     const projectId = get().activeProjectId;
@@ -416,6 +393,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       || !conversationId
       || get().streaming
       || get().uploading
+      || hasActiveTask(get().activeRun)
     ) return;
 
     const temporaryUserId = `pending-user-${crypto.randomUUID()}`;
@@ -434,9 +412,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       messages: [...state.messages, pendingUser],
       streaming: true,
       liveTurn: [],
-      activeRunId: null,
-      activeRun: null,
-      approvals: [],
       pendingClarification: null,
       error: null,
     }));
@@ -459,9 +434,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }, (runId) => {
         if (get().activeConversationId !== conversationId) return;
         rememberRun(conversationId, runId);
-        set({ activeRunId: runId });
+        set({ activeRunId: runId, activeRun: null });
       }, {
-        autonomyMode: get().autonomyMode,
         parentRunId: options.parentRunId,
       });
       if (!terminalEventReceived) {
@@ -541,7 +515,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({
           activeRunId: null,
           activeRun: null,
-          approvals: [],
           pendingClarification: null,
         });
         return;
@@ -565,10 +538,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const detail = await getAgentRun(runId);
       const latestSequence = numberValue(detail.state?.last_sequence) ?? 0;
-      const [approvals, events] = await Promise.all([
-        listAgentApprovals(runId),
-        getAgentRunEvents(runId, Math.max(0, latestSequence - 1000)),
-      ]);
+      const events = await getAgentRunEvents(
+        runId,
+        Math.max(0, latestSequence - 1000),
+      );
       if (
         get().activeConversationId !== conversationId
         || detail.run.conversation_id !== conversationId
@@ -577,7 +550,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({
         activeRunId: runId,
         activeRun: detail,
-        approvals,
         pendingClarification: pendingClarification(detail, events.events),
       });
     } catch (error) {
@@ -702,43 +674,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           steps: response.steps,
         },
       });
-    } catch (error) {
-      set({ error: errorMessage(error) });
-      throw error;
-    } finally {
-      set({ collaborationBusy: null });
-    }
-  },
-
-  decideApproval: async (approvalId, decision, reason) => {
-    const runId = get().activeRunId;
-    if (!runId || get().collaborationBusy) return;
-    set({ collaborationBusy: `approval-${decision}`, error: null });
-    try {
-      const [fresh, currentApprovals] = await Promise.all([
-        getAgentRun(runId),
-        listAgentApprovals(runId),
-      ]);
-      const approval = currentApprovals.find(
-        (item) => item.approval_id === approvalId,
-      );
-      if (!approval) throw new Error("授权请求已不存在或当前主体无权查看。");
-      const response = await decideAgentApproval(
-        runId,
-        fresh.run.state_version,
-        approvalId,
-        approval.version,
-        decision,
-        reason,
-      );
-      set({
-        activeRun: { ...fresh, run: response.run },
-        approvals: currentApprovals.map((item) => (
-          item.approval_id === approvalId ? response.approval : item
-        )),
-      });
-      // 重新读取服务端派生投影，使 Join 确认/恢复状态与 ApprovalRecord 同步。
-      await get().refreshActiveRun(runId);
     } catch (error) {
       set({ error: errorMessage(error) });
       throw error;
@@ -874,9 +809,6 @@ function runStatusForEvent(event: ChatStreamEvent): AgentRunStatus | undefined {
     "run.started": "running",
     "run.resumed": "running",
     "run.paused": "paused",
-    "autonomy.plan_review_requested": "paused",
-    "approval.requested": "paused",
-    "approval.waiting": "paused",
     waiting_user: "waiting_user",
     "clarification.answered": "planning",
     "verification.started": "verifying",
@@ -936,12 +868,6 @@ function clarificationFromPayload(
 
 function runStorageKey(conversationId: string): string {
   return `chatbi.agentRun.${conversationId}`;
-}
-
-function initialAutonomyMode(): AgentAutonomyMode {
-  if (typeof window === "undefined") return "read_only";
-  const value = window.sessionStorage.getItem("chatbi.autonomyMode");
-  return value === "assisted" || value === "autonomous" ? value : "read_only";
 }
 
 function rememberRun(conversationId: string, runId: string): void {
@@ -1165,4 +1091,13 @@ function stringArray(value: unknown): string[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求失败，请稍后重试。";
+}
+
+function hasActiveTask(detail: AgentRunDetail | null): boolean {
+  return detail !== null && ![
+    "completed",
+    "blocked",
+    "failed",
+    "cancelled",
+  ].includes(detail.run.status);
 }

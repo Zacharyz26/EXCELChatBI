@@ -513,96 +513,24 @@ async def test_collaboration_api_enforces_subject_version_and_idempotency(
     current = tasks.get_run(run_id)
     assert current is not None
 
-    run, approval, _, _ = tasks.request_approval(
-        run_id,
-        expected_version=current.state_version,
-        idempotency_key="seed-api-approval",
-        tenant_id="tenant-a",
-        subject_user_id="alice",
-        requested_by_user_id="alice",
-        step_id="analyze",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-        risk_level="critical",
-        expires_at=_approval_expiry(),
-    )
-    blocked_resume = await client.post(
-        f"/agent/runs/{run_id}/resume/stream",
-        headers={
-            "Authorization": f"Bearer {_ALICE_TOKEN}",
-            "If-Match": str(run.state_version),
-            "Idempotency-Key": "resume-before-approval",
-        },
-    )
-    assert blocked_resume.status_code == 409
-    assert "待决定" in blocked_resume.json()["detail"]
     alice_headers = {"Authorization": f"Bearer {_ALICE_TOKEN}"}
-    bob_headers = {"Authorization": f"Bearer {_BOB_TOKEN}"}
-    approvals = await client.get(
+    removed_list = await client.get(
         f"/agent/runs/{run_id}/approvals",
         headers=alice_headers,
     )
-    assert len(approvals.json()) == 1
-    bob_approvals = await client.get(
-        f"/agent/runs/{run_id}/approvals",
-        headers=bob_headers,
-    )
-    assert bob_approvals.json() == []
-
-    decision_path = f"/agent/runs/{run_id}/approvals/{approval.approval_id}/decision"
-    decision_headers = {
-        "Authorization": f"Bearer {_ALICE_TOKEN}",
-        "If-Match": str(run.state_version),
-        "Idempotency-Key": "api-approval-decision",
-    }
-    bob_decision_headers = {
-        **decision_headers,
-        "Authorization": f"Bearer {_BOB_TOKEN}",
-    }
-    assert (
-        await client.post(
-            decision_path,
-            json={
-                "expected_version": approval.version,
-                "decision": "approved",
-                "reason": "越权",
-            },
-            headers=bob_decision_headers,
-        )
-    ).status_code == 409
-    decision = await client.post(
-        decision_path,
+    assert removed_list.status_code == 404
+    removed_decision = await client.post(
+        f"/agent/runs/{run_id}/approvals/{'a' * 32}/decision",
         json={
-            "expected_version": approval.version,
+            "expected_version": 1,
             "decision": "approved",
-            "reason": "确认执行",
+            "reason": "不再提供人工审批",
         },
-        headers=decision_headers,
-    )
-    assert decision.status_code == 200
-    assert decision.json()["approval"]["status"] == "approved"
-    assert decision.json()["replayed"] is False
-    assert (
-        await client.post(
-            decision_path,
-            json={
-                "expected_version": approval.version,
-                "decision": "approved",
-                "reason": "确认执行",
-            },
-            headers=bob_decision_headers,
-        )
-    ).status_code == 409
-    replay = await client.post(
-        decision_path,
-        json={
-            "expected_version": approval.version,
-            "decision": "approved",
-            "reason": "确认执行",
+        headers={
+            **alice_headers,
+            "If-Match": str(current.state_version),
+            "Idempotency-Key": "removed-approval-decision",
         },
-        headers=decision_headers,
     )
-    assert replay.status_code == 200
-    assert replay.json()["replayed"] is True
+    assert removed_decision.status_code == 404
     await client.aclose()

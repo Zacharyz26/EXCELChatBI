@@ -882,39 +882,6 @@ select {
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff 20%);
 }
 
-.autonomy-selector {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 2px 8px;
-}
-
-.autonomy-option {
-  padding: 5px 8px;
-  color: #7b8699;
-  font-size: 9px;
-  font-weight: 700;
-  background: #f5f6f8;
-  border: 1px solid #e2e5eb;
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.autonomy-option--active {
-  color: #4f62c8;
-  background: #edf0ff;
-  border-color: #cfd6fb;
-}
-
-.autonomy-selector > span {
-  min-width: 0;
-  overflow: hidden;
-  color: #929baa;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .chat-composer,
 .chat-error,
 .composer-hint {
@@ -2014,7 +1981,6 @@ select {
 
 .agent-run-card__heading,
 .agent-section__title,
-.agent-approval__heading,
 .agent-plan-step__body > div,
 .agent-plan-editor__heading {
   display: flex;
@@ -2059,8 +2025,7 @@ select {
 }
 
 .agent-status,
-.agent-step-status,
-.agent-risk {
+.agent-step-status {
   display: inline-flex;
   align-items: center;
   min-height: 21px;
@@ -2106,7 +2071,6 @@ select {
 }
 
 .agent-run-actions,
-.agent-approval__actions,
 .agent-plan-editor__actions {
   display: flex;
   justify-content: flex-end;
@@ -2115,7 +2079,6 @@ select {
 }
 
 .agent-run-actions button,
-.agent-approval__actions button,
 .agent-plan-editor__actions button,
 .agent-clarification-card form button {
   padding: 7px 11px;
@@ -2129,7 +2092,6 @@ select {
 }
 
 .agent-run-actions .agent-primary-button,
-.agent-approval__actions .agent-primary-button,
 .agent-plan-editor__actions .agent-primary-button,
 .agent-clarification-card form .agent-primary-button {
   color: #fff;
@@ -2137,8 +2099,7 @@ select {
   border-color: #586bd8;
 }
 
-.agent-run-actions .agent-danger-button,
-.agent-approval__actions .agent-danger-button {
+.agent-run-actions .agent-danger-button {
   color: #a3424f;
   background: #fff3f4;
   border-color: #efd6da;
@@ -2459,12 +2420,6 @@ select {
   border-radius: 999px;
 }
 
-.agent-join-status--awaiting_approval,
-.agent-join-status--approved {
-  color: #98601f;
-  background: #fff0d4;
-}
-
 .agent-join-status--completed {
   color: #247453;
   background: #e7f6ee;
@@ -2627,26 +2582,6 @@ select {
   background: #fff1f3;
   border-color: #efd1d6;
 }
-
-.agent-approval__join-scope {
-  margin: 8px 0 10px;
-  padding: 8px;
-  background: #fffdf8;
-  border: 1px solid #eee2ca;
-  border-radius: 6px;
-}
-
-.agent-approval__join-scope strong,
-.agent-approval__join-scope p,
-.agent-approval__join-scope small {
-  display: block;
-  margin: 0;
-  color: #6b604c;
-  font-size: 8.5px;
-  line-height: 1.5;
-}
-
-.agent-approval__join-scope p { margin-top: 4px; }
 
 .agent-tool-audits {
   display: grid;
@@ -2865,7 +2800,6 @@ select {
 }
 
 .agent-clarification-card form,
-.agent-approval label,
 .agent-plan-editor label {
   display: grid;
   gap: 5px;
@@ -2875,7 +2809,6 @@ select {
 }
 
 .agent-clarification-card textarea,
-.agent-approval textarea,
 .agent-plan-editor input,
 .agent-plan-editor textarea {
   width: 100%;
@@ -2941,85 +2874,6 @@ select {
 
 .agent-plan-step__body > button {
   margin-top: 7px;
-}
-
-.agent-approval-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 13px;
-}
-
-.agent-approval {
-  padding: 12px;
-  background: #f8f9fb;
-  border: 1px solid #e4e7ed;
-  border-radius: 9px;
-}
-
-.agent-approval--pending {
-  background: #fffaf2;
-  border-color: #eadbbf;
-}
-
-.agent-approval__heading > div {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.agent-approval__heading strong {
-  color: #344055;
-  font-size: 11px;
-}
-
-.agent-approval__heading > span {
-  color: #7e8999;
-  font-size: 9px;
-}
-
-.agent-risk--high {
-  color: #9a6223;
-  background: #fff0d4;
-}
-
-.agent-risk--critical {
-  color: #a33a49;
-  background: #ffe9ec;
-}
-
-.agent-approval dl {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px 14px;
-  margin: 10px 0;
-}
-
-.agent-approval dl > div {
-  display: flex;
-  min-width: 0;
-  gap: 5px;
-  font-size: 9px;
-}
-
-.agent-approval dt { color: #a0a8b4; }
-.agent-approval dd {
-  min-width: 0;
-  margin: 0;
-  color: #667287;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-approval textarea {
-  min-height: 62px;
-}
-
-.agent-approval__reason {
-  margin: 8px 0 0;
-  color: #707b8e;
-  font-size: 9.5px;
-  line-height: 1.55;
 }
 
 .agent-plan-editor {
@@ -3227,8 +3081,7 @@ select {
   }
 
   .memory-card__facts,
-  .memory-editor__fields,
-  .agent-approval dl {
+  .memory-editor__fields {
     grid-template-columns: 1fr;
   }
 

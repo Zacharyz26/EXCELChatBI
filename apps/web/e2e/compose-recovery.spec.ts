@@ -20,9 +20,8 @@ test("全新浏览器从服务端恢复 TaskRun 与报告，且 MCP 不暴露", 
   await expect(controlButton).toBeEnabled({ timeout: 30_000 });
   await controlButton.click();
   const panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel.locator(".agent-status")).toHaveText("已阻塞");
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
   await expect(panel).toContainText(`Run ${latestRunId.slice(0, 10)}`);
-  await expect(panel).toContainText("标准只读");
   await panel.getByRole("button", {
     name: `查看分支 ${runId.slice(0, 10)}…`,
   }).click();

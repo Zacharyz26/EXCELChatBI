@@ -45,6 +45,7 @@ from apps.orchestrator.agent_tools import (
     enabled_capability_profiles_from_settings,
     mcp_client_config_from_settings,
 )
+from apps.orchestrator.run_manager import ActiveConversationRunError
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -71,6 +72,16 @@ async def chat_stream(
         principal,
         write=True,
     )
+    task_store = TaskStore(store.db_path)
+    active_run = await run_in_threadpool(
+        task_store.get_active_run_for_conversation,
+        conversation.id,
+    )
+    if active_run is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="当前对话已有未完成任务，请先继续或取消该任务。",
+        )
     if req.parent_run_id is not None:
         parent = await run_in_threadpool(
             TaskStore(store.db_path).get_run,
@@ -116,29 +127,34 @@ async def chat_stream(
         run_timeout_seconds=settings.agent_run_timeout_seconds,
         model_timeout_seconds=settings.agent_model_timeout_seconds,
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
-        approval_ttl_seconds=settings.agent_approval_ttl_seconds,
         max_parallel_tools=settings.agent_max_parallel_tools,
     )
     run_id = uuid.uuid4().hex
-    subscription = agent_run_manager.start(
-        run_id,
-        lambda control: stream_agent_chat(
+    try:
+        subscription = agent_run_manager.start(
+            run_id,
+            lambda control: stream_agent_chat(
+                conversation_id=conversation.id,
+                project_id=conversation.project_id,
+                user_text=req.message,
+                store=store,
+                gateway=gateway,
+                registry=registry,
+                locks=conversation_locks,
+                config=config,
+                planner_gateway=gateway,
+                principal=principal,
+                run_id=run_id,
+                control=control,
+                parent_run_id=req.parent_run_id,
+            ),
             conversation_id=conversation.id,
-            project_id=conversation.project_id,
-            user_text=req.message,
-            store=store,
-            gateway=gateway,
-            registry=registry,
-            locks=conversation_locks,
-            config=config,
-            planner_gateway=gateway,
-            principal=principal,
-            run_id=run_id,
-            control=control,
-            autonomy_mode=req.autonomy_mode,
-            parent_run_id=req.parent_run_id,
-        ),
-    )
+        )
+    except ActiveConversationRunError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="当前对话已有未完成任务，请先继续或取消该任务。",
+        ) from exc
     return EventSourceResponse(
         subscription,
         ping=15,

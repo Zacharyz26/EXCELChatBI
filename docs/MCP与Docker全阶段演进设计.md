@@ -1,8 +1,15 @@
 # MCP 与 Docker 全阶段演进设计
 
 > 状态：总体设计已完成；v2.5 阶段 3–6 已通过真实 Compose CI 工程关闭
-> · 更新日期：2026-08-14
+> · 更新日期：2026-08-24
 > 范围：v2.4 基础能力完成后的 v2.5 阶段 3–6、独立安全项目和 v3.0 阶段 7–8
+
+> **收尾修订**：当前产品只有一个对话式 Agent。人工审批执行链和三档自主等级已从 API、
+> React 与 Agent 运行路径撤下；历史记录与兼容结构仅用于演进追溯/旧库兼容。现有注册工具
+> 通过 Gateway 的目录、Schema、权限、预算、版本、预检和 Evidence 检查后自动执行。
+> 完整多租户隔离已取消，多 Agent 仅保留为真实负载评测证明收益后的候选。
+> 2026-08-24 已补充验证独立 Milvus Compose + 本机单实例完整 BGE 的开发拓扑；根 Compose
+> 仍是生产结构/E2E 入口，两者用途不同，见 `docs/README.md`。
 
 ## 1. 文档定位
 
@@ -45,7 +52,7 @@ Invocation、Evidence Ledger 与 Verifier 结果状态；6C-3 已实现受预算
 Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和预测传输/恢复探针已由
 提交 `3febd68` 的
 [run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
-完整 CI 关闭。6E-1～6E-4 的只读预检、高风险固定 Join/多父血缘、React 协作、
+   完整 CI 关闭。6E-1～6E-4 的只读预检、固定 Join/多父血缘、React 协作、
 脱敏质量门禁、双传输和 Compose 恢复由提交 `92a6f02` 交付；
 [run 31767613363](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31767613363)
 已确认 backend、frontend 与 containers/Compose 三项全绿，阶段 6E 工程关闭。
@@ -54,8 +61,8 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 
 ### 2.1 MCP 边界
 
-1. Agent Host 始终拥有目标、计划、记忆、TaskRun、审批和 Evidence Ledger；MCP Server
-   只执行被授权的一次能力调用，不能读取完整对话或自行结束任务。
+1. Agent Host 始终拥有目标、计划、记忆、TaskRun 和 Evidence Ledger；MCP Server 只执行
+   通过 Host/Gateway 确定性准入的一次能力调用，不能读取完整对话或自行结束任务。
 2. Planner 依赖 capability，Executor 经 MCP Client Gateway 选择具体工具。任何 Agent、
    后台 Worker 或兼容 API 都不能绕过 Gateway 直接调用远程 Server。
 3. `inputSchema`、`outputSchema`、工具版本和后置条件单源生成；MCP annotations 只作为提示，
@@ -67,7 +74,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 6. 外部 HTTP MCP 必须使用受支持的授权流程，token 绑定目标 Server，禁止 token passthrough；
    Server 调用上游系统时使用独立凭据。
 7. MCP Tasks、sampling、elicitation 或未来扩展只有经过独立 ADR、能力协商和安全评审后才能
-   使用；不能靠协议新能力绕过 ChatBI 的 TaskRun、零 LLM 工具或审批边界。
+   使用；不能靠协议新能力绕过 ChatBI 的 TaskRun、零 LLM 工具或服务端准入边界。
 
 ### 2.2 Docker 边界
 
@@ -90,12 +97,12 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 |---|---|---|---|
 | v2.4 阶段 0–2 | 项目内标准 Server、Gateway、stdio/Streamable HTTP、能力契约 | API/Web/工具镜像、单机 Compose、RAG profile | 单 Agent 在单机规范调用内部 MCP |
 | v2.5 阶段 3 | 记忆引用与 Evidence 贯通，记忆仍由 Host 管理 | 持久卷、迁移、备份和重启恢复 | 容器重建不丢任务与记忆 |
-| v2.5 阶段 4 | 工具来源、权限、审批和健康状态进入 Agent 前端 | Web 代理、SSE、下载和控制操作的 Compose E2E | 用户可看见并干预 MCP 执行 |
+| v2.5 阶段 4 | 工具来源、权限和健康状态进入 Agent 前端；模式/审批在收尾版撤下 | Web 代理、SSE、下载和控制操作的 Compose E2E | 用户可看见并干预 MCP 执行 |
 | v2.5 阶段 5 | 版本化语义/知识 Resource 与 Evidence | `knowledge-tools`、RAG profile、索引/模型生命周期 | 业务口径先约束工具计算 |
 | v2.5 阶段 6 | 能力目录扩展、内部工具变更通知、受控并行 | stats/GPU/浏览器资源 profile 和容量门禁 | 自主探索可控且可扩容 |
 | 安全项目 A/B | `sql-tools` 与代码执行 façade，经独立准入 | 专用低权限镜像/网络；代码沙箱与业务容器分离 | 高风险能力可单独启停和审计 |
 | v3.0 阶段 7 | 外部 MCP 目录、OAuth/企业身份、连接器和无人值守身份 | Worker/调度/通知、外部状态、镜像供应链和滚动发布 | 可接企业数据并主动运行 |
-| v3.0 阶段 8 | 多 Agent 共享 Gateway、租户级工具目录和委派 | 无状态副本、HA、网络策略、租户配额和隔离 | 企业级多 Agent 数据平面 |
+| v3.0 阶段 8 候选 | 仅在真实评测证明收益后考虑多 Agent 委派 | 若立项再设计无状态副本、HA 和取消传播 | 单 Agent 优先；完整多租户隔离已取消 |
 
 ## 4. v2.5 阶段 3：记忆系统
 
@@ -109,7 +116,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
   MCP Server 不获得图写权限，也不通过 Resource 枚举完整项目血缘。
 - `RequestContext` 增加 `memory_snapshot_id` 和 `evidence_ledger_version`。Server 只看到执行所需
   的引用，不能查询全部项目记忆。
-- 用户可查看的项目知识未来可由 `knowledge-tools` 提供只读 Resource；个人偏好、审批记录和
+- 用户可查看的项目知识未来可由 `knowledge-tools` 提供只读 Resource；个人偏好、历史审批记录和
   对话摘要不通过 MCP Resource 暴露。
 
 ### Docker 设计
@@ -137,8 +144,8 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
   Evidence/Artifact 和简短行动理由；不展示原始内部推理或 Server 私有 `_meta`。
 - 修改计划、跳过、重试、调参、暂停和取消先写入 TaskEvent，再由 Host/Gateway 取消或重新发起
   MCP 调用。浏览器断线不能被解释为任务取消。
-- 高风险工具确认生成不可伪造的 ApprovalRecord，绑定 subject、run、plan version、step、
-  tool schema hash、参数摘要和有效期；前端按钮本身不是授权依据。
+- 当前不提供通用高风险确认或自主等级按钮；现有工具由 Host/Gateway 根据冻结目录、Schema、
+  主体/项目权限、预算、数据版本和预检 Evidence 决定是否执行。
 - 内部 Server 发出 `tools/list_changed` 时，Gateway 重新校验目录；未通过 schema/权限检查的
   变化不进入 Planner，也不能只靠前端隐藏。
 
@@ -147,12 +154,13 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 - Web 反向代理统一转发 API、SSE 和 Artifact/PDF 下载路径，关闭 SSE 缓冲并保留断线重连游标；
   MCP endpoint 不经公共 Web 路由暴露。
 - Web 运行时配置只包含公开 API 基址和版本，不包含模型或 MCP secrets。
-- Compose 浏览器 E2E 覆盖计划变更、审批、取消、页面刷新、代理重启和报告下载，避免再次出现
+- Compose 浏览器 E2E 覆盖计划变更、取消、页面刷新、代理重启和报告下载，避免再次出现
   “后端已生成但前端没有卡片/下载入口”的跨容器回归。
 
 ### 验收
 
-- 用户看到的工具来源、权限和结果与审计记录一致；未经批准的高风险调用在 Server 前被拒绝；
+- 用户看到的工具来源、权限和结果与审计记录一致；未注册、越权、Schema/版本/预检不一致的
+  调用在 Server 前被拒绝；
 - Web/API 重启或 SSE 重连后，计划版本、步骤和 Artifact 卡不丢失、不重复；
 - 从浏览器网络侧无法直接访问内部 MCP endpoint。
 
@@ -165,7 +173,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 > 5B-3 已交付项目目录、签名分页游标、订阅/退订与版本化通知；5B-4 已交付双传输等价、
 > Gateway 重新订阅及 Compose 重启门禁；5B-5 已交付原文/索引/模型缓存分离、Local/Milvus
 > 切代回滚和 CPU/GPU profile。真实 Compose 配置/重连门禁已全绿；runtime semantic 等价与
-> 领域代表性签字仍待目标机器和领域负责人确认。
+> 领域代表性签字已从收尾范围取消，保持未验证。
 
 - `knowledge-tools` 同时提供受控查询 Tool 和选择性只读 Resource。领域定义（业务指标只是
   其中一种）使用稳定 opaque URI，携带定义版本、生效时间、粒度、公式 hash、负责人和来源，
@@ -202,10 +210,10 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 > 匿名评测和 Compose 恢复门禁已由提交 `d5005ee` 的完整 CI 关闭。6D-1～6D-4 的统一
 > Evidence、高级统计、独立 `stats.forecast` Tool/Profile、匿名质量门禁、React 局限展示
 > 和预测双传输/Compose 恢复探针已由完整 CI 关闭。6E-1 已实现只读 Join 预检、
-> 双数据集 Host/MCP/TaskRun 授权和显式数据集/关联键澄清；6E-2 已实现参数哈希绑定
-> 的高风险授权、固定 Join 执行、SQLite v11 双父血缘和派生策略继承；6E-3 已实现
+> 双数据集 Host/MCP/TaskRun 权限检查和显式数据集/关联键澄清；6E-2 已实现固定 Join
+> 执行、SQLite v11 双父血缘和派生策略继承；6E-3 已实现
 > 精确预检/版本 Evidence 门禁和 React 协作恢复；6E-4 已实现 17 场景脱敏评测、项目/敏感键/
-> 授权发布契约、stdio/HTTP 等价与 `data-tools` 重启恢复；提交 `92a6f02` 的
+> 权限发布契约、stdio/HTTP 等价与 `data-tools` 重启恢复；提交 `92a6f02` 的
 > [run 31767613363](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31767613363)
 > 全绿并关闭 6E。
 
@@ -268,7 +276,7 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 ### MCP 设计
 
 - 建立受信 Server Catalog，记录 owner、canonical URI、协议/SDK、工具与 Resource schema hash、
-  数据分类、风险、授权方式、健康、版本和审批状态。发现只产生候选，管理员准入后才进入 Gateway。
+  数据分类、风险、授权方式、健康、版本和准入状态。发现只产生候选，管理员准入后才进入 Gateway。
 - 第三方/跨网络 Streamable HTTP 使用 TLS 和标准授权。交互式用户授权遵循 OAuth 2.1、PKCE、
   Resource Indicators 和 audience 校验；无人值守任务使用企业批准的机器身份/扩展，权限不超过
   触发器预授权范围。禁止 token passthrough。
@@ -300,7 +308,10 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 - 已签名镜像可从空环境部署，升级/回滚不丢 TaskRun、Evidence、Dataset 和 Artifact，故障 Worker
   可被重试且幂等。
 
-## 10. v3.0 阶段 8：多 Agent 与企业治理
+## 10. v3.0 阶段 8：多 Agent 候选
+
+> 本阶段不在当前主动计划内。完整多租户隔离已经取消；只有真实工作负载评测证明单 Agent
+> 存在明确的质量、隔离或并行瓶颈时，才重新立项以下设计。
 
 ### MCP 设计
 
@@ -309,8 +320,8 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 - Agent 间传递的是 TaskStep、Observation、Claim/Evidence reference 和取消信号，不把另一个
   Agent 默认伪装成 MCP Tool。若未来需要 Agent-to-Agent 协议，必须独立 ADR，不复用 Tool 的
   幂等、权限或完成语义。
-- 每个调用绑定 tenant/project/subject/agent/run/step/invocation 和 permission snapshot；MCP
-  session ID 不是身份。租户级 allowlist、配额、风险审批和审计由 Gateway 强制执行。
+- 每个调用绑定 project/subject/agent/run/step/invocation 和 permission snapshot；MCP session
+  ID 不是身份。能力 allowlist、配额和审计由 Gateway 强制执行。
 - 统一 Verifier 对所有子 Agent 的 Evidence 做最终校验；任何一个子 Agent 都不能直接把任务标记
   为成功或绕过主 TaskContract。
 
@@ -321,15 +332,13 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
   取决于幂等性、会话粘性和底层依赖。
 - 生产编排需要滚动升级、Pod/任务中断处理、反亲和/故障域、网络策略、secret manager、集中日志、
   trace、指标、配额和自动扩缩；具体平台以阶段 7 选型为基础。
-- 高风险 runner、连接器和普通分析工具分离节点池/网络域；GPU、Chromium 和代码沙箱不能与 API
+- 隔离 runner、连接器和普通分析工具分离节点池/网络域；GPU、Chromium 和代码沙箱不能与 API
   默认共享权限或宿主目录。
-- 多租户不得依赖“容器名不同”实现隔离。身份、数据库行列权限、对象前缀、向量分区、加密密钥、
-  缓存键和审计都必须带租户边界，并进行跨租户对抗测试。
 
 ### 验收
 
-- 子 Agent 越权、跨租户引用、重复执行、部分失败、网络分区和取消传播都有确定性结果；
-- 任一 API/Worker/Gateway 副本重启不会丢任务或造成 Artifact 重复，租户配额能抑制 noisy neighbor；
+- 子 Agent 越权、重复执行、部分失败、网络分区和取消传播都有确定性结果；
+- 任一 API/Worker/Gateway 副本重启不会丢任务或造成 Artifact 重复；
 - 版本、镜像 digest、模型、Prompt、工具 schema、Server、权限快照和数据版本足以复现最终结论。
 
 ## 11. 兼容、发布与测试矩阵
@@ -348,7 +357,7 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 | 本机开发 | stdio，必要时进程内测试适配 | 可不启容器；使用隔离测试数据 | schema、单工具、Planner/Verifier |
 | CI | stdio + Streamable HTTP | 临时镜像/Compose/volume | 契约等价、健康、权限、失败和重启 |
 | 单机部署 | 内部 Streamable HTTP | Compose + 持久卷 + profiles | 浏览器主链路、备份恢复、端口和 secrets |
-| 企业部署 | 受信远程 Streamable HTTP | OCI 镜像 + 外置状态 + 生产编排 | OAuth、准入、滚动升级、HA、租户隔离 |
+| 企业部署候选 | 受信远程 Streamable HTTP | OCI 镜像 + 外置状态 + 生产编排 | OAuth、准入、滚动升级和 HA |
 
 每阶段必须同时维护宿主机与容器测试；容器测试不能替代行为评测，stdio 测试也不能替代远程认证、
 网络故障和反向代理测试。
@@ -359,7 +368,7 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 - 安全项目 A：首批 SQL 数据源、方言、凭据和隔离粒度；
 - 安全项目 B：沙箱运行时、内核隔离级别和允许依赖；
 - 阶段 7：企业 IdP、机器身份、Server Catalog、生产编排平台、任务存储/队列/对象存储；
-- 阶段 8：租户隔离模型、Gateway 高可用、Agent 间协议和跨区域灾备。
+- 阶段 8（若重新立项）：Gateway 高可用、Agent 间协议和跨区域灾备。
 
 这些 ADR 未完成前可以做接口探针和威胁建模，但不能用默认值直接上线。
 

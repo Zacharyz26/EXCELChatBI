@@ -4,7 +4,34 @@
 
 > 开发约束见 [`CLAUDE.md`](./CLAUDE.md)，完整架构见
 > [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)，当前开发路线见
-> [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
+> [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。文档入口和现行/历史边界见
+> [`docs/README.md`](./docs/README.md)。
+
+> 文档状态：2026-08-24。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
+> 2A–2E 与 v2.5 阶段 3–6 已工程关闭。C1“启动依赖契约”和 C2“未实现工具撤出目录”仍是
+> 收尾项。2026-08-24 已在 WSL2/CPU 上实测完整 BGE-M3 + BGE reranker + Docker Milvus
+> Standalone：API/Web readiness、2 文档 6 片段重建和 semantic 门禁均通过。
+
+## 启动导航
+
+先按用途选择一种方式，不要混用两套 RAG 配置：
+
+| 目标 | RAG | Docker | 推荐入口 |
+|---|---|---|---|
+| 第一次跑通、日常前端/API 开发 | `hashing + lexical + local` | 不需要 | [方案 A：轻量本地启动](#方案-a轻量本地启动推荐新开发者) |
+| 使用完整中文语义模型和独立向量库 | `bge-m3 + bge-reranker-v2-m3 + Milvus` | 只运行 Milvus | [方案 B：完整 BGE + Docker Milvus](#方案-b完整-bge--docker-milvus) |
+| 验证生产结构、多 MCP 服务和统一入口 | 由 Compose profile 决定 | 全栈 | [方案 C：根 Compose](#方案-c根-compose-生产结构验收) |
+
+如果你刚接触本项目，先用方案 A；需要真实 RAG 时再切方案 B。方案 B 的逐项安装、模型
+侧载、RBAC、WSL2/Docker Desktop 排错见
+[`docs/本地完整BGE与Milvus启动指南.md`](./docs/本地完整BGE与Milvus启动指南.md)。
+
+成功启动后的地址：
+
+- Web：`http://127.0.0.1:5173`；
+- API 文档：`http://127.0.0.1:8000/docs`；
+- API readiness：`http://127.0.0.1:8000/health/ready`；
+- 根 Compose 统一入口：`http://127.0.0.1:8080`。
 
 ## 当前进度
 
@@ -13,7 +40,8 @@ Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
 SSE 展示。SQLite schema v11 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、
-幂等操作、不可变快照、资源关联、持久化对话压缩、ApprovalRecord、版本化领域定义与字段映射。
+幂等操作、不可变快照、资源关联、持久化对话压缩、版本化领域定义与字段映射；历史
+ApprovalRecord 持久化结构只为旧数据库兼容保留，不再属于当前产品执行路径。
 阶段 3A 的离线一致备份/恢复、
 Memory readiness 和 Compose 联合恢复门禁已经通过完整 CI；阶段 3B-1–3B-3
 与阶段 3C-1–3C-3 已由提交 `e3d51fd` 的真实 Docker/Compose CI 验证并关闭。
@@ -27,7 +55,8 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 已完成；提交 `d5a672d` 的 GitHub Actions
 [run 31063896157](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31063896157)
 已确认 backend、frontend 与真实 Compose Resource 重连/CPU-GPU 配置门禁全绿，阶段 5
-工程关闭。真实 CPU/GPU 模型语义等价和领域代表性签字继续作为发布债务，不由配置门禁代替。
+工程关闭。真实 CPU/GPU 模型语义等价和领域代表性签字已从收尾范围取消，未执行且不得
+被描述为通过。
 阶段 6A 已关闭：SQLite v9 为每个 TaskRun 固定不可变 capability/tool 目录快照，
 6A-2 已接入受治理目录换代和 profile 可用性；SQLite v10 进一步固定执行作用域、数据版本、
 取消树与 Evidence Ledger，并对同一 ready frontier 的受治理只读工具开启有界并行。提交
@@ -38,13 +67,19 @@ backend、frontend 和 Docker/Compose CI 验证并关闭，v2.5 阶段 3 已全�
 [run 31659188951](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31659188951)
 验证关闭。阶段 6D 已由提交 `3febd68` 的
 [run 31678576324](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31678576324)
-完整 CI 关闭。6E-1 已实现只读 Join 预检和双数据集三层授权，6E-2 已实现
-参数绑定审批后的固定 Join 执行、SQLite v11 多父血缘与派生策略继承；6E-3 已实现
-精确预检/数据版本门禁、React 审批恢复和完整双父血缘展示；6E-4 已实现 17 场景
-脱敏质量门禁、跨项目/敏感键/高风险授权发布契约、stdio/HTTP 等价、`data-tools`
+完整 CI 关闭。6E-1 已实现只读 Join 预检和双数据集三层权限校验，6E-2 已实现
+固定等值 Join、SQLite v11 多父血缘与派生策略继承；6E-3 已实现精确预检/数据版本门禁
+和完整双父血缘展示；6E-4 已实现 17 场景脱敏质量门禁、跨项目/敏感键发布契约、
+stdio/HTTP 等价、`data-tools`
 重启恢复和浏览器验收。提交 `92a6f02` 的
 [CI run 31767613363](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31767613363)
 已确认 backend、frontend 与真实 Compose 三项全绿，v2.5 阶段 6 全部工程关闭。
+
+2026-08-17 的收尾修订将产品统一为一个对话式 Agent：删除辅助、标准只读、自主三档模式，
+删除公开审批 API、审批界面及执行前等待审批流程。现有注册工具在 capability 白名单、JSON
+Schema、项目权限、预算、数据版本、预检和 Evidence 约束通过后自动执行。该修订同时修复了
+暂停任务持有对话锁、SSE 心跳掩盖无响应而导致界面长期显示“生成中”的问题：同一对话只允许
+一个活动 TaskRun，前端具有首事件/空闲超时，未完成任务必须继续或取消后才能发送下一条消息。
 
 本轮已完成安全与可运行性加固：`dataset_ref` 只能是服务端生成的 32 位不透明标识符；
 Bearer token 映射到用户/租户/角色，项目、对话、数据集、任务和报告均做成员隔离；模型、
@@ -78,17 +113,16 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   conversation/tenant/project 隔离、稳定图 hash、漂移检测和安全响应字段均失败关闭；
 - 工作区备份 manifest 与 Compose 联合恢复探针固定 v6 checksum、锚点/Claim/Plan 行数、
   非正文 lineage hash 及项目图 hash/计数；恢复漂移不允许服务就绪；
-- SQLite v6→v7 增加高风险 ApprovalRecord 与幂等授权操作；用户可在 `paused` 安全边界
-  创建不可变计划新版本，审批固定绑定 subject/run/plan/step/schema/参数摘要和有效期，
-  且批准只能被完全匹配的执行一次性消费；
-- 阶段 4A API 已提供计划修订、当前主体授权列表和批准/拒绝；所有写操作使用
-  `If-Match` 与 `Idempotency-Key`，成功后任务保持暂停并写入事件、快照和 Checkpoint；
-- 阶段 4B React 任务协作面板已接入真实 TaskRun：展示状态/版本/计划/步骤/风险摘要，
-  支持结构化澄清、暂停/显式恢复/取消、计划不可变修订、单步重试及 ApprovalRecord
-  批准/拒绝；批准本身不会恢复任务，浏览器按钮不作为授权依据；
-- `high/critical` 工具在 ToolInvocation 和 MCP 调用前原子暂停；显式恢复后只消费与当前
-  subject、计划、步骤、契约和参数完全匹配的批准，已消费绑定由 MCP Client Gateway 与
-  MCP Server 双重校验；当前未启用新的高风险生产工具；
+- SQLite v6→v7 的历史 ApprovalRecord/幂等操作表继续兼容旧库，但公开审批 API、React
+  审批交互和 Agent 审批暂停/消费路径已经撤下；当前生产目录没有需要人工审批的工具；
+- React 任务协作面板以真实 TaskRun 驱动，展示状态、版本、计划、步骤、Evidence 与工具审计，
+  支持结构化澄清、暂停/恢复/取消、计划不可变修订和单步重试；
+- 单一 Agent 执行路径不再接受 `autonomy_mode`。写入型已注册工具与只读工具一样先经过
+  capability、Schema、权限、预算、版本和后置条件校验，通过后自动执行；
+- 同一对话在进程内 RunManager 和 SQLite 原子创建层均只允许一个活动 TaskRun；重复消息会
+  明确返回 409，避免后台 producer 排队占锁而不产生 SSE 事件；
+- 浏览器 SSE 消费区分心跳与业务事件，首个业务事件和后续空闲均有超时；任务未完成时输入区
+  会锁定并引导用户在任务面板继续或取消，不再无限显示“生成中”；
 - SQLite v4→v5 增加不可变 ConversationCompaction 版本、精确来源条目和策略参数；
   Agent 使用有界、脱敏的确定性历史摘要与最近原文，TaskRun 恢复固定原 `compaction_id`；
 - 最小确定性 Verifier：最终正文先验证后发送，图表/报告必须有当前 run 的真实 Artifact，
@@ -123,7 +157,10 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
 - 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
-### 当前缺口
+### 当前边界与收尾缺口
+
+- C1 尚未完成：API 启动仍要求显式声明 `stats` extra，单独执行 `uv sync` 会移除统计依赖；
+- C2 尚未完成：需要把仍未实现的占位工具从 MCP/Agent 公开目录撤下，并增加目录完整性回归；
 
 - 依赖图调度、Observation 自动重规划、结构化澄清回答、单步重试、SSE 游标重连和
   服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁已通过真实 Compose CI；
@@ -134,14 +171,13 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   3D 用户治理与 3E 五阶段血缘/恢复已通过真实本机 full-stack E2E 和
   Docker/Compose CI；
   长期记忆自动提取尚未设计，当前继续禁止通用模型 `memory.write`；
-- 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API、企业审计和完整审批策略尚未实现；
+- 静态 Bearer 鉴权已落地；OIDC/OAuth、成员管理 API 和企业审计尚未实现；
 - Agent Executor 已切到 MCP Client Gateway；支持 stdio/认证 Streamable HTTP、
   Host RequestContext、超时/取消、健康代次和只读幂等有限重连，部署环境禁止进程内降级；
-- 单机生产结构 Compose 与 Milvus CPU/GPU RAG profile 已提供；多实例外置状态、对象存储和
-  阶段 6 重型分析工具 profile 尚未完成；
-- 前端已提供结构化澄清、计划编辑、审批、暂停/续跑、工具来源/权限/健康审计视图、
-  SSE 重连、三档自主等级、分析分支对比和追加式反馈闭环；辅助确认、反馈后 LLM 分支和
-  标准只读副作用拒绝的 Compose 场景已通过真实 Docker runner 验证；
+- 单机生产结构 Compose、Milvus CPU/GPU RAG profile 及阶段 6 重型分析工具 profile 已提供；
+  多实例外置状态和对象存储不在当前收尾范围；
+- 前端已提供结构化澄清、计划编辑、暂停/续跑、工具来源/权限/健康审计视图、SSE 重连、
+  分析分支对比和追加式反馈闭环；产品只保留一个自动调用受治理工具的对话式 Agent；
 - SQLite v8 领域定义、字段映射、受控公式编译和 `domain_definition_lookup` 已接入 Evidence；
   `knowledge-tools` 已提供按签名 project/subject/conversation 过滤的领域定义 Resource
   `list/read`，共享服务 token 不作为用户身份；
@@ -150,27 +186,29 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   运行中的新目录；
 - SQLite v10 为 TaskRun 原子固定共享预算、数据集版本绑定和取消树；独立只读幂等分支
   可有界并行，结果由 Host 按统一 Evidence Ledger 原子提交，不跨版本、不分裂预算；
-- SQLite v11 以不可变边表保存多父 Dataset 血缘和 TaskRun 双父版本绑定；受治理 Join 先预检、
-  再经参数哈希绑定的高风险审批执行，并继承两侧更严格的数据策略；
-- 知识库仍是实例级共享资源，尚未做租户级索引隔离；
+- SQLite v11 以不可变边表保存多父 Dataset 血缘和 TaskRun 双父版本绑定；受治理 Join 先预检，
+  再由 Host 校验完全一致的参数和数据版本后自动执行，并继承两侧更严格的数据策略；
+- 知识库仍是实例级共享资源；当前收尾版本明确限定单租户部署，不承诺跨租户索引隔离；
 - 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
 
 ### 已规划但未实现
 
 - **v2.4 收口**：阶段 2 的 20×3 真实行为对照已完成并通过自动门禁（任务成功率
   70.0%、终态如实率 73.3%、越界 0），Compose/容器 CI 已全绿；现有评测全部使用商业
-  数据语境，人工盲评暂缓，需补代表性场景和 Verifier 评分契约后再完成 G7 签字；
+  数据语境，G7 人工盲评/签字已取消，因此仍不能宣称代表性产品验收通过；
 - **v2.5**：阶段 3A–3E、4A–4D、阶段 5 和阶段 6A～6E 工程门禁已完成并通过真实 Compose CI；
-  真实 CPU/GPU semantic 等价和领域签字继续作为发布债务；
+  真实 CPU/GPU semantic 等价和领域签字已取消且保持“未验证”；
 - **独立安全项目**：以隔离 MCP Server/运行环境交付受限 SQL、受限 Code Interpreter，普通 Docker 容器不替代代码沙箱；
-- **v3.0**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和容器发布供应链、多 Agent、多租户和企业治理。
+- **v3.0 候选**：内部数据连接器、后台主动任务、外部 MCP 准入与企业授权、外置状态和
+  容器发布供应链；多 Agent 只有在单 Agent 真实工作负载评测证明存在质量或并行收益时才考虑，
+  完整多租户隔离已取消。
 
 这些能力已进入路线图，但不得在代码和交付说明中提前标记为完成。
 
 ## Agent 演进路线
 
 ```text
-当前 v2.4 阶段 2E（代码与容器 CI 已完成，G7 代表性评审债务保留）
+当前 v2.4 阶段 2E（代码与容器 CI 已完成，G7 人工部分取消且未通过）
   理解目标 → 必要澄清 → 结构化计划 → 受控执行
       ↑                      （依赖图 ready frontier）↓
   持久状态 ← 最终交付 ← Verifier ← Evidence
@@ -197,12 +235,12 @@ v2.5 阶段 3E（已完成，Docker/Compose CI 全绿）
   领域中立质量门禁 + readiness/备份 hash + API 重启/离线恢复图一致性
 
 v2.5 阶段 4（已完成；真实 Compose 门禁全绿）
-  SQLite v7 + 计划干预/审批授权边界 + Executor/Gateway/Server 双重校验
-  React 协作 → 服务端恢复/SSE 重连/工具审计 → 自主等级/分支/反馈 → Compose 关闭门禁
+  SQLite v7 + 计划干预 + TaskRun 控制与恢复
+  React 协作 → 服务端恢复/SSE 重连/工具审计 → 分支/反馈 → 单一 Agent 执行路径
 
-v2.5 阶段 5（工程关闭；真实 CPU/GPU semantic 与领域签字债务保留）
+v2.5 阶段 5（工程关闭；真实 CPU/GPU semantic 与领域签字取消且未验证）
   SQLite v8 版本化定义 + 受控公式 + Evidence → MCP Resource list/read
-  定义/数据 Claim + 旧报告复核 → 目录分页/订阅/通知 → 双传输/重连 → RAG 生命周期 → 代表性签字
+  定义/数据 Claim + 旧报告复核 → 目录分页/订阅/通知 → 双传输/重连 → RAG 生命周期
 
 v2.5 阶段 6A（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   SQLite v9 TaskRun capability/tool 快照 → tools/list_changed 换代 → profile 可用性
@@ -225,12 +263,12 @@ v2.5 阶段 6E（已关闭；完整 CI 与 Compose 恢复门禁全绿）
   Docker：仅 Web 公网入口 → 私网 API/MCP → 分卷/secrets/重启 E2E
 
 v2.5 延伸
-  MCP：记忆/Evidence 引用 → 前端审批 → 知识 Resource → 自主分析能力目录
+  MCP：记忆/Evidence 引用 → 知识 Resource → 自主分析能力目录
   Docker：状态恢复 → 代理 E2E → RAG CPU/GPU 生命周期 → 重型分析工具资源 profile
 
 v3.0
   数据连接器 + 主动任务 + 外部 MCP 治理/OAuth
-  外置状态 + 镜像供应链/多实例 + 多 Agent/租户隔离
+  外置状态 + 镜像供应链/多实例；多 Agent 仅保留为评测驱动候选
 ```
 
 完整阶段、依赖和验收标准见 [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。
@@ -263,11 +301,11 @@ Governance → MCP Client Gateway
              ├─ stdio（本地）
              └─ 认证 Streamable HTTP（部署）
       ↓
-parquet/报告文件 + SQLite v9 + Local/Milvus 知识库
+parquet/报告文件 + SQLite v11 + Local/Milvus 知识库
 ```
 
 Dify 已放弃。Agent 生产执行已使用 MCP 单源契约、官方 SDK Server/Client 和受治理
-Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已把 11 个 Agent 工具分配到
+Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已把 17 个 Agent 工具分配到
 五个独立服务，v3.0 再扩展外部 MCP 的动态发现、授权与准入治理。
 
 ## 目录速览
@@ -288,74 +326,120 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 | `tests` | 后端单元/集成、Agent 控制面与安全回归 |
 | `apps/web/e2e` | Playwright 浏览器 E2E |
 
-## 快速开始
+## 本地启动
 
-本机开发推荐先使用确定性轻量 RAG（`hashing + lexical + local`）。当前 API 启动时会
-注册统计路由和 Agent 统计工具，因此 `stats` 是本地启动的最小 extra；只执行不带 extra
-的 `uv sync` 会移除 `statsmodels/scikit-learn` 等可选包，随后 API 将无法导入。
+### 前置环境
+
+- Python `3.11`、[`uv`](https://docs.astral.sh/uv/)、Node.js `20`、pnpm `9`；
+- 方案 B/C 还需要 Docker Engine 或 Docker Desktop，并能执行 `docker compose version`；
+- 使用对话 Agent 时，在 `.env` 中填写有效的 `DEEPSEEK_API_KEY`；只检查 health/知识库
+  存储不要求模型 API key；
+- 完整 CPU BGE 建议给 WSL/宿主机至少 16 GiB 内存并准备约 5 GiB 模型磁盘空间。
+
+所有命令默认从仓库根目录执行。
+
+### 方案 A：轻量本地启动（推荐新开发者）
+
+首次配置和安装：
 
 ```bash
-# 1. 配置
 cp .env.example .env
 cp config/models.example.yaml config/models.yaml
-cp config/data_policy.example.yaml config/data_policy.yaml  # 可选
-
-# 2. 安装可启动 API 的最小依赖；不要改成单独的 `uv sync`
+cp config/data_policy.example.yaml config/data_policy.yaml
 uv sync --extra stats
-
-# 3. 启动后端；重复声明 extra，保证 uv 校验环境时保留统计依赖
-uv run --extra stats uvicorn apps.api.main:app --reload
-
-# 4. 另开终端启动前端
-cd apps/web
-pnpm install
-pnpm dev
+pnpm --dir apps/web install
 ```
 
-默认地址：后端 `http://127.0.0.1:8000`，前端 `http://127.0.0.1:5173`。
-`.env.example` 默认已经设置：
+确认 `.env` 使用轻量 RAG：
 
 ```dotenv
 RAG_EMBEDDER=hashing
 RAG_RERANKER=lexical
 RAG_STORE=local
-RAG_RUNTIME_PROFILE=auto
+RAG_RUNTIME_PROFILE=baseline
+EMBEDDING_DEVICE=cpu
 ```
 
-如果现有 `.env` 已切换为 `RAG_EMBEDDER=bge`、`RAG_RERANKER=bge`、
-`RAG_STORE=milvus`，则必须同时安装并保留 `stats` 和 `rag`：
+终端 1 启动 API：
 
 ```bash
-uv sync --extra stats --extra rag
-uv run --extra stats --extra rag uvicorn apps.api.main:app --reload
+uv run --extra stats uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-该档位会在启动时 fail-fast 加载 bge-m3、bge-reranker 和 Milvus；需要可访问
-Hugging Face，或把 `EMBEDDING_MODEL`、`RERANK_MODEL` 配置为已侧载的本地权重目录。
-仅临时切回轻量档位而不修改 `.env` 时可以运行：
+终端 2 启动 Web：
 
 ```bash
-RAG_EMBEDDER=hashing RAG_RERANKER=lexical RAG_STORE=local \
-  RAG_RUNTIME_PROFILE=baseline \
-  uv run --extra stats uvicorn apps.api.main:app --reload
+pnpm --dir apps/web dev --host 127.0.0.1 --port 5173
 ```
 
-单机容器部署：
+### 方案 B：完整 BGE + Docker Milvus
+
+该方案让 Milvus/etcd/MinIO 运行在 Docker 中，API、BGE 和 Web 运行在本机/WSL。这样只加载
+一份 BGE，适合 16 GiB 左右的 CPU 开发环境。首次安装和初始化必须按
+[`本地完整 BGE 与 Milvus 启动指南`](./docs/本地完整BGE与Milvus启动指南.md)执行；完成后
+日常启动只需三个终端：
 
 ```bash
-docker compose up --build
+# 终端 1：Milvus
+docker compose --env-file deploy/milvus/.env \
+  -f deploy/milvus/docker-compose.yml up -d
+
+# 终端 2：API；不要加 --reload，避免完整 BGE 重复加载
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+NO_PROXY=127.0.0.1,localhost,::1 no_proxy=127.0.0.1,localhost,::1 \
+uv run --no-sync uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+
+# 终端 3：Web
+pnpm --dir apps/web dev --host 127.0.0.1 --port 5173
 ```
 
-默认入口为 `http://127.0.0.1:8080`。生产认证、数据卷和真实 E2E 说明见
-[`docs/全栈部署与E2E.md`](./docs/全栈部署与E2E.md)。
+首次导入或原文变更后，通过已加载模型的 API 重建，避免另一个进程重复加载 BGE：
+
+```bash
+curl --fail --request POST http://127.0.0.1:8000/kb/rebuild \
+  --header 'Content-Type: application/json' --data '{}'
+curl --fail http://127.0.0.1:8000/health/ready
+uv run --no-sync python scripts/kb_admin.py status
+```
+
+### 方案 C：根 Compose（生产结构验收）
+
+默认根 Compose 使用轻量 RAG，构建 API、Web、edge 和五个 MCP 服务：
+
+```bash
+docker compose up --build -d
+docker compose ps
+curl --fail http://127.0.0.1:8080/api/health/ready
+```
+
+完整 CPU/GPU RAG profile、认证、secrets、卷和真实 E2E 命令见
+[`docs/全栈部署与E2E.md`](./docs/全栈部署与E2E.md)与
+[`docs/知识库部署与运维.md`](./docs/知识库部署与运维.md)。
+
+### 启动失败时先检查
+
+```bash
+docker compose --env-file deploy/milvus/.env \
+  -f deploy/milvus/docker-compose.yml ps
+curl --fail http://127.0.0.1:9091/healthz
+curl --fail http://127.0.0.1:8000/health/ready
+```
+
+- `RAG_RUNTIME_PROFILE=cpu` 必须同时使用 `bge/bge/milvus + EMBEDDING_DEVICE=cpu`；
+- `ModuleNotFoundError: FlagEmbedding/pymilvus`：重新执行
+  `uv sync --extra stats --extra rag`；
+- Milvus `permission deny ... CreateCollection`：重新运行修复后的
+  `scripts/milvus_bootstrap.py`，业务角色需要 `default` 数据库的 `DatabaseAdmin` 和
+  `CollectionAdmin`；
+- WSL/Docker credential helper、模型下载超时和内存问题见完整启动指南的排错章节。
 
 ## 测试与检查
 
 ```bash
 # 后端
-uv run pytest
-uv run ruff check .
-uv run mypy .
+uv run --extra stats pytest
+uv run --extra stats ruff check .
+uv run --extra stats mypy .
 
 # 前端
 cd apps/web
@@ -375,9 +459,9 @@ cd ../..
 工作区离线备份/恢复要求先停止 API 和所有写服务。宿主机部署可使用：
 
 ```bash
-uv run python -m apps.api.workspace_admin backup --service-stopped
-uv run python -m apps.api.workspace_admin verify --input .data/workspace_backups/<backup>
-uv run python -m apps.api.workspace_admin restore \
+uv run --no-sync python -m apps.api.workspace_admin backup --service-stopped
+uv run --no-sync python -m apps.api.workspace_admin verify --input .data/workspace_backups/<backup>
+uv run --no-sync python -m apps.api.workspace_admin restore \
   --input .data/workspace_backups/<backup> \
   --service-stopped --yes --replace-files
 ```
@@ -397,7 +481,8 @@ uv sync --extra stats
 
 # 确定性 RAG + 统计 + 报告 + 截图（常用本地完整档位）
 uv sync --extra stats --extra report --extra chart-screenshot
-uv run playwright install --with-deps chromium
+uv run --extra stats --extra report --extra chart-screenshot \
+  playwright install --with-deps chromium
 
 # 真实 bge/Milvus 语义检索
 uv sync --extra stats --extra rag
@@ -414,13 +499,13 @@ uv sync --all-extras
 
 ```bash
 # 增量/全量重建
-uv run python scripts/kb_rebuild.py --mode incremental
-uv run python scripts/kb_rebuild.py --mode full
+uv run --no-sync python scripts/kb_rebuild.py --mode incremental
+uv run --no-sync python scripts/kb_rebuild.py --mode full
 
 # 质量门禁、状态和负载测试
-uv run python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
-uv run python scripts/kb_admin.py status
-uv run python scripts/kb_load_test.py --requests 50 --concurrency 2
+uv run --no-sync python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
+uv run --no-sync python scripts/kb_admin.py status
+uv run --no-sync python scripts/kb_load_test.py --requests 50 --concurrency 2
 ```
 
 详细说明：

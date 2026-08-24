@@ -7,7 +7,6 @@ from pathlib import Path
 import apps.api.join_recovery_probe as recovery_probe
 import pytest
 from apps.api.join_recovery_probe import (
-    _approved_context,
     _arguments,
     _assert_catalog,
     _assert_execution,
@@ -50,7 +49,7 @@ def test_data_tools_exports_reviewed_join_contracts(tmp_path: Path) -> None:
     assert preflight.metadata.read_only is True
     assert execute.metadata.read_only is False
     assert execute.metadata.idempotent is False
-    assert execute.metadata.risk_level == "high"
+    assert execute.metadata.risk_level == "medium"
 
 
 @pytest.mark.asyncio
@@ -103,7 +102,7 @@ def test_compose_probe_fixture_exercises_join_governance_guards(
     settings = _settings(tmp_path)
     fixture = _seed(settings)
     runtime = AgentServiceRuntime("data-tools", settings)
-    _preflight_descriptor, execute_descriptor = _assert_catalog(
+    _preflight_descriptor, _execute_descriptor = _assert_catalog(
         runtime.adapter.list_tools()
     )
     context = _context(
@@ -124,12 +123,7 @@ def test_compose_probe_fixture_exercises_join_governance_guards(
         _arguments(fixture, right_ref=fixture.protected_ref),
         context,
     )
-    unapproved = runtime.adapter.call_tool("join_datasets", arguments, context)
-    approved = runtime.adapter.call_tool(
-        "join_datasets",
-        arguments,
-        _approved_context(context, execute_descriptor, arguments),
-    )
+    automatic = runtime.adapter.call_tool("join_datasets", arguments, context)
 
     assert preflight.is_error is False
     assert preflight.structured_content is not None
@@ -138,12 +132,10 @@ def test_compose_probe_fixture_exercises_join_governance_guards(
     assert cross_project.error_code == "project_scope_violation"
     assert protected.is_error is True
     assert protected.error_code == "tool_business_error"
-    assert unapproved.is_error is True
-    assert unapproved.error_code == "approval_required"
-    assert approved.is_error is False
-    assert approved.structured_content is not None
-    _assert_execution(approved.structured_content, fixture=fixture)
-    delete_dataset(str(approved.structured_content["dataset_ref"]))
+    assert automatic.is_error is False
+    assert automatic.structured_content is not None
+    _assert_execution(automatic.structured_content, fixture=fixture)
+    delete_dataset(str(automatic.structured_content["dataset_ref"]))
     get_settings.cache_clear()
 
 
@@ -164,9 +156,8 @@ def test_compose_gate_checks_join_dual_transport_restart_and_browser() -> None:
     assert "recovered_result_equivalent" in probe
     assert "cross_project_rejected" in probe
     assert "sensitive_key_rejected" in probe
-    assert "missing_approval_rejected" in probe
-    assert "approved_execution_passed" in probe
+    assert "approval_not_required" in probe
+    assert "automatic_execution_passed" in probe
     assert "two_parent_result_verified" in probe
     assert '"raw_data_in_report": False' in probe
-    assert "6E-4 Join 发布浏览器门禁" in browser
-    assert "完整双父血缘已登记" in browser
+    assert "单一 Agent 执行路径不暴露模式和审批开关" in browser

@@ -24,6 +24,7 @@ apps/web/node_modules/
 apps/web/dist/
 apps/web/.env
 deploy/milvus/.env
+deploy/milvus/volumes/
 apps/web/*.tsbuildinfo
 apps/web/playwright-report/
 apps/web/test-results/

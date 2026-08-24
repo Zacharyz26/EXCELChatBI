@@ -33,10 +33,19 @@ class FakeClient:
         return {"role": role_name, "privileges": self.roles[role_name]}
 
     def grant_privilege_v2(
-        self, *, role_name: str, privilege: str, collection_name: str
+        self,
+        *,
+        role_name: str,
+        privilege: str,
+        collection_name: str,
+        db_name: str,
     ) -> None:
         self.roles[role_name].append(
-            {"privilege": privilege, "collection_name": collection_name}
+            {
+                "privilege": privilege,
+                "collection_name": collection_name,
+                "db_name": db_name,
+            }
         )
         self.calls.append("grant_privilege")
 
@@ -59,6 +68,8 @@ def test_bootstrap_is_idempotent() -> None:
     )
     assert first["user_created"] is True
     assert first["privilege_granted"] is True
+    assert first["privileges_granted"] == ["CollectionAdmin", "DatabaseAdmin"]
+    assert first["database_scope"] == "default"
 
     client.calls.clear()
     second = _bootstrap(

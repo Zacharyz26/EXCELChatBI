@@ -69,6 +69,24 @@ class ControlConflict(RuntimeError):
     """A task-control command is unsafe for the current persisted state."""
 
 
+class ActiveRunConflict(ControlConflict):
+    """A conversation already has a non-terminal TaskRun."""
+
+    def __init__(self, run_id: str, status: RunStatus) -> None:
+        self.run_id = run_id
+        self.status = status
+        super().__init__(f"对话已有未完成任务: {run_id} ({status})")
+
+
+_ACTIVE_RUN_STATUSES: tuple[RunStatus, ...] = (
+    "planning",
+    "waiting_user",
+    "running",
+    "verifying",
+    "paused",
+)
+
+
 _EMPTY_CAPABILITY_CATALOG: JsonObject = {
     "schema": "chatbi-capability-catalog-v1",
     "capabilities": [],
@@ -163,6 +181,21 @@ class TaskStore:
                 raise ValueError(f"对话不存在: {conversation_id}")
             if str(row["project_id"]) != project_id:
                 raise ValueError("对话不属于指定项目")
+            active_row = connection.execute(
+                """
+                SELECT run_id, status FROM task_runs
+                WHERE conversation_id = ?
+                  AND status IN ('planning', 'waiting_user', 'running', 'verifying', 'paused')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if active_row is not None:
+                raise ActiveRunConflict(
+                    str(active_row["run_id"]),
+                    cast(RunStatus, str(active_row["status"])),
+                )
             has_user_message = connection.execute(
                 """
                 SELECT 1 FROM messages
@@ -206,6 +239,21 @@ class TaskStore:
             updated_at=now,
         )
         return conversation, message, run, event
+
+    def get_active_run_for_conversation(self, conversation_id: str) -> TaskRun | None:
+        """Return the latest non-terminal run that owns a conversation."""
+        placeholders = ", ".join("?" for _ in _ACTIVE_RUN_STATUSES)
+        with self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM task_runs
+                WHERE conversation_id = ? AND status IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (conversation_id, *_ACTIVE_RUN_STATUSES),
+            ).fetchone()
+        return _run_from_row(row) if row is not None else None
 
     def get_run(self, run_id: str) -> TaskRun | None:
         with self._connection() as connection:

@@ -1,7 +1,9 @@
 # 全栈部署与真实 E2E
 
-> 状态：v2.4 生产结构与 v2.5 阶段 3A–3E 的记忆、固定引用、血缘和联合恢复门禁
-> 已通过提交 `0b5980c` 的 Docker/Compose CI · 更新日期：2026-07-31
+> 状态：现行根 Compose 与真实 E2E 运维说明；v2.4 阶段 2E、v2.5 阶段 3–6 的
+> Compose 工程门禁已关闭 · 更新日期：2026-08-24
+> 本文描述全栈生产结构；若只需 Docker Milvus + 本机单实例 BGE，请改用
+> [`本地完整BGE与Milvus启动指南.md`](./本地完整BGE与Milvus启动指南.md)。
 
 ## 单机生产结构 Compose
 
@@ -31,7 +33,9 @@
 本地空环境可直接运行：
 
 ```bash
-docker compose up --build
+docker compose up --build -d
+docker compose ps
+curl --fail http://127.0.0.1:8080/api/health/ready
 ```
 
 打开 `http://127.0.0.1:8080`。仓库内 `deploy/secrets/*.dev` 是公开开发凭据，只为满足

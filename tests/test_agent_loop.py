@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from apps.api.deps import model_gateway_dep, session_store_dep, settings_dep  # noqa: E402
 from apps.api.main import app  # noqa: E402
+from apps.api.routers import chat as chat_router  # noqa: E402
 from apps.orchestrator import agent_loop as agent_loop_module  # noqa: E402
 from apps.orchestrator.agent_loop import (  # noqa: E402
     AgentLoopConfig,
@@ -39,6 +40,8 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
 from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
 from apps.orchestrator.control.contracts import build_minimal_contract  # noqa: E402
 from apps.orchestrator.control.planner_contract import validate_task_plan  # noqa: E402
+from apps.orchestrator.run_manager import ManagedRunControl  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.common.client_gateway import (  # noqa: E402
     GatewayHealth,
@@ -363,7 +366,7 @@ class HighRiskMCPGatewayRegistry(MCPGatewayRegistry):
 
 
 class WriteMCPGatewayRegistry(MCPGatewayRegistry):
-    """将画像工具声明为写操作，用于验证标准只读自主等级。"""
+    """将画像工具声明为写操作，用于验证单一路径可执行注册工具。"""
 
     def mcp_descriptor_for_tool(
         self,
@@ -468,7 +471,6 @@ async def _run_loop(
     policy: ToolPolicyGateway | None = None,
     planner_gateway: Any | None = None,
     enforce_plan: bool | None = None,
-    autonomy_mode: str = "autonomous",
     parent_run_id: str | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     raw = [
@@ -485,7 +487,6 @@ async def _run_loop(
             policy=policy,
             planner_gateway=planner_gateway,
             enforce_plan=(planner_gateway is not None if enforce_plan is None else enforce_plan),
-            autonomy_mode=cast(Any, autonomy_mode),
             parent_run_id=parent_run_id,
         )
     ]
@@ -813,7 +814,7 @@ async def test_tool_round_emits_transparency_events_and_persists(
 
 
 @pytest.mark.asyncio
-async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
+async def test_single_agent_path_starts_without_plan_review(
     store: SessionStore,
     conversation: Conversation,
     monkeypatch: pytest.MonkeyPatch,
@@ -830,24 +831,37 @@ async def test_assisted_mode_pauses_after_plan_until_explicit_resume(
     events = await _run_loop(
         store,
         conversation,
-        ScriptedGateway([]),
+        ScriptedGateway(
+            [
+                {
+                    "deltas": ["读取数据画像。"],
+                    "tool_calls": [
+                        ToolCall(
+                            id="single-path-profile",
+                            name="get_data_profile",
+                            arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                        )
+                    ],
+                },
+                {"deltas": ["已完成回答。"]},
+            ]
+        ),
         FakeRegistry({"get_data_profile": lambda _: {"profile": {"row_count": 3}}}),
         user_text="查看数据画像",
         enforce_plan=True,
-        autonomy_mode="assisted",
     )
 
     names = [name for name, _ in events]
-    assert names[-2:] == ["autonomy.plan_review_requested", "done"]
-    assert "run.started" not in names
+    assert "run.started" in names
+    assert "autonomy.plan_review_requested" not in names
+    assert names[-1] == "done"
     meta = dict(events)["meta"]
-    assert meta["autonomy_mode"] == "assisted"
+    assert "autonomy_mode" not in meta
     tasks = TaskStore(store.db_path)
     run = tasks.get_run(cast(str, meta["run_id"]))
     assert run is not None
-    assert run.status == "paused"
-    assert run.autonomy_mode == "assisted"
-    assert tasks.list_invocations(run.run_id) == []
+    assert run.status == "completed"
+    assert len(tasks.list_invocations(run.run_id)) == 1
 
 
 @pytest.mark.asyncio
@@ -865,19 +879,45 @@ async def test_resume_fails_closed_when_frozen_tool_is_unavailable(
 
     monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
     _register_dataset(store, conversation)
-    initial_events = await _run_loop(
-        store,
-        conversation,
-        ScriptedGateway([]),
-        FakeRegistry({"get_data_profile": lambda _: {}}),
+    control = ManagedRunControl()
+    initial_stream = stream_agent_chat(
+        conversation_id=conversation.id,
+        project_id=conversation.project_id,
         user_text="查看数据画像",
+        store=store,
+        gateway=cast(Any, ScriptedGateway([])),
+        registry=cast(
+            AgentToolRegistry,
+            FakeRegistry({"get_data_profile": lambda _: {}}),
+        ),
+        locks=ConversationLockPool(),
+        config=AgentLoopConfig(tool_result_max_chars=500),
         enforce_plan=True,
-        autonomy_mode="assisted",
+        control=control,
     )
+    initial_events: list[tuple[str, dict[str, Any]]] = []
+    async for item in initial_stream:
+        event = _events([item])[0]
+        initial_events.append(event)
+        if event[0] == "run.started":
+            break
     run_id = cast(str, dict(initial_events)["meta"]["run_id"])
     tasks = TaskStore(store.db_path)
-    paused = tasks.get_run(run_id)
-    assert paused is not None and paused.status == "paused"
+    running = tasks.get_run(run_id)
+    assert running is not None and running.status == "running"
+    paused, _, _ = tasks.control_transition(
+        run_id,
+        expected_version=running.state_version,
+        idempotency_key="pause-before-catalog-drift",
+        command="pause",
+        allowed_statuses={"running"},
+        status="paused",
+        event_type="run.paused",
+        payload={"reason": "catalog_drift_test"},
+        require_idle=True,
+        checkpoint_reason="catalog_drift_test",
+    )
+    control.pause()
     resumed, _, _ = tasks.control_transition(
         run_id,
         expected_version=paused.state_version,
@@ -914,6 +954,7 @@ async def test_resume_fails_closed_when_frozen_tool_is_unavailable(
     assert failed.status == "failed"
     assert failed.terminal_reason == "capability_catalog_drift"
     assert tasks.list_invocations(run_id) == []
+    await initial_stream.aclose()
 
 
 @pytest.mark.asyncio
@@ -968,7 +1009,22 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
         "assumptions": [],
         "clarifications": [],
     }
-    gateway = PlannerAwareGateway([], planner_plan)
+    gateway = PlannerAwareGateway(
+        [
+            {
+                "deltas": ["重新读取画像。"],
+                "tool_calls": [
+                    ToolCall(
+                        id="branch-profile",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["已完成分支分析。"]},
+        ],
+        planner_plan,
+    )
 
     child_events = await _run_loop(
         store,
@@ -977,7 +1033,6 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
         FakeRegistry({"get_data_profile": lambda _: {}}),
         user_text="COMPOSE_4D_BRANCH 请深入分析当前数据画像",
         planner_gateway=gateway,
-        autonomy_mode="assisted",
         parent_run_id=parent_run_id,
     )
 
@@ -988,15 +1043,15 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
     assert "COMPOSE_4D_FEEDBACK" in planning_request
     assert "不能扩大数据、工具或权限范围" in planning_request
     assert request["contract"]["goal"] == "COMPOSE_4D_BRANCH 请深入分析当前数据画像"
-    assert [name for name, _ in child_events][-2:] == [
-        "autonomy.plan_review_requested",
-        "done",
-    ]
+    child_names = [name for name, _ in child_events]
+    assert "run.started" in child_names
+    assert "autonomy.plan_review_requested" not in child_names
+    assert child_names[-1] == "done"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("descriptor_mode", ["missing", "write"])
-async def test_read_only_mode_persists_policy_denial_without_executing_write_tool(
+async def test_single_agent_path_executes_registered_write_tool_without_mode_gate(
     store: SessionStore,
     conversation: Conversation,
     monkeypatch: pytest.MonkeyPatch,
@@ -1032,7 +1087,7 @@ async def test_read_only_mode_persists_policy_denial_without_executing_write_too
                     )
                 ],
             },
-            {"deltas": ["标准只读模式已阻止该操作。"], "tool_calls": []},
+            {"deltas": ["工具已执行并返回结果。"], "tool_calls": []},
         ]
     )
 
@@ -1041,31 +1096,24 @@ async def test_read_only_mode_persists_policy_denial_without_executing_write_too
         conversation,
         gateway,
         registry,
-        user_text="验证标准只读边界",
-        autonomy_mode="read_only",
+        user_text="验证单一 Agent 执行路径",
     )
 
-    assert registry.contexts == []
+    assert len(registry.contexts) == 1
     meta = dict(events)["meta"]
-    assert meta["autonomy_mode"] == "read_only"
+    assert "autonomy_mode" not in meta
     tasks = TaskStore(store.db_path)
     run_id = cast(str, meta["run_id"])
     run = tasks.get_run(run_id)
-    assert run is not None and run.autonomy_mode == "read_only"
+    assert run is not None and run.status == "completed"
     invocations = tasks.list_invocations(run_id)
     assert len(invocations) == 1
-    assert invocations[0].status == "failed"
-    snapshot = tasks.get_snapshot(run_id)
-    assert snapshot is not None
-    assert snapshot["last_observation"]["code"] == "autonomy_write_denied"
-    assert any(
-        name == "tool_end" and payload.get("message", "").startswith("未执行：标准只读模式")
-        for name, payload in events
-    )
+    assert invocations[0].status == "succeeded"
+    assert any(name == "tool_end" and payload["status"] == "ok" for name, payload in events)
 
 
 @pytest.mark.asyncio
-async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
+async def test_high_risk_registered_tool_executes_without_human_approval(
     store: SessionStore,
     conversation: Conversation,
     monkeypatch: pytest.MonkeyPatch,
@@ -1099,11 +1147,12 @@ async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
                         arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
                     )
                 ],
-            }
+            },
+            {"deltas": ["结论：共 3 行。"]},
         ]
     )
 
-    paused_events = await _run_loop(
+    events = await _run_loop(
         store,
         conversation,
         initial_gateway,
@@ -1112,94 +1161,28 @@ async def test_high_risk_tool_pauses_then_consumes_approval_after_host_recovery(
         enforce_plan=True,
     )
 
-    paused_names = [name for name, _ in paused_events]
-    assert "approval.requested" in paused_names
-    assert "approval_required" in paused_names
-    assert paused_names[-1] == "done"
-    meta = dict(paused_events)["meta"]
+    names = [name for name, _ in events]
+    assert "approval.requested" not in names
+    assert "approval_required" not in names
+    assert names[-1] == "done"
+    meta = dict(events)["meta"]
     run_id = cast(str, meta["run_id"])
     tasks = TaskStore(store.db_path)
-    paused = tasks.get_run(run_id)
-    assert paused is not None and paused.status == "paused"
-    assert tasks.list_invocations(run_id) == []
-    assert registry.contexts == []
+    saved = tasks.get_run(run_id)
+    assert saved is not None and saved.status == "completed"
+    assert len(tasks.list_invocations(run_id)) == 1
+    assert len(registry.contexts) == 1
     approvals = tasks.list_approvals(
         run_id,
         tenant_id="local",
         subject_user_id="local-user",
     )
-    assert len(approvals) == 1
-    approval = approvals[0]
-    assert approval.status == "pending"
-
-    approved_run, approved, _, _ = tasks.decide_approval(
-        approval.approval_id,
-        expected_run_version=paused.state_version,
-        expected_approval_version=approval.version,
-        idempotency_key="approve-after-host-restart",
-        tenant_id="local",
-        actor_user_id="local-user",
-        decision="approved",
-        reason="确认读取该数据集画像",
-    )
-    resumed, _, _ = tasks.control_transition(
-        run_id,
-        expected_version=approved_run.state_version,
-        idempotency_key="resume-approved-after-host-restart",
-        command="resume",
-        allowed_statuses={"paused"},
-        status="running",
-        event_type="run.resumed",
-        payload={"reason": "approval_granted"},
-        require_checkpoint=True,
-    )
-    resumed_gateway = ScriptedGateway(
-        [
-            {
-                "deltas": ["恢复并读取已批准画像"],
-                "tool_calls": [
-                    ToolCall(
-                        id="approval-call-after-restart",
-                        name="get_data_profile",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ],
-            },
-            {"deltas": ["结论：共 3 行。"]},
-        ]
-    )
-    resumed_raw = [
-        item
-        async for item in stream_agent_chat(
-            conversation_id=conversation.id,
-            project_id=conversation.project_id,
-            user_text="查看数据画像",
-            store=store,
-            gateway=cast(Any, resumed_gateway),
-            registry=cast(AgentToolRegistry, registry),
-            locks=ConversationLockPool(),
-            config=AgentLoopConfig(tool_result_max_chars=500),
-            principal=Principal(user_id="local-user"),
-            run_id=resumed.run_id,
-            resume_existing=True,
-        )
-    ]
-    resumed_events = _events(resumed_raw)
-
-    resumed_names = [name for name, _ in resumed_events]
-    assert resumed_names.index("approval.consumed") < resumed_names.index("step.started")
-    saved = tasks.get_run(run_id)
-    assert saved is not None and saved.status == "completed"
-    consumed = tasks.get_approval(approval.approval_id)
-    assert consumed is not None
-    assert consumed.status == "consumed" and consumed.version == approved.version + 1
-    assert len(tasks.list_invocations(run_id)) == 1
-    assert len(registry.contexts) == 1
+    assert approvals == []
     context = registry.contexts[0]
-    assert context.approval_id == approval.approval_id
-    assert context.approval_version == consumed.version
-    assert context.approval_contract_hash == approval.tool_schema_hash
-    assert context.approval_parameter_hash == approval.parameter_summary_hash
+    assert context.approval_id is None
+    assert context.approval_version is None
+    assert context.approval_contract_hash is None
+    assert context.approval_parameter_hash is None
 
 
 @pytest.mark.asyncio
@@ -4152,7 +4135,7 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     ], events
     meta = events[0][1]
     done = events[-1][1]
-    assert meta["autonomy_mode"] == "read_only"
+    assert "autonomy_mode" not in meta
     assert response.headers["x-chatbi-run-id"] == meta["run_id"]
     assert meta["conversation_id"] == chat_harness.conversation.id
     assert meta["message_id"] == done["message_id"]
@@ -4181,6 +4164,64 @@ def test_stream_chat_emits_protocol_and_persists_complete_reply(
     assert "编造数字" in model_messages[0].content
     assert model_messages[-1].role == "user"
     assert model_messages[-1].content == "请介绍一下系统能力"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_rejects_second_nonterminal_run_before_opening_sse(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(chat_router, "run_in_threadpool", direct_threadpool)
+    _, message = store.start_user_turn(
+        conversation_id=conversation.id,
+        content="已在执行的任务",
+        suggested_title="已在执行的任务",
+    )
+    run_id = "active-chat-run"
+    contract = build_minimal_contract(
+        run_id=run_id,
+        user_text="已在执行的任务",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    TaskStore(store.db_path).create_run(
+        project_id=conversation.project_id,
+        conversation_id=conversation.id,
+        user_message_id=message.id,
+        contract=contract,
+        budget={"max_tool_calls": 3},
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        await chat_router.chat_stream(
+            req=chat_router.ChatStreamRequest(
+                conversation_id=conversation.id,
+                message="第二条消息",
+            ),
+            store=store,
+            gateway=cast(Any, None),
+            settings=Settings(_env_file=None, chat_db_path=str(store.db_path)),
+            excel=cast(Any, None),
+            stats=cast(Any, None),
+            chart=cast(Any, None),
+            dataset_ops=cast(Any, None),
+            report=cast(Any, None),
+            retriever=cast(Any, None),
+            principal=Principal(user_id="local-user"),
+        )
+
+    error = captured.value
+    assert error.status_code == 409
+    assert error.detail == "当前对话已有未完成任务，请先继续或取消该任务。"
 
 
 def test_resume_stream_reconstructs_lost_host_from_checkpoint(

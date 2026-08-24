@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Literal, cast
 
 from packages.session.models import JsonObject
 from packages.session.task_models import (
-    ApprovalRecord,
     EvidenceRecord,
     TaskEvent,
     ToolInvocation,
@@ -163,7 +161,6 @@ def build_join_collaboration_projection(
     *,
     invocations: Sequence[ToolInvocation],
     evidence: Sequence[EvidenceRecord],
-    approvals: Sequence[ApprovalRecord],
     step_events: Sequence[TaskEvent],
     current_data_version_hash: str,
     dataset_parents: Mapping[str, Sequence[str]],
@@ -179,14 +176,6 @@ def build_join_collaboration_projection(
     if not parameter_hash:
         return None
     preflight = _object(context.get("preflight"))
-    matching_approvals = [
-        item
-        for item in approvals
-        if item.tool_name == "join_datasets"
-        and item.parameter_summary_hash == parameter_hash
-    ]
-    approval = matching_approvals[-1] if matching_approvals else None
-    approval_expired = approval is not None and _approval_expired(approval)
     matching_executions = [
         item
         for item in invocations
@@ -245,34 +234,13 @@ def build_join_collaboration_projection(
         }
     elif preflight_status == "blocked":
         status = "blocked"
-    elif approval is None:
-        status = "preflight_ready"
-    elif approval.status == "pending" and not approval_expired:
-        status = "awaiting_approval"
-    elif approval.status == "pending":
-        status = "preflight_ready"
-    elif approval.status == "approved":
-        status = "approved"
-    elif approval.status == "consumed":
+    elif execution is not None and execution.status == "running":
         status = "executing"
-    elif approval.status in {"denied", "revoked"}:
-        status = "blocked"
     else:
         status = "preflight_ready"
 
     left = _input_projection("left", arguments, preflight)
     right = _input_projection("right", arguments, preflight)
-    approval_payload: JsonObject | None = None
-    if approval is not None:
-        approval_payload = {
-            "approval_id": approval.approval_id,
-            "status": approval.status,
-            "plan_version": approval.plan_version,
-            "step_id": approval.step_logical_id,
-            "expires_at": approval.expires_at,
-            "decision_reason": approval.decision_reason,
-            "expired": approval_expired,
-        }
     output_payload: JsonObject | None = None
     if output_ref:
         output_payload = {
@@ -293,8 +261,6 @@ def build_join_collaboration_projection(
             ),
         }
     updated_candidates = [preflight_evidence.created_at]
-    if approval is not None:
-        updated_candidates.append(approval.updated_at)
     if execution is not None:
         updated_candidates.append(execution.completed_at or execution.started_at)
     if execute_evidence is not None:
@@ -317,7 +283,6 @@ def build_join_collaboration_projection(
         "data_version_hash": _text(context.get("data_version_hash")),
         "current_data_version_hash": current_data_version_hash,
         "data_version_matches": data_version_matches,
-        "approval": approval_payload,
         "output": output_payload,
         "failure": failure,
         "updated_at": max(updated_candidates),
@@ -448,19 +413,3 @@ def _integer(value: object) -> int | None:
 
 def _number(value: object) -> int | float | None:
     return value if isinstance(value, int | float) and not isinstance(value, bool) else None
-
-
-def _approval_expired(approval: ApprovalRecord) -> bool:
-    normalized = (
-        approval.expires_at[:-1] + "+00:00"
-        if approval.expires_at.endswith("Z")
-        else approval.expires_at
-    )
-    try:
-        expires_at = datetime.fromisoformat(normalized)
-    except ValueError:
-        return True
-    return (
-        expires_at.tzinfo is None
-        or expires_at.astimezone(UTC) <= datetime.now(UTC)
-    )

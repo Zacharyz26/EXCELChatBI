@@ -211,9 +211,6 @@ if (audit.feedback_marker_seen_in_planner !== true) {
 if (audit.branch_profile_tool_calls !== 1) {
   throw new Error(`branch profile tool was requested ${audit.branch_profile_tool_calls} times`);
 }
-if (audit.read_only_report_attempts < 1) {
-  throw new Error("read-only side-effect denial scenario did not attempt report generation");
-}
 if (audit.parallel_tool_batches !== 1) {
   throw new Error(`6A parallel batch was requested ${audit.parallel_tool_batches} times`);
 }
@@ -354,7 +351,7 @@ run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.s
 parallel_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.parallel_run_id)")"
 hypothesis_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.hypothesis_run_id)")"
 pdf_url="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.pdf_url)")"
-latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.read_only_run_id)")"
+latest_run_id="$(node -e "const f=require('./.data/e2e/compose-result.json'); process.stdout.write(f.latest_run_id)")"
 verify_hypothesis_run
 "${compose[@]}" restart api stats-tools report-tools web
 wait_for_application "Web/API/report-tools restart"

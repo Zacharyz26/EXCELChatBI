@@ -158,7 +158,7 @@ def test_mcp_schema_is_shared_with_model_defs() -> None:
     assert descriptors["gen_chart"].metadata.artifact_types == ("chart",)
     assert descriptors["join_datasets"].metadata.read_only is False
     assert descriptors["join_datasets"].metadata.idempotent is False
-    assert descriptors["join_datasets"].metadata.risk_level == "high"
+    assert descriptors["join_datasets"].metadata.risk_level == "medium"
     assert descriptors["generate_report"].output_schema["required"] == [
         "report_id",
         "md_path",

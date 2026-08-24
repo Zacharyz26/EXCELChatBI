@@ -10,9 +10,6 @@ const FEEDBACK_COMMENT = (
 const BRANCH_GOAL = (
   "COMPOSE_4D_BRANCH：请深入分析这份数据的字段与规模，并根据父分支反馈调整计划。"
 );
-const READ_ONLY_GOAL = (
-  "COMPOSE_4D_READ_ONLY：请基于已有数据画像重新生成一份报告并导出 PDF。"
-);
 const PARALLEL_GOAL = (
   "COMPOSE_6A_PARALLEL：请深入分析这份数据的画像和销售额时间趋势。"
 );
@@ -24,7 +21,6 @@ interface RunDetailPayload {
     run_id: string;
     conversation_id: string;
     parent_run_id: string | null;
-    autonomy_mode: "assisted" | "read_only" | "autonomous";
     status: string;
   };
   plan: { definition: { steps: Array<{ capability: string }> } } | null;
@@ -170,7 +166,6 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
     timeout: 30_000,
   });
 
-  await page.getByRole("radio", { name: "自主模式" }).click();
   await page.getByLabel("消息内容").fill(PARALLEL_GOAL);
   const parallelResponsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/chat/stream")
@@ -420,7 +415,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await expect(reportAudit).toContainText("Artifact");
   await page.getByRole("button", { name: "关闭任务协作" }).click();
 
-  // 4D：在真实 API/SQLite 上追加反馈，再以辅助模式创建 LLM Planner 分支。
+  // 在真实 API/SQLite 上追加反馈，再由单一 Agent 创建 LLM Planner 分支。
   await controlButton.click();
   let panel = page.getByRole("dialog", { name: "任务协作" });
   await panel.getByRole("radio", { name: "需改进" }).click();
@@ -435,7 +430,6 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await expect(panel.getByLabel("结果反馈")).toContainText(FEEDBACK_COMMENT);
   await page.getByRole("button", { name: "关闭任务协作" }).click();
 
-  await page.getByRole("radio", { name: "辅助模式" }).click();
   await controlButton.click();
   panel = page.getByRole("dialog", { name: "任务协作" });
   await panel.getByRole("textbox", { name: "新分支目标" }).fill(BRANCH_GOAL);
@@ -446,147 +440,48 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await panel.getByRole("button", { name: "创建分析分支" }).click();
   const branchResponse = await branchResponsePromise;
   expect(branchResponse.ok()).toBeTruthy();
-  const assistedRunId = await branchResponse.headerValue("x-chatbi-run-id");
-  expect(assistedRunId).toBeTruthy();
+  const branchRunId = await branchResponse.headerValue("x-chatbi-run-id");
+  expect(branchRunId).toBeTruthy();
   await expect.poll(
-    async () => getRunStatusForPolling(page, assistedRunId!),
-    { timeout: 60_000 },
-  ).toBe("paused");
+    async () => getRunStatusForPolling(page, branchRunId!),
+    { timeout: 120_000 },
+  ).toBe("completed");
 
   await expect(controlButton).toBeEnabled();
   await controlButton.click();
   panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel.locator(".agent-status")).toHaveText("已暂停");
-  await expect(panel).toContainText("辅助模式");
+  await expect(panel.locator(".agent-status")).toHaveText("已完成");
   await expect(panel).toContainText("data.profile");
 
-  const assistedEventsBeforeResume = await page.request.get(
-    `/api/agent/runs/${encodeURIComponent(assistedRunId!)}/events`,
+  const branchEventsResponse = await page.request.get(
+    `/api/agent/runs/${encodeURIComponent(branchRunId!)}/events`,
     { headers: AUTH_HEADERS },
   );
-  expect(assistedEventsBeforeResume.ok()).toBeTruthy();
-  const assistedInitialPayload = await assistedEventsBeforeResume.json() as {
+  expect(branchEventsResponse.ok()).toBeTruthy();
+  const branchEvents = await branchEventsResponse.json() as {
     events: Array<{ event_type: string; payload: Record<string, unknown> }>;
   };
-  const assistedPlan = assistedInitialPayload.events.find(
+  const branchPlan = branchEvents.events.find(
     (event) => event.event_type === "plan.created",
   );
-  expect((assistedPlan?.payload.planner as { route?: string })?.route).toBe("llm");
+  expect((branchPlan?.payload.planner as { route?: string })?.route).toBe("llm");
   expect(
-    assistedInitialPayload.events.some(
+    branchEvents.events.some(
       (event) => event.event_type === "autonomy.plan_review_requested",
     ),
-  ).toBeTruthy();
-
-  const resumeResponsePromise = page.waitForResponse(
-    (response) => response.url().endsWith(
-      `/api/agent/runs/${assistedRunId}/resume/stream`,
-    ) && response.request().method() === "POST",
-  );
-  await panel.getByRole("button", { name: "确认计划并执行" }).click();
-  const resumeResponse = await resumeResponsePromise;
-  expect(resumeResponse.ok()).toBeTruthy();
-  await expect.poll(
-    async () => getRunStatusForPolling(page, assistedRunId!),
-    { timeout: 120_000 },
-  ).toBe("completed");
+  ).toBeFalsy();
   await expect(page.getByText(
     "Compose 4D 分支画像已完成，并已按父分支反馈重新核对。",
     { exact: true },
   )).toBeVisible();
-  const assistedDetail = await getRunDetail(page, assistedRunId!);
-  expect(assistedDetail.run.parent_run_id).toBe(runId);
-  expect(assistedDetail.run.autonomy_mode).toBe("assisted");
-  expect(assistedDetail.tool_audits).toEqual(expect.arrayContaining([
+  const branchDetail = await getRunDetail(page, branchRunId!);
+  expect(branchDetail.run.parent_run_id).toBe(runId);
+  expect(branchDetail.tool_audits).toEqual(expect.arrayContaining([
     expect.objectContaining({ tool_name: "get_data_profile", status: "succeeded" }),
   ]));
   await expect(panel.getByLabel("分支对比")).toContainText("2 个相关 Run");
 
-  // 回到原报告 Run，再从它创建标准只读分支，使重启后的最新 Run 仍可追溯到报告。
-  await panel.getByRole("button", {
-    name: `查看分支 ${runId!.slice(0, 10)}…`,
-  }).click();
-  await expect(panel.locator(".agent-status")).toHaveText("已完成");
-  await expect(panel).toContainText(`Run ${runId!.slice(0, 10)}`);
   await page.getByRole("button", { name: "关闭任务协作" }).click();
-
-  // 标准只读模式必须让 generate_report 在 Host 策略层失败，且不新增报告 Artifact。
-  const conversationBefore = await page.request.get(
-    `/api/conversations/${encodeURIComponent(detail.run.conversation_id)}`,
-    { headers: AUTH_HEADERS },
-  );
-  expect(conversationBefore.ok()).toBeTruthy();
-  const reportCountBefore = (
-    (await conversationBefore.json() as { artifacts: Array<{ type: string }> }).artifacts
-  ).filter((artifact) => artifact.type === "report").length;
-
-  await page.getByRole("radio", { name: "标准只读" }).click();
-  await controlButton.click();
-  panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel).toContainText(`Run ${runId!.slice(0, 10)}`);
-  await panel.getByRole("textbox", { name: "新分支目标" }).fill(READ_ONLY_GOAL);
-  const readOnlyResponsePromise = page.waitForResponse(
-    (response) => response.url().includes("/api/chat/stream")
-      && response.request().method() === "POST",
-  );
-  await panel.getByRole("button", { name: "创建分析分支" }).click();
-  const readOnlyResponse = await readOnlyResponsePromise;
-  expect(readOnlyResponse.ok()).toBeTruthy();
-  const readOnlyRunId = await readOnlyResponse.headerValue("x-chatbi-run-id");
-  expect(readOnlyRunId).toBeTruthy();
-  await expect.poll(
-    async () => getRunStatusForPolling(page, readOnlyRunId!),
-    { timeout: 120_000 },
-  ).toMatch(/^(blocked|failed)$/);
-
-  const readOnlyDetail = await getRunDetail(page, readOnlyRunId!);
-  expect(readOnlyDetail.run.parent_run_id).toBe(runId);
-  expect(readOnlyDetail.run.autonomy_mode).toBe("read_only");
-  const reportAttempts = readOnlyDetail.tool_audits.filter(
-    (audit) => audit.tool_name === "generate_report",
-  );
-  expect(reportAttempts.length).toBeGreaterThan(0);
-  expect(reportAttempts.every((audit) => audit.status === "failed")).toBeTruthy();
-  expect(reportAttempts.every((audit) => (
-    audit.evidence_id === null && audit.artifact_id === null
-  ))).toBeTruthy();
-
-  const readOnlyEventsResponse = await page.request.get(
-    `/api/agent/runs/${encodeURIComponent(readOnlyRunId!)}/events`,
-    { headers: AUTH_HEADERS },
-  );
-  expect(readOnlyEventsResponse.ok()).toBeTruthy();
-  const readOnlyEvents = await readOnlyEventsResponse.json() as {
-    events: Array<{ event_type: string; payload: Record<string, unknown> }>;
-  };
-  expect(
-    readOnlyEvents.events.some((event) => (
-      JSON.stringify(event.payload).includes("autonomy_write_denied")
-    )),
-  ).toBeTruthy();
-  const deniedReportStep = readOnlyEvents.events.find(
-    (event) => event.event_type === "step.completed"
-      && event.payload.tool === "generate_report"
-      && event.payload.status === "failed",
-  );
-  expect(deniedReportStep).toBeDefined();
-  expect(deniedReportStep?.payload.evidence_ids).toEqual([]);
-  expect(deniedReportStep?.payload.artifact_ids).toEqual([]);
-  expect(readOnlyEvents.events.some(
-    (event) => event.event_type === "step.completed"
-      && event.payload.tool === "generate_report"
-      && event.payload.status === "completed",
-  )).toBeFalsy();
-
-  const conversationAfter = await page.request.get(
-    `/api/conversations/${encodeURIComponent(detail.run.conversation_id)}`,
-    { headers: AUTH_HEADERS },
-  );
-  expect(conversationAfter.ok()).toBeTruthy();
-  const reportCountAfter = (
-    (await conversationAfter.json() as { artifacts: Array<{ type: string }> }).artifacts
-  ).filter((artifact) => artifact.type === "report").length;
-  expect(reportCountAfter).toBe(reportCountBefore);
 
   const pdfUrl = await page.getByRole("button", { name: "下载 PDF" }).evaluate(
     (button) => button.closest(".report-artifact")?.textContent ? "present" : "",
@@ -605,8 +500,8 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
       completed_event_count: 1,
       parallel_run_id: parallelRunId,
       hypothesis_run_id: hypothesisRunId,
-      assisted_run_id: assistedRunId,
-      read_only_run_id: readOnlyRunId,
+      branch_run_id: branchRunId,
+      latest_run_id: branchRunId,
     }),
     "utf-8",
   );

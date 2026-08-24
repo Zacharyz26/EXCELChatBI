@@ -825,7 +825,7 @@ def build_registry(
             "join_preflight",
             "只读评估两个不同数据集按指定键关联的可行性：返回基数关系、匹配覆盖、"
             "预估结果行数及多对多/空键/行数膨胀风险；不执行 Join、不生成数据集、"
-            "不返回原始行。status 非 ready 时不得自动进入 Join 执行。",
+            "不返回原始行。status=blocked 时不得进入 Join 执行。",
             override_schema=JOIN_PREFLIGHT_SCHEMA,
             metadata=tool_metadata("dataset.join.preflight"),
         ),
@@ -833,7 +833,7 @@ def build_registry(
             name="join_datasets",
             description=(
                 "在成功 Join 预检后执行同一组固定等值关联参数并生成衍生数据集。"
-                "本工具是高风险写操作，执行前必须取得与完整参数绑定的用户授权；"
+                "Host 会校验预检 Evidence、数据版本、Schema 和行数上限；"
                 "不支持自由 SQL、表达式或模型指定输出路径。"
             ),
             parameters=JOIN_DATASETS_SCHEMA,
@@ -843,7 +843,7 @@ def build_registry(
                 "dataset.join.execute",
                 read_only=False,
                 idempotent=False,
-                risk_level="high",
+                risk_level="medium",
             ),
         ),
         _wrap_handler(

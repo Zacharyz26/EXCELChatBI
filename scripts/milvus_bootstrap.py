@@ -16,10 +16,13 @@ if str(ROOT) not in sys.path:
 
 
 def _contains_privilege(
-    role_info: dict[str, Any], privilege: str, collection: str
+    role_info: dict[str, Any],
+    privilege: str,
+    collection: str,
+    database: str,
 ) -> bool:
     encoded = json.dumps(role_info.get("privileges", []), ensure_ascii=False)
-    return privilege in encoded and collection in encoded
+    return privilege in encoded and collection in encoded and database in encoded
 
 
 def _bootstrap(
@@ -29,6 +32,7 @@ def _bootstrap(
     password: str,
     role: str,
     collection: str,
+    database: str = "default",
 ) -> dict[str, object]:
     users = set(client.list_users())
     roles = set(client.list_roles())
@@ -40,14 +44,28 @@ def _bootstrap(
         client.create_role(role_name=role, description="ChatBI collection lifecycle")
 
     role_info = client.describe_role(role_name=role)
-    privilege_granted = not _contains_privilege(
-        role_info, "CollectionAdmin", collection
+    required_privileges = (
+        # CollectionAdmin covers data/index/alias lifecycle, but Milvus 2.6 treats
+        # CreateCollection and DropCollection as database-level privileges.
+        ("CollectionAdmin", collection),
+        ("DatabaseAdmin", "*"),
     )
-    if privilege_granted:
+    missing_privileges = [
+        (privilege, collection_name)
+        for privilege, collection_name in required_privileges
+        if not _contains_privilege(
+            role_info,
+            privilege,
+            collection_name,
+            database,
+        )
+    ]
+    for privilege, collection_name in missing_privileges:
         client.grant_privilege_v2(
             role_name=role,
-            privilege="CollectionAdmin",
-            collection_name=collection,
+            privilege=privilege,
+            collection_name=collection_name,
+            db_name=database,
         )
 
     user_info = client.describe_user(user_name=username)
@@ -59,10 +77,12 @@ def _bootstrap(
         "status": "ready",
         "username": username,
         "role": role,
+        "database_scope": database,
         "collection_scope": collection,
         "user_created": user_created,
         "role_created": role_created,
-        "privilege_granted": privilege_granted,
+        "privilege_granted": bool(missing_privileges),
+        "privileges_granted": [item[0] for item in missing_privileges],
         "role_granted": role_granted,
     }
 
@@ -72,6 +92,7 @@ def main() -> int:
     parser.add_argument("--uri", default="http://127.0.0.1:19530")
     parser.add_argument("--username", default="chatbi")
     parser.add_argument("--role", default="chatbi_collection_admin")
+    parser.add_argument("--database", default="default")
     parser.add_argument("--collection", default="*", help="物理集合动态换代，默认授权 *")
     args = parser.parse_args()
     root_token = os.getenv("MILVUS_BOOTSTRAP_TOKEN", "")
@@ -91,6 +112,7 @@ def main() -> int:
                 password=app_password,
                 role=args.role,
                 collection=args.collection,
+                database=args.database,
             )
             root_rotated = False
             if new_root_password:

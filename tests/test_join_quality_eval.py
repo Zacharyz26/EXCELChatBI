@@ -22,7 +22,6 @@ def test_frozen_join_set_is_domain_neutral_representative_and_passes() -> None:
     assert {case["join_type"] for case in cases} == {"inner", "left", "right", "full"}
     assert {case["expected"]["status"] for case in cases} == {
         "ready",
-        "requires_confirmation",
         "blocked",
         "error",
     }
@@ -57,7 +56,7 @@ def test_frozen_join_set_is_domain_neutral_representative_and_passes() -> None:
     many_to_many = next(
         row for row in report["cases"] if row["id"] == "JQ07_many_to_many_confirmation"
     )
-    assert many_to_many["actual_status"] == "requires_confirmation"
+    assert many_to_many["actual_status"] == "ready"
     assert many_to_many["risk_codes"] == ["many_to_many"]
     expansion = next(
         row for row in report["cases"] if row["id"] == "JQ08_row_expansion_confirmation"
@@ -73,15 +72,14 @@ def test_frozen_join_set_is_domain_neutral_representative_and_passes() -> None:
     assert "right_key" not in report_strings
 
 
-def test_join_gate_detects_confirmation_bypass(
+def test_join_gate_detects_risk_disclosure_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = quality_eval.preflight_tool
 
     def unsafe_preflight(arguments: dict[str, Any]) -> dict[str, Any]:
         result = original(arguments)
-        result["status"] = "ready"
-        result["requires_confirmation"] = False
+        result["risks"] = []
         return result
 
     monkeypatch.setattr(quality_eval, "preflight_tool", unsafe_preflight)
@@ -90,8 +88,8 @@ def test_join_gate_detects_confirmation_bypass(
     report = run_evaluation([case])
 
     assert report["passed"] is False
-    assert report["metrics"]["expected_outcome_rate"] == 0.0
-    assert "expected_outcome_rate" in report["misses"]
+    assert report["metrics"]["risk_classification_rate"] == 0.0
+    assert "risk_classification_rate" in report["misses"]
 
 
 def test_join_gate_detects_preflight_contract_drift(

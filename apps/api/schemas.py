@@ -251,7 +251,6 @@ class ChatStreamRequest(BaseModel):
 
     conversation_id: ConversationId
     message: ChatMessageText
-    autonomy_mode: Literal["assisted", "read_only", "autonomous"] = "read_only"
     parent_run_id: Annotated[
         str,
         StringConstraints(pattern=r"^[0-9a-f]{32}$"),
@@ -303,39 +302,6 @@ class PlanRevisionRequest(BaseModel):
             ),
         ]
     ] = Field(default_factory=list, max_length=24)
-
-
-class ApprovalDecisionRequest(BaseModel):
-    """对一个固定版本 ApprovalRecord 做批准或拒绝决定。"""
-
-    expected_version: int = Field(ge=1)
-    decision: Literal["approved", "denied"]
-    reason: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
-    ]
-
-
-class ApprovalResponse(BaseModel):
-    """浏览器可见的安全授权摘要，不包含主体内部字段或幂等哈希。"""
-
-    approval_id: str
-    run_id: str
-    plan_id: str
-    plan_version: int
-    step_id: str
-    tool_name: str
-    tool_schema_hash: str
-    parameter_summary_hash: str
-    risk_level: Literal["high", "critical"]
-    status: Literal["pending", "approved", "denied", "consumed", "revoked"]
-    version: int
-    expires_at: str
-    decision_reason: str | None
-    requested_at: str
-    updated_at: str
-    decided_at: str | None
-    consumed_at: str | None
 
 
 class UploadResponse(BaseModel):

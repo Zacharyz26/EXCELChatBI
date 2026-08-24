@@ -171,7 +171,7 @@ def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
         )
     if relationship == "many_to_many":
         risks.append(
-            _join_risk("many_to_many", "warning", "关联键为多对多关系，执行前必须人工确认。")
+            _join_risk("many_to_many", "warning", "关联键为多对多关系，结果可能出现行数扩张。")
         )
     if expansion_ratio > _JOIN_EXPANSION_CONFIRM_RATIO:
         risks.append(
@@ -183,14 +183,7 @@ def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
         risks.append(_join_risk("right_null_keys", "warning", "右侧关联键包含空值。"))
 
     blocked = any(risk["severity"] == "blocking" for risk in risks)
-    requires_confirmation = not blocked and any(
-        risk["severity"] == "warning" for risk in risks
-    )
-    status = (
-        "blocked"
-        if blocked
-        else ("requires_confirmation" if requires_confirmation else "ready")
-    )
+    status = "blocked" if blocked else "ready"
     return {
         "schema": "chatbi-join-preflight-v1",
         "status": status,
@@ -205,7 +198,7 @@ def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
         "expansion_ratio": expansion_ratio,
         "max_output_rows": _JOIN_MAX_OUTPUT_ROWS,
         "risks": risks,
-        "requires_confirmation": requires_confirmation,
+        "requires_confirmation": False,
         "executable": not blocked,
         "mutates_data": False,
         "raw_rows_returned": False,
@@ -213,7 +206,7 @@ def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def join_datasets(args: dict[str, Any]) -> dict[str, Any]:
-    """通过固定预检后物化等值 Join；外层高风险契约负责显式用户授权。"""
+    """通过固定预检后物化等值 Join。"""
     preflight = join_preflight(args)
     if preflight["status"] == "blocked":
         codes = ", ".join(str(risk["code"]) for risk in preflight["risks"])

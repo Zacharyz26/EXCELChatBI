@@ -46,7 +46,7 @@ def build_server() -> MCPServer:
     server.register(
         Tool(
             "join_datasets",
-            "在预检与显式授权后执行固定等值 Join，并生成双父血缘衍生数据集",
+            "在固定预检通过后执行等值 Join，并生成双父血缘衍生数据集",
             schemas.JOIN_DATASETS_SCHEMA,
             tools.join_datasets,
             output_schema=tool_output_schema("join_datasets"),
@@ -54,7 +54,7 @@ def build_server() -> MCPServer:
                 "dataset.join.execute",
                 read_only=False,
                 idempotent=False,
-                risk_level="high",
+                risk_level="medium",
             ),
         )
     )

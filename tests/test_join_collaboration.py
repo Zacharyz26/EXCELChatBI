@@ -10,7 +10,6 @@ from apps.orchestrator.control.join_collaboration import (
     evaluate_join_execution_guard,
 )
 from packages.session.task_models import (
-    ApprovalRecord,
     EvidenceRecord,
     TaskEvent,
     ToolInvocation,
@@ -32,19 +31,19 @@ _ARGS = {
 
 def _preflight_result() -> dict[str, object]:
     return {
-        "status": "requires_confirmation",
+        "status": "ready",
         "relationship": "many_to_many",
         "estimated_output_rows": 24,
         "expansion_ratio": 2.4,
         "matching_key_count": 8,
         "matched_left_rows": 10,
         "matched_right_rows": 12,
-        "requires_confirmation": True,
+        "requires_confirmation": False,
         "risks": [
             {
                 "code": "many_to_many",
                 "severity": "warning",
-                "message": "关联键为多对多关系，执行前必须人工确认。",
+                "message": "关联键为多对多关系，结果可能出现行数扩张。",
             }
         ],
         "left": {"row_count": 10, "null_count": 0, "distinct_count": 8},
@@ -98,37 +97,6 @@ def _evidence(
     )
 
 
-def _approval(*, status: str) -> ApprovalRecord:
-    return ApprovalRecord(
-        approval_id="4" * 32,
-        tenant_id="tenant-a",
-        project_id="project-a",
-        run_id="join-run",
-        plan_id="plan-a",
-        plan_version=1,
-        task_step_id="execute-step-id",
-        step_logical_id="execute-join",
-        subject_user_id="alice",
-        requested_by_user_id="alice",
-        tool_name="join_datasets",
-        tool_schema_hash="b" * 64,
-        parameter_summary_hash=invocation_arguments_hash(_ARGS),
-        risk_level="high",
-        status=status,  # type: ignore[arg-type]
-        version=1,
-        expires_at="2099-08-14T02:00:00Z",
-        decision_reason="确认双父版本和多对多风险" if status != "pending" else None,
-        decided_by_user_id="alice" if status != "pending" else None,
-        requested_at="2026-08-14T01:00:02Z",
-        updated_at="2026-08-14T01:00:03Z",
-        decided_at="2026-08-14T01:00:03Z" if status != "pending" else None,
-        consumed_at="2026-08-14T01:00:04Z" if status == "consumed" else None,
-        idempotency_key="join-approval-request",
-        request_hash="c" * 64,
-        request_event_id="5" * 32,
-    )
-
-
 def test_join_guard_requires_exact_preflight_and_stops_on_version_drift() -> None:
     invocation = _invocation("preflight", "join_preflight")
     context = build_join_evidence_context(
@@ -169,7 +137,7 @@ def test_join_guard_requires_exact_preflight_and_stops_on_version_drift() -> Non
     assert changed.allowed is False and changed.code == "join_preflight_evidence_required"
 
 
-def test_join_projection_survives_approval_and_exposes_complete_two_parent_lineage() -> None:
+def test_join_projection_exposes_preflight_and_complete_two_parent_lineage() -> None:
     preflight_invocation = _invocation("preflight", "join_preflight")
     preflight_context = build_join_evidence_context(
         tool_name="join_preflight",
@@ -185,26 +153,25 @@ def test_join_projection_survives_approval_and_exposes_complete_two_parent_linea
         created_at="2026-08-14T01:00:01Z",
     )
 
-    pending = build_join_collaboration_projection(
+    ready = build_join_collaboration_projection(
         invocations=[preflight_invocation],
         evidence=[preflight_evidence],
-        approvals=[_approval(status="pending")],
         step_events=[],
         current_data_version_hash=_DATA_HASH,
         dataset_parents={},
     )
-    assert pending is not None
-    assert pending["status"] == "awaiting_approval"
-    assert pending["left"]["dataset_ref"] == _LEFT
-    assert pending["right"]["key"] == "customer_code"
-    assert pending["risks"][0]["code"] == "many_to_many"
+    assert ready is not None
+    assert ready["status"] == "preflight_ready"
+    assert ready["left"]["dataset_ref"] == _LEFT
+    assert ready["right"]["key"] == "customer_code"
+    assert ready["risks"][0]["code"] == "many_to_many"
 
     execute_invocation = _invocation("execute", "join_datasets")
     execute_context = build_join_evidence_context(
         tool_name="join_datasets",
         arguments=_ARGS,
         result={
-            "preflight_status": "requires_confirmation",
+            "preflight_status": "ready",
             "relationship": "many_to_many",
             "dataset_ref": _OUTPUT,
             "parent_refs": [_LEFT, _RIGHT],
@@ -224,7 +191,6 @@ def test_join_projection_survives_approval_and_exposes_complete_two_parent_linea
     completed = build_join_collaboration_projection(
         invocations=[preflight_invocation, execute_invocation],
         evidence=[preflight_evidence, execute_evidence],
-        approvals=[_approval(status="consumed")],
         step_events=[],
         current_data_version_hash="9" * 64,
         dataset_parents={_OUTPUT: (_LEFT, _RIGHT)},
@@ -284,7 +250,6 @@ def test_join_projection_explains_persisted_failure() -> None:
     projection = build_join_collaboration_projection(
         invocations=[preflight_invocation, failed],
         evidence=[preflight_evidence],
-        approvals=[_approval(status="consumed")],
         step_events=[event],
         current_data_version_hash=_DATA_HASH,
         dataset_parents={},

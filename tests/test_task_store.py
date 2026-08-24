@@ -13,6 +13,7 @@ from packages.session.models import ArtifactDraft
 from packages.session.store import _SCHEMA_V1, SessionStore
 from packages.session.task_models import ClaimDraft, InvocationStatus, ObservationSource
 from packages.session.task_store import (
+    ActiveRunConflict,
     ControlConflict,
     IdempotencyConflict,
     StateVersionConflict,
@@ -246,7 +247,7 @@ def test_terminal_run_feedback_and_analysis_branch_are_append_only(
         conversation_id=conversation_id,
         user_message_id=message_id,
         contract=parent_contract,
-        budget={"max_tool_calls": 2, "autonomy_mode": "read_only"},
+        budget={"max_tool_calls": 2},
     )
 
     with pytest.raises(ControlConflict, match="终态"):
@@ -280,8 +281,6 @@ def test_terminal_run_feedback_and_analysis_branch_are_append_only(
         event_type="run.completed",
         payload={},
     )
-    assert parent.autonomy_mode == "read_only"
-
     feedback_run, feedback_event, created = tasks.record_user_feedback(
         parent.run_id,
         expected_version=parent.state_version,
@@ -347,11 +346,10 @@ def test_terminal_run_feedback_and_analysis_branch_are_append_only(
         conversation_id=conversation_id,
         user_message_id=child_message.id,
         contract=child_contract,
-        budget={"max_tool_calls": 2, "autonomy_mode": "autonomous"},
+        budget={"max_tool_calls": 2},
         parent_run_id=parent.run_id,
     )
     assert child.parent_run_id == parent.run_id
-    assert child.autonomy_mode == "autonomous"
     assert [item.run_id for item in tasks.list_runs_for_conversation(conversation_id)][:2] == [
         child.run_id,
         parent.run_id,
@@ -773,6 +771,52 @@ def test_atomic_task_start_rolls_back_user_message_on_run_failure(tmp_path: Path
     unchanged = session.get_conversation(conversation.id)
     assert unchanged is not None and unchanged.title == "新对话"
     assert tasks.get_run(contract.run_id) is None
+
+
+def test_atomic_task_start_rejects_second_active_run_for_conversation(
+    tmp_path: Path,
+) -> None:
+    session = SessionStore(str(tmp_path / "single-active-run.db"))
+    project = session.create_project("单活动任务")
+    conversation = session.create_conversation(project.id)
+    tasks = TaskStore(session.db_path)
+    first_contract = build_minimal_contract(
+        run_id="first-active-run",
+        user_text="第一个任务",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    _, first_message, first_run, _ = tasks.start_run_with_user_turn(
+        project_id=project.id,
+        conversation_id=conversation.id,
+        content="第一个任务",
+        suggested_title="第一个任务",
+        contract=first_contract,
+        budget={"max_tool_calls": 3},
+    )
+    second_contract = build_minimal_contract(
+        run_id="second-active-run",
+        user_text="第二个任务",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    with pytest.raises(ActiveRunConflict) as captured:
+        tasks.start_run_with_user_turn(
+            project_id=project.id,
+            conversation_id=conversation.id,
+            content="第二个任务",
+            suggested_title="第二个任务",
+            contract=second_contract,
+            budget={"max_tool_calls": 3},
+        )
+
+    assert captured.value.run_id == first_run.run_id
+    assert tasks.get_active_run_for_conversation(conversation.id) == first_run
+    assert session.list_messages(conversation.id) == [first_message]
+    assert tasks.get_run(second_contract.run_id) is None
 
 
 def test_invocation_is_idempotent_and_success_creates_evidence(tmp_path: Path) -> None:

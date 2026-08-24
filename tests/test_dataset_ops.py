@@ -226,7 +226,7 @@ def test_join_preflight_one_to_one_is_ready() -> None:
     assert load_dataframe(right_ref).shape == (3, 2)
 
 
-def test_join_preflight_many_to_many_requires_confirmation() -> None:
+def test_join_preflight_many_to_many_discloses_risk_without_approval() -> None:
     left_ref = save_dataframe(pd.DataFrame({"key": [1, 1, 2]}))
     right_ref = save_dataframe(pd.DataFrame({"key": [1, 1, 3]}))
 
@@ -240,11 +240,12 @@ def test_join_preflight_many_to_many_requires_confirmation() -> None:
         }
     )
 
-    assert out["status"] == "requires_confirmation"
+    assert out["status"] == "ready"
     assert out["relationship"] == "many_to_many"
     assert out["estimated_output_rows"] == 5
-    assert out["requires_confirmation"] is True
+    assert out["requires_confirmation"] is False
     assert {risk["code"] for risk in out["risks"]} == {"many_to_many"}
+    assert "人工确认" not in out["risks"][0]["message"]
 
 
 def test_join_relationship_uses_matching_keys_not_unmatched_duplicates() -> None:

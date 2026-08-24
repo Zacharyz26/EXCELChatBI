@@ -74,8 +74,6 @@ from packages.session.models import (
 )
 from packages.session.store import SessionStore
 from packages.session.task_models import (
-    ApprovalRecord,
-    AutonomyMode,
     CapabilityCatalogSnapshot,
     ObservationSource,
     RunStatus,
@@ -86,6 +84,7 @@ from packages.session.task_models import (
     ToolInvocation,
 )
 from packages.session.task_store import (
+    ActiveRunConflict,
     ControlConflict,
     TaskStore,
     invocation_arguments_hash,
@@ -162,8 +161,8 @@ _SYSTEM_PROMPT = """你是 ChatBI 对话式数据分析 Agent，用中文帮助�
 6. 数据集用 dataset_ref 引用，可用数据集见下方清单；transform_dataset 产生的衍生数据集带血缘，\
 后续分析应在衍生数据集上进行（除非用户要求用原数据）。
 6a. 跨数据集关联必须先调用 join_preflight；status=blocked 时停止。只有预检 Evidence 成功后，\
-才能用完全相同的双数据集、双键和 Join 类型调用 join_datasets。join_datasets 是高风险写操作，\
-Host 会在执行前要求用户对完整参数显式授权；只有返回已登记的新 dataset_ref 后才能声称完成关联。
+才能用完全相同的双数据集、双键和 Join 类型调用 join_datasets。Host 会校验工具白名单、\
+Schema、数据版本与预检 Evidence；只有返回已登记的新 dataset_ref 后才能声称完成关联。
 7. 用户追问修改分析（如“换成按月”“排除异常后重算”）时，参考“分析登记表”中已执行分析的参数，\
 只改需要变化的参数后重新调用工具。
 8. 用户要生成报告时调用 generate_report，analysis_ids 从分析登记表中选择相关分析的 ID。
@@ -353,7 +352,6 @@ class AgentLoopConfig:
     run_timeout_seconds: int = 300
     model_timeout_seconds: int = 90
     tool_timeout_seconds: int = 120
-    approval_ttl_seconds: int = 900
     planner_max_steps: int = 12
     max_replans: int = 3
     max_parallel_tools: int = 4
@@ -901,7 +899,7 @@ def _evaluate_join_execution_preconditions(
     run_id: str,
     arguments: JsonObject,
 ) -> JoinExecutionGuard:
-    """Resolve the exact durable preflight dependency before approval or execution."""
+    """Resolve the exact durable preflight dependency before execution."""
     return evaluate_join_execution_guard(
         arguments=arguments,
         invocations=task_store.list_invocations(run_id),
@@ -979,7 +977,6 @@ async def stream_agent_chat(
     resume_existing: bool = False,
     clarification_question_id: str | None = None,
     clarification_answer: object | None = None,
-    autonomy_mode: AutonomyMode = "autonomous",
     parent_run_id: str | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """以总超时和终态收敛包裹一轮 Agent 流。"""
@@ -1007,7 +1004,6 @@ async def stream_agent_chat(
                 resume_existing=resume_existing,
                 clarification_question_id=clarification_question_id,
                 clarification_answer=clarification_answer,
-                autonomy_mode=autonomy_mode,
                 parent_run_id=parent_run_id,
             ):
                 yield item
@@ -1110,7 +1106,6 @@ async def _stream_agent_chat_inner(
     resume_existing: bool,
     clarification_question_id: str | None,
     clarification_answer: object | None,
-    autonomy_mode: AutonomyMode,
     parent_run_id: str | None,
 ) -> AsyncIterator[dict[str, str]]:
     """执行一轮 Agent 对话：持久化用户消息 → 循环调模型/工具 → SSE 事件流。"""
@@ -1128,7 +1123,6 @@ async def _stream_agent_chat_inner(
         memory_reference_resolution: MemoryReferenceResolution | None = None
         reference_query = user_text
         effective_request_text = user_text
-        effective_autonomy_mode = autonomy_mode
         capability_snapshot: CapabilityCatalogSnapshot | None = None
         try:
             datasets = await run_in_threadpool(store.list_datasets, project_id)
@@ -1291,7 +1285,6 @@ async def _stream_agent_chat_inner(
                 ):
                     raise ValueError("TaskRun 当前状态不能从 Checkpoint 恢复")
                 run = stored_run
-                effective_autonomy_mode = stored_run.autonomy_mode
                 conversation = stored_conversation
                 user_message_id = run.user_message_id
                 goal_event = None
@@ -1322,7 +1315,6 @@ async def _stream_agent_chat_inner(
                         "max_tool_calls": config.max_tool_calls,
                         "max_parallelism": config.max_parallel_tools,
                         "max_replans": config.max_replans,
-                        "autonomy_mode": effective_autonomy_mode,
                     },
                     parent_run_id=parent_run_id,
                     capability_catalog=current_capability_catalog,
@@ -1420,6 +1412,18 @@ async def _stream_agent_chat_inner(
                     memory_snapshot_id=memory_snapshot.memory_snapshot_id,
                     principal=active_principal,
                 )
+        except ActiveRunConflict as exc:
+            yield _event(
+                "error",
+                {
+                    "code": "active_run_conflict",
+                    "message": "当前对话已有未完成任务，请先继续或取消该任务。",
+                    "retryable": False,
+                    "active_run_id": exc.run_id,
+                    "active_run_status": exc.status,
+                },
+            )
+            return
         except CapabilityCatalogDrift as exc:
             terminated = await run_in_threadpool(
                 task_store.terminate_active_run,
@@ -1501,7 +1505,6 @@ async def _stream_agent_chat_inner(
                 "title": conversation.title,
                 "run_id": run_id,
                 "resumed": resume_existing,
-                "autonomy_mode": effective_autonomy_mode,
                 "parent_run_id": run.parent_run_id,
                 "memory_snapshot_id": memory_snapshot.memory_snapshot_id,
                 "capability_catalog_snapshot_id": capability_snapshot.snapshot_id,
@@ -2118,56 +2121,7 @@ async def _stream_agent_chat_inner(
                 ),
             )
 
-        plan_review_resumed = False
-        if effective_autonomy_mode == "assisted" and (
-            not resume_existing or clarification_question_id is not None
-        ):
-            if control is not None:
-                control.pause()
-            run, review_event = await run_in_threadpool(
-                task_store.transition,
-                run_id,
-                expected_version=run.state_version,
-                status="paused",
-                event_type="autonomy.plan_review_requested",
-                payload={
-                    "autonomy_mode": effective_autonomy_mode,
-                    "plan_id": plan_record.plan_id,
-                    "plan_version": plan_record.version,
-                    "reason": "assisted_mode_requires_plan_confirmation",
-                },
-                usage={"tool_calls": 0},
-                checkpoint_reason="autonomy_plan_review",
-            )
-            yield _task_event(review_event, conversation_id)
-            yield _event(
-                "done",
-                {
-                    "conversation_id": conversation_id,
-                    "run_id": run_id,
-                    "run_status": run.status,
-                    "last_sequence": review_event.sequence,
-                    "characters": 0,
-                    "tool_calls": 0,
-                    "autonomy_mode": effective_autonomy_mode,
-                },
-            )
-            if control is None:
-                return
-            controlled_run = await _controlled_run_boundary(
-                control,
-                task_store,
-                run,
-                timeout_seconds=config.run_timeout_seconds,
-            )
-            if controlled_run is None:
-                return
-            run = controlled_run
-            plan_review_resumed = True
-
-        if (
-            not resume_existing or clarification_question_id is not None
-        ) and not plan_review_resumed:
+        if not resume_existing or clarification_question_id is not None:
             try:
                 run, started_event = await run_in_threadpool(
                     task_store.transition,
@@ -2184,7 +2138,6 @@ async def _stream_agent_chat_inner(
                         "plan_id": plan_record.plan_id,
                         "plan_version": plan_record.version,
                         "planner_route": planner_route,
-                        "autonomy_mode": effective_autonomy_mode,
                     },
                 )
             except (sqlite3.Error, RuntimeError, ValueError) as exc:
@@ -2916,12 +2869,6 @@ async def _stream_agent_chat_inner(
                     definition_execution_error = str(exc)
                 fields = _humanize_args(call.name, call_args)
                 attempts_before_call = attempts_used
-                descriptor_lookup = getattr(
-                    registry,
-                    "mcp_descriptor_for_tool",
-                    None,
-                )
-                descriptor = descriptor_lookup(call.name) if callable(descriptor_lookup) else None
                 resource_project_ids: list[str | None] = []
                 for _argument_name, dataset_ref in dataset_reference_arguments(call_args):
                     referenced_dataset = (
@@ -3020,15 +2967,6 @@ async def _stream_agent_chat_inner(
                     if policy_decision.code == "tool_budget_exhausted":
                         tools_allowed = False
                         budget_exhausted = True
-                elif effective_autonomy_mode == "read_only" and (
-                    descriptor is None or not descriptor.metadata.read_only
-                ):
-                    feedback = (
-                        "未执行：标准只读模式禁止产生写入或外部副作用；"
-                        "请切换到自主模式后基于当前结果创建新分支。"
-                    )
-                    failure_code = "autonomy_write_denied"
-                    failure_source = "policy"
                 elif plan_enforced and planned_step is None:
                     tool_capabilities = set(registry.capabilities_for_tool(call.name))
                     plan_capabilities = {
@@ -3066,7 +3004,6 @@ async def _stream_agent_chat_inner(
                     if invalid_attempts_used >= config.max_invalid_tool_calls:
                         tools_allowed = False
                         feedback += " 无效工具调用次数已达上限，后续轮次将不再提供工具。"
-                approval_record: ApprovalRecord | None = None
                 audit_metadata_lookup = getattr(
                     registry,
                     "audit_metadata_for_tool",
@@ -3075,185 +3012,6 @@ async def _stream_agent_chat_inner(
                 tool_contract = (
                     audit_metadata_lookup(call.name) if callable(audit_metadata_lookup) else {}
                 )
-                if (
-                    feedback is None
-                    and descriptor is not None
-                    and descriptor.metadata.risk_level in {"high", "critical"}
-                ):
-                    if planned_step is None:
-                        feedback = "未执行：高风险工具必须绑定当前就绪的持久化计划步骤。"
-                        failure_code = "approval_plan_binding_required"
-                        failure_source = "policy"
-                    else:
-                        contract_hash = descriptor.contract_hash
-                        parameter_hash = policy_decision.arguments_hash
-                        while approval_record is None and feedback is None:
-                            candidate = await run_in_threadpool(
-                                task_store.find_execution_approval,
-                                run_id,
-                                tenant_id=active_principal.tenant_scope,
-                                subject_user_id=active_principal.user_id,
-                                plan_version=run.plan_version,
-                                step_id=planned_step.logical_id,
-                                tool_name=call.name,
-                                tool_schema_hash=contract_hash,
-                                parameter_summary_hash=parameter_hash,
-                            )
-                            if candidate is not None and candidate.status in {"denied", "revoked"}:
-                                feedback = (
-                                    "未执行：该高风险工具授权已被拒绝或撤销。"
-                                    "如需重新申请，请先修改计划或参数。"
-                                )
-                                failure_code = f"approval_{candidate.status}"
-                                failure_source = "policy"
-                                break
-                            if (
-                                candidate is not None
-                                and candidate.status == "approved"
-                                and not _approval_expired(candidate)
-                            ):
-                                (
-                                    run,
-                                    approval_record,
-                                    consumed_event,
-                                    consumed_created,
-                                ) = await run_in_threadpool(
-                                    task_store.consume_approval,
-                                    candidate.approval_id,
-                                    expected_run_version=run.state_version,
-                                    expected_approval_version=candidate.version,
-                                    idempotency_key=(f"approval-consume:{candidate.approval_id}"),
-                                    tenant_id=active_principal.tenant_scope,
-                                    actor_user_id=active_principal.user_id,
-                                    tool_name=call.name,
-                                    tool_schema_hash=contract_hash,
-                                    parameter_summary_hash=parameter_hash,
-                                )
-                                if consumed_created:
-                                    yield _task_event(
-                                        consumed_event,
-                                        conversation_id,
-                                    )
-                                break
-                            pending = (
-                                candidate
-                                if candidate is not None
-                                and candidate.status == "pending"
-                                and not _approval_expired(candidate)
-                                else None
-                            )
-                            if control is not None:
-                                control.pause()
-                            try:
-                                if pending is None:
-                                    expires_at = (
-                                        (
-                                            datetime.now(UTC)
-                                            + timedelta(seconds=config.approval_ttl_seconds)
-                                        )
-                                        .isoformat()
-                                        .replace("+00:00", "Z")
-                                    )
-                                    (
-                                        run,
-                                        pending,
-                                        approval_event,
-                                        approval_created,
-                                    ) = await run_in_threadpool(
-                                        task_store.request_approval,
-                                        run_id,
-                                        expected_version=run.state_version,
-                                        idempotency_key=(
-                                            "approval-request:"
-                                            f"{idempotency_key}:{run.state_version}"
-                                        ),
-                                        tenant_id=active_principal.tenant_scope,
-                                        subject_user_id=active_principal.user_id,
-                                        requested_by_user_id=active_principal.user_id,
-                                        step_id=planned_step.logical_id,
-                                        tool_name=call.name,
-                                        tool_schema_hash=contract_hash,
-                                        parameter_summary_hash=parameter_hash,
-                                        risk_level=descriptor.metadata.risk_level,
-                                        expires_at=expires_at,
-                                        pause_run=True,
-                                    )
-                                else:
-                                    (
-                                        run,
-                                        approval_event,
-                                        approval_created,
-                                    ) = await run_in_threadpool(
-                                        task_store.control_transition,
-                                        run_id,
-                                        expected_version=run.state_version,
-                                        idempotency_key=(
-                                            "approval-wait:"
-                                            f"{pending.approval_id}:"
-                                            f"{run.state_version}"
-                                        ),
-                                        command="approval_wait",
-                                        allowed_statuses={"running"},
-                                        status="paused",
-                                        event_type="approval.waiting",
-                                        payload={
-                                            "approval_id": pending.approval_id,
-                                            "plan_version": pending.plan_version,
-                                            "step_id": pending.step_logical_id,
-                                            "risk_level": pending.risk_level,
-                                        },
-                                        require_idle=True,
-                                        checkpoint_reason=(
-                                            f"approval_waiting:{pending.approval_id}"
-                                        ),
-                                    )
-                            except Exception:
-                                if control is not None:
-                                    control.resume()
-                                raise
-                            if approval_created:
-                                yield _task_event(
-                                    approval_event,
-                                    conversation_id,
-                                )
-                            assert pending is not None
-                            yield _event(
-                                "approval_required",
-                                {
-                                    "approval_id": pending.approval_id,
-                                    "run_id": run_id,
-                                    "plan_version": pending.plan_version,
-                                    "step_id": pending.step_logical_id,
-                                    "tool": pending.tool_name,
-                                    "risk_level": pending.risk_level,
-                                    "expires_at": pending.expires_at,
-                                },
-                            )
-                            yield _event(
-                                "done",
-                                {
-                                    "conversation_id": conversation_id,
-                                    "run_id": run_id,
-                                    "run_status": "paused",
-                                    "last_sequence": approval_event.sequence,
-                                    "characters": characters_streamed,
-                                    "tool_calls": calls_used,
-                                    "tool_attempts": attempts_used,
-                                    "invalid_tool_calls": invalid_attempts_used,
-                                },
-                            )
-                            if control is None:
-                                return
-                            controlled_run = await _controlled_run_boundary(
-                                control,
-                                task_store,
-                                run,
-                                timeout_seconds=config.run_timeout_seconds,
-                            )
-                            if controlled_run is None:
-                                return
-                            run = controlled_run
-
                 attempts_used += 1
                 if attempts_used >= config.max_tool_calls:
                     tools_allowed = False
@@ -3265,13 +3023,6 @@ async def _stream_agent_chat_inner(
                     policy_payload["data_role_preconditions"] = (
                         data_role_guard.evidence()
                     )
-                if approval_record is not None:
-                    policy_payload["approval"] = {
-                        "approval_id": approval_record.approval_id,
-                        "version": approval_record.version,
-                        "contract_hash": approval_record.tool_schema_hash,
-                        "parameter_hash": approval_record.parameter_summary_hash,
-                    }
                 if definition_execution is not None:
                     policy_payload["definition_execution"] = definition_execution
                 reserved_invocation: ToolInvocation | None = None
@@ -3486,20 +3237,6 @@ async def _stream_agent_chat_inner(
                     deadline_at=(
                         datetime.now(UTC) + timedelta(seconds=operation_timeout)
                     ).isoformat(),
-                    approval_id=(
-                        approval_record.approval_id if approval_record is not None else None
-                    ),
-                    approval_version=(
-                        approval_record.version if approval_record is not None else None
-                    ),
-                    approval_contract_hash=(
-                        approval_record.tool_schema_hash if approval_record is not None else None
-                    ),
-                    approval_parameter_hash=(
-                        approval_record.parameter_summary_hash
-                        if approval_record is not None
-                        else None
-                    ),
                 )
                 execution = await _execute_tool(
                     registry,
@@ -5164,8 +4901,7 @@ async def _try_execute_parallel_frontier(
 
     Eligibility is deliberately narrow: all calls must bind to distinct ready
     steps and declare low/medium-risk read-only idempotent contracts. Writes,
-    approvals, conditional anomaly branches and delivery tools retain the
-    existing sequential path.
+    conditional anomaly branches and delivery tools retain the sequential path.
     """
     if not 2 <= len(tool_calls) <= config.max_parallel_tools:
         return None
@@ -6158,22 +5894,6 @@ def _parse_args(arguments: str) -> dict[str, Any]:
 def _normalized_argument_mapping(arguments: dict[str, Any]) -> str:
     """对 Host 补全后的最终参数做稳定排序，用于同计划版本的熔断。"""
     return json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
-
-
-def _approval_expired(approval: ApprovalRecord) -> bool:
-    """对损坏或已过期的授权失败关闭。"""
-    normalized = (
-        approval.expires_at[:-1] + "+00:00"
-        if approval.expires_at.endswith("Z")
-        else approval.expires_at
-    )
-    try:
-        expires_at = datetime.fromisoformat(normalized)
-    except ValueError:
-        return True
-    if expires_at.tzinfo is None:
-        return True
-    return expires_at.astimezone(UTC) <= datetime.now(UTC)
 
 
 def _title_from_message(message: str) -> str:

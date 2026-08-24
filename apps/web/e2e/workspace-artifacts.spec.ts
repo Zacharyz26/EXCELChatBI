@@ -12,7 +12,6 @@ interface MockWorkspaceState {
   agentRuns: Record<string, MockAgentRunState>;
   chatRequests: Array<{
     message: string;
-    autonomy_mode: string;
     parent_run_id: string | null;
   }>;
   reconnectCursors: string[];
@@ -21,7 +20,6 @@ interface MockWorkspaceState {
 
 interface MockAgentRunState {
   detail: Record<string, any>;
-  approvals: Array<Record<string, any>>;
   events: Array<Record<string, any>>;
 }
 
@@ -154,9 +152,7 @@ function mockAgentRun(
   goal: string,
   status: string,
   options: {
-    approvals?: Array<Record<string, any>>;
     waitingPayload?: Record<string, unknown>;
-    autonomyMode?: string;
     parentRunId?: string | null;
   } = {},
 ): MockAgentRunState {
@@ -193,14 +189,12 @@ function mockAgentRun(
         plan_version: 1,
         budget: {
           max_tool_calls: 4,
-          autonomy_mode: options.autonomyMode ?? "autonomous",
         },
         usage: { tool_calls: 0 },
         terminal_reason: null,
         created_at: NOW,
         updated_at: NOW,
         finished_at: status === "completed" ? NOW : null,
-        autonomy_mode: options.autonomyMode ?? "autonomous",
       },
       contract: { goal },
       plan: {
@@ -235,7 +229,6 @@ function mockAgentRun(
       feedback: [],
       state: { last_sequence: 3 },
     },
-    approvals: options.approvals ?? [],
     events,
   };
 }
@@ -298,90 +291,7 @@ function persistCollaborationTurn(
     };
   }
 
-  const governedJoin = prompt.includes("Join");
-  const approvals = prompt.includes("高风险")
-    ? [{
-      approval_id: "a".repeat(32),
-      run_id: runId,
-      plan_id: `${runId}-plan-1`,
-      plan_version: 1,
-      step_id: "prepare",
-      tool_name: governedJoin ? "join_datasets" : "high_risk_export",
-      tool_schema_hash: "b".repeat(64),
-      parameter_summary_hash: "c".repeat(64),
-      risk_level: "high",
-      status: "pending",
-      version: 1,
-      expires_at: "2099-07-31T12:00:00Z",
-      decision_reason: null,
-      requested_at: NOW,
-      updated_at: NOW,
-      decided_at: null,
-      consumed_at: null,
-    }]
-    : [];
-  state.agentRuns[runId] = mockAgentRun(runId, prompt, "paused", { approvals });
-  if (governedJoin) {
-    state.agentRuns[runId].detail.join_collaboration = {
-      schema: "chatbi-join-collaboration-v1",
-      schema_version: 1,
-      status: "awaiting_approval",
-      join_type: "left",
-      relationship: "many_to_many",
-      left: {
-        dataset_ref: "1".repeat(32),
-        key: "customer_id",
-        row_count: 10,
-        null_count: 0,
-        distinct_count: 8,
-      },
-      right: {
-        dataset_ref: "2".repeat(32),
-        key: "customer_code",
-        row_count: 12,
-        null_count: 0,
-        distinct_count: 8,
-      },
-      estimated_output_rows: 24,
-      expansion_ratio: 2.4,
-      matching_key_count: 8,
-      risks: [{
-        code: "many_to_many",
-        severity: "warning",
-        message: "关联键为多对多关系，执行前必须人工确认。",
-      }, {
-        code: "row_expansion",
-        severity: "warning",
-        message: "预估结果行数存在明显膨胀。",
-      }],
-      requires_confirmation: true,
-      preflight_status: "requires_confirmation",
-      preflight_evidence_id: "e".repeat(32),
-      data_version_hash: "a".repeat(64),
-      current_data_version_hash: "a".repeat(64),
-      data_version_matches: true,
-      approval: {
-        approval_id: approvals[0].approval_id,
-        status: "pending",
-        plan_version: 1,
-        step_id: "prepare",
-        expires_at: approvals[0].expires_at,
-        decision_reason: null,
-        expired: false,
-      },
-      output: null,
-      failure: null,
-      updated_at: NOW,
-      raw_rows_returned: false,
-    };
-  }
-  if (approvals.length > 0) {
-    state.agentRuns[runId].events.push(
-      taskEvent(runId, 4, "approval.requested", {
-        approval_id: approvals[0].approval_id,
-      }),
-    );
-  }
+  state.agentRuns[runId] = mockAgentRun(runId, prompt, "paused");
   return {
     frames: [
       ["meta", { run_id: runId, conversation_id: "conversation-1" }],
@@ -397,28 +307,11 @@ function persistCollaborationTurn(
           status: "pending",
         }],
       }),
-      ...(approvals.length > 0 ? [
-        taskSse(runId, 4, "approval.requested", {
-          approval_id: approvals[0].approval_id,
-          plan_version: 1,
-          step_id: "prepare",
-          risk_level: "high",
-        }),
-        ["approval_required", {
-          approval_id: approvals[0].approval_id,
-          run_id: runId,
-          plan_version: 1,
-          step_id: "prepare",
-          tool: approvals[0].tool_name,
-          risk_level: "high",
-          expires_at: approvals[0].expires_at,
-        }] as [string, Record<string, unknown>],
-      ] : []),
       ["done", {
         run_id: runId,
         conversation_id: "conversation-1",
         run_status: "paused",
-        last_sequence: approvals.length > 0 ? 4 : 2,
+        last_sequence: 2,
       }],
     ],
   };
@@ -967,12 +860,6 @@ async function installMockApi(
       await json(route, { run: latest?.detail.run ?? null });
       return;
     }
-    const runApprovalsMatch = path.match(/^\/agent\/runs\/([^/]+)\/approvals$/);
-    if (method === "GET" && runApprovalsMatch) {
-      const run = state.agentRuns[decodeURIComponent(runApprovalsMatch[1])];
-      await json(route, run?.approvals ?? []);
-      return;
-    }
     const runEventsMatch = path.match(/^\/agent\/runs\/([^/]+)\/events$/);
     if (method === "GET" && runEventsMatch) {
       const runId = decodeURIComponent(runEventsMatch[1]);
@@ -981,61 +868,6 @@ async function installMockApi(
         run_id: runId,
         events: run?.events ?? [],
         last_sequence: Number(run?.detail.state.last_sequence ?? 0),
-      });
-      return;
-    }
-    const approvalDecisionMatch = path.match(
-      /^\/agent\/runs\/([^/]+)\/approvals\/([^/]+)\/decision$/,
-    );
-    if (method === "POST" && approvalDecisionMatch) {
-      const runId = decodeURIComponent(approvalDecisionMatch[1]);
-      const approvalId = decodeURIComponent(approvalDecisionMatch[2]);
-      const run = state.agentRuns[runId];
-      if (!run) {
-        await json(route, { detail: "TaskRun 不存在" }, 404);
-        return;
-      }
-      const expectedRunVersion = Number(request.headers()["if-match"]);
-      if (expectedRunVersion !== run.detail.run.state_version) {
-        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
-        return;
-      }
-      const body = request.postDataJSON() as {
-        expected_version: number;
-        decision: "approved" | "denied";
-        reason: string;
-      };
-      const approval = run.approvals.find(
-        (item) => item.approval_id === approvalId,
-      );
-      if (!approval || approval.version !== body.expected_version) {
-        await json(route, { detail: "ApprovalRecord 版本冲突" }, 409);
-        return;
-      }
-      approval.status = body.decision;
-      approval.version += 1;
-      approval.decision_reason = body.reason;
-      approval.decided_at = NOW;
-      approval.updated_at = NOW;
-      if (run.detail.join_collaboration?.approval?.approval_id === approvalId) {
-        run.detail.join_collaboration.approval.status = body.decision;
-        run.detail.join_collaboration.approval.decision_reason = body.reason;
-        run.detail.join_collaboration.status = body.decision === "approved"
-          ? "approved"
-          : "blocked";
-      }
-      run.detail.run.state_version += 1;
-      run.detail.run.updated_at = NOW;
-      const event = appendTaskEvent(run, runId, "approval.decided", {
-        approval_id: approvalId,
-        decision: body.decision,
-        approval_version: approval.version,
-      });
-      await json(route, {
-        run: run.detail.run,
-        approval,
-        event,
-        replayed: false,
       });
       return;
     }
@@ -1166,10 +998,6 @@ async function installMockApi(
         await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
         return;
       }
-      if (run.approvals.some((approval) => approval.status === "pending")) {
-        await json(route, { detail: "仍有待决定授权" }, 409);
-        return;
-      }
       run.detail.run.status = "completed";
       run.detail.run.state_version += 1;
       run.detail.run.finished_at = NOW;
@@ -1184,36 +1012,6 @@ async function installMockApi(
       const streamEvents: Array<[string, Record<string, unknown>]> = [
         eventToSse(resumed),
       ];
-      for (const approval of run.approvals) {
-        if (approval.status !== "approved") continue;
-        approval.status = "consumed";
-        approval.version += 1;
-        approval.consumed_at = NOW;
-        approval.updated_at = NOW;
-        streamEvents.push(eventToSse(appendTaskEvent(
-          run,
-          runId,
-          "approval.consumed",
-          { approval_id: approval.approval_id },
-        )));
-      }
-      if (run.detail.join_collaboration) {
-        const join = run.detail.join_collaboration;
-        join.status = "completed";
-        join.current_data_version_hash = "d".repeat(64);
-        join.data_version_matches = true;
-        join.approval.status = "consumed";
-        join.output = {
-          dataset_ref: "3".repeat(32),
-          rows: 24,
-          parent_refs: ["1".repeat(32), "2".repeat(32)],
-          parents: [
-            { dataset_ref: "1".repeat(32), ordinal: 0, role: "left" },
-            { dataset_ref: "2".repeat(32), ordinal: 1, role: "right" },
-          ],
-          lineage_complete: true,
-        };
-      }
       const completed = appendTaskEvent(run, runId, "run.completed", {
         terminal_reason: null,
       });
@@ -1261,24 +1059,18 @@ async function installMockApi(
     if (method === "POST" && path === "/chat/stream") {
       const body = request.postDataJSON() as {
         message?: string;
-        autonomy_mode?: string;
         parent_run_id?: string | null;
       };
       const prompt = body.message ?? "";
-      const autonomyMode = body.autonomy_mode ?? "autonomous";
       const parentRunId = body.parent_run_id ?? null;
       state.chatRequests.push({
         message: prompt,
-        autonomy_mode: autonomyMode,
         parent_run_id: parentRunId,
       });
-      const turn = autonomyMode === "assisted" && parentRunId === null
-        ? persistCollaborationTurn(state, prompt)
-        : prompt.includes("断线恢复")
+      const turn = prompt.includes("断线恢复")
         ? persistReconnectTurn(state, prompt)
         : (
-        prompt.includes("高风险")
-        || prompt.includes("修改计划")
+        prompt.includes("修改计划")
         || prompt.includes("选择指标")
       )
         ? persistCollaborationTurn(state, prompt)
@@ -1293,8 +1085,6 @@ async function installMockApi(
       const run = runId ? state.agentRuns[runId] : undefined;
       if (run) {
         run.detail.run.parent_run_id = parentRunId;
-        run.detail.run.autonomy_mode = autonomyMode;
-        run.detail.run.budget.autonomy_mode = autonomyMode;
         refreshRelatedRuns(state);
       }
       await route.fulfill({
@@ -1478,7 +1268,7 @@ test("Chart Artifact 在生成后及刷新后都可见", async ({ page }) => {
   const chart = page.locator('[data-chart-id="chart-1"]');
   await expect(chart).toBeVisible();
   await expect(chart.locator("canvas")).toBeVisible();
-  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+  await expect(page.getByText("趋势图已生成。", { exact: true }).last()).toBeVisible();
 
   await page.reload();
   await expect(page.locator('[data-chart-id="chart-1"] canvas')).toBeVisible();
@@ -1542,76 +1332,23 @@ test("知识库问答生成并持久化来源引用卡", async ({ page }) => {
   await expect(page.locator(".citation-artifact")).toContainText("指标口径.md");
 });
 
-test("高风险审批只记录决定，用户显式继续后才执行", async ({ page }) => {
+test("单一 Agent 执行路径不暴露模式和审批开关", async ({ page }) => {
   await installMockApi(page);
   await page.goto("/");
 
-  await send(page, "请执行高风险导出");
+  await expect(page.getByRole("radio", { name: "辅助模式" })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "标准只读" })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "自主模式" })).toHaveCount(0);
+
+  await send(page, "请分析当前数据");
   const controlButton = page.getByRole("button", { name: "任务协作" });
   await expect(controlButton).toBeEnabled();
   await controlButton.click();
 
   const panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel).toContainText("high_risk_export");
-  await expect(panel.getByRole("button", { name: "继续执行" })).toBeDisabled();
-
-  await panel.getByLabel("授权原因 high_risk_export").fill("仅允许本轮导出");
-  await panel.getByRole("button", { name: "批准一次" }).click();
-
-  await expect(panel).toContainText("显式点击“继续执行”");
-  await expect(panel).toContainText("已批准");
-  await expect(panel.getByRole("button", { name: "继续执行" })).toBeEnabled();
-  await panel.getByRole("button", { name: "继续执行" }).click();
-
   await expect(panel.locator(".agent-status")).toHaveText("已完成");
-  await expect(panel.getByRole("region", { name: "任务执行边界" })).toContainText(
-    "并行上限",
-  );
-  await expect(panel).toContainText("已消费");
-});
-
-test("6E-4 Join 发布浏览器门禁：风险、审批恢复与完整双父血缘", async ({ page }) => {
-  await installMockApi(page);
-  await page.goto("/");
-
-  await send(page, "请执行 Join 高风险关联");
-  const controlButton = page.getByRole("button", { name: "任务协作" });
-  await controlButton.click();
-  let panel = page.getByRole("dialog", { name: "任务协作" });
-  const collaboration = panel.getByRole("region", { name: "多数据集 Join 协作" });
-  await expect(collaboration).toContainText("等待确认");
-  await expect(collaboration).toContainText("左输入版本");
-  await expect(collaboration).toContainText("customer_id");
-  await expect(collaboration).toContainText("右输入版本");
-  await expect(collaboration).toContainText("customer_code");
-  await expect(collaboration).toContainText("多对多");
-  await expect(collaboration).toContainText("预估结果");
-  await expect(collaboration).toContainText("24 行");
-  await expect(collaboration).toContainText("膨胀比");
-  await expect(collaboration).toContainText("2.4");
-  await expect(collaboration).toContainText("执行前必须人工确认");
-  await expect(collaboration).toContainText("预估结果行数存在明显膨胀");
-  await expect(panel).toContainText("本次授权固定范围");
-
-  await panel.getByLabel("授权原因 join_datasets").fill("确认双父版本和多对多膨胀风险");
-  await panel.getByRole("button", { name: "批准一次" }).click();
-  await expect(collaboration).toContainText("已批准，等待恢复");
-  await page.getByRole("button", { name: "关闭任务协作" }).click();
-
-  await page.reload();
-  await controlButton.click();
-  panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel.getByRole("region", { name: "多数据集 Join 协作" })).toContainText(
-    "授权已持久化",
-  );
-  await panel.getByRole("button", { name: "继续执行" }).click();
-
-  const completed = panel.getByRole("region", { name: "多数据集 Join 协作" });
-  await expect(completed).toContainText("关联已完成");
-  await expect(completed).toContainText("衍生数据集");
-  await expect(completed).toContainText("左父版本");
-  await expect(completed).toContainText("右父版本");
-  await expect(completed).toContainText("完整双父血缘已登记");
+  await expect(panel).not.toContainText("高风险审批");
+  await expect(panel).not.toContainText("批准一次");
 });
 
 test("暂停态可以提交不可变计划新版本", async ({ page }) => {
@@ -1791,19 +1528,15 @@ test("SSE 中断后携带游标续接并抑制边界重复事件", async ({ page
   ).toHaveText("已完成");
 });
 
-test("4D 自主等级、反馈和分析分支形成可追踪闭环", async ({ page }) => {
+test("单一 Agent、反馈和分析分支形成可追踪闭环", async ({ page }) => {
   const state = await installMockApi(page);
   await page.goto("/");
 
-  await page.getByRole("radio", { name: "辅助模式" }).click();
-  await send(page, "请执行辅助模式验收");
+  await send(page, "请执行单一 Agent 验收");
 
   const controlButton = page.getByRole("button", { name: "任务协作" });
   await controlButton.click();
   let panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel.locator(".agent-status")).toHaveText("已暂停");
-  await expect(panel).toContainText("辅助模式");
-  await panel.getByRole("button", { name: "确认计划并执行" }).click();
   await expect(panel.locator(".agent-status")).toHaveText("已完成");
 
   await panel.getByRole("radio", { name: "需改进" }).click();
@@ -1813,7 +1546,6 @@ test("4D 自主等级、反馈和分析分支形成可追踪闭环", async ({ pa
   await expect(panel.getByLabel("结果反馈")).toContainText("1 条");
 
   await page.getByRole("button", { name: "关闭任务协作" }).click();
-  await page.getByRole("radio", { name: "自主模式" }).click();
   await controlButton.click();
   panel = page.getByRole("dialog", { name: "任务协作" });
   await panel.getByRole("textbox", { name: "新分支目标" }).fill(
@@ -1821,26 +1553,22 @@ test("4D 自主等级、反馈和分析分支形成可追踪闭环", async ({ pa
   );
   await panel.getByRole("button", { name: "创建分析分支" }).click();
 
-  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+  await expect(page.getByText("趋势图已生成。", { exact: true }).last()).toBeVisible();
   await controlButton.click();
   panel = page.getByRole("dialog", { name: "任务协作" });
   await expect(panel.getByLabel("分支对比")).toContainText("2 个相关 Run");
-  await expect(panel.getByLabel("分支对比")).toContainText("自主模式");
   await panel.getByRole("button", { name: /查看分支/ }).click();
-  await expect(panel).toContainText("请执行辅助模式验收");
   await expect(panel.getByLabel("结果反馈")).toContainText(
     "请改用不同假设并比较结果",
   );
   expect(state.chatRequests).toEqual([
     {
-      message: "请执行辅助模式验收",
-      autonomy_mode: "assisted",
+      message: "请执行单一 Agent 验收",
       parent_run_id: null,
     },
     {
       message: "改用稳健趋势方法并与原结果对比",
-      autonomy_mode: "autonomous",
-      parent_run_id: "collaboration-run-1",
+      parent_run_id: "run-1",
     },
   ]);
 });

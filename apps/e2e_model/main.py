@@ -20,7 +20,6 @@ app = FastAPI(title="ChatBI E2E model fixture")
 
 _BRANCH_MARKER = "COMPOSE_4D_BRANCH"
 _FEEDBACK_MARKER = "COMPOSE_4D_FEEDBACK"
-_READ_ONLY_MARKER = "COMPOSE_4D_READ_ONLY"
 _PARALLEL_MARKER = "COMPOSE_6A_PARALLEL"
 _HYPOTHESIS_MARKER = "请深入分析这份数据"
 _REPORT_MARKER = "COMPOSE_REPORT"
@@ -28,7 +27,6 @@ _audit: dict[str, int | bool] = {
     "planner_calls": 0,
     "feedback_marker_seen_in_planner": False,
     "branch_profile_tool_calls": 0,
-    "read_only_report_attempts": 0,
     "parallel_tool_batches": 0,
     "hypothesis_anomaly_tool_calls": 0,
 }
@@ -240,8 +238,6 @@ async def _stream_turn(
         )
         yield _sse_chunk(model, {}, finish_reason="tool_calls")
     elif not has_current_tool_result and "generate_report" in tool_names:
-        if scenario_marker == _READ_ONLY_MARKER:
-            _audit["read_only_report_attempts"] = int(_audit["read_only_report_attempts"]) + 1
         analysis_ids = re.findall(r"analysis_id=([A-Za-z0-9_-]+)", joined)
         if not analysis_ids:
             raise HTTPException(status_code=422, detail="analysis_id missing")
@@ -303,15 +299,6 @@ async def _stream_turn(
             {
                 "role": "assistant",
                 "content": "Compose 4D 分支画像已完成，并已按父分支反馈重新核对。",
-            },
-        )
-        yield _sse_chunk(model, {}, finish_reason="stop")
-    elif scenario_marker == _READ_ONLY_MARKER:
-        yield _sse_chunk(
-            model,
-            {
-                "role": "assistant",
-                "content": "标准只读模式已阻止报告写入。",
             },
         )
         yield _sse_chunk(model, {}, finish_reason="stop")
@@ -482,7 +469,6 @@ def _latest_scenario_marker(messages: list[Any]) -> str | None:
         for marker in (
             _REPORT_MARKER,
             _PARALLEL_MARKER,
-            _READ_ONLY_MARKER,
             _BRANCH_MARKER,
             _HYPOTHESIS_MARKER,
         ):

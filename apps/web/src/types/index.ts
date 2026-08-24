@@ -220,8 +220,6 @@ export type AgentRunStatus =
   | "failed"
   | "cancelled";
 
-export type AgentAutonomyMode = "assisted" | "read_only" | "autonomous";
-
 export type AgentStepStatus =
   | "pending"
   | "running"
@@ -246,7 +244,6 @@ export interface AgentRun {
   created_at: string;
   updated_at: string;
   finished_at: string | null;
-  autonomy_mode: AgentAutonomyMode;
 }
 
 export interface AgentPlanStepDefinition {
@@ -474,8 +471,6 @@ export interface AgentExecutionControl {
 
 export type AgentJoinCollaborationStatus =
   | "preflight_ready"
-  | "awaiting_approval"
-  | "approved"
   | "executing"
   | "completed"
   | "blocked"
@@ -514,15 +509,6 @@ export interface AgentJoinCollaboration {
   data_version_hash: string;
   current_data_version_hash: string;
   data_version_matches: boolean;
-  approval: {
-    approval_id: string;
-    status: AgentApprovalStatus;
-    plan_version: number;
-    step_id: string;
-    expires_at: string;
-    decision_reason: string | null;
-    expired: boolean;
-  } | null;
   output: {
     dataset_ref: string;
     rows: number | null;
@@ -545,33 +531,6 @@ export interface AgentJoinCollaboration {
 
 export interface LatestAgentRunResponse {
   run: AgentRun | null;
-}
-
-export type AgentApprovalStatus =
-  | "pending"
-  | "approved"
-  | "denied"
-  | "consumed"
-  | "revoked";
-
-export interface AgentApproval {
-  approval_id: string;
-  run_id: string;
-  plan_id: string;
-  plan_version: number;
-  step_id: string;
-  tool_name: string;
-  tool_schema_hash: string;
-  parameter_summary_hash: string;
-  risk_level: "high" | "critical";
-  status: AgentApprovalStatus;
-  version: number;
-  expires_at: string;
-  decision_reason: string | null;
-  requested_at: string;
-  updated_at: string;
-  decided_at: string | null;
-  consumed_at: string | null;
 }
 
 export interface AgentTaskEvent {
@@ -609,10 +568,6 @@ export interface AgentControlResponse {
 export interface AgentPlanRevisionResponse extends AgentControlResponse {
   plan: AgentPlan;
   steps: AgentTaskStep[];
-}
-
-export interface AgentApprovalDecisionResponse extends AgentControlResponse {
-  approval: AgentApproval;
 }
 
 // ── 对话式 Agent 实时轮次（阶段 3，SSE 事件 14.5.3 → 消息卡片）──

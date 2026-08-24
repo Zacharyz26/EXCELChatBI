@@ -6,7 +6,12 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from apps.orchestrator.run_manager import AgentRunManager, ManagedRunControl, SseItem
+from apps.orchestrator.run_manager import (
+    ActiveConversationRunError,
+    AgentRunManager,
+    ManagedRunControl,
+    SseItem,
+)
 
 
 @pytest.mark.asyncio
@@ -123,3 +128,35 @@ async def test_shutdown_cancels_and_forgets_background_producers() -> None:
     assert manager.control_for("run-shutdown") is None
     with pytest.raises(StopAsyncIteration):
         await anext(subscription)
+
+
+@pytest.mark.asyncio
+async def test_conversation_allows_only_one_live_execution_host() -> None:
+    manager = AgentRunManager()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def source(_control: ManagedRunControl) -> AsyncIterator[SseItem]:
+        started.set()
+        await release.wait()
+        yield {"event": "done", "data": '{"run_status":"completed"}'}
+
+    first = manager.start("run-first", source, conversation_id="conversation-1")
+    await started.wait()
+
+    with pytest.raises(ActiveConversationRunError) as captured:
+        manager.start("run-second", source, conversation_id="conversation-1")
+    assert captured.value.run_id == "run-first"
+
+    release.set()
+    assert (await asyncio.wait_for(anext(first), timeout=1))["event"] == "done"
+    await first.aclose()
+    await asyncio.sleep(0)
+
+    replacement = manager.start(
+        "run-second",
+        source,
+        conversation_id="conversation-1",
+    )
+    assert (await asyncio.wait_for(anext(replacement), timeout=1))["event"] == "done"
+    await replacement.aclose()

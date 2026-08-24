@@ -12,7 +12,6 @@ import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
-  AgentAutonomyMode,
   LiveTurnItem,
   ToolStep,
   WorkspaceArtifact,
@@ -28,10 +27,9 @@ export function ChatPanel() {
   const loading = useWorkspaceStore((state) => state.loading);
   const uploading = useWorkspaceStore((state) => state.uploading);
   const streaming = useWorkspaceStore((state) => state.streaming);
+  const activeRun = useWorkspaceStore((state) => state.activeRun);
   const error = useWorkspaceStore((state) => state.error);
   const sendMessage = useWorkspaceStore((state) => state.sendMessage);
-  const autonomyMode = useWorkspaceStore((state) => state.autonomyMode);
-  const setAutonomyMode = useWorkspaceStore((state) => state.setAutonomyMode);
   const uploadFile = useWorkspaceStore((state) => state.uploadFile);
   const clearError = useWorkspaceStore((state) => state.clearError);
   const [draft, setDraft] = useState("");
@@ -55,7 +53,7 @@ export function ChatPanel() {
 
   async function submitMessage() {
     const content = draft.trim();
-    if (!content || !activeConversationId || streaming || uploading) return;
+    if (!content || !activeConversationId || streaming || uploading || taskPending) return;
     setDraft("");
     stickToBottomRef.current = true; // 自己发消息后跳到最新回复
     await sendMessage(content);
@@ -118,7 +116,8 @@ export function ChatPanel() {
     return map;
   }, [messages]);
 
-  const busy = streaming || uploading;
+  const taskPending = activeRun !== null && !TERMINAL_RUN_STATUSES.has(activeRun.run.status);
+  const busy = streaming || uploading || taskPending;
 
   return (
     <section className="chat-panel" aria-label="对话消息">
@@ -163,23 +162,6 @@ export function ChatPanel() {
             <button type="button" onClick={clearError} aria-label="关闭错误提示">×</button>
           </div>
         )}
-        <div className="autonomy-selector" role="radiogroup" aria-label="自主等级">
-          {AUTONOMY_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={autonomyMode === option.value}
-              className={autonomyMode === option.value ? "autonomy-option autonomy-option--active" : "autonomy-option"}
-              onClick={() => setAutonomyMode(option.value)}
-              disabled={busy}
-              title={option.description}
-            >
-              {option.label}
-            </button>
-          ))}
-          <span>{AUTONOMY_OPTIONS.find((item) => item.value === autonomyMode)?.description}</span>
-        </div>
         <div className="quick-commands" role="toolbar" aria-label="快捷指令">
           {QUICK_COMMANDS.map((command) => (
             <button
@@ -221,14 +203,14 @@ export function ChatPanel() {
             placeholder="描述你的分析需求…"
             rows={1}
             maxLength={20_000}
-            disabled={!activeConversationId || loading}
+            disabled={!activeConversationId || loading || taskPending}
             aria-label="消息内容"
           />
           <button
             type="submit"
             className="composer-send"
             disabled={!draft.trim() || !activeConversationId || busy}
-            aria-label={streaming ? "正在生成回复" : "发送消息"}
+            aria-label={busy ? "当前任务正在处理" : "发送消息"}
           >
             {streaming ? <LoadingRing /> : <SendIcon />}
           </button>
@@ -236,6 +218,8 @@ export function ChatPanel() {
         <p className="composer-hint">
           {uploading
             ? "正在解析并生成数据画像…"
+            : taskPending
+              ? "当前对话仍有未完成任务，请先在任务面板继续或取消"
             : "Enter 发送 · Shift + Enter 换行 · Agent 会自动规划并调用分析工具"}
         </p>
       </div>
@@ -243,27 +227,12 @@ export function ChatPanel() {
   );
 }
 
-const AUTONOMY_OPTIONS: Array<{
-  value: AgentAutonomyMode;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "assisted",
-    label: "辅助模式",
-    description: "先生成计划，确认后才开始执行工具",
-  },
-  {
-    value: "read_only",
-    label: "标准只读",
-    description: "自动执行只读分析，禁止写入型工具",
-  },
-  {
-    value: "autonomous",
-    label: "自主模式",
-    description: "自动执行低/中风险工具，高风险仍需审批",
-  },
-];
+const TERMINAL_RUN_STATUSES = new Set([
+  "completed",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
 
 // ── 快捷指令条（14.4：注入模板仍走对话链路，不退化成菜单表单）──
 
