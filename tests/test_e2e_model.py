@@ -99,11 +99,11 @@ def test_compose_fixture_selects_the_latest_marked_user_turn() -> None:
             [
                 {"role": "user", "content": "COMPOSE_4D_BRANCH"},
                 {"role": "assistant", "content": "分支完成"},
-                {"role": "user", "content": "COMPOSE_4D_READ_ONLY"},
+                {"role": "user", "content": "COMPOSE_6A_PARALLEL"},
                 {"role": "user", "content": "请按当前计划重试"},
             ]
         )
-        == "COMPOSE_4D_READ_ONLY"
+        == "COMPOSE_6A_PARALLEL"
     )
     assert (
         _latest_scenario_marker(
