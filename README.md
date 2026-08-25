@@ -164,7 +164,9 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - C2 已完成：未实现的 `multi_layout` 已从 chart MCP、Schema 和设计声明撤下；目录完整性回归
   会拒绝缺少治理元数据、完整输出契约或直接抛出 `NotImplementedError` 的公开工具；
 - 2026-08-26 本地已通过干净核心环境烟测、完整后端测试、全仓 Ruff、前端 lint/build；
-  当前 WSL 未启用 Docker Desktop 集成，提交后的 Compose CI 仍是功能冻结的发布确认门禁；
+  提交 `eb7789c` 的 [GitHub Actions run 32883619141](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/32883619141)
+  已确认 backend、frontend 与真实 Compose 三项作业全绿，项目已进入功能冻结；当前 WSL
+  未启用 Docker Desktop 集成仅是本地环境限制，不再构成发布阻塞；
 
 - 依赖图调度、Observation 自动重规划、结构化澄清回答、单步重试、SSE 游标重连和
   服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁已通过真实 Compose CI；
