@@ -17,14 +17,14 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --no-editable \
-      --extra stats --extra report --extra rag-store --extra chart-screenshot --extra mcp
+      --extra forecast --extra report --extra rag-store --extra chart-screenshot --extra mcp
 
 COPY apps ./apps
 COPY mcp_servers ./mcp_servers
 COPY packages ./packages
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable \
-      --extra stats --extra report --extra rag-store --extra chart-screenshot --extra mcp
+      --extra forecast --extra report --extra rag-store --extra chart-screenshot --extra mcp
 
 
 # Optional semantic RAG builder. The baseline image stays lightweight and CI can
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python-builder AS python-rag-builder
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable \
-      --extra stats --extra report --extra rag --extra chart-screenshot --extra mcp
+      --extra forecast --extra report --extra rag --extra chart-screenshot --extra mcp
 
 
 FROM ${PYTHON_IMAGE} AS api

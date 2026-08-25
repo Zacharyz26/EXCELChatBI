@@ -32,7 +32,7 @@ docker compose version
 cp .env.example .env
 cp config/models.example.yaml config/models.yaml
 cp config/data_policy.example.yaml config/data_policy.yaml
-uv sync --extra stats --extra rag
+uv sync --extra rag
 pnpm --dir apps/web install
 ```
 

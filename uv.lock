@@ -528,7 +528,9 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-multipart" },
     { name = "pyyaml" },
+    { name = "scikit-learn" },
     { name = "sse-starlette" },
+    { name = "statsmodels" },
     { name = "structlog" },
     { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
@@ -537,6 +539,9 @@ dependencies = [
 [package.optional-dependencies]
 chart-screenshot = [
     { name = "playwright" },
+]
+forecast = [
+    { name = "prophet" },
 ]
 mcp = [
     { name = "mcp" },
@@ -553,11 +558,6 @@ report = [
     { name = "markdown" },
     { name = "pydyf" },
     { name = "weasyprint" },
-]
-stats = [
-    { name = "prophet" },
-    { name = "scikit-learn" },
-    { name = "statsmodels" },
 ]
 storage = [
     { name = "minio" },
@@ -588,7 +588,7 @@ requires-dist = [
     { name = "openpyxl", specifier = ">=3.1,<4" },
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "playwright", marker = "extra == 'chart-screenshot'", specifier = ">=1.44,<2" },
-    { name = "prophet", marker = "extra == 'stats'", specifier = ">=1.1,<2" },
+    { name = "prophet", marker = "extra == 'forecast'", specifier = ">=1.1,<2" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'storage'", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pydantic-settings", specifier = ">=2.3,<3" },
@@ -598,16 +598,16 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "redis", marker = "extra == 'storage'", specifier = ">=5.0,<6" },
-    { name = "scikit-learn", marker = "extra == 'stats'", specifier = ">=1.5,<2" },
+    { name = "scikit-learn", specifier = ">=1.5,<2" },
     { name = "sse-starlette", specifier = ">=2.1,<3" },
-    { name = "statsmodels", marker = "extra == 'stats'", specifier = ">=0.14,<0.15" },
+    { name = "statsmodels", specifier = ">=0.14,<0.15" },
     { name = "structlog", specifier = ">=24.1,<25" },
     { name = "tenacity", specifier = ">=8.3,<9" },
     { name = "transformers", marker = "extra == 'rag'", specifier = ">=4.44,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<0.35" },
     { name = "weasyprint", marker = "extra == 'report'", specifier = ">=62,<63" },
 ]
-provides-extras = ["stats", "rag", "rag-store", "chart-screenshot", "report", "mcp", "storage"]
+provides-extras = ["forecast", "rag", "rag-store", "chart-screenshot", "report", "mcp", "storage"]
 
 [package.metadata.requires-dev]
 dev = [

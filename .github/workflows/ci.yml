@@ -28,8 +28,16 @@ jobs:
           python-version: "3.11"
           enable-cache: true
 
+      - name: Install core runtime in a clean environment
+        run: uv sync --locked --no-dev
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-core
+
+      - name: Smoke-test core API import, lifespan and readiness
+        run: .venv-core/bin/python scripts/api_startup_smoke.py
+
       - name: Install backend dependencies
-        run: uv sync --frozen --extra stats --extra report --extra rag-store --extra mcp
+        run: uv sync --frozen --extra forecast --extra report --extra rag-store --extra mcp
 
       - name: Run backend tests
         run: uv run --frozen pytest -q

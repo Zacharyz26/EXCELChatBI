@@ -42,10 +42,3 @@ CHART_SCREENSHOT_SCHEMA: dict[str, Any] = {
     "required": ["option"],
     "additionalProperties": False,
 }
-
-MULTI_LAYOUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {"chart_ids": {"type": "array", "items": {"type": "string"}}},
-    "required": ["chart_ids"],
-    "additionalProperties": False,
-}

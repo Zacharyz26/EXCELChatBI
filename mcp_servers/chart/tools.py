@@ -188,8 +188,3 @@ def chart_screenshot(args: dict[str, Any]) -> dict[str, Any]:
         "height": height,
         "bytes": out_path.stat().st_size,
     }
-
-
-def multi_layout(args: dict[str, Any]) -> dict[str, Any]:
-    """多图组合布局。"""
-    raise NotImplementedError("TODO: 组合多个图表为面板布局")

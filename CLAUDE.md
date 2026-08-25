@@ -3,7 +3,7 @@
 > AI 编码工作基准。完整架构见 `/docs/ChatBI设计文档.md`，当前路线图见
 > `/docs/Agent自主化开发规划.md`，MCP/Docker 跨阶段设计见
 > `/docs/MCP与Docker全阶段演进设计.md`。安全约束以本文件为准；阶段内容以路线图为准。
-> 文档索引见 `/docs/README.md`。本基准于 2026-08-24 复核，适用于当前
+> 文档索引见 `/docs/README.md`。本基准于 2026-08-26 复核，适用于当前
 > `v2.5-closeout` 单一 Agent 代码基线。
 
 ## 1. 项目一句话
@@ -251,13 +251,13 @@ cp .env.example .env
 cp config/models.example.yaml config/models.yaml
 cp config/data_policy.example.yaml config/data_policy.yaml  # 可选
 
-# 安装与后端（stats 是当前 API 启动的最小 extra）
-uv sync --extra stats
-uv run --extra stats uvicorn apps.api.main:app --reload
+# 安装与后端（基础统计属于核心运行时）
+uv sync
+uv run uvicorn apps.api.main:app --reload
 
-# 现有 .env 若启用 bge + Milvus，需在同一次同步中同时声明 stats 与 rag；
+# 现有 .env 若启用 bge + Milvus，需在同次同步中声明 rag；
 # 完整模型不要开 --reload，完成同步后用 --no-sync 防止环境被重新精确同步
-uv sync --extra stats --extra rag
+uv sync --extra rag
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   uv run --no-sync uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
 
@@ -267,9 +267,9 @@ pnpm install
 pnpm dev
 
 # 后端检查
-uv run --extra stats pytest
-uv run --extra stats ruff check .
-uv run --extra stats mypy .
+uv run pytest
+uv run ruff check .
+uv run mypy .
 
 # 前端检查与 E2E
 cd apps/web
@@ -283,7 +283,7 @@ uv run --no-sync python scripts/kb_eval.py --enforce --json-output .data/kb-eval
 uv run --no-sync python scripts/kb_admin.py status
 ```
 
-`uv sync` 是精确同步：不带 extra 会移除统计/RAG 等可选依赖，连续执行多个单 extra
+`uv sync` 是精确同步：不带 extra 会移除 Prophet/RAG 等可选依赖，连续执行多个单 extra
 命令也不能视为能力累加。需要全部本地能力时使用 `uv sync --all-extras`，启动时对应使用
 `uv run --all-extras ...`。默认 `.env.example` 使用 `hashing/lexical/local`，无需下载
 Hugging Face 权重；`bge/bge/milvus` 会在应用 lifespan 中 fail-fast 加载依赖、模型和存储。

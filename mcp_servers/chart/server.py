@@ -33,13 +33,6 @@ def build_server() -> MCPServer:
             ),
         )
     )
-    server.register(
-        Tool(
-            "multi_layout", "多图布局", schemas.MULTI_LAYOUT_SCHEMA,
-            tools.multi_layout, output_schema=tool_output_schema("multi_layout"),
-            metadata=tool_metadata("visualization.layout")
-        )
-    )
     return server
 
 

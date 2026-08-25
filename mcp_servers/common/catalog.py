@@ -682,9 +682,6 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
         "height",
         "bytes",
     ),
-    # multi_layout remains unavailable to the Agent; its implementation still
-    # raises NotImplementedError, so no successful result is advertised here.
-    "multi_layout": {"type": "object"},
     "transform_dataset": _object(
         {
             "dataset_ref": _STRING,

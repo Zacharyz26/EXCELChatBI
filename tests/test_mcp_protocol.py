@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
 import sys
+import textwrap
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -957,7 +960,20 @@ async def test_streamable_http_client_cancellation_keeps_session_usable() -> Non
         assert terminated.status_code == 200
 
 
-def test_every_project_server_exports_governed_mcp_metadata() -> None:
+def _directly_raises_not_implemented(handler: Any) -> bool:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+        if isinstance(raised, ast.Name) and raised.id == "NotImplementedError":
+            return True
+        if isinstance(raised, ast.Attribute) and raised.attr == "NotImplementedError":
+            return True
+    return False
+
+
+def test_every_project_server_exports_complete_governed_tools() -> None:
     servers = (
         build_excel_server(),
         build_stats_server(),
@@ -965,17 +981,17 @@ def test_every_project_server_exports_governed_mcp_metadata() -> None:
         build_data_server(),
         build_report_server(),
     )
+    tools = [tool for server in servers for tool in server.tools]
     descriptors = [
         descriptor for server in servers for descriptor in server.as_mcp_adapter().list_tools()
     ]
-    assert len(descriptors) == 20
+    assert len(tools) == 19
+    assert len(descriptors) == len(tools)
+    assert all(tool.metadata is not None for tool in tools)
     assert all(descriptor.metadata.capabilities for descriptor in descriptors)
     assert all(descriptor.output_schema.get("type") == "object" for descriptor in descriptors)
-    assert all(
-        descriptor.output_schema.get("required")
-        for descriptor in descriptors
-        if descriptor.name != "multi_layout"
-    )
+    assert all(descriptor.output_schema.get("required") for descriptor in descriptors)
+    assert not any(_directly_raises_not_implemented(tool.handler) for tool in tools)
     assert all(descriptor.to_protocol_dict()["_meta"] for descriptor in descriptors)
 
 

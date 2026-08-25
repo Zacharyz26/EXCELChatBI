@@ -4,7 +4,7 @@
 算出，函数内绝无 LLM 调用，LLM 仅负责事后解读（本切片暂不接解读）。
 红线1：明细级输出（STL 逐行分量、异常点原值）随结果整体返回，供前端渲染（数据不出环境）；
 将来接 LLM 解读时，须在编排层收敛为摘要再喂模型，不得下发逐行明细。
-趋势支持 STL / 移动平均 / Prophet（prophet 惰性导入，需 .[stats]）。
+趋势支持 STL / 移动平均 / Prophet（prophet 惰性导入，需 .[forecast]）。
 """
 
 from __future__ import annotations

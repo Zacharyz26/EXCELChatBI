@@ -63,7 +63,7 @@ def chart_tools_dep() -> MCPServer:
 
 @lru_cache
 def stats_tools_dep() -> MCPServer:
-    """注入统计分析工具服务（进程内；需 uv sync --extra stats）。"""
+    """注入核心运行时内的统计分析工具服务。"""
     return build_stats_server()
 
 

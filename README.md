@@ -7,9 +7,9 @@
 > [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。文档入口和现行/历史边界见
 > [`docs/README.md`](./docs/README.md)。
 
-> 文档状态：2026-08-24。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
-> 2A–2E 与 v2.5 阶段 3–6 已工程关闭。C1“启动依赖契约”和 C2“未实现工具撤出目录”仍是
-> 收尾项。2026-08-24 已在 WSL2/CPU 上实测完整 BGE-M3 + BGE reranker + Docker Milvus
+> 文档状态：2026-08-26。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
+> 2A–2E、v2.5 阶段 3–6，以及 C1“启动依赖契约”和 C2“未实现工具撤出目录”均已工程完成。
+> 2026-08-24 已在 WSL2/CPU 上实测完整 BGE-M3 + BGE reranker + Docker Milvus
 > Standalone：API/Web readiness、2 文档 6 片段重建和 semantic 门禁均通过。
 
 ## 启动导航
@@ -157,10 +157,14 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - bge-m3 稠密+稀疏检索、reranker、Milvus Lite/Standalone、知识文档生命周期和 CI 质量门禁；
 - 固定版本 Milvus Standalone 部署、readiness、代际状态、回滚、清理、备份恢复和负载测试工具。
 
-### 当前边界与收尾缺口
+### 收尾结果与当前边界
 
-- C1 尚未完成：API 启动仍要求显式声明 `stats` extra，单独执行 `uv sync` 会移除统计依赖；
-- C2 尚未完成：需要把仍未实现的占位工具从 MCP/Agent 公开目录撤下，并增加目录完整性回归；
+- C1 已完成：基础统计依赖进入核心运行时，Prophet 独立为 `forecast` extra；锁文件、默认命令、
+  Docker 依赖档位和干净核心环境 API import/lifespan/readiness 烟测保持同源；
+- C2 已完成：未实现的 `multi_layout` 已从 chart MCP、Schema 和设计声明撤下；目录完整性回归
+  会拒绝缺少治理元数据、完整输出契约或直接抛出 `NotImplementedError` 的公开工具；
+- 2026-08-26 本地已通过干净核心环境烟测、完整后端测试、全仓 Ruff、前端 lint/build；
+  当前 WSL 未启用 Docker Desktop 集成，提交后的 Compose CI 仍是功能冻结的发布确认门禁；
 
 - 依赖图调度、Observation 自动重规划、结构化澄清回答、单步重试、SSE 游标重连和
   服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁已通过真实 Compose CI；
@@ -346,7 +350,7 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 cp .env.example .env
 cp config/models.example.yaml config/models.yaml
 cp config/data_policy.example.yaml config/data_policy.yaml
-uv sync --extra stats
+uv sync
 pnpm --dir apps/web install
 ```
 
@@ -363,7 +367,7 @@ EMBEDDING_DEVICE=cpu
 终端 1 启动 API：
 
 ```bash
-uv run --extra stats uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 终端 2 启动 Web：
@@ -426,8 +430,7 @@ curl --fail http://127.0.0.1:8000/health/ready
 ```
 
 - `RAG_RUNTIME_PROFILE=cpu` 必须同时使用 `bge/bge/milvus + EMBEDDING_DEVICE=cpu`；
-- `ModuleNotFoundError: FlagEmbedding/pymilvus`：重新执行
-  `uv sync --extra stats --extra rag`；
+- `ModuleNotFoundError: FlagEmbedding/pymilvus`：重新执行 `uv sync --extra rag`；
 - Milvus `permission deny ... CreateCollection`：重新运行修复后的
   `scripts/milvus_bootstrap.py`，业务角色需要 `default` 数据库的 `DatabaseAdmin` 和
   `CollectionAdmin`；
@@ -437,9 +440,9 @@ curl --fail http://127.0.0.1:8000/health/ready
 
 ```bash
 # 后端
-uv run --extra stats pytest
-uv run --extra stats ruff check .
-uv run --extra stats mypy .
+uv run pytest
+uv run ruff check .
+uv run mypy .
 
 # 前端
 cd apps/web
@@ -476,16 +479,19 @@ uv run --no-sync python -m apps.api.workspace_admin restore \
 中声明所有需要的 extras，或者使用 `--all-extras`。
 
 ```bash
-# 最小本地 API：统计为当前启动必需
-uv sync --extra stats
+# 最小本地 API：包含基础统计和轻量 RAG
+uv sync
 
-# 确定性 RAG + 统计 + 报告 + 截图（常用本地完整档位）
-uv sync --extra stats --extra report --extra chart-screenshot
-uv run --extra stats --extra report --extra chart-screenshot \
+# 基础统计 + 报告 + 截图（常用本地档位）
+uv sync --extra report --extra chart-screenshot
+uv run --extra report --extra chart-screenshot \
   playwright install --with-deps chromium
 
 # 真实 bge/Milvus 语义检索
-uv sync --extra stats --extra rag
+uv sync --extra rag
+
+# 可选 Prophet 趋势预测实现（其他统计不需该 extra）
+uv sync --extra forecast
 
 # 安装全部可选能力；体积较大
 uv sync --all-extras

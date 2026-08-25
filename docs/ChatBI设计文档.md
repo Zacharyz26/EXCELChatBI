@@ -276,7 +276,7 @@ SessionState {
 |--------|------|--------|------|
 | Excel 解析 | parse_excel / infer_schema / data_preview | pandas · openpyxl | F2 |
 | 统计分析 | trend_analysis / anomaly_detect / regression | statsmodels · sklearn · Prophet | F4 |
-| 图表配置 | gen_chart / chart_screenshot / multi_layout | ECharts JSON 输出 | F2 F3 |
+| 图表配置 | gen_chart / chart_screenshot | ECharts JSON 输出 | F2 F3 |
 | 报告生成 | gen_report_md / insight_summary / export_pdf | Markdown · WeasyPrint | F2 |
 | Code Interpreter | 通用代码执行（独立安全项目，当前未启用） | pandas + 沙箱 | F2 F4 |
 | 内部数据接入 | query_db / call_api（v3.0） | MCP Server | F5 |
