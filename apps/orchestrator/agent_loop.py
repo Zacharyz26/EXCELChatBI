@@ -2492,40 +2492,42 @@ async def _stream_agent_chat_inner(
                     max(len(_contract_chart_dimensions(contract)), _MISSING_CHART_RETRY_LIMIT),
                     3,
                 )
-                if (
-                    issue_codes.intersection(
-                        {"missing_chart_artifact", "missing_chart_dimension_artifact"}
-                    )
-                    and tools_enabled
-                    and missing_chart_retries < chart_retry_limit
-                ):
-                    missing_chart_retries += 1
-                    retry_instruction = _chart_retry_instruction(verification)
-                elif (
-                    "missing_report_artifact" in issue_codes
-                    and tools_enabled
-                    and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT
-                ):
-                    missing_report_retries += 1
-                    retry_instruction = (
-                        _MISSING_PDF_REPORT_INSTRUCTION
-                        if pdf_required
-                        else _MISSING_REPORT_INSTRUCTION
-                    )
-                elif (
-                    "unsupported_numeric_claim" in issue_codes
-                    and tools_enabled
-                    and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
-                ):
-                    unsupported_claim_retries += 1
-                    retry_instruction = _UNSUPPORTED_CLAIM_INSTRUCTION
-                elif (
-                    "unsupported_knowledge_claim" in issue_codes
-                    and tools_enabled
-                    and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
-                ):
-                    unsupported_claim_retries += 1
-                    retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
+                chart_issues = issue_codes.intersection(
+                    {"missing_chart_artifact", "missing_chart_dimension_artifact"}
+                )
+                # A specific postcondition owns the retry decision even after
+                # its budget is exhausted. Falling through to the generic
+                # incomplete-plan repair would grant an unintended extra model
+                # round for the same missing chart/report.
+                if chart_issues:
+                    if tools_enabled and missing_chart_retries < chart_retry_limit:
+                        missing_chart_retries += 1
+                        retry_instruction = _chart_retry_instruction(verification)
+                elif "missing_report_artifact" in issue_codes:
+                    if (
+                        tools_enabled
+                        and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT
+                    ):
+                        missing_report_retries += 1
+                        retry_instruction = (
+                            _MISSING_PDF_REPORT_INSTRUCTION
+                            if pdf_required
+                            else _MISSING_REPORT_INSTRUCTION
+                        )
+                elif "unsupported_numeric_claim" in issue_codes:
+                    if (
+                        tools_enabled
+                        and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
+                    ):
+                        unsupported_claim_retries += 1
+                        retry_instruction = _UNSUPPORTED_CLAIM_INSTRUCTION
+                elif "unsupported_knowledge_claim" in issue_codes:
+                    if (
+                        tools_enabled
+                        and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
+                    ):
+                        unsupported_claim_retries += 1
+                        retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
                 elif (
                     "incomplete_plan_steps" in issue_codes
                     and tools_enabled
