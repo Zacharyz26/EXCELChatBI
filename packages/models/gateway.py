@@ -16,6 +16,11 @@ from packages.common.logging import get_logger
 from packages.governance.observability import TraceSpan, trace_span
 from packages.models.adapters.base import ModelAdapter
 from packages.models.adapters.openai_compatible import OpenAICompatibleAdapter
+from packages.models.dsml import (
+    DSML_START_MARKERS,
+    dsml_marker_suffix_length,
+    normalize_dsml_tool_response,
+)
 from packages.models.registry import ModelRegistry, ModelSpec
 from packages.models.types import Message, ModelResponse, Scenario
 
@@ -104,6 +109,8 @@ class ModelGateway:
                 ) as span:
                     adapter = self._get_adapter(spec)
                     resp = await adapter.complete(messages, tools=tools, **call_params)
+                    if tools is not None:
+                        resp = normalize_dsml_tool_response(resp, tools)
                     _apply_pricing(resp, spec)
                     span.set_attributes(
                         actual_model=resp.model,
@@ -195,21 +202,63 @@ class ModelGateway:
                     with_tools=tools is not None,
                 ) as span:
                     adapter = self._get_adapter(spec)
-                    chunks = aiter(
-                        adapter.stream_turn(messages, tools=tools, **call_params)
-                    )
-                    first = await anext(chunks, None)
-                    stream_started = True
-                    if first is not None:
-                        if isinstance(first, ModelResponse):
-                            _apply_pricing(first, spec)
-                            _set_response_trace(span, first)
-                        yield first
-                        async for piece in chunks:
-                            if isinstance(piece, ModelResponse):
-                                _apply_pricing(piece, spec)
-                                _set_response_trace(span, piece)
-                            yield piece
+                    chunks = aiter(adapter.stream_turn(messages, tools=tools, **call_params))
+                    pending_text = ""
+                    emitted_text = ""
+                    dsml_detected = False
+                    async for piece in chunks:
+                        if isinstance(piece, str):
+                            if tools is None:
+                                stream_started = True
+                                yield piece
+                                continue
+                            pending_text += piece
+                            if dsml_detected:
+                                continue
+                            marker_positions = [
+                                pending_text.find(marker)
+                                for marker in DSML_START_MARKERS
+                                if marker in pending_text
+                            ]
+                            if marker_positions:
+                                marker_position = min(marker_positions)
+                                safe_text = pending_text[:marker_position]
+                                if safe_text:
+                                    emitted_text += safe_text
+                                    stream_started = True
+                                    yield safe_text
+                                pending_text = pending_text[marker_position:]
+                                dsml_detected = True
+                                continue
+                            retained = dsml_marker_suffix_length(pending_text)
+                            safe_length = len(pending_text) - retained
+                            if safe_length:
+                                safe_text = pending_text[:safe_length]
+                                pending_text = pending_text[safe_length:]
+                                emitted_text += safe_text
+                                stream_started = True
+                                yield safe_text
+                            continue
+
+                        response = piece
+                        if tools is not None:
+                            response = normalize_dsml_tool_response(response, tools)
+                            if response.content.startswith(emitted_text):
+                                remaining_text = response.content[len(emitted_text) :]
+                            elif emitted_text.startswith(response.content):
+                                # Normalization may trim whitespace immediately before
+                                # a DSML block that was already emitted as harmless text.
+                                remaining_text = ""
+                            else:
+                                raise ValueError("模型流式文本与聚合响应不一致")
+                            if remaining_text:
+                                stream_started = True
+                                yield remaining_text
+                            pending_text = ""
+                        _apply_pricing(response, spec)
+                        _set_response_trace(span, response)
+                        stream_started = True
+                        yield response
             except (OpenAIError, ValueError) as exc:
                 if stream_started:
                     raise

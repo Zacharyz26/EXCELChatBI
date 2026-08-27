@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { ClarificationPrompt } from "@/components/ClarificationPrompt";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
   AgentJoinCollaboration,
@@ -10,7 +11,7 @@ import type {
 } from "@/types";
 
 const RUN_STATUS_LABELS: Record<AgentRunStatus, string> = {
-  planning: "规划中",
+  planning: "初始化中",
   waiting_user: "等待澄清",
   running: "执行中",
   verifying: "验证中",
@@ -51,7 +52,7 @@ const HYPOTHESIS_STATUS_LABELS = {
 } as const;
 
 const HYPOTHESIS_EXECUTION_LABELS = {
-  planned: "已绑定计划",
+  planned: "已绑定提纲",
   running: "验证执行中",
   evidence_collected: "Evidence 已收集",
   supported: "Evidence 支持",
@@ -91,7 +92,7 @@ const HYPOTHESIS_FOLLOWUP_REASON_LABELS: Record<string, string> = {
   bounded_retry_available: "预算允许一次有界补证",
   non_retryable_failure: "最近失败不允许自动重试",
   tool_budget_exhausted: "共享工具预算已耗尽",
-  replan_budget_exhausted: "重规划预算已耗尽",
+  replan_budget_exhausted: "后续验证预算已耗尽",
   cancellation_boundary_unsettled: "取消树尚未进入可安全跟进的终态",
 };
 
@@ -120,7 +121,7 @@ const JOIN_RELATIONSHIP_LABELS: Record<string, string> = {
   no_matches: "没有匹配键",
 };
 
-/** 真实 TaskRun、计划、澄清和运行控制的统一协作面板。 */
+/** 真实 TaskRun、任务提纲、澄清和运行控制的统一协作面板。 */
 export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const activeRunId = useWorkspaceStore((state) => state.activeRunId);
   const detail = useWorkspaceStore((state) => state.activeRun);
@@ -136,7 +137,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
   const revisePlan = useWorkspaceStore((state) => state.reviseActivePlan);
   const submitRunFeedback = useWorkspaceStore((state) => state.submitActiveRunFeedback);
   const startBranch = useWorkspaceStore((state) => state.startBranch);
-  const [clarificationDraft, setClarificationDraft] = useState("");
   const [editingPlan, setEditingPlan] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [reasonDraft, setReasonDraft] = useState("");
@@ -190,14 +190,6 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
     setEditingPlan(true);
   }
 
-  async function submitClarification(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const value = clarificationDraft.trim();
-    if (!value || busy) return;
-    await answer(value);
-    setClarificationDraft("");
-  }
-
   async function submitPlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!detail?.plan || !reasonDraft.trim() || busy) return;
@@ -217,7 +209,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
         [...skippedStepIds],
       );
       setEditingPlan(false);
-      setNotice("计划已保存为不可变新版本；任务仍保持暂停。");
+      setNotice("任务提纲已保存为不可变新版本；任务仍保持暂停。");
     } catch {
       /* 详细冲突由共享错误提示展示，保留编辑草稿。 */
     }
@@ -230,7 +222,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
       await submitRunFeedback(feedbackRating, feedbackComment.trim() || null);
       setFeedbackRating(null);
       setFeedbackComment("");
-      setNotice("反馈已绑定当前 Run 的 Evidence/Artifact，并会用于后续分支规划。");
+      setNotice("反馈已绑定当前 Run 的 Evidence/Artifact，并会用于后续分支上下文。");
     } catch {
       /* 共享错误区域展示版本或引用冲突。 */
     }
@@ -264,7 +256,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
           <div>
             <span>AGENT RUN</span>
             <h2 id="agent-control-title">任务协作</h2>
-            <p>计划、澄清与执行状态均以服务端 TaskRun 为准</p>
+            <p>任务提纲、澄清与执行状态均以服务端 TaskRun 为准</p>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭任务协作">×</button>
         </header>
@@ -295,7 +287,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
               </div>
               <h3>{detail.run.goal}</h3>
               <p>
-                Run {shortHash(detail.run.run_id)} · 计划 v{detail.run.plan_version}
+                Run {shortHash(detail.run.run_id)} · 提纲 v{detail.run.plan_version}
                 {detail.run.terminal_reason && ` · ${detail.run.terminal_reason}`}
               </p>
               <div className="agent-run-actions">
@@ -492,7 +484,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                         && candidate.status === "eligible" && (
                           <button
                             type="button"
-                            onClick={() => setClarificationDraft(candidate.statement)}
+                            onClick={() => void answer(candidate.statement)}
                             disabled={busy !== null}
                           >
                             选择此假设
@@ -521,7 +513,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   </div>
                   <dl>
                     <div>
-                      <dt>计划步骤</dt>
+                      <dt>提纲步骤</dt>
                       <dd>
                         v{detail.hypothesis_execution.execution_plan_version}
                         {` · ${detail.hypothesis_execution.logical_step_id}`}
@@ -591,7 +583,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                       </dd>
                     </div>
                     <div>
-                      <dt>重规划余量</dt>
+                      <dt>后续验证余量</dt>
                       <dd>
                         {detail.hypothesis_followup.limits.replans_remaining}
                         {` / ${detail.hypothesis_followup.limits.max_replans}`}
@@ -616,36 +608,17 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
             )}
 
             {detail.run.status === "waiting_user" && clarification && (
-              <section className="agent-section agent-clarification-card">
-                <div className="agent-section__title">
-                  <span>需要你的输入</span>
-                  <small>{clarification.about || clarification.question_id}</small>
-                </div>
-                <h3>{clarification.question}</h3>
-                {clarification.reason && <p>{clarification.reason}</p>}
-                <form onSubmit={(event) => void submitClarification(event)}>
-                  <textarea
-                    value={clarificationDraft}
-                    onChange={(event) => setClarificationDraft(event.target.value)}
-                    maxLength={20_000}
-                    placeholder="输入明确答案，提交后继续同一个任务"
-                    aria-label="澄清答案"
-                    required
-                  />
-                  <button
-                    type="submit"
-                    className="agent-primary-button"
-                    disabled={!clarificationDraft.trim() || busy !== null}
-                  >
-                    {busy === "clarification" ? "提交并恢复中…" : "提交答案并继续"}
-                  </button>
-                </form>
-              </section>
+              <ClarificationPrompt
+                clarification={clarification}
+                busy={busy !== null}
+                className="agent-section agent-clarification-card"
+                onAnswer={answer}
+              />
             )}
 
             <section className="agent-section">
               <div className="agent-section__title">
-                <span>执行计划</span>
+                <span>任务提纲</span>
                 <div>
                   {detail.plan && <small>v{detail.plan.version}</small>}
                   {detail.run.status === "paused" && detail.plan && (
@@ -654,7 +627,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                       onClick={beginPlanEdit}
                       disabled={busy !== null}
                     >
-                      修改计划
+                      修改提纲
                     </button>
                   )}
                 </div>
@@ -675,7 +648,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                   </div>
                 </>
               ) : (
-                <p className="agent-section__empty">计划尚未生成。</p>
+                <p className="agent-section__empty">任务提纲尚未生成。</p>
               )}
             </section>
 
@@ -724,7 +697,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                         disabled={busy !== null}
                         aria-label={`查看分支 ${shortHash(candidate.run_id)}`}
                       >
-                        查看计划、证据与反馈
+                        查看提纲、证据与反馈
                       </button>
                     )}
                   </article>
@@ -743,7 +716,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                       required
                     />
                   </label>
-                  <p>新分支将继承本 Run 的反馈作为规划上下文。</p>
+                  <p>新分支将继承本 Run 的反馈作为 Agent 上下文。</p>
                   <button type="submit" disabled={!branchDraft.trim() || busy !== null}>
                     创建分析分支
                   </button>
@@ -815,11 +788,11 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
         {editingPlan && detail?.plan && (
           <form className="agent-plan-editor" onSubmit={(event) => void submitPlan(event)}>
             <div className="agent-plan-editor__heading">
-              <div><span>IMMUTABLE REVISION</span><h3>修改计划</h3></div>
-              <button type="button" onClick={() => setEditingPlan(false)} aria-label="关闭计划编辑">×</button>
+              <div><span>IMMUTABLE REVISION</span><h3>修改任务提纲</h3></div>
+              <button type="button" onClick={() => setEditingPlan(false)} aria-label="关闭提纲编辑">×</button>
             </div>
             <label>
-              计划摘要
+              提纲摘要
               <input
                 value={summaryDraft}
                 onChange={(event) => setSummaryDraft(event.target.value)}
@@ -870,7 +843,7 @@ export function AgentControlPanel({ onClose }: { onClose: () => void }) {
                 value={reasonDraft}
                 onChange={(event) => setReasonDraft(event.target.value)}
                 maxLength={500}
-                placeholder="说明为什么调整计划"
+                placeholder="说明为什么调整提纲"
                 required
               />
             </label>

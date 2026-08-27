@@ -65,6 +65,8 @@ export default defineConfig({
         RAG_EMBEDDER: "hashing",
         RAG_RERANKER: "lexical",
         RAG_STORE: "local",
+        RAG_RUNTIME_PROFILE: "baseline",
+        EMBEDDING_DEVICE: "cpu",
       },
       url: `http://127.0.0.1:${apiPort}/health/ready`,
       reuseExistingServer: false,

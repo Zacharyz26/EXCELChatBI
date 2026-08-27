@@ -572,7 +572,7 @@ export interface AgentPlanRevisionResponse extends AgentControlResponse {
 
 // ── 对话式 Agent 实时轮次（阶段 3，SSE 事件 14.5.3 → 消息卡片）──
 
-/** 一次工具调用步骤（计划卡/执行卡合一渲染，随 tool_start/tool_end 更新）。 */
+/** 一次工具调用步骤（提纲卡/执行卡合一渲染，随 tool_start/tool_end 更新）。 */
 export interface ToolStep {
   id: string;
   tool: string;

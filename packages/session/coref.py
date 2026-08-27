@@ -174,7 +174,7 @@ class ReferenceResolution:
         return REFERENCE_ASSUMPTION_PREFIX + _stable_json(payload)
 
     def clarification(self) -> dict[str, object] | None:
-        """把歧义转换为现有 Planner 可持久化的阻塞澄清契约。"""
+        """把歧义转换为现有任务提纲可持久化的阻塞澄清契约。"""
         if self.status not in {"ambiguous", "unresolved"}:
             return None
         choices = [choice.to_dict() for choice in self.choices]

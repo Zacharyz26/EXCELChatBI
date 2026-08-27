@@ -40,17 +40,6 @@ DEFAULT_CASES = Path(__file__).parent / "agent_eval_set.jsonl"
 _NUMBER_PATTERN = re.compile(r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?%?")
 _QUESTION_PATTERN = re.compile(r"(?:请确认|请选择|需要您|哪一|哪个|是否).*[？?]?")
 _CAUSAL_PATTERN = re.compile(r"(?:导致|驱动|造成|因为.+所以)")
-_CAPABILITY_BY_TOOL = {
-    "get_data_profile": "data.profile",
-    "kb_search": "knowledge.search",
-    "aggregate_preview": "data.aggregate",
-    "trend_analysis": "stats.trend",
-    "anomaly_detect": "stats.anomaly",
-    "transform_dataset": "dataset.transform",
-    "correlation": "stats.correlation",
-    "gen_chart": "visualization.chart",
-    "generate_report": "report.generate",
-}
 _CAPABILITIES_BY_TOOL = {
     "get_data_profile": ("data.profile", "data.roles", "data.quality"),
     "kb_search": ("knowledge.search",),
@@ -115,15 +104,13 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
                 "category": _required_text(raw.get("category"), f"{case_id}.category"),
                 "request": _required_text(raw.get("request"), f"{case_id}.request"),
                 "context": _object(raw.get("context"), f"{case_id}.context"),
-                "planner_expected": _object(
-                    expected.get("planner"), f"{case_id}.expected.planner"
+                "execution_expected": _object(
+                    expected.get("execution"), f"{case_id}.expected.execution"
                 ),
                 "verifier_expected": _object(
                     expected.get("verifier"), f"{case_id}.expected.verifier"
                 ),
-                "forbidden": _string_list(
-                    raw.get("forbidden", []), f"{case_id}.forbidden"
-                ),
+                "forbidden": _string_list(raw.get("forbidden", []), f"{case_id}.forbidden"),
             }
         )
     if not cases:
@@ -154,26 +141,6 @@ class _ObservingGateway:
                     yield item
         except TimeoutError as exc:
             raise RuntimeError("Agent 模型轮次超过 45 秒总时限") from exc
-
-    async def complete(
-        self,
-        scenario: Scenario,
-        messages: list[Message],
-        *,
-        params: dict[str, object] | None = None,
-    ) -> ModelResponse:
-        """Observe Planner calls without retaining prompts or response content."""
-        try:
-            async with asyncio.timeout(45):
-                response = await self._gateway.complete(
-                    scenario,
-                    messages,
-                    params=params,
-                )
-        except TimeoutError as exc:
-            raise RuntimeError("Planner 模型轮次超过 45 秒总时限") from exc
-        self.responses.append(response)
-        return response
 
 
 class _FixtureRegistry:
@@ -246,39 +213,28 @@ class _FixtureRegistry:
         return [
             item
             for item in tools
-            if allowed_tool_names is None
-            or str(item["function"]["name"]) in allowed_tool_names
+            if allowed_tool_names is None or str(item["function"]["name"]) in allowed_tool_names
         ]
 
     def capability_catalog(self) -> list[JsonObject]:
-        """Expose the production Planner catalog shape for Stage 2 evaluation."""
+        """Expose the production capability catalog for behavior evaluation."""
         descriptions = {
             str(item["function"]["name"]): str(item["function"]["description"])
             for item in self.openai_tools()
         }
         catalog: list[JsonObject] = []
         for capability in sorted(
-            {
-                capability
-                for values in _CAPABILITIES_BY_TOOL.values()
-                for capability in values
-            }
+            {capability for values in _CAPABILITIES_BY_TOOL.values() for capability in values}
         ):
             tool_name = next(
-                name
-                for name, values in _CAPABILITIES_BY_TOOL.items()
-                if capability in values
+                name for name, values in _CAPABILITIES_BY_TOOL.items() if capability in values
             )
             catalog.append(
                 {
                     "name": capability,
                     "description": descriptions[tool_name],
                     "allowed": True,
-                    "risk": (
-                        "medium"
-                        if capability in _MEDIUM_RISK_CAPABILITIES
-                        else "low"
-                    ),
+                    "risk": ("medium" if capability in _MEDIUM_RISK_CAPABILITIES else "low"),
                     "read_only": capability not in _MEDIUM_RISK_CAPABILITIES,
                     "artifact_types": _ARTIFACT_TYPES_BY_CAPABILITY.get(
                         capability,
@@ -287,20 +243,6 @@ class _FixtureRegistry:
                 }
             )
         return catalog
-
-    def openai_tools_for_capabilities(
-        self,
-        capabilities: set[str],
-        *,
-        allowed_tool_names: frozenset[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        return [
-            item
-            for item in self.openai_tools(allowed_tool_names=allowed_tool_names)
-            if capabilities.intersection(
-                self.capabilities_for_tool(str(item["function"]["name"]))
-            )
-        ]
 
     async def validate_remote_catalog(self) -> dict[str, str]:
         """Publish the deterministic in-memory fixture catalog for this run."""
@@ -314,9 +256,7 @@ class _FixtureRegistry:
         for item in capabilities:
             capability = str(item["name"])
             item["tool_names"] = [
-                name
-                for name, values in _CAPABILITIES_BY_TOOL.items()
-                if capability in values
+                name for name, values in _CAPABILITIES_BY_TOOL.items() if capability in values
             ]
         return {
             "schema": "chatbi-capability-catalog-v1",
@@ -340,9 +280,7 @@ class _FixtureRegistry:
         raw_tools = snapshot.get("tools")
         if not isinstance(raw_tools, list):
             return ("invalid_catalog_tools",)
-        current = {
-            str(item["tool_name"]): item for item in self._snapshot_tools()
-        }
+        current = {str(item["tool_name"]): item for item in self._snapshot_tools()}
         issues: list[str] = []
         seen: set[str] = set()
         for raw_tool in raw_tools:
@@ -380,11 +318,7 @@ class _FixtureRegistry:
         raw = snapshot.get("tools")
         if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             raise ValueError("TaskRun tool 目录快照格式非法")
-        names = [
-            item.get("tool_name")
-            for item in raw
-            if item.get("allowed") is not False
-        ]
+        names = [item.get("tool_name") for item in raw if item.get("allowed") is not False]
         if not all(isinstance(item, str) and item for item in names):
             raise ValueError("TaskRun tool 目录快照包含非法工具名")
         return frozenset(cast(list[str], names))
@@ -396,9 +330,7 @@ class _FixtureRegistry:
                 "tool_name": str(item["function"]["name"]),
                 "tool_version": "fixture-v1",
                 "contract_hash": self._tool_contract_hash(item),
-                "capabilities": list(
-                    self.capabilities_for_tool(str(item["function"]["name"]))
-                ),
+                "capabilities": list(self.capabilities_for_tool(str(item["function"]["name"]))),
                 "allowed": True,
             }
             for item in self.openai_tools()
@@ -553,18 +485,12 @@ async def run_evaluation(
     registry: ModelRegistry,
     model_names: list[str],
     repetitions: int,
-    enforce_plan: bool = False,
-    planner_model_name: str | None = None,
-    evaluation_name: str = "reactive_agent_observable_baseline",
-    evaluation_label: str = (
-        "v2.3-compatible loop with stage-1 deterministic verifier"
-    ),
+    evaluation_name: str = "single_agent_observable_behavior",
+    evaluation_label: str = "single Agent loop with deterministic outline and verifier",
     scenario_set_hash: str | None = None,
     existing_rows: list[dict[str, Any]] | None = None,
     on_row_completed: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
-    if enforce_plan and planner_model_name is None:
-        raise ValueError("阶段 2 评测必须显式指定隔离 Planner 模型")
     concurrency = 4
     semaphore = asyncio.Semaphore(concurrency)
     pending: list[Any] = []
@@ -592,7 +518,6 @@ async def run_evaluation(
         model_name: str,
         repetition: int,
         gateway: ModelGateway,
-        planner_gateway: ModelGateway | None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         async with semaphore:
             try:
@@ -601,8 +526,6 @@ async def run_evaluation(
                     model_name=model_name,
                     repetition=repetition,
                     gateway=gateway,
-                    planner_gateway=planner_gateway,
-                    enforce_plan=enforce_plan,
                 )
             except Exception as exc:
                 return None, {
@@ -622,19 +545,6 @@ async def run_evaluation(
             max_retries=0,
         )
         model_gateway = ModelGateway(isolated)
-        planner_gateway = (
-            ModelGateway(
-                registry.isolated_route(
-                    Scenario.COMPLEX_REASONING,
-                    planner_model_name,
-                    temperature=0.0,
-                    timeout_seconds=30,
-                    max_retries=0,
-                )
-            )
-            if enforce_plan and planner_model_name is not None
-            else None
-        )
         for repetition in range(1, repetitions + 1):
             for case in cases:
                 key = (model_name, repetition, str(case["id"]))
@@ -646,7 +556,6 @@ async def run_evaluation(
                         model_name=model_name,
                         repetition=repetition,
                         gateway=model_gateway,
-                        planner_gateway=planner_gateway,
                     )
                 )
     failures: list[dict[str, Any]] = []
@@ -675,16 +584,14 @@ async def run_evaluation(
         )
     )
     metrics = {
-        model_name: _score_rows(
-            [row for row in rows if row["configured_model"] == model_name]
-        )
+        model_name: _score_rows([row for row in rows if row["configured_model"] == model_name])
         for model_name in model_names
     }
     return {
         "schema_version": 1,
         "evaluation": evaluation_name,
         "baseline_label": evaluation_label,
-        "execution_mode": "stage2_structured_plan" if enforce_plan else "v23_baseline",
+        "execution_mode": "single_agent_outline",
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "scenario_set_hash": (
             scenario_set_hash
@@ -694,7 +601,6 @@ async def run_evaluation(
         "repetitions": repetitions,
         "concurrency": concurrency,
         "models": model_names,
-        "planner_model": planner_model_name,
         "case_count": len(cases),
         "expected_runs": len(expected_keys),
         "completed_runs": len(rows),
@@ -724,8 +630,6 @@ async def _run_case(
     model_name: str,
     repetition: int,
     gateway: ModelGateway,
-    planner_gateway: ModelGateway | None = None,
-    enforce_plan: bool = False,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="chatbi-baseline-") as raw_workspace:
         workspace = Path(raw_workspace)
@@ -734,11 +638,6 @@ async def _run_case(
         conversation = store.create_conversation(project.id)
         _seed_context(store, conversation, case, workspace)
         observing = _ObservingGateway(gateway)
-        observing_planner = (
-            _ObservingGateway(planner_gateway)
-            if planner_gateway is not None
-            else None
-        )
         fixture_registry = _FixtureRegistry(
             str(case["id"]),
             workspace,
@@ -756,32 +655,20 @@ async def _run_case(
                 registry=cast(Any, fixture_registry),
                 locks=ConversationLockPool(),
                 config=AgentLoopConfig(max_tool_calls=12, tool_result_max_chars=4_000),
-                planner_gateway=observing_planner,
-                enforce_plan=enforce_plan,
             )
         ]
         events = [
-            (item["event"], cast(dict[str, Any], json.loads(item["data"])))
-            for item in raw_events
+            (item["event"], cast(dict[str, Any], json.loads(item["data"]))) for item in raw_events
         ]
         return _observable_row(
             case,
             model_name=model_name,
             repetition=repetition,
             events=events,
-            responses=[
-                *(observing_planner.responses if observing_planner is not None else []),
-                *observing.responses,
-            ],
-            planner_responses=(
-                observing_planner.responses if observing_planner is not None else []
-            ),
+            responses=observing.responses,
             store=store,
             conversation=conversation,
             executed=fixture_registry.executed,
-            execution_mode=(
-                "stage2_structured_plan" if enforce_plan else "v23_baseline"
-            ),
         )
 
 
@@ -792,11 +679,9 @@ def _observable_row(
     repetition: int,
     events: list[tuple[str, dict[str, Any]]],
     responses: list[ModelResponse],
-    planner_responses: list[ModelResponse],
     store: SessionStore,
     conversation: Conversation,
     executed: list[tuple[str, dict[str, Any]]],
-    execution_mode: str,
 ) -> dict[str, Any]:
     done = next((payload for name, payload in reversed(events) if name == "done"), None)
     error = next((payload for name, payload in reversed(events) if name == "error"), None)
@@ -817,66 +702,45 @@ def _observable_row(
     }
     tool_end = [payload for name, payload in events if name == "tool_end"]
     successful_tools = [
-        str(payload.get("tool"))
-        for payload in tool_end
-        if payload.get("status") == "ok"
+        str(payload.get("tool")) for payload in tool_end if payload.get("status") == "ok"
     ]
-    capabilities = (
-        {
-            capability
-            for name in successful_tools
-            for capability in _CAPABILITIES_BY_TOOL.get(name, ())
-        }
-        if execution_mode == "stage2_structured_plan"
-        else {
-            _CAPABILITY_BY_TOOL[name]
-            for name in successful_tools
-            if name in _CAPABILITY_BY_TOOL
-        }
-    )
+    capabilities = {
+        capability
+        for name in successful_tools
+        for capability in _CAPABILITIES_BY_TOOL.get(name, ())
+    }
     final_text = "".join(
-        str(payload.get("delta", ""))
-        for name, payload in events
-        if name == "text.delta"
+        str(payload.get("delta", "")) for name, payload in events if name == "text.delta"
     )
     required_capabilities = set(
         _string_list(
-            cast(dict[str, Any], case["planner_expected"]).get(
-                "required_capabilities", []
-            ),
+            cast(dict[str, Any], case["execution_expected"]).get("required_capabilities", []),
             "required_capabilities",
         )
     )
     conditional_capabilities = set(
         _string_list(
-            cast(dict[str, Any], case["planner_expected"]).get(
-                "conditional_capabilities", []
-            ),
+            cast(dict[str, Any], case["execution_expected"]).get("conditional_capabilities", []),
             "conditional_capabilities",
         )
     )
     blocking_expected = (
-        cast(dict[str, Any], case["planner_expected"]).get("clarification")
-        == "blocking"
+        cast(dict[str, Any], case["execution_expected"]).get("clarification") == "blocking"
     )
     clarification_detected = bool(_QUESTION_PATTERN.search(final_text))
     required_artifacts = _string_list(
-        cast(dict[str, Any], case["planner_expected"]).get("required_artifacts", []),
+        cast(dict[str, Any], case["execution_expected"]).get("required_artifacts", []),
         "required_artifacts",
     )
     artifact_checks = {
         item: _artifact_satisfied(item, artifacts, event_artifact_ids)
         for item in required_artifacts
     }
-    numerical_claims = [
-        claim for claim in claims if _NUMBER_PATTERN.search(claim.statement)
-    ]
+    numerical_claims = [claim for claim in claims if _NUMBER_PATTERN.search(claim.statement)]
     numeric_claims_supported = all(
         claim.evidence_ids and claim.value_refs for claim in numerical_claims
     )
-    expected_terminal = str(
-        cast(dict[str, Any], case["verifier_expected"]).get("verdict", "PASS")
-    )
+    expected_terminal = str(cast(dict[str, Any], case["verifier_expected"]).get("verdict", "PASS"))
     actual_status = run.status if run is not None else "not_started"
     terminal_truthful = _terminal_matches(
         expected_terminal,
@@ -910,9 +774,7 @@ def _observable_row(
         if response.cost is not None:
             costs.append(float(response.cost))
     currencies = {
-        response.cost_currency
-        for response in responses
-        if response.cost_currency is not None
+        response.cost_currency for response in responses if response.cost_currency is not None
     }
     return {
         "case_id": case["id"],
@@ -921,13 +783,9 @@ def _observable_row(
         "repetition": repetition,
         "configured_model": model_name,
         "actual_models": sorted({response.model for response in responses}),
-        "request_hash": _json_hash(
-            {"request": case["request"], "context": case["context"]}
-        ),
+        "request_hash": _json_hash({"request": case["request"], "context": case["context"]}),
         "final_response_hash": (
-            hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-            if final_text
-            else None
+            hashlib.sha256(final_text.encode("utf-8")).hexdigest() if final_text else None
         ),
         "task_satisfied": task_satisfied,
         "required_capabilities_satisfied": capabilities_satisfied,
@@ -941,9 +799,7 @@ def _observable_row(
         "numeric_claim_count": len(numerical_claims),
         "evidence_count": len(evidence),
         "tool_calls": len(executed),
-        "invalid_tool_calls": sum(
-            payload.get("status") == "error" for payload in tool_end
-        ),
+        "invalid_tool_calls": sum(payload.get("status") == "error" for payload in tool_end),
         "clarification": (
             "correct"
             if blocking_expected and clarification_detected
@@ -958,19 +814,17 @@ def _observable_row(
         "terminal_truthful": terminal_truthful,
         "forbidden_violations": forbidden_violations,
         "model_calls": len(responses),
-        "agent_model_calls": len(responses) - len(planner_responses),
-        "planner_model_calls": len(planner_responses),
+        "agent_model_calls": len(responses),
         "plan_version": run.plan_version if run is not None else 0,
-        "planner_route": next(
+        "outline_route": next(
             (
-                str(event.payload.get("planner_route"))
+                str(event.payload.get("outline_route"))
                 for event in task_events
-                if event.event_type == "run.started"
-                and event.payload.get("planner_route")
+                if event.event_type == "run.started" and event.payload.get("outline_route")
             ),
             None,
         ),
-        "planned_capabilities": (
+        "outline_capabilities": (
             sorted(
                 str(step.get("capability"))
                 for step in cast(list[JsonObject], plan.plan.get("steps", []))
@@ -979,16 +833,10 @@ def _observable_row(
             else []
         ),
         "plan_steps_total": len(plan_steps),
-        "plan_steps_completed": sum(
-            step.status in {"completed", "skipped"} for step in plan_steps
-        ),
-        "plan_revisions": sum(
-            event.event_type == "plan.revised" for event in task_events
-        ),
+        "plan_steps_completed": sum(step.status in {"completed", "skipped"} for step in plan_steps),
+        "outline_revisions": sum(event.event_type == "plan.revised" for event in task_events),
         "prompt_tokens": sum(response.prompt_tokens for response in responses),
-        "completion_tokens": sum(
-            response.completion_tokens for response in responses
-        ),
+        "completion_tokens": sum(response.completion_tokens for response in responses),
         "usage_available": all(response.usage_available for response in responses)
         if responses
         else False,
@@ -1009,14 +857,9 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     costs = [float(row["cost"]) for row in rows if row.get("cost") is not None]
     cost_complete = all(
-        int(row.get("model_calls", 0)) == 0 or row.get("cost") is not None
-        for row in rows
+        int(row.get("model_calls", 0)) == 0 or row.get("cost") is not None for row in rows
     )
-    currencies = {
-        str(row["cost_currency"])
-        for row in rows
-        if row.get("cost_currency") is not None
-    }
+    currencies = {str(row["cost_currency"]) for row in rows if row.get("cost_currency") is not None}
     return {
         "runs": total,
         "task_success_rate": (
@@ -1032,14 +875,9 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "numeric_claim_support_rate": _mean(
             [bool(row["numeric_claims_supported"]) for row in rows]
         ),
-        "truthful_terminal_rate": _mean(
-            [bool(row["terminal_truthful"]) for row in rows]
-        ),
+        "truthful_terminal_rate": _mean([bool(row["terminal_truthful"]) for row in rows]),
         "clarification_accuracy": _mean(
-            [
-                row["clarification"] in {"correct", "none"}
-                for row in rows
-            ]
+            [row["clarification"] in {"correct", "none"} for row in rows]
         ),
         "tool_calls": sum(int(row["tool_calls"]) for row in rows),
         "invalid_tool_calls": sum(int(row["invalid_tool_calls"]) for row in rows),
@@ -1048,32 +886,22 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "model_calls": sum(int(row["model_calls"]) for row in rows),
         "agent_model_calls": sum(int(row.get("agent_model_calls", 0)) for row in rows),
-        "planner_model_calls": sum(
-            int(row.get("planner_model_calls", 0)) for row in rows
-        ),
         "plan_completion_rate": _mean(
             [
-                int(row.get("plan_steps_completed", 0))
-                == int(row.get("plan_steps_total", 0))
+                int(row.get("plan_steps_completed", 0)) == int(row.get("plan_steps_total", 0))
                 for row in rows
                 if int(row.get("plan_steps_total", 0)) > 0
             ]
         ),
-        "runs_replanned": sum(
-            int(row.get("plan_revisions", 0)) > 0 for row in rows
+        "runs_with_outline_revisions": sum(
+            int(row.get("outline_revisions", 0)) > 0 for row in rows
         ),
         "prompt_tokens": sum(int(row["prompt_tokens"]) for row in rows),
         "completion_tokens": sum(int(row["completion_tokens"]) for row in rows),
         "latency_ms": round(sum(float(row["latency_ms"]) for row in rows), 3),
-        "cost": (
-            round(sum(costs), 9)
-            if cost_complete and (costs or rows)
-            else None
-        ),
+        "cost": (round(sum(costs), 9) if cost_complete and (costs or rows) else None),
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
-        "cost_availability": (
-            "available" if rows and cost_complete else "unavailable"
-        ),
+        "cost_availability": ("available" if rows and cost_complete else "unavailable"),
     }
 
 
@@ -1276,9 +1104,7 @@ def _required_text(value: object, field: str) -> str:
 
 
 def _json_hash(value: object) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -1354,9 +1180,7 @@ def main() -> int:
             / "report.json"
         )
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Report: {output}")
     return 0
 

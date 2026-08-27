@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from apps.orchestrator.control.plan_executor import (
+    match_planned_step,
     match_ready_step,
     schedule_plan_steps,
 )
@@ -140,3 +141,39 @@ def test_tool_can_only_bind_to_a_step_offered_at_start_of_round() -> None:
 
     assert accepted == profile
     assert rejected is None
+
+
+def test_agent_selected_tool_can_bind_to_compatible_waiting_outline_step() -> None:
+    profile = _step("profile", capability="data.profile", dependencies=[])
+    trend = _step(
+        "trend",
+        capability="stats.trend",
+        dependencies=["profile"],
+        position=1,
+    )
+
+    matched = match_planned_step(
+        tool_name="trend",
+        steps=[profile, trend],
+        resolver=_Resolver(),
+    )
+
+    assert matched == trend
+
+
+def test_agent_selected_tool_does_not_rebind_a_finished_outline_step() -> None:
+    trend = _step(
+        "trend",
+        capability="stats.trend",
+        dependencies=[],
+        status="completed",
+    )
+
+    assert (
+        match_planned_step(
+            tool_name="trend",
+            steps=[trend],
+            resolver=_Resolver(),
+        )
+        is None
+    )

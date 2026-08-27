@@ -1,19 +1,22 @@
 # ChatBI Agent 自主化开发规划
 
-> 状态：当前开发依据 · 制定日期：2026-07-21 · 更新日期：2026-08-26
+> 状态：历史路线与当前收尾边界 · 制定日期：2026-07-21 · 更新日期：2026-08-27
 > 基线：v2.4 阶段 1 已验收，阶段 2A–2E 已实现；v2.5 阶段 3–6 已工程关闭
 > 当前没有未完成的 v2.5 功能阶段；C1“启动依赖契约修复”和 C2“未实现工具撤出公开目录”
 > 已于 2026-08-26 完成实现与本地门禁，C3“单一 Agent 执行路径与无响应修复”已于
 > 2026-08-17 完成。提交 `eb7789c` 的 GitHub Actions run `32883619141` 已确认 backend、
 > frontend 与真实 Compose 三项作业全绿，项目已进入功能冻结。
+> 2026-08-27 收尾审查删除了独立 LLM Planner/Replanner、旧单次分析/统计/知识问答
+> 入口和未接线占位模块。当前运行时使用确定性任务提纲 + 单一 Agent 工具反馈循环；下文
+> 关于混合 Planner/Replanner 的内容只记录历史阶段，不再描述现行生产架构。
 > G1–G6 实测和 G7 自动门禁已完成；尚未执行的代表性盲评、负责人
 > 签字、领域验收及 CPU/GPU semantic 等价实测已从当前项目计划取消；
 > 它们不得被记为已通过，因此收尾版只定位为单机、单租户技术预览。
 > 2026-08-24 补充运行验收：WSL2/CPU 的 BGE-M3、BGE reranker、Docker Milvus
 > Standalone、API/Web readiness、知识库重建和 semantic 门禁已通过；这只证明该机器上的
 > 本地方案可运行，不替代已取消的跨 CPU/GPU 等价或代表性业务签字。
-> 经负责人授权先行实施的阶段 2A 已落地混合
-> Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 已落地
+> 以下为阶段交付历史，不代表当前运行时：经负责人授权先行实施的阶段 2A 曾落地混合
+> Planner、TaskPlan/TaskStep 持久化、能力约束和计划完成校验；阶段 2B 曾落地
 > 依赖图 Executor 与 Observation 驱动 Replanner；阶段 2C 已落地任务控制与
 > Checkpoint 恢复；阶段 2D 已把 Executor 切换到受治理 MCP Client Gateway；
 > 阶段 2E 已落地五服务 Compose 与真实容器 E2E 门禁；首轮 CI 暴露的镜像 smoke、
@@ -65,21 +68,20 @@
 将 ChatBI 从“反应式工具调用”升级为“目标驱动的受约束自主分析 Agent”：Agent 能理解用户目标、在必要时澄清、制定并动态修订计划、通过标准 MCP 协议执行确定性工具、验证结果是否真正达成目标，并让全过程可追溯、可审计、可恢复、可干预。项目同时以 Docker 提供可复现的开发、测试和部署环境。
 
 ```text
-理解目标 → 必要澄清 → 制定计划 → 执行工具
-    ↑                              ↓
-持久记忆 ← 最终交付 ← 验证完成 ← 观察结果
-                  ↖ 不满足则重新规划
+理解目标 → 必要澄清 → 确定性提纲 → Agent ↔ 受治理工具
+    ↑                                         ↓
+持久记忆 ← 最终交付 ← 确定性验证 ← Observation/Evidence
 ```
 
-“更像 Agent”不等于让模型绕过工具或安全检查。规划、取舍与重规划可以由模型参与；计算、权限、执行、证据和完成条件必须由可验证的代码约束。
+“更像 Agent”不等于让模型绕过工具或安全检查。工具取舍由同一个 Agent 在反馈循环内完成；计算、权限、执行、证据和完成条件必须由可验证的代码约束。
 
 ## 2. 当前基线与主要缺口
 
-当前生产基线已从纯反应式工具调用推进到带结构化计划约束的 Agent：
+当前生产基线是在类型化任务控制面内运行的单一 Agent：
 
-- fast/template/LLM 三条 Planner 路径已统一输出并持久化 TaskPlan/TaskStep；Executor
-  只获得当前依赖已满足的 ready capability 工具，Verifier 会拒绝存在未完成步骤的成功终态；
-  可恢复失败会依据 Observation 生成不可变计划新版本，已完成步骤和 Evidence 保持不变；
+- 本地 fast/template 规则即时生成 TaskPlan/TaskStep 提纲，供澄清、进度、恢复和审计；
+  Agent 获得冻结目录中的全部可用工具，失败 Observation 直接返回同一个 Agent；Verifier
+  会拒绝缺失所需 Evidence/Artifact 的成功终态；
 - 阶段 1 已把循环结束收口到确定性 Verifier，并接入当前 run 的数值 Claim/`value_refs`、
   知识 source、空检索诚实回答、显式局限和同值多路径候选；受约束语义协议和评测入口已落地，
   但 DeepSeek V3/R1 首轮均出现 false PASS，因此生产语义模型保持禁用；
@@ -88,7 +90,7 @@
   提交；工具开始、失败与 unknown Observation 已原子持久化，unknown 会阻断完成；真实计划
   版本、后台 run 宿主、可幂等任务控制与 Checkpoint 同 run 续跑已经落地；
 - 工具注册表已补 capability、版本、风险、权限、幂等性和 Artifact 后置条件元数据，并由
-  生产 Planner 直接生成能力目录；6A 已完成运行时健康、不可变目录和 profile 可用性，完整
+  Agent 使用 Gateway 冻结的能力目录；6A 已完成运行时健康、不可变目录和 profile 可用性，完整
   前置条件与多实现选优仍未完成；
 - Agent Executor 已经由标准 MCP Client Gateway 执行：Host RequestContext、固定协议/
   契约发现、stdio/认证 Streamable HTTP、超时取消、健康代次、只读幂等有限重连和
@@ -191,7 +193,7 @@ Finalizer 从结构化 Claim 渲染最终答复。模型需要的新计算必须
 - risk_level、required_permissions、estimated_cost；
 - idempotent、fallback_tools、version。
 
-Planner 规划“能力”，Executor 通过该契约选择具体工具；任何工具都必须经过中央策略网关。
+确定性提纲记录“能力”作为进度提示，Agent 通过该契约目录选择具体工具；任何工具都必须经过中央策略网关。
 
 ### 4.5 MCP 协议化与 Docker 容器化
 
@@ -557,8 +559,8 @@ schema、权限和数据版本足以复现结论。
 
 1. 从 chart server、MCP 输出 schema 和相关设计声明中撤下仍抛出
    `NotImplementedError` 的 `multi_layout`；快速收尾不实现该功能。
-2. Code Interpreter、内部数据连接器及其他预留骨架继续保持未注册，不进入
-   生产 allowlist、MCP 公开目录或 Planner 可见 capability。
+2. Code Interpreter、内部数据连接器及其他未接线预留骨架已从代码树删除，不进入
+   生产 allowlist、MCP 公开目录或 Agent 冻结工具目录。
 3. 新增目录完整性回归：禁止已列出工具使用占位 output schema、直接抛出
    `NotImplementedError` 或缺失必需元数据。
 4. 同步 README 的工具数量、工具表和设计文档，不把预留能力计入已实现功能。

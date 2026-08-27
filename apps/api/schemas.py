@@ -30,10 +30,6 @@ ConversationId = Annotated[
 ChatMessageText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20_000)
 ]
-DatasetRef = Annotated[
-    str,
-    StringConstraints(pattern=r"^[0-9a-f]{32}$"),
-]
 
 
 class ProjectCreate(BaseModel):
@@ -180,10 +176,13 @@ class MemoryRevisionRequest(BaseModel):
         StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000),
     ]
     confidence: float = Field(ge=0.0, le=1.0)
-    expires_at: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
-    ] | None
+    expires_at: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+        ]
+        | None
+    )
 
 
 class MemoryMutationResponse(BaseModel):
@@ -251,26 +250,32 @@ class ChatStreamRequest(BaseModel):
 
     conversation_id: ConversationId
     message: ChatMessageText
-    parent_run_id: Annotated[
-        str,
-        StringConstraints(pattern=r"^[0-9a-f]{32}$"),
-    ] | None = None
+    parent_run_id: (
+        Annotated[
+            str,
+            StringConstraints(pattern=r"^[0-9a-f]{32}$"),
+        ]
+        | None
+    ) = None
 
 
 class RunFeedbackRequest(BaseModel):
     """对固定终态 TaskRun 的追加式用户反馈。"""
 
     rating: Literal["helpful", "not_helpful"]
-    comment: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
-    ] | None = None
-    evidence_ids: list[
-        Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
-    ] = Field(default_factory=list, max_length=100)
-    artifact_ids: list[
-        Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
-    ] = Field(default_factory=list, max_length=100)
+    comment: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+        ]
+        | None
+    ) = None
+    evidence_ids: list[Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]] = Field(
+        default_factory=list, max_length=100
+    )
+    artifact_ids: list[Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]] = Field(
+        default_factory=list, max_length=100
+    )
 
 
 class ClarificationAnswerRequest(BaseModel):
@@ -314,85 +319,6 @@ class UploadResponse(BaseModel):
     profile: dict[str, Any]
     messages: list[MessageResponse] | None = None
     artifact: ArtifactResponse | None = None
-
-
-class AnalyzeRequest(BaseModel):
-    """分析请求：基于已上传数据集出图。"""
-
-    dataset_ref: DatasetRef
-
-
-class ChartResponse(BaseModel):
-    """出图响应：ECharts 配置（数值来自真实数据，红线2）。"""
-
-    chart_id: str
-    chart_type: str
-    option: dict[str, Any]
-
-
-class StatsRequest(BaseModel):
-    """统计分析请求：基于已上传数据集执行受治理统计分析。
-
-    params 为工具专属入参（如 value_col/time_col/target/features），
-    与 dataset_ref 合并后经 Tool.invoke 做 JSON Schema 校验（红线3）。
-    """
-
-    dataset_ref: DatasetRef
-    # trend | forecast | anomaly | regression | correlation | contribution | group_compare
-    kind: str
-    params: dict[str, Any] = {}
-    interpret: bool = False        # 是否附带 LLM 中文解读（默认关，不平白付模型成本）
-
-
-class StatsResponse(BaseModel):
-    """统计分析响应：结构化结果（数值来自工具，红线2）。
-
-    result 内可能含明细级数组（STL 逐行分量、异常点原值），仅供前端渲染；
-    interpretation 为可选的 LLM 中文解读——喂模型的只有摘要（红线1），
-    模型不可用时为 None（降级，统计结果照常返回）。
-    """
-
-    kind: str
-    result: dict[str, Any]
-    interpretation: str | None = None
-
-
-class ReportChartSpec(BaseModel):
-    """报告中要包含的一张图（编排层重跑 gen_chart→chart_screenshot 出图片）。"""
-
-    chart_type: str
-    encoding: dict[str, Any]
-    caption: str | None = None
-
-
-class ReportStatSpec(BaseModel):
-    """报告中要包含的一项统计（编排层重跑 stats 工具拿真实结果）。"""
-
-    kind: str                      # trend | anomaly | regression
-    params: dict[str, Any] = {}
-    caption: str | None = None
-
-
-class ReportRequest(BaseModel):
-    """报告生成请求：基于 dataset_ref 重跑分析并组装成可下载报告。
-
-    interpret=true 时，各统计段的中文解读由编排层调 stats_interpreter（已门控的
-    唯一 LLM 出口）生成后传给 report 工具；report 工具本身不调 LLM（红线1/铁律）。
-    """
-
-    dataset_ref: DatasetRef
-    title: str = "分析报告"
-    charts: list[ReportChartSpec] = []
-    stats: list[ReportStatSpec] = []
-    interpret: bool = False
-
-
-class ReportResponse(BaseModel):
-    """报告生成响应：报告 id 与下载链接。"""
-
-    report_id: str
-    md_url: str
-    pdf_url: str
 
 
 class IngestRequest(BaseModel):
@@ -452,26 +378,3 @@ class DeleteDocumentResponse(BaseModel):
 
     document_id: str
     removed_chunks: int
-
-
-class KBQueryRequest(BaseModel):
-    """知识库问答请求（单轮中文提问）。"""
-
-    question: str
-    top_k: int = Field(default=5, ge=1, le=20)
-
-
-class Citation(BaseModel):
-    """引用来源（红线6）。"""
-
-    source: str
-    snippet: str
-    section: str | None = None
-
-
-class KBQueryResponse(BaseModel):
-    """问答响应：答案 + 引用；无结果时如实告知。"""
-
-    answer: str
-    citations: list[Citation]
-    is_empty: bool

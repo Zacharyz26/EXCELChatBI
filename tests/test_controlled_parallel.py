@@ -97,7 +97,7 @@ def _running_parallel_run(
         expected_version=run.state_version,
         plan=plan,
         reason="initial:test",
-        planner={"route": "test"},
+        outline_audit={"route": "test"},
     )
     run, _ = tasks.transition(
         run.run_id,

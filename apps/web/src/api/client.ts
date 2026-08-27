@@ -272,7 +272,7 @@ function operationKey(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-/** 读取一个 TaskRun 的当前计划、步骤、状态版本和快照。 */
+/** 读取一个 TaskRun 的当前任务提纲、步骤、状态版本和快照。 */
 export async function getAgentRun(runId: string): Promise<AgentRunDetail> {
   const resp = await apiFetch(`${API_BASE}/agent/runs/${encodeURIComponent(runId)}`);
   if (!resp.ok) return asError(resp);
@@ -414,7 +414,7 @@ export async function retryAgentStep(
   await consumeTaskStream(resp, runId, onEvent);
 }
 
-/** 提交完整计划新版本；服务端继续验证 capability 与已完成步骤边界。 */
+/** 提交完整提纲新版本；服务端继续验证 capability 与已完成步骤边界。 */
 export async function reviseAgentPlan(
   runId: string,
   stateVersion: number,

@@ -38,10 +38,6 @@ class Settings(BaseSettings):
 
     # 模型路由
     model_registry_path: str = "config/models.yaml"
-    deepseek_api_base: str = ""
-    deepseek_api_key: str = ""
-    vision_api_base: str = ""
-    vision_api_key: str = ""
 
     # 对话工作区持久层（SQLite 真相源 + 单进程内存热缓存）
     chat_db_path: str = ".data/chatbi.db"
@@ -83,21 +79,7 @@ class Settings(BaseSettings):
     agent_mcp_allow_in_process_fallback: bool = False
     agent_capability_profiles: str = ",".join(sorted(DEFAULT_AGENT_CAPABILITY_PROFILES))
 
-    # 生产存储预留（达到多 worker / 多实例等触发条件后再接入）
-    redis_host: str = "127.0.0.1"
-    redis_port: int = 6379
-    session_ttl_seconds: int = 3600
-    postgres_host: str = "127.0.0.1"
-    postgres_port: int = 5432
-    milvus_host: str = "127.0.0.1"
-    milvus_port: int = 19530
-    minio_endpoint: str = "127.0.0.1:9000"
-
-    # 沙箱（红线5）
-    sandbox_timeout_seconds: int = 30
-    sandbox_max_memory_mb: int = 512
-
-    # 本地数据集存储（切片用本地落盘代替 MinIO；生产切 MinIO，留 TODO）
+    # 当前交付边界为单机本地数据集存储；未接线的 Redis/Postgres/MinIO 配置已删除。
     dataset_dir: str = ".data/datasets"
     upload_dir: str = ".data/uploads"
     max_upload_mb: int = 50  # 上传文件大小上限（超限 413，防内存 DoS）
@@ -107,7 +89,7 @@ class Settings(BaseSettings):
     # 图表服务端截图（Playwright 无头 chromium）；留空则自动探测已安装的 chromium
     chromium_executable_path: str = ""
     # 表行数处理上限：parse_excel 读表前按元数据检查，超过直接拒绝（防解压后 OOM）；
-    # 后续支持超大表时改 DuckDB 分块而非拒绝（留 TODO）
+    # 单机技术预览明确不接收超出该边界的工作簿。
     large_table_row_threshold: int = 500_000
 
     # 数据画像安全策略配置（缺失时用内置宽松默认，见 packages/governance/data_boundary）

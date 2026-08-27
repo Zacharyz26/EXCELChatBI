@@ -159,8 +159,11 @@ def test_format_one_local_backup_removes_new_generation_pointer(
 def test_standalone_backup_redirects_to_official_tool() -> None:
     settings = Settings(
         _env_file=None,
+        rag_runtime_profile="cpu",
         rag_embedder="bge",
+        rag_reranker="bge",
         rag_store="milvus",
+        embedding_device="cpu",
         milvus_uri="http://127.0.0.1:19530",
     )
     with pytest.raises(RuntimeError, match="milvus-backup"):
@@ -170,9 +173,11 @@ def test_standalone_backup_redirects_to_official_tool() -> None:
 def test_milvus_lite_backup_scope_includes_persistent_sources(tmp_path: Path) -> None:
     settings = Settings(
         _env_file=None,
+        rag_runtime_profile="cpu",
         rag_embedder="bge",
         rag_reranker="bge",
         rag_store="milvus",
+        embedding_device="cpu",
         milvus_uri=str(tmp_path / "lite.db"),
         kb_source_dir=str(tmp_path / "sources"),
     )

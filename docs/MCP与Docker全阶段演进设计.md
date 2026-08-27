@@ -37,13 +37,13 @@ capability/tool 目录，6A-2 已实现严格通知换代与 profile unavailable
 SQLite v10 建立共享预算、固定数据版本、取消树和统一 Evidence Ledger，并启用受限并行；
 提交 `b67b704` 的完整 CI 与真实 Compose 恢复门禁全绿，6A 已关闭。
 6B-1 已把 `data.roles`、确定性置信/歧义和只读质量建议接入 `get_data_profile` 1.1.0，
-并以严格输出 schema、Planner 单次路由和 React Artifact 展示落地；6B-2 已补绑定计划/数据
+并以严格输出 schema、当时的 Planner 单次路由（现已删除）和 React Artifact 展示落地；6B-2 已补绑定计划/数据
 版本的结构化确认和统计/聚合前置门禁；6B-3 已接入匿名代表性评测与
 `data-role-quality` CI 门禁；6B-4 已接入 stdio/HTTP 契约等价、真实 `data-tools` Compose
 调用、目录重验和重启恢复门禁；提交 `6b89ef6` 的
 [run 31467721161](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31467721161)
 已确认 backend、frontend 与 Compose 三项全绿并关闭 6B。6C-1 已把有界候选筛选结果
-绑定 TaskRun 数据版本、Planner 审计与 React 人工选择；6C-2 已继续绑定不可变计划步骤、
+绑定 TaskRun 数据版本、任务提纲审计与 React 人工选择；6C-2 已继续绑定不可变计划步骤、
 Invocation、Evidence Ledger 与 Verifier 结果状态；6C-3 已实现受预算、重规划、取消树和
 用户确认约束的确定性跟进；6C-4 已加入匿名评测、CI 强制门禁及 Compose 浏览器/三次恢复
 探针；提交 `d5005ee` 的
@@ -63,7 +63,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 
 1. Agent Host 始终拥有目标、计划、记忆、TaskRun 和 Evidence Ledger；MCP Server 只执行
    通过 Host/Gateway 确定性准入的一次能力调用，不能读取完整对话或自行结束任务。
-2. Planner 依赖 capability，Executor 经 MCP Client Gateway 选择具体工具。任何 Agent、
+2. 确定性任务提纲记录 capability，Agent 经 MCP Client Gateway 选择具体工具。任何 Agent、
    后台 Worker 或兼容 API 都不能绕过 Gateway 直接调用远程 Server。
 3. `inputSchema`、`outputSchema`、工具版本和后置条件单源生成；MCP annotations 只作为提示，
    不能代替服务器端权限、风险和结果检查。
@@ -147,7 +147,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 - 当前不提供通用高风险确认或自主等级按钮；现有工具由 Host/Gateway 根据冻结目录、Schema、
   主体/项目权限、预算、数据版本和预检 Evidence 决定是否执行。
 - 内部 Server 发出 `tools/list_changed` 时，Gateway 重新校验目录；未通过 schema/权限检查的
-  变化不进入 Planner，也不能只靠前端隐藏。
+  变化不进入冻结工具目录，也不能只靠前端隐藏。
 
 ### Docker 设计
 
@@ -220,7 +220,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 ### MCP 设计
 
 - 新增数据角色识别、质量、分群、贡献、预测、多数据集关联等能力时，先扩展 Tool Capability
-  Contract，再由一个或多个 Server 实现；Planner 不硬编码容器名或工具名。
+  Contract，再由一个或多个 Server 实现；确定性任务提纲不硬编码容器名或工具名。
 - `tools/list_changed` 只用于已准入的项目内 Server 版本变化。Gateway 对 schema、capability、
   风险和后置条件重新校验后生成不可变目录快照，TaskRun 固定使用该快照直到结束。
 - 独立步骤可并行调用，但共享调用预算、数据版本和取消树。所有分支结果先进入 Evidence Ledger，
@@ -233,7 +233,7 @@ Evidence、高级统计、独立 forecast Tool/Profile、匿名质量门禁和�
 - 通过 `stats`、`forecast`、`browser`、`gpu` 等 profile 组合重依赖；未启用 profile 时 Gateway
   明确把对应 capability 标为 unavailable，不静默改成模型计算。
 - 为 stats、chart/Chromium 和 knowledge 设置独立 CPU、内存、并发、超时和队列上限；容量不足
-  返回可重试/不可重试的稳定错误，让 Replanner 决定等待、降级或停止。
+  返回可重试/不可重试的稳定错误，让同一个 Agent 决定等待、降级或停止。
 - 阶段 6 仍以单机 Compose 为正式交付边界。可以复制无状态工具容器做容量实验，但不能宣称
   已具备跨主机调度、HA 或多租户隔离。
 
@@ -354,7 +354,7 @@ Socket；若底层使用容器运行时，创建权限属于独立受审计的 r
 
 | 环境 | MCP | Docker/状态 | 必测内容 |
 |---|---|---|---|
-| 本机开发 | stdio，必要时进程内测试适配 | 可不启容器；使用隔离测试数据 | schema、单工具、Planner/Verifier |
+| 本机开发 | stdio，必要时进程内测试适配 | 可不启容器；使用隔离测试数据 | schema、单工具、任务提纲/Agent/Verifier |
 | CI | stdio + Streamable HTTP | 临时镜像/Compose/volume | 契约等价、健康、权限、失败和重启 |
 | 单机部署 | 内部 Streamable HTTP | Compose + 持久卷 + profiles | 浏览器主链路、备份恢复、端口和 secrets |
 | 企业部署候选 | 受信远程 Streamable HTTP | OCI 镜像 + 外置状态 + 生产编排 | OAuth、准入、滚动升级和 HA |

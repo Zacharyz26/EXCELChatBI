@@ -3,6 +3,7 @@ tools 候选跳过与 stream 降级语义（阶段0，设计文档 14.8 / 决策
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -673,6 +674,50 @@ async def test_stream_turn_yields_text_then_response() -> None:
     assert final is not None
     assert final.content == "你好"
     assert final.tool_calls == calls
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_converts_dsml_without_leaking_protocol_text() -> None:
+    """DeepSeek DSML content is recovered as a tool call before it reaches the UI."""
+    dsml = (
+        '<｜｜DSML｜｜tool_calls>\n'
+        '<｜｜DSML｜｜invoke name="gen_chart">\n'
+        '<｜｜DSML｜｜parameter name="chart_type" string="true">bar'
+        '</｜｜DSML｜｜parameter>\n'
+        '<｜｜DSML｜｜parameter name="dataset_ref" string="true">'
+        'dddddddddddddddddddddddddddddddd</｜｜DSML｜｜parameter>\n'
+        '<｜｜DSML｜｜parameter name="encoding" string="false">'
+        '{"x":"地区","y":"销售额","agg":"sum"}'
+        '</｜｜DSML｜｜parameter>\n'
+        '</｜｜DSML｜｜invoke>\n'
+        '</｜｜DSML｜｜tool_calls>'
+    )
+    gw = ModelGateway(_registry())
+    _seed(
+        gw,
+        {
+            "primary": _StreamTurnAdapter(
+                ["我先生成图。<｜｜DS", "ML｜｜tool_calls>" + dsml.split(">", 1)[1]]
+            )
+        },
+    )
+
+    pieces, final = await _collect_turn(
+        gw.stream_turn(Scenario.CORE_REASONING, _MSGS, tools=_TOOLS)
+    )
+
+    assert "".join(pieces) == "我先生成图。"
+    assert all("DSML" not in piece for piece in pieces)
+    assert final is not None
+    assert final.content == "我先生成图。"
+    assert len(final.tool_calls) == 1
+    assert final.tool_calls[0].name == "gen_chart"
+    assert final.tool_calls[0].id.startswith("dsml_")
+    assert json.loads(final.tool_calls[0].arguments) == {
+        "chart_type": "bar",
+        "dataset_ref": "d" * 32,
+        "encoding": {"x": "地区", "y": "销售额", "agg": "sum"},
+    }
 
 
 @pytest.mark.asyncio

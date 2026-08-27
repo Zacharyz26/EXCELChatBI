@@ -1,6 +1,6 @@
 """阶段 2B 的确定性依赖图调度器。
 
-Planner 负责描述步骤和依赖；本模块只根据持久化状态计算当前可执行集合，
+确定性任务提纲负责描述步骤和依赖；本模块只根据持久化状态计算当前可执行集合，
 不调用模型、不猜测依赖，也不把失败步骤静默视为完成。
 """
 
@@ -102,6 +102,34 @@ def match_ready_step(
             step
             for step in schedule.ready
             if step.step_id in offered_step_ids
+            and str(step.definition.get("capability")) in tool_capabilities
+        ),
+        None,
+    )
+
+
+def match_planned_step(
+    *,
+    tool_name: str,
+    steps: list[TaskStepRecord],
+    resolver: CapabilityResolver,
+) -> TaskStepRecord | None:
+    """Bind a valid Agent-selected tool to an unfinished outline step.
+
+    The deterministic outline is observable guidance rather than a tool
+    whitelist. A model may therefore select a downstream governed tool before
+    an informational prerequisite step was explicitly called. Persisting that
+    invocation as unbound leaves the outline permanently pending even though
+    the requested capability produced Evidence. This fallback records the
+    compatible capability truthfully; prerequisite reconciliation remains a
+    separate completion-boundary operation.
+    """
+    tool_capabilities = set(resolver.capabilities_for_tool(tool_name))
+    return next(
+        (
+            step
+            for step in steps
+            if step.status in {"pending", "failed", "blocked"}
             and str(step.definition.get("capability")) in tool_capabilities
         ),
         None,

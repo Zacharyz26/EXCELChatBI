@@ -1,12 +1,11 @@
 """TaskPlan contract and deterministic validation.
 
-This module defines the shared shape used by the production fast, template and
-LLM Planner paths as well as the frozen evaluation harness.
+This module defines the shared shape used by deterministic task outlines, user
+revisions, recovery, and the frozen evaluation harness.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -144,17 +143,6 @@ class PlanValidation:
         )
 
 
-def parse_task_plan(content: str) -> JsonObject:
-    """Parse strict JSON without accepting Markdown fences or free-text recovery."""
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Planner 未返回严格 JSON") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("TaskPlan 顶层必须是对象")
-    return cast(JsonObject, parsed)
-
-
 def validate_task_plan(
     plan: JsonObject,
     *,
@@ -247,21 +235,6 @@ def validate_task_plan(
         budget_valid=budget_valid,
         issues=tuple(issues),
     )
-
-
-def plan_signature(plan: JsonObject) -> str:
-    """Return a stable structure signature used for repeatability scoring."""
-    steps = cast(list[dict[str, Any]], plan.get("steps", []))
-    value = [
-        {
-            "capability": step.get("capability"),
-            "dependencies": sorted(
-                str(item) for item in cast(list[object], step.get("dependencies", []))
-            ),
-        }
-        for step in steps
-    ]
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _has_cycle(steps: list[dict[str, Any]]) -> bool:

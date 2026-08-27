@@ -672,7 +672,12 @@ def _record_gate_reason(record: MemoryRecord) -> str | None:
     if record.confidence < MIN_MEMORY_SELECTION_CONFIDENCE:
         return "memory_reference_low_confidence"
     now = datetime.now(UTC)
-    if _timestamp(record.valid_from) > now:
+    valid_from = _timestamp(record.valid_from)
+    created_at = _timestamp(record.created_at)
+    # MemoryStore 用同一个时间戳表达“创建即生效”。墙上时钟在虚拟机/NTP
+    # 环境中可能短暂回拨，不能因此把刚提交的记录误判为未来记录；显式设置
+    # 的未来 valid_from 仍然严格失败关闭。
+    if valid_from > now and valid_from != created_at:
         return "memory_reference_not_yet_valid"
     if record.expires_at is not None and _timestamp(record.expires_at) <= now:
         return "memory_reference_expired"

@@ -1,6 +1,6 @@
-"""Excel 解析工具实现（pandas / openpyxl，大表走 DuckDB 分块）。
+"""Excel 解析工具实现（pandas / openpyxl，超限工作簿明确拒绝）。
 
-要点：仅产出"数据画像"，原始整表不进 LLM（红线1）；大表超阈值切 DuckDB（第7节，留 TODO）。
+要点：仅产出"数据画像"，原始整表不进 LLM（红线1）；行数上限用于避免解压后 OOM。
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ def parse_excel(args: dict[str, Any]) -> dict[str, Any]:
     nrows: int | None = args.get("nrows")
 
     # 大表防护：读整表进内存前先查行数元数据，超阈值直接拒绝（防 OOM）。
-    # TODO（大表）：后续支持超阈值文件时改 DuckDB 扫描/分块，而非直接拒绝。
     _guard_row_limit(file_ref, sheet, header_row, nrows)
     df = pd.read_excel(file_ref, sheet_name=sheet, header=header_row, nrows=nrows)
     dataset_ref = save_dataframe(df)

@@ -39,7 +39,7 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
     top_n: int | None = enc.get("top_n")
 
     if chart_type == "scatter":
-        # TODO（大表）：散点非聚合，超大表应下推采样，避免整表入内存。
+        # 数据集已受上传行数上限约束；散点图不对超限工作簿提供隐式降级。
         df = load_dataframe(dataset_ref)
         for col in (x_col, y_col):
             if col not in df.columns:

@@ -7,7 +7,7 @@
   用的是同一份 JSON Schema，模型看到什么约束、执行时就校验什么约束。
 - **执行必经 Gateway**：生产循环走 `execute_mcp`；同步 runner 只保留兼容/测试。
 - **零 LLM**（5.3 正式条款）：本模块只做封装、组装与血缘登记，不调模型；
-  中文解读在编排层（阶段3 循环 / stats_interpreter）。
+  中文解读由同一个 Agent 基于受验证工具结果生成。
 - 本模块由阶段 3 的 Agent 循环消费；阶段 2 内每个工具可独立测试（14.8 验收）。
 """
 
@@ -206,8 +206,7 @@ class AgentToolRegistry:
         unknown_profiles = self._enabled_capability_profiles - AGENT_CAPABILITY_PROFILES
         if unknown_profiles:
             raise ValueError(
-                "未知 Agent capability profile: "
-                + ", ".join(sorted(unknown_profiles))
+                "未知 Agent capability profile: " + ", ".join(sorted(unknown_profiles))
             )
         self._catalog_watch_tasks: list[asyncio.Task[None]] = []
         self._validated_remote_catalogs: dict[str, str] = {}
@@ -224,9 +223,7 @@ class AgentToolRegistry:
             validate_service_keys(config.service_tokens, label="MCP 令牌")
             for service_name, tool_names in AGENT_MCP_SERVICE_TOOLS.items():
                 selected = [self._specs[name] for name in tool_names]
-                adapter = MCPServerAdapter(
-                    service_name, (spec.mcp_binding() for spec in selected)
-                )
+                adapter = MCPServerAdapter(service_name, (spec.mcp_binding() for spec in selected))
                 routed_config = replace(
                     config,
                     http_url=config.service_urls[service_name],
@@ -240,18 +237,14 @@ class AgentToolRegistry:
                     frozenset(tool_names),
                 )
                 self._mcp_executors[service_name] = executor
-                self._mcp_tool_routes.update(
-                    (tool_name, service_name) for tool_name in tool_names
-                )
+                self._mcp_tool_routes.update((tool_name, service_name) for tool_name in tool_names)
         else:
             self._mcp_executors["agent-tools"] = self._build_mcp_executor(
                 config,
                 self._mcp_adapter,
                 frozenset(self._specs),
             )
-            self._mcp_tool_routes.update(
-                (tool_name, "agent-tools") for tool_name in self._specs
-            )
+            self._mcp_tool_routes.update((tool_name, "agent-tools") for tool_name in self._specs)
 
     @staticmethod
     def _build_mcp_executor(
@@ -294,7 +287,7 @@ class AgentToolRegistry:
         ]
 
     def capability_catalog(self) -> list[JsonObject]:
-        """从实际注册工具生成 Planner 能力目录，避免另维护一份静态清单。"""
+        """从实际注册工具生成任务提纲能力目录，避免另维护一份静态清单。"""
         catalog: dict[str, JsonObject] = {}
         for spec in self._specs.values():
             for capability in spec.metadata.capabilities:
@@ -345,8 +338,7 @@ class AgentToolRegistry:
         """Build the immutable, executable v1 catalog persisted with a TaskRun."""
         capabilities = self.capability_catalog()
         capability_allowed = {
-            str(item["name"]): item.get("allowed") is not False
-            for item in capabilities
+            str(item["name"]): item.get("allowed") is not False for item in capabilities
         }
         for item in capabilities:
             name = str(item["name"])
@@ -397,9 +389,7 @@ class AgentToolRegistry:
                     "service_name": service_name,
                     "content_hash": content_hash,
                 }
-                for service_name, content_hash in sorted(
-                    self._validated_remote_catalogs.items()
-                )
+                for service_name, content_hash in sorted(self._validated_remote_catalogs.items())
             ],
         }
 
@@ -455,28 +445,10 @@ class AgentToolRegistry:
         raw = snapshot.get("tools")
         if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
             raise ValueError("TaskRun tool 目录快照格式非法")
-        names = [
-            item.get("tool_name")
-            for item in raw
-            if item.get("allowed") is not False
-        ]
+        names = [item.get("tool_name") for item in raw if item.get("allowed") is not False]
         if not all(isinstance(item, str) and item for item in names):
             raise ValueError("TaskRun tool 目录快照包含非法工具名")
         return frozenset(cast(list[str], names))
-
-    def openai_tools_for_capabilities(
-        self,
-        capabilities: set[str],
-        *,
-        allowed_tool_names: frozenset[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """只暴露当前计划声明的 capability 对应工具。"""
-        return [
-            spec.openai_tool()
-            for spec in self._specs.values()
-            if capabilities.intersection(spec.metadata.capabilities)
-            and (allowed_tool_names is None or spec.name in allowed_tool_names)
-        ]
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
         """返回工具声明的能力；未知工具返回空元组。"""
@@ -486,9 +458,7 @@ class AgentToolRegistry:
     def tool_names_for_capability(self, capability: str) -> tuple[str, ...]:
         """把一个计划能力解析为已注册工具名，保持注册顺序。"""
         return tuple(
-            spec.name
-            for spec in self._specs.values()
-            if capability in spec.metadata.capabilities
+            spec.name for spec in self._specs.values() if capability in spec.metadata.capabilities
         )
 
     def mcp_descriptors(self) -> tuple[MCPToolDescriptor, ...]:
@@ -667,9 +637,7 @@ class AgentToolRegistry:
         if self._catalog_watch_tasks:
             await asyncio.gather(*self._catalog_watch_tasks, return_exceptions=True)
             self._catalog_watch_tasks.clear()
-        await asyncio.gather(
-            *(executor.aclose() for executor in self._mcp_executors.values())
-        )
+        await asyncio.gather(*(executor.aclose() for executor in self._mcp_executors.values()))
 
     def execute(self, name: str, arguments_json: str) -> Any:
         """Compatibility-only direct runner used by focused unit tests.
@@ -735,7 +703,8 @@ def build_registry(
             ),
         ),
         _wrap_mcp(
-            stats, "trend_analysis",
+            stats,
+            "trend_analysis",
             "趋势分析（STL 分解/移动平均/探索性外推）。需要时间列与数值列；"
             "输出统计 Evidence 护栏，但不替代受治理 stats.forecast 预测。",
             metadata=tool_metadata("stats.trend", "stats", tool_version="1.1.0"),
@@ -748,18 +717,21 @@ def build_registry(
             metadata=tool_metadata("stats.forecast", "stats"),
         ),
         _wrap_mcp(
-            stats, "anomaly_detect",
+            stats,
+            "anomaly_detect",
             "异常检测（3sigma/IQR/孤立森林/STL 残差）。返回异常点行号(index)与数值，"
             "可配合 transform_dataset 的 exclude_row_indices 排除异常后重算。",
             metadata=tool_metadata("stats.anomaly", "stats", tool_version="1.1.0"),
         ),
         _wrap_mcp(
-            stats, "regression",
+            stats,
+            "regression",
             "回归分析（OLS/Logit）：目标列 target 与自变量 features，输出系数、p 值、R²。",
             metadata=tool_metadata("stats.regression", "stats", tool_version="1.1.0"),
         ),
         _wrap_mcp(
-            stats, "correlation",
+            stats,
+            "correlation",
             "相关性分析（Pearson/Spearman）：给定 ≥2 个数值列，输出相关矩阵与强相关对"
             "（含 p_value/significant）。结果仅支持共变关系结论，不支持因果推断。",
             metadata=tool_metadata("stats.correlation", "stats", tool_version="1.1.0"),
@@ -779,14 +751,16 @@ def build_registry(
             metadata=tool_metadata("stats.group_compare", "stats"),
         ),
         _wrap_mcp(
-            chart, "gen_chart",
+            chart,
+            "gen_chart",
             "生成 ECharts 图表：选择图型(line/bar/pie/scatter)与列映射(encoding.x/y/agg)，"
             "工具内部会对原始数据真实聚合，**无需先用 aggregate_preview 预聚合**，"
             "直接在原数据集上出图即可。用户要看图/可视化时调用。",
             metadata=tool_metadata("visualization.chart", "chart"),
         ),
         _wrap_mcp(
-            chart, "chart_screenshot",
+            chart,
+            "chart_screenshot",
             "把 ECharts option 渲染为 PNG 截图（主要供报告使用）。",
             metadata=tool_metadata(
                 "visualization.screenshot",
@@ -814,7 +788,8 @@ def build_registry(
             ),
         ),
         _wrap_mcp(
-            dataset_ops, "aggregate_preview",
+            dataset_ops,
+            "aggregate_preview",
             "分组聚合出表：按 group_col 分组对 value_col 求 sum/mean/count，"
             '回答"各X的Y是多少"类取数问题。',
             override_schema=AGGREGATE_PREVIEW_SCHEMA,
@@ -922,7 +897,7 @@ def mcp_client_config_from_settings(settings: Settings) -> MCPClientConfig:
 
 
 def enabled_capability_profiles_from_settings(settings: Settings) -> frozenset[str]:
-    """Project validated deployment settings into Planner-visible profiles."""
+    """Project validated deployment settings into outline-visible profiles."""
     profiles = set(parse_capability_profiles(settings.agent_capability_profiles))
     if settings.rag_runtime_profile == "gpu":
         profiles.add("gpu")
@@ -1045,9 +1020,9 @@ def _register_transformed_dataset(
         raise AgentToolError("源数据集不属于当前项目")
     if excel is None:
         raise AgentToolError("Host 缺少衍生数据集画像依赖")
-    profile: JsonObject = excel._tools["infer_schema"].invoke(
-        {"dataset_ref": result["dataset_ref"]}
-    ).to_dict()
+    profile: JsonObject = (
+        excel._tools["infer_schema"].invoke({"dataset_ref": result["dataset_ref"]}).to_dict()
+    )
     context.store.register_dataset(
         ref=str(result["dataset_ref"]),
         project_id=context.project_id,
@@ -1116,9 +1091,9 @@ def _register_joined_dataset(
     parent_refs = (left.ref, right.ref)
     if result.get("parent_refs") != list(parent_refs):
         raise AgentToolError("Join 结果父版本与 Host 固定参数不一致")
-    profile: JsonObject = excel._tools["infer_schema"].invoke(
-        {"dataset_ref": result["dataset_ref"]}
-    ).to_dict()
+    profile: JsonObject = (
+        excel._tools["infer_schema"].invoke({"dataset_ref": result["dataset_ref"]}).to_dict()
+    )
     transform: JsonObject = {
         "operation": "join",
         "join_type": args["join_type"],
@@ -1258,10 +1233,7 @@ def _generate_report(
     context: AgentContext | None,
     args: dict[str, Any],
 ) -> dict[str, Any]:
-    """按 analysis_ids 从对话工件组装报告（14.7：report 组装式重构）。
-
-    与旧 /analyze/report 端点（重跑固定清单）并行共存，互不影响（纪律2）。
-    """
+    """按 analysis_ids 从当前对话的已验证工件组装报告。"""
     if context is None:
         raise AgentToolError("generate_report 需要会话上下文（conversation 内调用）")
 
@@ -1291,9 +1263,7 @@ def _generate_report(
             )
     if args.get("include_pdf"):
         try:
-            pdf = report._tools["export_pdf"].invoke(
-                {"report_id": result["report_id"]}
-            )
+            pdf = report._tools["export_pdf"].invoke({"report_id": result["report_id"]})
         except Exception:
             # Markdown belongs to this attempted compound operation. If PDF export
             # fails, do not leave an unreferenced half-report behind.

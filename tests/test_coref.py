@@ -329,7 +329,7 @@ def test_restore_rejects_tampered_or_deleted_target(tmp_path: Path) -> None:
         )
 
 
-def test_reference_binding_is_bounded_by_planner_assumption_contract(
+def test_reference_binding_is_bounded_by_outline_assumption_contract(
     tmp_path: Path,
 ) -> None:
     session, project_id, conversation_id, artifacts, _ = _workspace(tmp_path)

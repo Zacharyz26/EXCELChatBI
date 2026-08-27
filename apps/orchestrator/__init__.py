@@ -1,6 +1,5 @@
-"""自研编排层。
+"""ChatBI 单一 function-calling Agent 编排层。
 
-当前主入口是 v2.3 function-calling Agent 循环；v2.4 将演进为统一的类型化
-Goal/Planner/Executor/Verifier/Replanner/Finalizer 控制面。早期 Dify/LangGraph
-A/B 双轨已经废止，历史占位模块不参与运行。
+确定性任务提纲只承担澄清、进度展示和审计；同一个 Agent 负责选择工具、接收工具
+反馈并继续推理，最终由确定性 Evidence/Artifact Verifier 收口。
 """

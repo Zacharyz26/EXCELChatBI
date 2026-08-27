@@ -1,7 +1,8 @@
 """Deterministic Claim extraction and Evidence linking.
 
 Stage 1 deliberately keeps this extractor conservative: numeric claims require
-an exact value present in current-run Evidence, while knowledge claims require
+a value present in current-run Evidence, allowing only deterministic display
+rounding and explicit units such as ``%``/``万``/``亿``. Knowledge claims require
 an explicit source label returned by a governed knowledge Tool. It does not ask
 a model to invent links between prose and Evidence.
 """
@@ -10,21 +11,29 @@ from __future__ import annotations
 
 import math
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from packages.session.models import JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord
 
 _NUMBER_PATTERN = re.compile(
-    r"(?<![\w.\-])"
+    # Treat only ASCII identifier characters as token boundaries. Chinese unit
+    # expressions commonly omit spaces (``10万元``/``366行``) and must still be
+    # auditable numeric claims.
+    r"(?<![A-Za-z0-9_.\-])"
     r"[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
-    r"(?:[eE][-+]?\d+)?%?(?![\w.\-])"
+    r"(?:[eE][-+]?\d+)?%?(?![A-Za-z0-9_.\-])"
 )
 _LEADING_LIST_MARKER = re.compile(r"^\s*(?:[-*]\s+|\d+[.)、]\s*)")
 _MAX_EVIDENCE_VALUES = 256
 _MAX_EVIDENCE_SOURCES = 64
 _MAX_VALUE_DEPTH = 8
+_DISPLAY_UNIT_FACTORS: dict[str, Decimal] = {
+    "千": Decimal("1000"),
+    "万": Decimal("10000"),
+    "亿": Decimal("100000000"),
+}
 _NO_KNOWLEDGE_RESULT_PATTERN = re.compile(
     r"(?:未找到|没有找到|没查到|未检索到|没有检索到|没能检索到|无相关|没有相关|检索无结果|"
     r"无法(?:依据|从).{0,12}(?:回答|确认)|"
@@ -103,8 +112,12 @@ def extract_numeric_claims(
                 and _looks_like_time_scope(statement, match.start(), match.end())
             ):
                 continue
-            matched, candidates = _match_evidence_value(
-                normalized, evidence_values, statement=statement
+            matched, candidates, match_kind, display_factor = _match_evidence_value(
+                normalized,
+                evidence_values,
+                statement=statement,
+                token=token,
+                token_end=match.end(),
             )
             if matched is None:
                 refs.append(
@@ -123,7 +136,10 @@ def extract_numeric_claims(
                 "evidence_id": evidence_id,
                 "path": path,
                 "evidence_value": evidence_value,
+                "match_kind": match_kind,
             }
+            if display_factor != Decimal(1):
+                value_ref["display_factor"] = str(display_factor)
             if len(candidates) > 1:
                 value_ref["candidate_paths"] = [
                     {"evidence_id": item[0], "path": item[1]}
@@ -506,24 +522,108 @@ def _match_evidence_value(
     values: list[tuple[str, str, Decimal, str]],
     *,
     statement: str,
-) -> tuple[tuple[str, str, str] | None, list[tuple[str, str, str]]]:
-    candidates = [
+    token: str,
+    token_end: int,
+) -> tuple[
+    tuple[str, str, str] | None,
+    list[tuple[str, str, str]],
+    str | None,
+    Decimal,
+]:
+    exact_candidates = [
         (evidence_id, path, raw_value)
         for evidence_id, path, evidence_value, raw_value in values
         if evidence_value == claim_value
     ]
+    if exact_candidates:
+        return (
+            _select_evidence_candidate(exact_candidates, statement),
+            exact_candidates,
+            "exact",
+            Decimal(1),
+        )
+
+    display_factor = _display_factor(token, statement=statement, token_end=token_end)
+    quantum = _display_quantum(token)
+    if display_factor is None or quantum is None:
+        return None, [], None, Decimal(1)
+    candidates = [
+        (evidence_id, path, raw_value)
+        for evidence_id, path, evidence_value, raw_value in values
+        if _matches_display_value(
+            evidence_value,
+            claim_value,
+            display_factor=display_factor,
+            quantum=quantum,
+        )
+    ]
     if not candidates:
-        return None, []
+        return None, [], None, display_factor
+    match_kind = "unit_scaled" if display_factor != Decimal(1) else "rounded"
+    return (
+        _select_evidence_candidate(candidates, statement),
+        candidates,
+        match_kind,
+        display_factor,
+    )
+
+
+def _select_evidence_candidate(
+    candidates: list[tuple[str, str, str]], statement: str
+) -> tuple[str, str, str]:
     if len(candidates) == 1:
-        return candidates[0], candidates
+        return candidates[0]
 
     scored = [(_path_relevance(item[1], statement), item) for item in candidates]
     highest = max(score for score, _item in scored)
     best = [item for score, item in scored if score == highest]
     # Prefer a unique semantic path match. Otherwise retain every candidate in
     # the Claim instead of silently pretending the first path is unambiguous.
-    chosen = best[0] if highest > 0 and len(best) == 1 else candidates[0]
-    return chosen, candidates
+    return best[0] if highest > 0 and len(best) == 1 else candidates[0]
+
+
+def _display_factor(token: str, *, statement: str, token_end: int) -> Decimal | None:
+    """Return raw-evidence units represented by one displayed claim unit.
+
+    For example, ``10.28万`` represents a raw value near ``102800`` and
+    ``25.1%`` represents a raw ratio near ``0.251``. Combining percent with a
+    large-number unit is rejected instead of guessed.
+    """
+    suffix = statement[token_end : token_end + 4]
+    percent = token.endswith("%") or re.match(r"\s*%", suffix) is not None
+    unit_match = re.match(r"\s*([千万亿])", suffix)
+    if percent and unit_match is not None:
+        return None
+    if percent:
+        return Decimal("0.01")
+    if unit_match is not None:
+        return _DISPLAY_UNIT_FACTORS[unit_match.group(1)]
+    return Decimal(1)
+
+
+def _display_quantum(token: str) -> Decimal | None:
+    normalized = _normalize_number(token)
+    if normalized is None:
+        return None
+    exponent = normalized.as_tuple().exponent
+    if not isinstance(exponent, int):
+        return None
+    return Decimal(1).scaleb(exponent)
+
+
+def _matches_display_value(
+    evidence_value: Decimal,
+    claim_value: Decimal,
+    *,
+    display_factor: Decimal,
+    quantum: Decimal,
+) -> bool:
+    """Accept only values that deterministically render as the claim token."""
+    try:
+        displayed = evidence_value / display_factor
+        return displayed.quantize(quantum, rounding=ROUND_HALF_UP) == claim_value
+    except (InvalidOperation, ZeroDivisionError):
+        return False
 
 
 def _path_relevance(path: str, statement: str) -> int:

@@ -415,7 +415,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await expect(reportAudit).toContainText("Artifact");
   await page.getByRole("button", { name: "关闭任务协作" }).click();
 
-  // 在真实 API/SQLite 上追加反馈，再由单一 Agent 创建 LLM Planner 分支。
+  // 在真实 API/SQLite 上追加反馈，再由同一个 Agent 创建分析分支。
   await controlButton.click();
   let panel = page.getByRole("dialog", { name: "任务协作" });
   await panel.getByRole("radio", { name: "需改进" }).click();
@@ -461,10 +461,10 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   const branchEvents = await branchEventsResponse.json() as {
     events: Array<{ event_type: string; payload: Record<string, unknown> }>;
   };
-  const branchPlan = branchEvents.events.find(
-    (event) => event.event_type === "plan.created",
+  const branchStarted = branchEvents.events.find(
+    (event) => event.event_type === "run.started",
   );
-  expect((branchPlan?.payload.planner as { route?: string })?.route).toBe("llm");
+  expect(branchStarted?.payload.outline_route).toBe("template");
   expect(
     branchEvents.events.some(
       (event) => event.event_type === "autonomy.plan_review_requested",

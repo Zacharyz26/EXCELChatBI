@@ -422,7 +422,7 @@ def test_task_plan_and_steps_are_versioned_and_persisted_atomically(
         expected_version=run.state_version,
         plan=plan,
         reason="initial:template",
-        planner={"route": "template", "response_hash": "hash"},
+        outline_audit={"route": "template", "response_hash": "hash"},
     )
 
     assert updated.plan_version == 1
@@ -459,7 +459,7 @@ def test_task_plan_and_steps_are_versioned_and_persisted_atomically(
         expected_version=running.state_version,
         plan=revised_plan,
         reason="observation:column_changed",
-        planner={"route": "template", "response_hash": "revised"},
+        outline_audit={"route": "template", "response_hash": "revised"},
     )
     assert revised_run.plan_version == 2
     assert revised.version == 2
@@ -501,11 +501,195 @@ def test_task_plan_save_rejects_version_conflict_without_partial_rows(
             expected_version=run.state_version + 1,
             plan=plan,
             reason="stale",
-            planner={"route": "fast"},
+            outline_audit={"route": "fast"},
         )
 
     assert tasks.list_plans(run.run_id) == []
     assert tasks.list_plan_steps(run.run_id) == []
+
+
+def test_verification_reconciles_superseded_prerequisite_and_completion_is_closed(
+    tmp_path: Path,
+) -> None:
+    session, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="outline-reconciliation",
+        user_text="分析销售趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 2},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "先识别角色，再分析趋势",
+        "steps": [
+            {
+                "step_id": "roles",
+                "purpose": "识别字段角色",
+                "capability": "data.roles",
+                "dependencies": [],
+                "expected_evidence": ["角色 Evidence"],
+                "completion_conditions": ["角色已确认"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+            {
+                "step_id": "trend",
+                "purpose": "分析趋势",
+                "capability": "stats.trend",
+                "dependencies": ["roles"],
+                "expected_evidence": ["趋势 Evidence"],
+                "completion_conditions": ["趋势调用成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            },
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, steps, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:template",
+        outline_audit={"route": "template"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, invocation, _, _ = tasks.start_invocation_with_event(
+        run_id=run.run_id,
+        expected_version=run.state_version,
+        tool_call_id="trend-call",
+        tool_name="trend_analysis",
+        arguments={"dataset_ref": "sales"},
+        idempotency_key="outline-reconciliation-trend",
+        policy_decision={"allowed": True},
+        step_id=steps[1].step_id,
+    )
+    assistant = session.append_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content="执行趋势分析",
+    )
+    run, _, _, _, _, _ = tasks.commit_tool_success(
+        invocation.invocation_id,
+        expected_version=run.state_version,
+        assistant_message_id=assistant.id,
+        result={"direction": "上升"},
+        evidence_kind="tool_result",
+        evidence_source={"tool": "trend_analysis"},
+        evidence_summary={"summary": "方向=上升", "value_index": []},
+        artifact_draft=None,
+    )
+
+    verifying, event = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="verifying",
+        event_type="verification.started",
+        payload={},
+    )
+
+    assert event.payload["reconciled_outline_steps"] == ["roles"]
+    assert [step.status for step in tasks.list_plan_steps(run.run_id)] == [
+        "skipped",
+        "completed",
+    ]
+    completed, _ = tasks.transition(
+        run.run_id,
+        expected_version=verifying.state_version,
+        status="completed",
+        event_type="verification",
+        payload={"verdict": "PASS"},
+    )
+    assert completed.status == "completed"
+
+
+def test_completion_rejects_independent_pending_outline_step(tmp_path: Path) -> None:
+    _, tasks, project_id, conversation_id, message_id = _workspace(tmp_path)
+    contract = build_minimal_contract(
+        run_id="unfinished-outline",
+        user_text="检查画像",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    run, _ = tasks.create_run(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        user_message_id=message_id,
+        contract=contract,
+        budget={"max_tool_calls": 1},
+    )
+    plan = {
+        "schema_version": 1,
+        "summary": "检查画像",
+        "steps": [
+            {
+                "step_id": "profile",
+                "purpose": "检查画像",
+                "capability": "data.profile",
+                "dependencies": [],
+                "expected_evidence": ["画像 Evidence"],
+                "completion_conditions": ["画像成功"],
+                "fallback": [{"when": "失败", "action": "retry"}],
+            }
+        ],
+        "assumptions": [],
+        "clarifications": [],
+    }
+    run, _, _, _ = tasks.save_plan(
+        run.run_id,
+        expected_version=run.state_version,
+        plan=plan,
+        reason="initial:fast",
+        outline_audit={"route": "fast"},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="running",
+        event_type="run.started",
+        payload={},
+    )
+    run, _ = tasks.transition(
+        run.run_id,
+        expected_version=run.state_version,
+        status="verifying",
+        event_type="verification.started",
+        payload={},
+    )
+
+    with pytest.raises(ControlConflict, match="profile"):
+        tasks.transition(
+            run.run_id,
+            expected_version=run.state_version,
+            status="completed",
+            event_type="verification",
+            payload={"verdict": "PASS"},
+        )
+
+    with pytest.raises(ControlConflict, match="profile"):
+        tasks.control_transition(
+            run.run_id,
+            expected_version=run.state_version,
+            idempotency_key="cannot-bypass-unfinished-outline",
+            command="complete",
+            allowed_statuses={"verifying"},
+            status="completed",
+            event_type="run.completed",
+            payload={"verdict": "PASS"},
+        )
 
 
 def test_plan_revision_preserves_completed_steps_and_can_explicitly_skip_pending(
@@ -556,8 +740,8 @@ def test_plan_revision_preserves_completed_steps_and_can_explicitly_skip_pending
         run.run_id,
         expected_version=run.state_version,
         plan=plan,
-        reason="initial:llm",
-        planner={"route": "llm"},
+        reason="initial:template",
+        outline_audit={"route": "template"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -597,7 +781,7 @@ def test_plan_revision_preserves_completed_steps_and_can_explicitly_skip_pending
         expected_version=run.state_version,
         plan={**plan, "summary": "未发现异常，跳过清洗"},
         reason="observation:no_anomalies",
-        planner={"route": "template"},
+        outline_audit={"route": "template"},
         step_status_overrides={"clean": "skipped"},
     )
 
@@ -649,7 +833,7 @@ def test_plan_revision_cannot_remove_a_completed_step(tmp_path: Path) -> None:
         expected_version=run.state_version,
         plan=plan,
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -697,7 +881,7 @@ def test_plan_revision_cannot_remove_a_completed_step(tmp_path: Path) -> None:
             expected_version=run.state_version,
             plan=empty_plan,
             reason="invalid",
-            planner={"route": "template"},
+            outline_audit={"route": "template"},
         )
 
     assert len(tasks.list_plans(run.run_id)) == 1
@@ -1532,7 +1716,7 @@ def test_startup_recovery_marks_active_invocations_unknown(tmp_path: Path) -> No
         expected_version=run.state_version,
         plan=plan,
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -1636,7 +1820,7 @@ def test_startup_recovery_pauses_idle_running_run_with_checkpoint(
         expected_version=run.state_version,
         plan=plan,
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -1801,7 +1985,7 @@ def test_pause_rejects_active_invocation_and_cancel_marks_it_unknown(
         expected_version=run.state_version,
         plan=plan,
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -1965,7 +2149,7 @@ def test_data_role_clarification_persists_versioned_confirmation(
             ],
         },
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     data_hash = tasks.data_version_hash(run.run_id)
     run, _ = tasks.transition(
@@ -2092,7 +2276,7 @@ def test_user_step_retry_creates_one_immutable_plan_revision(
         expected_version=run.state_version,
         plan=plan,
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,

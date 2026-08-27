@@ -1,7 +1,6 @@
-"""统计分析工具 + /analyze/stats 路由测试。
+"""统计分析工具测试。
 
 红线2：断言数值由工具从真实数据算出（回归系数/R²、异常索引、趋势方向）。
-红线3：路由对非法入参/列返回 422。
 """
 
 from __future__ import annotations
@@ -17,8 +16,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.api.main import app  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 from mcp_servers.common.catalog import tool_output_schema  # noqa: E402
 from mcp_servers.common.contracts import validate_json  # noqa: E402
 from mcp_servers.stats.tools import (  # noqa: E402
@@ -73,6 +70,7 @@ def order_regression_ref() -> str:
 
 # ── 工具层 ──
 
+
 def test_trend_stl_detects_upward_and_seasonality(trend_ref: str) -> None:
     res = trend_analysis(
         {
@@ -87,48 +85,65 @@ def test_trend_stl_detects_upward_and_seasonality(trend_ref: str) -> None:
     assert res["method"] == "stl"
     assert res["direction"] == "上升"
     assert res["slope"] > 0
-    assert res["seasonality_strength"] > 0.5      # 明显季节性
-    assert len(res["points"]["trend"]) == 48       # 逐行分量全量返回（供前端）
-    assert len(res["forecast"]) == 3               # 线性外推 3 步
+    assert res["seasonality_strength"] > 0.5  # 明显季节性
+    assert len(res["points"]["trend"]) == 48  # 逐行分量全量返回（供前端）
+    assert len(res["forecast"]) == 3  # 线性外推 3 步
     assert res["forecast"][-1] > res["forecast"][0]
 
 
 def test_trend_prophet_forecasts(trend_ref: str) -> None:
     try:
         res = trend_analysis(
-            {"dataset_ref": trend_ref, "value_col": "销量", "time_col": "日期",
-             "method": "prophet", "period": 12, "forecast_horizon": 3}
+            {
+                "dataset_ref": trend_ref,
+                "value_col": "销量",
+                "time_col": "日期",
+                "method": "prophet",
+                "period": 12,
+                "forecast_horizon": 3,
+            }
         )
     except (ImportError, RuntimeError) as exc:  # prophet/cmdstan 不可用 → skip
         pytest.skip(f"prophet 不可用：{exc}")
     assert res["method"] == "prophet"
-    assert res["direction"] == "上升"                 # 数据本就上升
-    assert len(res["points"]["trend"]) == 48          # 逐行趋势分量
-    assert len(res["forecast"]) == 3                  # Prophet 预测 3 期
+    assert res["direction"] == "上升"  # 数据本就上升
+    assert len(res["points"]["trend"]) == 48  # 逐行趋势分量
+    assert len(res["forecast"]) == 3  # Prophet 预测 3 期
     assert all(v is not None for v in res["forecast"])
 
 
 def test_trend_prophet_handles_duplicate_dates() -> None:
     # 复现 test.xlsx 结构：多行共享同一日期（Prophet 会折叠历史，需按原 ds 对齐）
     n = 60
-    days = np.repeat(np.arange(n // 3), 3)          # 每个日期 3 行
+    days = np.repeat(np.arange(n // 3), 3)  # 每个日期 3 行
     val = 100 + 5 * days + np.random.default_rng(0).normal(0, 1, n)
-    ref = save_dataframe(pd.DataFrame({
-        "日期": pd.to_datetime("2024-01-01") + pd.to_timedelta(days, unit="D"),
-        "销售额": val,
-    }))
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": pd.to_datetime("2024-01-01") + pd.to_timedelta(days, unit="D"),
+                "销售额": val,
+            }
+        )
+    )
     try:
-        res = trend_analysis({"dataset_ref": ref, "value_col": "销售额", "time_col": "日期",
-                              "method": "prophet", "forecast_horizon": 3})
+        res = trend_analysis(
+            {
+                "dataset_ref": ref,
+                "value_col": "销售额",
+                "time_col": "日期",
+                "method": "prophet",
+                "forecast_horizon": 3,
+            }
+        )
     except (ImportError, RuntimeError) as exc:
         pytest.skip(f"prophet 不可用：{exc}")
-    assert len(res["points"]["trend"]) == n          # 逐行对齐，无 shape 错
+    assert len(res["points"]["trend"]) == n  # 逐行对齐，无 shape 错
     assert len(res["forecast"]) == 3
 
 
 def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
     res = trend_analysis({"dataset_ref": trend_ref, "value_col": "销量", "time_col": "日期"})
-    assert res["method"] == "ma"                   # 无 period 退化为移动平均
+    assert res["method"] == "ma"  # 无 period 退化为移动平均
     assert res["seasonality_strength"] is None
     assert res["direction"] == "上升"
     evidence = res["statistical_evidence"]
@@ -269,10 +284,7 @@ def test_forecast_that_does_not_beat_naive_is_explicitly_limited() -> None:
     assert result["selected_method"] == "naive"
     assert result["baseline"]["beats_baseline"] is False
     assert result["reliability"] == "limited"
-    assert any(
-        "低置信参考" in item
-        for item in result["statistical_evidence"]["limitations"]
-    )
+    assert any("低置信参考" in item for item in result["statistical_evidence"]["limitations"])
 
 
 @pytest.mark.parametrize(
@@ -281,9 +293,7 @@ def test_forecast_that_does_not_beat_naive_is_explicitly_limited() -> None:
         (
             pd.DataFrame(
                 {
-                    "日期": pd.to_datetime(
-                        ["2025-01-01", "2025-01-02", "2025-01-04"]
-                    ),
+                    "日期": pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-04"]),
                     "值": [1.0, 2.0, 3.0],
                 }
             ),
@@ -359,7 +369,7 @@ def test_anomaly_iqr_flags_outlier(anomaly_ref: str) -> None:
     res = anomaly_detect({"dataset_ref": anomaly_ref, "value_col": "v", "method": "iqr"})
     assert res["n_total"] == 30
     assert res["n_anomalies"] >= 1
-    assert res["anomalies"][0]["index"] == 10       # 最高分即植入的离群点
+    assert res["anomalies"][0]["index"] == 10  # 最高分即植入的离群点
     assert res["anomalies"][0]["value"] == pytest.approx(500.0, abs=1e-6)
     evidence = res["statistical_evidence"]
     assert evidence["analysis_kind"] == "anomaly"
@@ -410,9 +420,7 @@ def test_regression_returns_diagnostics_and_detects_collinearity() -> None:
     y = 3 + x1 + np.sin(x1)
     ref = save_dataframe(pd.DataFrame({"y": y, "x1": x1, "x2": x2}))
 
-    result = regression(
-        {"dataset_ref": ref, "target": "y", "features": ["x1", "x2"]}
-    )
+    result = regression({"dataset_ref": ref, "target": "y", "features": ["x1", "x2"]})
 
     diagnostics = result["diagnostics"]
     assert diagnostics["residual_normality"]["test"] == "jarque_bera"
@@ -599,9 +607,7 @@ def test_group_compare_uses_welch_holm_and_suppresses_small_groups() -> None:
     )
     ref = save_dataframe(frame)
 
-    result = group_compare(
-        {"dataset_ref": ref, "group_col": "群体", "value_col": "指标"}
-    )
+    result = group_compare({"dataset_ref": ref, "group_col": "群体", "value_col": "指标"})
 
     assert result["method"] == "welch_anova"
     assert result["overall"]["significant"] is True
@@ -633,122 +639,3 @@ def test_group_compare_fails_closed_for_zero_variance_groups() -> None:
 
     with pytest.raises(ValueError, match="非零组内方差"):
         group_compare({"dataset_ref": ref, "group_col": "群体", "value_col": "指标"})
-
-
-# ── 路由层（端到端，同 Excel 链路）──
-
-def test_route_trend_ok(trend_ref: str) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={
-            "dataset_ref": trend_ref,
-            "kind": "trend",
-            "params": {"value_col": "销量", "time_col": "日期", "period": 12},
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["kind"] == "trend"
-    assert body["result"]["direction"] == "上升"
-
-
-def test_route_bad_column_returns_422(trend_ref: str) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={"dataset_ref": trend_ref, "kind": "trend",
-              "params": {"value_col": "不存在", "time_col": "日期"}},
-    )
-    assert resp.status_code == 422
-
-
-def test_route_missing_dataset_returns_404() -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={"dataset_ref": "f" * 32, "kind": "anomaly", "params": {"value_col": "v"}},
-    )
-    assert resp.status_code == 404
-
-
-def test_route_unknown_kind_returns_422(trend_ref: str) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={"dataset_ref": trend_ref, "kind": "clustering", "params": {}},
-    )
-    assert resp.status_code == 422
-
-
-def test_route_correlation_ok(correlation_ref: str) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={"dataset_ref": correlation_ref, "kind": "correlation",
-              "params": {"columns": ["a", "b", "c"], "method": "pearson"}},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["kind"] == "correlation"
-    assert len(body["result"]["matrix"]) == 3
-    assert body["result"]["top_pairs"][0]["significant"] is True
-
-
-def test_route_dimension_contribution_ok() -> None:
-    ref = save_dataframe(
-        pd.DataFrame({"地区": ["甲"] * 5 + ["乙"] * 5, "销售额": [10.0] * 5 + [5.0] * 5})
-    )
-    client = TestClient(app)
-    response = client.post(
-        "/analyze/stats",
-        json={
-            "dataset_ref": ref,
-            "kind": "contribution",
-            "params": {"dimension_col": "地区", "value_col": "销售额"},
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["result"]["groups"][0]["share"] == pytest.approx(2 / 3)
-
-
-def test_route_regression_order_count_as_target(order_regression_ref: str) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={
-            "dataset_ref": order_regression_ref,
-            "kind": "regression",
-            "params": {"target": "订单数", "features": ["销售额"], "kind": "ols"},
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["kind"] == "regression"
-    assert body["result"]["n_obs"] == 24
-
-
-@pytest.mark.parametrize(
-    ("features", "detail"),
-    [
-        (["订单数"], "因变量不能同时作为自变量"),
-        (["销售额", "销售额"], "自变量不能重复"),
-    ],
-)
-def test_route_regression_rejects_invalid_feature_roles(
-    order_regression_ref: str,
-    features: list[str],
-    detail: str,
-) -> None:
-    client = TestClient(app)
-    resp = client.post(
-        "/analyze/stats",
-        json={
-            "dataset_ref": order_regression_ref,
-            "kind": "regression",
-            "params": {"target": "订单数", "features": features, "kind": "ols"},
-        },
-    )
-    assert resp.status_code == 422
-    assert resp.json()["detail"] == detail

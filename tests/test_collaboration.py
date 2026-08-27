@@ -103,7 +103,7 @@ def _paused_run(
         expected_version=run.state_version,
         plan=_plan(),
         reason="initial:template",
-        planner={"route": "template"},
+        outline_audit={"route": "template"},
     )
     run, _ = tasks.transition(
         run.run_id,

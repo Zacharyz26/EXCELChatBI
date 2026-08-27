@@ -1,6 +1,6 @@
-"""脚手架冒烟测试。
+"""基础结构与轻依赖冒烟测试。
 
-用标准库 unittest 编写（pytest 亦可收集），仅依赖纯骨架模块，
+用标准库 unittest 编写（pytest 亦可收集），仅依赖轻量模块，
 不依赖尚未安装的第三方库，因此 `python3 -m unittest` 即可通过，
 验证目录结构与模块可导入。
 """
@@ -30,14 +30,13 @@ class StructureTest(unittest.TestCase):
 
 
 class ImportTest(unittest.TestCase):
-    """纯骨架模块可导入（不触发 NotImplementedError，仅导入）。"""
+    """轻量模块可导入。"""
 
     PURE_MODULES = [
         "packages.models",
         "packages.models.types",
         "packages.models.gateway",
         "packages.governance.schema_validator",
-        "packages.governance.sandbox",
         "packages.rag.retriever",
         "packages.session.state",
         "mcp_servers.common.tool",
@@ -53,7 +52,7 @@ class ImportTest(unittest.TestCase):
 
 
 class SkeletonContractTest(unittest.TestCase):
-    """骨架契约：未实现的函数应抛 NotImplementedError；可构造的对象应可构造。"""
+    """核心轻量契约。"""
 
     def test_scenario_enum(self) -> None:
         from packages.models.types import Scenario

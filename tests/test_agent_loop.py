@@ -34,12 +34,12 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
     _blocking_clarification,
     _enrich_tool_arguments,
     _model_view,
-    _preserve_host_reference_assumptions,
+    _required_chart_dimensions,
     stream_agent_chat,
 )
 from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
 from apps.orchestrator.control.contracts import build_minimal_contract  # noqa: E402
-from apps.orchestrator.control.planner_contract import validate_task_plan  # noqa: E402
+from apps.orchestrator.control.task_plan_contract import validate_task_plan  # noqa: E402
 from apps.orchestrator.run_manager import ManagedRunControl  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -140,33 +140,6 @@ class ScriptedGateway:
         )
 
 
-class PlannerAwareGateway(ScriptedGateway):
-    """同时提供结构化 Planner 与流式 Executor 的测试网关。"""
-
-    def __init__(self, turns: list[dict[str, Any]], planner_plan: dict[str, Any]) -> None:
-        super().__init__(turns)
-        self.planner_plan = planner_plan
-        self.planner_calls = 0
-        self.planner_messages: list[list[ModelMessage]] = []
-
-    async def complete(
-        self,
-        scenario: Scenario,
-        messages: list[ModelMessage],
-        *,
-        params: dict[str, object] | None = None,
-    ) -> ModelResponse:
-        assert scenario == Scenario.COMPLEX_REASONING
-        assert params is not None
-        assert messages
-        self.planner_calls += 1
-        self.planner_messages.append(list(messages))
-        return ModelResponse(
-            content=json.dumps(self.planner_plan, ensure_ascii=False),
-            model="eligible-planner",
-        )
-
-
 class FakeRegistry:
     """确定性工具注册表替身：按工具名执行 handler。"""
 
@@ -206,18 +179,6 @@ class FakeRegistry:
             }
             for name in self._handlers
             for capability in self.capabilities_for_tool(name)
-        ]
-
-    def openai_tools_for_capabilities(
-        self,
-        capabilities: set[str],
-        *,
-        allowed_tool_names: frozenset[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        return [
-            item
-            for item in self.openai_tools(allowed_tool_names=allowed_tool_names)
-            if capabilities.intersection(self.capabilities_for_tool(str(item["function"]["name"])))
         ]
 
     def capability_catalog_snapshot(self) -> dict[str, Any]:
@@ -264,22 +225,21 @@ class FakeRegistry:
 
     def capabilities_for_tool(self, tool_name: str) -> tuple[str, ...]:
         mapping = {
-            "get_data_profile": "data.profile",
-            "trend_analysis": "stats.trend",
-            "anomaly_detect": "stats.anomaly",
-            "regression": "stats.regression",
-            "correlation": "stats.correlation",
-            "gen_chart": "visualization.chart",
-            "chart_screenshot": "visualization.screenshot",
-            "transform_dataset": "dataset.transform",
-            "aggregate_preview": "data.aggregate",
-            "join_preflight": "dataset.join.preflight",
-            "join_datasets": "dataset.join.execute",
-            "kb_search": "knowledge.search",
-            "generate_report": "report.generate",
+            "get_data_profile": ("data.profile", "data.roles", "data.quality"),
+            "trend_analysis": ("stats.trend",),
+            "anomaly_detect": ("stats.anomaly",),
+            "regression": ("stats.regression",),
+            "correlation": ("stats.correlation",),
+            "gen_chart": ("visualization.chart",),
+            "chart_screenshot": ("visualization.screenshot",),
+            "transform_dataset": ("dataset.transform",),
+            "aggregate_preview": ("data.aggregate",),
+            "join_preflight": ("dataset.join.preflight",),
+            "join_datasets": ("dataset.join.execute",),
+            "kb_search": ("knowledge.search",),
+            "generate_report": ("report.generate",),
         }
-        capability = mapping.get(tool_name)
-        return (capability,) if capability is not None else ()
+        return mapping.get(tool_name, ())
 
     def execute(self, name: str, arguments_json: str) -> Any:
         self.executed.append((name, arguments_json))
@@ -469,8 +429,6 @@ async def _run_loop(
     user_text: str = "分析一下",
     config: AgentLoopConfig | None = None,
     policy: ToolPolicyGateway | None = None,
-    planner_gateway: Any | None = None,
-    enforce_plan: bool | None = None,
     parent_run_id: str | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     raw = [
@@ -485,8 +443,6 @@ async def _run_loop(
             locks=ConversationLockPool(),
             config=config or AgentLoopConfig(tool_result_max_chars=500),
             policy=policy,
-            planner_gateway=planner_gateway,
-            enforce_plan=(planner_gateway is not None if enforce_plan is None else enforce_plan),
             parent_run_id=parent_run_id,
         )
     ]
@@ -532,6 +488,50 @@ def _register_dataset(
             ],
         },
     )
+
+
+def _register_dimension_dataset(
+    store: SessionStore,
+    conversation: Conversation,
+    ref: str = _DATASET_REF,
+) -> None:
+    store.register_dataset(
+        ref=ref,
+        project_id=conversation.project_id,
+        filename="多维销售.xlsx",
+        profile={
+            "row_count": 100,
+            "column_count": 4,
+            "columns": [
+                {
+                    "name": name,
+                    "dtype": dtype,
+                    "null_ratio": 0.0,
+                    "distinct_count": distinct_count,
+                }
+                for name, dtype, distinct_count in (
+                    ("地区", "str", 4),
+                    ("产品", "str", 8),
+                    ("渠道", "str", 3),
+                    ("销售额", "float", 96),
+                )
+            ],
+        },
+    )
+
+
+def test_quick_chart_prompt_compiles_all_governed_dimensions(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    _register_dimension_dataset(store, conversation)
+
+    dimensions = _required_chart_dimensions(
+        "请用合适的图表展示各【维度列】的【数值列】情况。",
+        store.list_datasets(conversation.project_id),
+    )
+
+    assert dimensions == ("地区", "产品", "渠道")
 
 
 def test_join_clarification_requires_exactly_two_datasets_and_explicit_keys(
@@ -848,7 +848,6 @@ async def test_single_agent_path_starts_without_plan_review(
         ),
         FakeRegistry({"get_data_profile": lambda _: {"profile": {"row_count": 3}}}),
         user_text="查看数据画像",
-        enforce_plan=True,
     )
 
     names = [name for name, _ in events]
@@ -892,7 +891,6 @@ async def test_resume_fails_closed_when_frozen_tool_is_unavailable(
         ),
         locks=ConversationLockPool(),
         config=AgentLoopConfig(tool_result_max_chars=500),
-        enforce_plan=True,
         control=control,
     )
     initial_events: list[tuple[str, dict[str, Any]]] = []
@@ -958,7 +956,7 @@ async def test_resume_fails_closed_when_frozen_tool_is_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
+async def test_analysis_branch_sends_bounded_parent_feedback_to_agent(
     store: SessionStore,
     conversation: Conversation,
     monkeypatch: pytest.MonkeyPatch,
@@ -978,7 +976,6 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
         ScriptedGateway([{"deltas": ["基线答复已完成。"]}]),
         FakeRegistry({"get_data_profile": lambda _: {}}),
         user_text="完成基线答复",
-        enforce_plan=False,
     )
     parent_run_id = cast(str, dict(parent_events)["meta"]["run_id"])
     tasks = TaskStore(store.db_path)
@@ -987,29 +984,12 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
     tasks.record_user_feedback(
         parent_run_id,
         expected_version=parent.state_version,
-        idempotency_key="branch-feedback-planner-context",
+        idempotency_key="branch-feedback-agent-context",
         subject_user_id="local-user",
         rating="not_helpful",
         comment="COMPOSE_4D_FEEDBACK 请保留原始数据，只重新核对字段",
     )
-    planner_plan = {
-        "schema_version": 1,
-        "summary": "重新核对画像",
-        "steps": [
-            {
-                "step_id": "profile_feedback_branch",
-                "purpose": "重新核对字段与规模",
-                "capability": "data.profile",
-                "dependencies": [],
-                "expected_evidence": ["画像 Evidence"],
-                "completion_conditions": ["画像工具成功"],
-                "fallback": [{"when": "失败", "action": "retry"}],
-            }
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = PlannerAwareGateway(
+    gateway = ScriptedGateway(
         [
             {
                 "deltas": ["重新读取画像。"],
@@ -1022,8 +1002,7 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
                 ],
             },
             {"deltas": ["已完成分支分析。"]},
-        ],
-        planner_plan,
+        ]
     )
 
     child_events = await _run_loop(
@@ -1032,17 +1011,14 @@ async def test_analysis_branch_sends_bounded_parent_feedback_to_llm_planner(
         gateway,
         FakeRegistry({"get_data_profile": lambda _: {}}),
         user_text="COMPOSE_4D_BRANCH 请深入分析当前数据画像",
-        planner_gateway=gateway,
         parent_run_id=parent_run_id,
     )
 
-    assert gateway.planner_calls == 1
-    request = json.loads(gateway.planner_messages[0][-1].content)
-    planning_request = request["planning_request"]
-    assert "COMPOSE_4D_BRANCH" in planning_request
-    assert "COMPOSE_4D_FEEDBACK" in planning_request
-    assert "不能扩大数据、工具或权限范围" in planning_request
-    assert request["contract"]["goal"] == "COMPOSE_4D_BRANCH 请深入分析当前数据画像"
+    first_turn_messages = cast(list[ModelMessage], gateway.calls[0]["messages"])
+    model_context = "\n".join(message.content for message in first_turn_messages)
+    assert "COMPOSE_4D_BRANCH" in model_context
+    assert "COMPOSE_4D_FEEDBACK" in model_context
+    assert "不能扩大数据、工具或权限范围" in model_context
     child_names = [name for name, _ in child_events]
     assert "run.started" in child_names
     assert "autonomy.plan_review_requested" not in child_names
@@ -1158,7 +1134,6 @@ async def test_high_risk_registered_tool_executes_without_human_approval(
         initial_gateway,
         registry,
         user_text="查看数据画像",
-        enforce_plan=True,
     )
 
     names = [name for name, _ in events]
@@ -1307,521 +1282,29 @@ async def test_executor_uses_mcp_context_and_transports_have_equivalent_evidence
 
 
 @pytest.mark.asyncio
-async def test_production_planner_limits_tools_and_binds_invocation_to_step(
-    store: SessionStore, conversation: Conversation
+async def test_deterministic_outline_keeps_all_registered_tools_available(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def direct_threadpool(function: Any, *args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
     _register_dataset(store, conversation)
-    plan = {
-        "schema_version": 1,
-        "summary": "检查数据质量",
-        "steps": [
-            {
-                "step_id": "profile",
-                "purpose": "取得质量画像",
-                "capability": "data.profile",
-                "dependencies": [],
-                "expected_evidence": ["画像 Evidence"],
-                "completion_conditions": ["画像调用成功"],
-                "fallback": [{"when": "失败", "action": "retry"}],
-            }
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = PlannerAwareGateway(
+    gateway = ScriptedGateway(
         [
             {
-                "deltas": ["我先检查质量"],
-                "tool_calls": [
-                    ToolCall(
-                        id="planned-call",
-                        name="get_data_profile",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ],
-            },
-            {"deltas": ["共有 3 行。"]},
-        ],
-        plan,
-    )
-    registry = FakeRegistry(
-        {
-            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
-            "anomaly_detect": lambda _: {"anomalies": []},
-        }
-    )
-
-    events = await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="先检查数据质量，然后给出结论",
-        planner_gateway=gateway,
-    )
-
-    assert gateway.planner_calls == 1
-    offered_names = {
-        str(item["function"]["name"])
-        for item in cast(list[dict[str, Any]], gateway.calls[0]["tools"])
-    }
-    assert offered_names == {"get_data_profile"}
-    by_name = dict(events)
-    plan_payload = cast(dict[str, Any], by_name["plan.created"]["payload"])
-    assert plan_payload["planner"]["route"] == "llm"
-    run_id = cast(str, by_name["meta"]["run_id"])
-    task_store = TaskStore(store.db_path)
-    steps = task_store.list_plan_steps(run_id)
-    assert len(steps) == 1
-    assert steps[0].logical_id == "profile"
-    assert steps[0].status == "completed"
-    invocation = task_store.list_invocations(run_id)[0]
-    assert invocation.step_id == steps[0].step_id
-
-
-@pytest.mark.asyncio
-async def test_dependency_executor_only_offers_the_current_ready_frontier(
-    store: SessionStore, conversation: Conversation
-) -> None:
-    _register_dataset(store, conversation)
-    plan = {
-        "schema_version": 1,
-        "summary": "先画像再分析趋势",
-        "steps": [
-            {
-                "step_id": "profile",
-                "purpose": "取得数据画像",
-                "capability": "data.profile",
-                "dependencies": [],
-                "expected_evidence": ["画像 Evidence"],
-                "completion_conditions": ["画像调用成功"],
-                "fallback": [{"when": "失败", "action": "retry"}],
-            },
-            {
-                "step_id": "trend",
-                "purpose": "分析趋势",
-                "capability": "stats.trend",
-                "dependencies": ["profile"],
-                "expected_evidence": ["趋势 Evidence"],
-                "completion_conditions": ["趋势调用成功"],
-                "fallback": [{"when": "失败", "action": "correct_parameters"}],
-            },
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = PlannerAwareGateway(
-        [
-            {
+                "deltas": ["我先检查数据画像。"],
                 "tool_calls": [
                     ToolCall(
                         id="profile-call",
                         name="get_data_profile",
                         arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
                     )
-                ]
-            },
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="trend-call",
-                        name="trend_analysis",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ]
-            },
-            {"deltas": ["计划中的分析已经完成。"]},
-        ],
-        plan,
-    )
-    registry = FakeRegistry(
-        {
-            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
-            "trend_analysis": lambda _: {"series": [{"period": "一月"}]},
-        }
-    )
-
-    await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="先检查数据规模，然后分析趋势",
-        planner_gateway=gateway,
-    )
-
-    offered = [
-        {str(item["function"]["name"]) for item in cast(list[dict[str, Any]], call["tools"] or [])}
-        for call in gateway.calls
-    ]
-    assert offered == [
-        {"get_data_profile"},
-        {"trend_analysis"},
-        set(),
-    ]
-    assert [item[0] for item in registry.executed] == [
-        "get_data_profile",
-        "trend_analysis",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_independent_ready_steps_execute_in_one_controlled_parallel_batch(
-    store: SessionStore,
-    conversation: Conversation,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def direct_threadpool(
-        function: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        return function(*args, **kwargs)
-
-    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
-    _register_dataset(store, conversation)
-    plan = {
-        "schema_version": 1,
-        "summary": "并行取得画像和趋势证据",
-        "steps": [
-            {
-                "step_id": "profile",
-                "purpose": "取得数据画像",
-                "capability": "data.profile",
-                "dependencies": [],
-                "expected_evidence": ["画像 Evidence"],
-                "completion_conditions": ["画像成功"],
-                "fallback": [{"when": "失败", "action": "retry"}],
-            },
-            {
-                "step_id": "trend",
-                "purpose": "取得趋势结果",
-                "capability": "stats.trend",
-                "dependencies": [],
-                "expected_evidence": ["趋势 Evidence"],
-                "completion_conditions": ["趋势成功"],
-                "fallback": [{"when": "失败", "action": "retry"}],
-            },
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = PlannerAwareGateway(
-        [
-            {
-                "deltas": ["我会同时检查画像和趋势。"],
-                "tool_calls": [
-                    ToolCall(
-                        id="parallel-profile",
-                        name="get_data_profile",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    ),
-                    ToolCall(
-                        id="parallel-trend",
-                        name="trend_analysis",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    ),
                 ],
             },
-            {"deltas": ["两项分析均已完成。"]},
-        ],
-        plan,
-    )
-    registry = ParallelMCPGatewayRegistry()
-
-    events = await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="深入分析数据画像和趋势",
-        planner_gateway=gateway,
-    )
-
-    run_id = cast(str, dict(events)["meta"]["run_id"])
-    tasks = TaskStore(store.db_path)
-    invocations = tasks.list_invocations(run_id)
-    assert len(invocations) == 2
-    assert all(item.status == "succeeded" for item in invocations)
-    starts = [payload for name, payload in events if name == "tool_start"]
-    assert len(starts) == 2
-    assert all(payload["parallel"] is True for payload in starts)
-    ledger = tasks.list_evidence_ledger(run_id)
-    assert [item.sequence for item in ledger] == [1, 2]
-    assert len({item.branch_node_id for item in ledger}) == 2
-    assert len({context.cancellation_node_id for context in registry.contexts}) == 2
-    assert len({context.data_version_hash for context in registry.contexts}) == 1
-    assert {context.evidence_ledger_version for context in registry.contexts} == {0}
-    nodes = tasks.list_cancellation_nodes(run_id)
-    assert len(nodes) == 3
-    assert all(node.status == "completed" for node in nodes)
-    run_id = cast(str, dict(events)["meta"]["run_id"])
-    assert [
-        (step.logical_id, step.status) for step in TaskStore(store.db_path).list_plan_steps(run_id)
-    ] == [("profile", "completed"), ("trend", "completed")]
-    assert events[-1][0] == "done"
-
-
-@pytest.mark.asyncio
-async def test_duplicate_guard_does_not_block_distinct_steps_using_same_tool(
-    store: SessionStore, conversation: Conversation
-) -> None:
-    _register_dataset(store, conversation)
-    steps = [
-        {
-            "step_id": "schema_profile",
-            "purpose": "确认字段结构",
-            "capability": "data.profile",
-            "dependencies": [],
-            "expected_evidence": ["字段 Evidence"],
-            "completion_conditions": ["字段画像成功"],
-            "fallback": [{"when": "失败", "action": "retry"}],
-        },
-        {
-            "step_id": "quality_profile",
-            "purpose": "确认质量概况",
-            "capability": "data.profile",
-            "dependencies": ["schema_profile"],
-            "expected_evidence": ["质量 Evidence"],
-            "completion_conditions": ["质量画像成功"],
-            "fallback": [{"when": "失败", "action": "retry"}],
-        },
-    ]
-    gateway = PlannerAwareGateway(
-        [
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="schema-call",
-                        name="get_data_profile",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ]
-            },
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="quality-call",
-                        name="get_data_profile",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ]
-            },
-            {"deltas": ["两个画像步骤都已完成。"]},
-        ],
-        {
-            "schema_version": 1,
-            "summary": "分步检查结构和质量",
-            "steps": steps,
-            "assumptions": [],
-            "clarifications": [],
-        },
-    )
-    registry = FakeRegistry({"get_data_profile": lambda _: {"profile": {"row_count": 3}}})
-
-    events = await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="先确认字段结构，然后再检查质量并给出替代解释",
-        planner_gateway=gateway,
-    )
-
-    assert [item[0] for item in registry.executed] == [
-        "get_data_profile",
-        "get_data_profile",
-    ]
-    assert events[-1][0] == "done"
-
-
-@pytest.mark.asyncio
-async def test_retryable_failure_creates_new_plan_version_and_recovers(
-    store: SessionStore,
-    conversation: Conversation,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def direct_threadpool(
-        function: Any,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        return function(*args, **kwargs)
-
-    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
-    _register_dataset(store, conversation)
-    plan = {
-        "schema_version": 1,
-        "summary": "分析趋势",
-        "steps": [
-            {
-                "step_id": "trend",
-                "purpose": "分析趋势",
-                "capability": "stats.trend",
-                "dependencies": [],
-                "expected_evidence": ["趋势 Evidence"],
-                "completion_conditions": ["趋势调用成功"],
-                "fallback": [{"when": "参数不适用", "action": "correct_parameters"}],
-            }
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    attempts = 0
-
-    def trend_handler(arguments: dict[str, Any]) -> dict[str, Any]:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise ValueError("趋势参数暂不可用")
-        return {"series": [{"period": arguments.get("time_col", "月份")}]}
-
-    gateway = PlannerAwareGateway(
-        [
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="trend-bad",
-                        name="trend_analysis",
-                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"月份"}'),
-                    )
-                ]
-            },
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="trend-fixed",
-                        name="trend_analysis",
-                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"月份"}'),
-                    )
-                ]
-            },
-            {"deltas": ["修正参数后已完成趋势分析。"]},
-        ],
-        plan,
-    )
-    registry = FakeRegistry({"trend_analysis": trend_handler})
-
-    events = await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="先分析趋势，然后给出替代解释",
-        planner_gateway=gateway,
-    )
-
-    names = [name for name, _ in events]
-    assert "replanning.started" in names
-    assert "plan.revised" in names
-    assert "replanning.completed" in names
-    run_id = cast(str, dict(events)["meta"]["run_id"])
-    task_store = TaskStore(store.db_path)
-    run = task_store.get_run(run_id)
-    assert run is not None
-    assert run.plan_version == 2
-    assert run.status == "completed"
-    assert task_store.list_plan_steps(run_id)[0].status == "completed"
-    attempts_by_event = [
-        payload["payload"]["attempt"] for name, payload in events if name == "step.started"
-    ]
-    assert attempts == 2
-    assert attempts_by_event == [1, 2]
-
-
-@pytest.mark.asyncio
-async def test_zero_anomaly_observation_skips_conditional_transform(
-    store: SessionStore, conversation: Conversation
-) -> None:
-    _register_dataset(store, conversation)
-    plan = {
-        "schema_version": 1,
-        "summary": "检测异常并按需清洗",
-        "steps": [
-            {
-                "step_id": "detect",
-                "purpose": "检测异常",
-                "capability": "stats.anomaly",
-                "dependencies": [],
-                "expected_evidence": ["异常 Evidence"],
-                "completion_conditions": ["异常检测成功"],
-                "fallback": [{"when": "失败", "action": "correct_parameters"}],
-            },
-            {
-                "step_id": "clean",
-                "purpose": "仅在存在异常时清洗",
-                "capability": "dataset.transform",
-                "dependencies": ["detect"],
-                "expected_evidence": ["衍生数据集"],
-                "completion_conditions": ["清洗成功或条件跳过"],
-                "fallback": [{"when": "失败", "action": "block"}],
-            },
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = PlannerAwareGateway(
-        [
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="detect-call",
-                        name="anomaly_detect",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
-                    )
-                ]
-            },
-            {"deltas": ["未发现需要清洗的异常，条件流程已经结束。"]},
-        ],
-        plan,
-    )
-    registry = FakeRegistry(
-        {
-            "anomaly_detect": lambda _: {"n_anomalies": 0, "anomalies": []},
-            "transform_dataset": lambda _: {"dataset_ref": "derived"},
-        }
-    )
-
-    events = await _run_loop(
-        store,
-        conversation,
-        gateway,
-        registry,
-        user_text="先检测异常，然后在需要时清洗并给出替代解释",
-        planner_gateway=gateway,
-    )
-
-    assert [item[0] for item in registry.executed] == ["anomaly_detect"]
-    run_id = cast(str, dict(events)["meta"]["run_id"])
-    task_store = TaskStore(store.db_path)
-    run = task_store.get_run(run_id)
-    assert run is not None and run.plan_version == 2
-    assert [(step.logical_id, step.status) for step in task_store.list_plan_steps(run_id)] == [
-        ("detect", "completed"),
-        ("clean", "skipped"),
-    ]
-    assert "plan.revised" in [name for name, _ in events]
-    assert events[-1][0] == "done"
-
-
-@pytest.mark.asyncio
-async def test_plan_enforcement_stays_fail_closed_without_llm_planner_gateway(
-    store: SessionStore, conversation: Conversation
-) -> None:
-    _register_dataset(store, conversation)
-    gateway = ScriptedGateway(
-        [
-            {
-                "tool_calls": [
-                    ToolCall(
-                        id="outside-plan",
-                        name="anomaly_detect",
-                        arguments=f'{{"dataset_ref":"{_DATASET_REF}","columns":["销售额"]}}',
-                    )
-                ]
-            },
-            {"deltas": ["已经完成。"]},
-            {"deltas": ["仍然无法执行计划外工具。"]},
+            {"deltas": ["数据画像检查已完成。"]},
         ]
     )
     registry = FakeRegistry(
@@ -1836,21 +1319,245 @@ async def test_plan_enforcement_stays_fail_closed_without_llm_planner_gateway(
         conversation,
         gateway,
         registry,
-        user_text="介绍这份数据的规模和质量",
-        enforce_plan=True,
+        user_text="先介绍数据规模，然后给出质量结论",
     )
 
     offered_names = {
         str(item["function"]["name"])
         for item in cast(list[dict[str, Any]], gateway.calls[0]["tools"])
     }
-    assert offered_names == {"get_data_profile"}
-    assert registry.executed == []
-    tool_end = next(payload for name, payload in events if name == "tool_end")
-    assert tool_end["status"] == "error"
-    assert "不属于当前持久化计划" in tool_end["message"]
-    assert events[-1][0] == "error"
-    assert events[-1][1]["code"] == "incomplete_plan"
+    assert offered_names == {"get_data_profile", "anomaly_detect"}
+    by_name = dict(events)
+    plan_payload = cast(dict[str, Any], by_name["plan.created"]["payload"])
+    assert plan_payload["planner"]["route"] == "template"
+    assert "model" not in plan_payload["planner"]
+    run_id = cast(str, by_name["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    steps = task_store.list_plan_steps(run_id)
+    assert len(steps) == 1
+    assert steps[0].logical_id == "data_profile_1"
+    assert steps[0].status == "completed"
+    invocation = task_store.list_invocations(run_id)[0]
+    assert invocation.step_id == steps[0].step_id
+
+
+@pytest.mark.asyncio
+async def test_downstream_agent_calls_reconcile_outline_without_pending_steps(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(function: Any, *args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-direct",
+                        name="trend_analysis",
+                        arguments=(
+                            f'{{"dataset_ref":"{_DATASET_REF}",'
+                            '"time_col":"月份","value_col":"销售额"}'
+                        ),
+                    ),
+                    ToolCall(
+                        id="chart-direct",
+                        name="gen_chart",
+                        arguments=(
+                            f'{{"dataset_ref":"{_DATASET_REF}","chart_type":"line",'
+                            '"encoding":{"x":"月份","y":"销售额","agg":"sum"}}'
+                        ),
+                    ),
+                ]
+            },
+            {"deltas": ["趋势分析与折线图均已完成。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
+            "trend_analysis": lambda _: {"direction": "上升"},
+            "gen_chart": lambda _: {
+                "chart_id": "chart-1",
+                "chart_type": "line",
+                "option": {
+                    "xAxis": {"data": ["一月"]},
+                    "series": [{"data": [10]}],
+                },
+            },
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="请分析【数值列】随【时间列】的变化趋势，并生成折线图。",
+    )
+
+    assert events[-1][0] == "done"
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    steps = task_store.list_plan_steps(run_id)
+    assert [(step.logical_id, step.status) for step in steps] == [
+        ("data_roles_1", "skipped"),
+        ("stats_trend_2", "completed"),
+        ("visualization_chart_3", "completed"),
+    ]
+    invocations = task_store.list_invocations(run_id)
+    assert all(invocation.step_id is not None for invocation in invocations)
+    verification_started = next(
+        payload for name, payload in events if name == "verification.started"
+    )
+    assert verification_started["payload"]["reconciled_outline_steps"] == [
+        "data_roles_1"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_returns_to_same_agent_for_corrected_retry(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(function: Any, *args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    executions = 0
+
+    def trend_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+        nonlocal executions
+        executions += 1
+        return {"series": [{"period": "一月", "value": 1}]}
+
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-bad",
+                        name="trend_analysis",
+                        arguments=(
+                            f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"不存在的月份"}'
+                        ),
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-fixed",
+                        name="trend_analysis",
+                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"time_col":"月份"}'),
+                    )
+                ]
+            },
+            {"deltas": ["已修正字段并完成趋势分析。"]},
+        ]
+    )
+    registry = FakeRegistry({"trend_analysis": trend_handler})
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="分析月份趋势",
+    )
+
+    names = [name for name, _ in events]
+    assert "replanning.started" not in names
+    assert "plan.revised" not in names
+    tool_ends = [payload for name, payload in events if name == "tool_end"]
+    assert [item["status"] for item in tool_ends] == ["error", "ok"]
+    assert executions == 1
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    run = TaskStore(store.db_path).get_run(run_id)
+    assert run is not None and run.plan_version == 1
+    assert run.status == "completed"
+    assert events[-1][0] == "done"
+
+
+@pytest.mark.asyncio
+async def test_outline_retries_valid_extra_tool_until_requested_step_completes(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_threadpool(function: Any, *args: Any, **kwargs: Any) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dataset(store, conversation)
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="outside-outline",
+                        name="anomaly_detect",
+                        arguments=(f'{{"dataset_ref":"{_DATASET_REF}",' '"columns":["销售额"]}'),
+                    )
+                ]
+            },
+            {"deltas": ["未发现需要进一步处理的异常。"]},
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="profile-after-verification",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {"deltas": ["数据规模与质量检查已完成。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _: {"profile": {"row_count": 3}},
+            "anomaly_detect": lambda _: {"n_anomalies": 0, "anomalies": []},
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="介绍这份数据的规模和质量",
+    )
+
+    offered_names = {
+        str(item["function"]["name"])
+        for item in cast(list[dict[str, Any]], gateway.calls[0]["tools"])
+    }
+    assert offered_names == {"get_data_profile", "anomaly_detect"}
+    assert [item[0] for item in registry.executed] == [
+        "anomaly_detect",
+        "get_data_profile",
+    ]
+    assert [
+        payload["status"] for name, payload in events if name == "tool_end"
+    ] == ["ok", "ok"]
+    retry_instruction = gateway.calls[2]["messages"][-1]
+    assert retry_instruction.role == "user"
+    assert "结构化提纲仍有未完成步骤" in retry_instruction.content
+    assert events[-1][0] == "done"
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    task_store = TaskStore(store.db_path)
+    run = task_store.get_run(run_id)
+    assert run is not None and run.status == "completed"
+    assert [step.status for step in task_store.list_plan_steps(run_id)] == [
+        "completed"
+    ]
 
 
 @pytest.mark.asyncio
@@ -2110,12 +1817,12 @@ async def test_open_exploration_persists_screened_hypotheses_before_execution(
             "clarifications": [],
         },
         reason="clarification:analysis_goal",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     assert execution_plan.version == 2
     assert plan_event.payload["hypothesis_execution"]["status"] == "planned"
-    assert plan_event.payload["hypothesis_execution"]["hypothesis_id"] == (
-        selection["hypothesis_id"]
+    assert (
+        plan_event.payload["hypothesis_execution"]["hypothesis_id"] == (selection["hypothesis_id"])
     )
     persisted_step = execution_steps[0]
     running, _ = tasks.transition(
@@ -2171,9 +1878,7 @@ async def test_open_exploration_persists_screened_hypotheses_before_execution(
         "evidence_outcome": "supported",
         "outcome": "untested",
     }
-    assert checkpoint.state["hypothesis_execution"]["evidence_ids"] == [
-        evidence.evidence_id
-    ]
+    assert checkpoint.state["hypothesis_execution"]["evidence_ids"] == [evidence.evidence_id]
     verifying, _ = tasks.transition(
         run_id,
         expected_version=running.state_version,
@@ -2281,9 +1986,7 @@ async def test_data_role_guard_rejects_mismatched_stats_before_invocation(
             {"deltas": ["无法继续执行。"]},
         ]
     )
-    registry = FakeRegistry(
-        {"regression": lambda _args: pytest.fail("角色不匹配时不得执行工具")}
-    )
+    registry = FakeRegistry({"regression": lambda _args: pytest.fail("角色不匹配时不得执行工具")})
 
     events = await _run_loop(
         store,
@@ -2291,7 +1994,6 @@ async def test_data_role_guard_rejects_mismatched_stats_before_invocation(
         gateway,
         registry,
         user_text="执行既定分析",
-        enforce_plan=False,
     )
 
     run_id = cast(str, dict(events)["meta"]["run_id"])
@@ -2301,8 +2003,7 @@ async def test_data_role_guard_rejects_mismatched_stats_before_invocation(
     rejected = next(
         payload["payload"]
         for name, payload in events
-        if name == "step.completed"
-        and payload["payload"]["status"] == "rejected"
+        if name == "step.completed" and payload["payload"]["status"] == "rejected"
     )
     assert rejected["observation"]["code"] == "data_role_mismatch"
     assert rejected["policy"]["data_role_preconditions"]["allowed"] is False
@@ -2755,6 +2456,84 @@ async def test_explicit_chart_request_cannot_finish_before_chart_artifact(
 
 
 @pytest.mark.asyncio
+async def test_all_dimension_chart_request_retries_until_every_chart_exists(
+    store: SessionStore,
+    conversation: Conversation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One chart cannot satisfy a request that explicitly covers every dimension."""
+    async def direct_threadpool(
+        function: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_module, "run_in_threadpool", direct_threadpool)
+    _register_dimension_dataset(store, conversation)
+    chart_result = {
+        "chart_id": "chart",
+        "chart_type": "bar",
+        "option": {"xAxis": {"data": ["A"]}, "series": [{"data": [10]}]},
+    }
+    registry = FakeRegistry({"gen_chart": lambda _args: chart_result})
+
+    def chart_call(call_id: str, dimension: str) -> ToolCall:
+        return ToolCall(
+            id=call_id,
+            name="gen_chart",
+            arguments=json.dumps(
+                {
+                    "dataset_ref": _DATASET_REF,
+                    "chart_type": "bar",
+                    "encoding": {"x": dimension, "y": "销售额", "agg": "sum"},
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    gateway = ScriptedGateway(
+        [
+            {"tool_calls": [chart_call("chart-region", "地区")]},
+            {"deltas": ["图表已经生成。"]},
+            {
+                "tool_calls": [
+                    chart_call("chart-product", "产品"),
+                    chart_call("chart-channel", "渠道"),
+                ]
+            },
+            {"deltas": ["三个维度图表均已生成。"]},
+        ]
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="请用合适的图表展示各【维度列】的【数值列】情况。",
+    )
+
+    verification_events = [payload for name, payload in events if name == "verification"]
+    assert verification_events, events
+    first_codes = {
+        check["code"]
+        for check in cast(
+            list[dict[str, Any]],
+            verification_events[0]["payload"]["checks"],
+        )
+    }
+    assert "missing_chart_dimension_artifact" in first_codes
+    retry = gateway.calls[2]["messages"][-1]
+    assert retry.role == "user"
+    assert "产品" in retry.content and "渠道" in retry.content
+    assert [name for name, _ in registry.executed] == ["gen_chart"] * 3
+    assert [payload for name, payload in events if name == "artifact"]
+    assert verification_events[-1]["payload"]["verdict"] == "PASS"
+    assert dict(events)["done"]["run_status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_explicit_chart_request_errors_if_retry_still_returns_only_text(
     store: SessionStore, conversation: Conversation
 ) -> None:
@@ -3004,9 +2783,7 @@ async def test_report_files_are_cleaned_if_atomic_success_commit_fails(
     tasks = TaskStore(store.db_path)
     assert tasks.list_evidence(run_id) == []
     assert [item.status for item in tasks.list_invocations(run_id)] == ["unknown"]
-    assert {item.status for item in tasks.list_cancellation_nodes(run_id)} == {
-        "cancel_requested"
-    }
+    assert {item.status for item in tasks.list_cancellation_nodes(run_id)} == {"cancel_requested"}
 
 
 @pytest.mark.parametrize(
@@ -3064,9 +2841,7 @@ async def test_tool_failure_feeds_error_back_for_retry(
             ToolCall(
                 id="c2",
                 name="aggregate_preview",
-                arguments=(
-                    f'{{"dataset_ref":"{_DATASET_REF}","value_col":"销售额"}}'
-                ),
+                arguments=(f'{{"dataset_ref":"{_DATASET_REF}","value_col":"销售额"}}'),
             )
         ]
     }
@@ -3219,7 +2994,7 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
     registry = FakeRegistry(
         {
             "get_data_profile": lambda args: {"profile": {}},
-            "aggregate_preview": lambda args: pytest.fail("计划外工具不得执行"),
+            "kb_search": lambda args: {"is_empty": True, "hits": []},
         }
     )
     gateway = ScriptedGateway(
@@ -3228,8 +3003,8 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
                 "tool_calls": [
                     ToolCall(
                         id="random-id-1",
-                        name="aggregate_preview",
-                        arguments='{"value_col":"销售额"}',
+                        name="kb_search",
+                        arguments='{"query":"销售口径"}',
                     )
                 ]
             },
@@ -3237,12 +3012,12 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
                 "tool_calls": [
                     ToolCall(
                         id="random-id-2",
-                        name="aggregate_preview",
-                        arguments='{"value_col":"销售额"}',
+                        name="kb_search",
+                        arguments='{"query":"销售口径"}',
                     )
                 ]
             },
-            {"deltas": ["没有执行计划外能力。"]},
+            {"deltas": ["已基于已有聚合结果作答。"]},
         ]
     )
 
@@ -3252,13 +3027,12 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
         gateway,
         registry,
         user_text="介绍这份数据的规模和质量",
-        enforce_plan=True,
     )
 
     ends = [payload for name, payload in events if name == "tool_end"]
-    assert "不属于当前持久化计划" in ends[0]["message"]
+    assert ends[0]["status"] == "ok"
     assert "熔断" in ends[1]["message"]
-    assert registry.executed == []
+    assert [item[0] for item in registry.executed] == ["kb_search"]
     assert gateway.calls[2]["tools"] is None
 
 
@@ -3412,41 +3186,13 @@ def test_host_enriches_report_delivery_and_referenced_chart_lineage(
     )
     chart_args = _enrich_tool_arguments(
         "gen_chart",
-        {"chart_type": "line"},
+        {"chart_type": "line", "analysis_id": "model-copied-host-id"},
         contract=chart_contract,
         artifacts=artifacts,
         datasets=datasets,
     )
     assert chart_args["dataset_ref"] == second_ref
-
-
-def test_replanner_cannot_drop_or_replace_host_reference_assumptions() -> None:
-    previous = {
-        "assumptions": [
-            "ordinary-old",
-            'HOST_COREF_V1:{"fixed":true}',
-            'HOST_MEMORY_REF_V1:{"fixed":true}',
-        ]
-    }
-    revised = {
-        "schema_version": 1,
-        "summary": "修订计划",
-        "steps": [],
-        "assumptions": [
-            "ordinary-new",
-            'HOST_COREF_V1:{"forged":true}',
-            'HOST_MEMORY_REF_V1:{"forged":true}',
-        ],
-        "clarifications": [],
-    }
-
-    result = _preserve_host_reference_assumptions(revised, previous)
-
-    assert result["assumptions"] == [
-        "ordinary-new",
-        'HOST_COREF_V1:{"fixed":true}',
-        'HOST_MEMORY_REF_V1:{"fixed":true}',
-    ]
+    assert "analysis_id" not in chart_args
 
 
 def test_verified_reference_overrides_model_delivery_lineage(
@@ -4260,9 +4006,7 @@ def test_resume_stream_reconstructs_lost_host_from_checkpoint(
         contract=contract,
         budget={"max_tool_calls": 4},
     )
-    assert [item.dataset_ref for item in tasks.list_dataset_bindings(run.run_id)] == [
-        _DATASET_REF
-    ]
+    assert [item.dataset_ref for item in tasks.list_dataset_bindings(run.run_id)] == [_DATASET_REF]
     compactions = CompactionStore(
         chat_harness.store,
         audit_recorder=lambda _event: None,
@@ -4315,7 +4059,7 @@ def test_resume_stream_reconstructs_lost_host_from_checkpoint(
             "clarifications": [],
         },
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -4465,7 +4209,7 @@ def test_resume_stream_restores_fixed_memory_reference_binding(
             "clarifications": [],
         },
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     run, _ = tasks.transition(
         run.run_id,
@@ -4555,7 +4299,7 @@ def test_clarification_answer_reconstructs_lost_host(
             ],
         },
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     waiting, _ = tasks.transition(
         run.run_id,
@@ -4681,7 +4425,7 @@ def test_memory_reference_clarification_selects_once_without_writing(
             ],
         },
         reason="initial:fast",
-        planner={"route": "fast"},
+        outline_audit={"route": "fast"},
     )
     waiting, _ = tasks.transition(
         run.run_id,

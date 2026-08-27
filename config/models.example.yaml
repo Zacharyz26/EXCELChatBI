@@ -53,7 +53,7 @@ routes:
     primary: deepseek-v4-pro
     fallback: [deepseek-v4-flash]
     temperature: 0.3
-  complex_reasoning:     # v2.4 Planner：G7 自动硬门禁仅 Flash 合格，Pro 禁止承担该路由
+  complex_reasoning:     # 离线语义 Verifier 评测路由
     primary: deepseek-v4-flash
     fallback: []
     temperature: 0.0

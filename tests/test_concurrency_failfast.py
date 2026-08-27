@@ -6,12 +6,10 @@ bge 存根构造期 fail-fast 与服务启动自检（D5）。
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
-from typing import Any
 
 import pytest
 
@@ -19,11 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.api.deps import embedder_dep, reranker_dep, stats_tools_dep  # noqa: E402
+from apps.api.deps import embedder_dep, reranker_dep  # noqa: E402
 from apps.api.main import app  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from mcp_servers.common.base_server import MCPServer  # noqa: E402
-from mcp_servers.common.tool import Tool  # noqa: E402
 from packages.common.config import get_settings  # noqa: E402
 from packages.rag.embedding import BGEEmbedder, HashingEmbedder  # noqa: E402
 from packages.rag.lifecycle import SourceDocument, sync_documents  # noqa: E402
@@ -31,36 +27,8 @@ from packages.rag.rerank import BGEReranker, LexicalReranker  # noqa: E402
 from packages.rag.retriever import HybridRetriever  # noqa: E402
 from packages.rag.store import LocalKnowledgeStore, SearchHit, StoredChunk  # noqa: E402
 
-# ── A5/V4：工具在线程池执行，不阻塞事件循环 ──
-
-def test_stats_tool_runs_off_event_loop() -> None:
-    """路由里的 Tool.invoke 应在线程池线程执行（该线程无运行中的事件循环）。"""
-    seen: dict[str, bool] = {}
-
-    def handler(args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            asyncio.get_running_loop()
-            seen["in_loop"] = True      # 若可取到循环，说明仍在事件循环线程里阻塞执行
-        except RuntimeError:
-            seen["in_loop"] = False
-        return {"ok": True}
-
-    fake = MCPServer(name="stats", port=0)
-    fake.register(Tool("trend_analysis", "假趋势工具", {"type": "object"}, handler))
-    app.dependency_overrides[stats_tools_dep] = lambda: fake
-    try:
-        client = TestClient(app)
-        resp = client.post(
-            "/analyze/stats",
-            json={"dataset_ref": "a" * 32, "kind": "trend"},
-        )
-        assert resp.status_code == 200, resp.text
-        assert seen["in_loop"] is False
-    finally:
-        app.dependency_overrides.clear()
-
-
 # ── store 写锁：并发摄入不丢数据、不写坏索引 ──
+
 
 def test_kb_store_concurrent_add_is_safe(tmp_path: Path) -> None:
     store = LocalKnowledgeStore(index_dir=str(tmp_path / "kb"))
@@ -150,7 +118,7 @@ def test_startup_failfast_when_bge_configured(monkeypatch: pytest.MonkeyPatch) -
     reranker_dep.cache_clear()
     try:
         with pytest.raises(RuntimeError, match="FlagEmbedding"):
-            with TestClient(app):   # context manager 触发 lifespan 启动自检
+            with TestClient(app):  # context manager 触发 lifespan 启动自检
                 pass
     finally:
         # 恢复环境（monkeypatch 撤销 env）后清缓存，避免污染其他测试

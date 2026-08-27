@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { downloadFile } from "@/api/client";
+import { ClarificationPrompt } from "@/components/ClarificationPrompt";
 import { EChartsRenderer } from "@/components/EChartsRenderer";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -28,11 +29,16 @@ export function ChatPanel() {
   const uploading = useWorkspaceStore((state) => state.uploading);
   const streaming = useWorkspaceStore((state) => state.streaming);
   const activeRun = useWorkspaceStore((state) => state.activeRun);
+  const pendingClarification = useWorkspaceStore((state) => state.pendingClarification);
+  const collaborationBusy = useWorkspaceStore((state) => state.collaborationBusy);
   const error = useWorkspaceStore((state) => state.error);
   const sendMessage = useWorkspaceStore((state) => state.sendMessage);
   const uploadFile = useWorkspaceStore((state) => state.uploadFile);
+  const answerClarification = useWorkspaceStore((state) => state.answerClarification);
+  const cancelActiveRun = useWorkspaceStore((state) => state.cancelActiveRun);
   const clearError = useWorkspaceStore((state) => state.clearError);
   const [draft, setDraft] = useState("");
+  const [dismissedFailureRunId, setDismissedFailureRunId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   // 是否“贴底”：用户上滚阅读时停止自动跟随，回到底部附近后恢复
@@ -83,6 +89,14 @@ export function ChatPanel() {
     textareaRef.current?.focus();
   }
 
+  async function retryFailedRun() {
+    if (!failedRun || streaming || uploading) return;
+    const originalMessage = messages.find(
+      (message) => message.id === failedRun.user_message_id && message.role === "user",
+    );
+    await sendMessage(originalMessage?.content || failedRun.goal);
+  }
+
   function adjustParams(tool: string, label: string, argsJson: string) {
     // 参数确认走对话链路（14.4）：结构化追问消息，真相源始终是对话
     void sendMessage(
@@ -118,6 +132,12 @@ export function ChatPanel() {
 
   const taskPending = activeRun !== null && !TERMINAL_RUN_STATUSES.has(activeRun.run.status);
   const busy = streaming || uploading || taskPending;
+  const failedRun = (
+    activeRun?.run.status === "failed"
+    && activeRun.run.run_id !== dismissedFailureRunId
+  ) ? activeRun.run : null;
+  const failureNotice = failedRun ? runFailureMessage(failedRun.terminal_reason) : null;
+  const displayedError = error || failureNotice;
 
   return (
     <section className="chat-panel" aria-label="对话消息">
@@ -156,10 +176,39 @@ export function ChatPanel() {
       </div>
 
       <div className="chat-composer-zone">
-        {error && (
+        {pendingClarification && (
+          <ClarificationPrompt
+            clarification={pendingClarification}
+            busy={streaming || collaborationBusy !== null}
+            className="chat-clarification-card"
+            onAnswer={answerClarification}
+            onCancel={cancelActiveRun}
+          />
+        )}
+        {displayedError && (
           <div className="chat-error" role="alert">
-            <span>{error}</span>
-            <button type="button" onClick={clearError} aria-label="关闭错误提示">×</button>
+            <span>{displayedError}</span>
+            {failedRun && (
+              <button
+                type="button"
+                className="chat-error__retry"
+                onClick={() => void retryFailedRun()}
+                disabled={streaming || uploading}
+              >
+                重新尝试
+              </button>
+            )}
+            <button
+              type="button"
+              className="chat-error__dismiss"
+              onClick={() => {
+                clearError();
+                if (failedRun) setDismissedFailureRunId(failedRun.run_id);
+              }}
+              aria-label="关闭错误提示"
+            >
+              ×
+            </button>
           </div>
         )}
         <div className="quick-commands" role="toolbar" aria-label="快捷指令">
@@ -220,7 +269,7 @@ export function ChatPanel() {
             ? "正在解析并生成数据画像…"
             : taskPending
               ? "当前对话仍有未完成任务，请先在任务面板继续或取消"
-            : "Enter 发送 · Shift + Enter 换行 · Agent 会自动规划并调用分析工具"}
+            : "Enter 发送 · Shift + Enter 换行 · Agent 会按需调用分析工具"}
         </p>
       </div>
     </section>
@@ -234,12 +283,19 @@ const TERMINAL_RUN_STATUSES = new Set([
   "cancelled",
 ]);
 
+function runFailureMessage(reason: string | null): string {
+  if (reason === "task_initialization_failed") {
+    return "任务初始化未能完成。系统已安全停止本次运行，你可以重新尝试。";
+  }
+  return "本次分析未能完成。任务已经安全停止，你可以重新尝试。";
+}
+
 // ── 快捷指令条（14.4：注入模板仍走对话链路，不退化成菜单表单）──
 
 const QUICK_COMMANDS = [
   {
     label: "自动分析",
-    hint: "让 Agent 自主规划分析",
+    hint: "让 Agent 自主选择分析",
     template: "请分析这份数据：先给出数据画像与质量概况，再完成你认为最有价值的 2-3 个分析并出图，最后用中文总结主要发现。",
   },
   {
@@ -847,7 +903,7 @@ function ChatWelcome({ onUpload }: { onUpload: () => void }) {
       <div className="chat-welcome__mark" aria-hidden="true">BI</div>
       <span className="chat-welcome__eyebrow">CHATBI WORKSPACE</span>
       <h1>从一份数据，开始一次分析对话</h1>
-      <p>上传 Excel 后直接用自然语言提出需求，Agent 会自动规划并调用画像、统计、图表与报告工具，全过程可见。</p>
+      <p>上传 Excel 后直接用自然语言提出需求，Agent 会按需调用画像、统计、图表与报告工具，全过程可见。</p>
       <button type="button" onClick={onUpload}>
         <PaperclipIcon />
         上传 Excel 数据

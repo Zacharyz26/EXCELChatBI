@@ -77,7 +77,6 @@ from packages.session.task_models import (
     CapabilityCatalogSnapshot,
     ObservationSource,
     RunStatus,
-    StepStatus,
     TaskEvent,
     TaskRun,
     TaskStepRecord,
@@ -119,18 +118,13 @@ from apps.orchestrator.control.join_collaboration import (
 )
 from apps.orchestrator.control.plan_executor import (
     PlanSchedule,
+    match_planned_step,
     match_ready_step,
     match_ready_steps_batch,
     schedule_payload,
     schedule_plan_steps,
 )
-from apps.orchestrator.control.planner_prompt import PlannerGateway, PlannerProtocolError
-from apps.orchestrator.control.production_planner import create_production_plan
-from apps.orchestrator.control.replanner import (
-    conditional_skip_after_success,
-    create_replan,
-    should_replan_failure,
-)
+from apps.orchestrator.control.task_outline import create_task_outline
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
 from apps.orchestrator.run_manager import RunControl
 
@@ -166,6 +160,8 @@ Schema、数据版本与预检 Evidence；只有返回已登记的新 dataset_re
 7. 用户追问修改分析（如“换成按月”“排除异常后重算”）时，参考“分析登记表”中已执行分析的参数，\
 只改需要变化的参数后重新调用工具。
 8. 用户要生成报告时调用 generate_report，analysis_ids 从分析登记表中选择相关分析的 ID。
+8a. gen_chart 只接收 dataset_ref、chart_type、encoding；analysis_id 是 Host 在工具成功后生成的
+工件标识，绝不能作为 gen_chart 入参传回工具。
 9. 完成分析后用简洁中文解读：先结论、再依据，依据必须引用工具返回的具体数字。
 10. 统计表述要严谨：相关性分析只能得出“共变/相关”结论，**相关不等于因果**，\
 禁止使用“驱动”“导致”“因为 A 所以 B”等因果措辞（回归分析也只能说“关联/预测作用”）；\
@@ -198,6 +194,10 @@ _MISSING_CHART_RETRY_LIMIT = 1
 _MISSING_CHART_INSTRUCTION = (
     "上一步只返回了文字，但用户明确要求的图表尚未生成。"
     "请先调用 gen_chart 生成真实图表工件，再给最终结论；不要再次只返回文字。"
+)
+_ALL_DIMENSION_CHART_PATTERN = re.compile(
+    r"(?:各|每个|所有|全部)\s*[【\[]?\s*维度(?:列)?\s*[】\]]?",
+    re.IGNORECASE,
 )
 
 _REPORT_REQUEST_PATTERN = re.compile(
@@ -235,6 +235,7 @@ _UNSUPPORTED_CLAIM_INSTRUCTION = (
     "候选答复里有数字无法在当前工具 Evidence 中定位。请调用合适的确定性工具取得依据，"
     "或删除没有依据的数字后重新回答；不得心算、估算或编造数字。"
 )
+_INCOMPLETE_PLAN_RETRY_LIMIT = 1
 _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION = (
     "候选答复中的知识结论没有引用本次知识工具返回的真实来源。请明确标注已返回的来源；"
     "如果检索没有命中，请如实说明无法回答。不得编造来源或知识结论。"
@@ -244,9 +245,7 @@ _ANOMALY_PATTERN = re.compile(r"(?:异常|离群)")
 _REGRESSION_PATTERN = re.compile(r"(?:回归|预测因子)")
 _CORRELATION_PATTERN = re.compile(r"(?:相关|关系)")
 _CONTRIBUTION_PATTERN = re.compile(r"(?:贡献|占比|构成)")
-_GROUP_COMPARE_PATTERN = re.compile(
-    r"(?:分群比较|组间差异|群体差异|分组比较|群组比较|比较不同)"
-)
+_GROUP_COMPARE_PATTERN = re.compile(r"(?:分群比较|组间差异|群体差异|分组比较|群组比较|比较不同)")
 _AGGREGATE_PATTERN = re.compile(
     r"(?:汇总|合计|平均|各地区|各产品|分组|group\s*by)",
     re.IGNORECASE,
@@ -352,7 +351,7 @@ class AgentLoopConfig:
     run_timeout_seconds: int = 300
     model_timeout_seconds: int = 90
     tool_timeout_seconds: int = 120
-    planner_max_steps: int = 12
+    outline_max_steps: int = 12
     max_replans: int = 3
     max_parallel_tools: int = 4
 
@@ -403,6 +402,44 @@ def _requests_chart(user_text: str) -> bool:
     )
 
 
+def _required_chart_dimensions(
+    user_text: str,
+    datasets: list[Dataset],
+) -> tuple[str, ...]:
+    """Compile explicit/all-dimension chart coverage from governed profiles."""
+    if not _requests_chart(user_text) or not datasets:
+        return ()
+    mentioned = [
+        dataset
+        for dataset in datasets
+        if dataset.ref in user_text or dataset.filename in user_text
+    ]
+    if len(mentioned) == 1:
+        dataset = mentioned[0]
+    elif len(datasets) == 1:
+        dataset = datasets[0]
+    else:
+        # Dataset selection is handled by the blocking clarification boundary.
+        return ()
+    try:
+        inferred = infer_data_roles_from_mapping(dataset.profile, dataset_ref=dataset.ref)
+    except ValueError:
+        return ()
+    raw_columns = inferred.get("columns")
+    columns = cast(list[JsonObject], raw_columns) if isinstance(raw_columns, list) else []
+    dimensions = tuple(
+        str(item["column"])
+        for item in columns
+        if isinstance(item.get("column"), str)
+        and item.get("primary_role") == "dimension"
+        and not bool(item.get("ambiguous"))
+    )
+    explicitly_named = tuple(column for column in dimensions if column in user_text)
+    if _ALL_DIMENSION_CHART_PATTERN.search(user_text) is not None:
+        return dimensions
+    return explicitly_named
+
+
 def _requests_report(user_text: str) -> bool:
     """仅识别用户明确表达的报告生成意图；讨论报告本身不强制生成。"""
     report_requested = (
@@ -447,9 +484,7 @@ def _blocking_clarification(
             "reason": "不同口径会改变计算结果。",
         }
     mentioned_dataset_refs = {
-        dataset.ref
-        for dataset in datasets
-        if dataset.ref in clean or dataset.filename in clean
+        dataset.ref for dataset in datasets if dataset.ref in clean or dataset.filename in clean
     }
     selected_dataset_refs = mentioned_dataset_refs | set(verified_dataset_refs)
     requests_join = _JOIN_REQUEST_PATTERN.search(clean) is not None or (
@@ -505,16 +540,16 @@ def _blocking_clarification(
         }
     if requests_open_exploration(clean):
         screening = hypothesis_screening or {}
-        raw_candidates = (
-            screening.get("candidates")
-            if screening
-            else None
+        raw_candidates = screening.get("candidates") if screening else None
+        candidates = (
+            [
+                cast(JsonObject, item)
+                for item in raw_candidates
+                if isinstance(item, dict) and item.get("status") == "eligible"
+            ]
+            if isinstance(raw_candidates, list)
+            else []
         )
-        candidates = [
-            cast(JsonObject, item)
-            for item in raw_candidates
-            if isinstance(item, dict) and item.get("status") == "eligible"
-        ] if isinstance(raw_candidates, list) else []
         if candidates:
             statements = [str(item["statement"]) for item in candidates]
             choices = "；".join(
@@ -713,12 +748,12 @@ def _role_selection_clarification(
         pattern = (
             _TIME_COLUMN_PATTERN
             if role == "time"
-            else _METRIC_HINT_PATTERN if role == "metric" else None
+            else _METRIC_HINT_PATTERN
+            if role == "metric"
+            else None
         )
         candidates = (
-            [name for name in columns if pattern.search(name)]
-            if pattern is not None
-            else []
+            [name for name in columns if pattern.search(name)] if pattern is not None else []
         )
         ambiguous_by_column = dict.fromkeys(candidates, False)
 
@@ -727,9 +762,7 @@ def _role_selection_clarification(
         (name for name in explicitly_named if name in candidates),
         None,
     )
-    if explicit_candidate is not None and not ambiguous_by_column.get(
-        explicit_candidate, False
-    ):
+    if explicit_candidate is not None and not ambiguous_by_column.get(explicit_candidate, False):
         return None
     selected_candidates: list[str]
     if explicit_candidate is not None:
@@ -817,10 +850,9 @@ def _waiting_user_payload(
     if source_clarification is None or data_version_hash is None:
         return payload
     raw_hypothesis_request = source_clarification.get("hypothesis_request")
-    if (
-        isinstance(raw_hypothesis_request, dict)
-        and source_clarification.get("question_id") == question.get("question_id")
-    ):
+    if isinstance(raw_hypothesis_request, dict) and source_clarification.get(
+        "question_id"
+    ) == question.get("question_id"):
         raw_candidates = raw_hypothesis_request.get("candidates")
         candidates = (
             [cast(JsonObject, item) for item in raw_candidates if isinstance(item, dict)]
@@ -968,8 +1000,6 @@ async def stream_agent_chat(
     registry: AgentToolRegistry,
     locks: ConversationLockPool,
     config: AgentLoopConfig,
-    planner_gateway: PlannerGateway | None = None,
-    enforce_plan: bool = True,
     principal: Principal | None = None,
     policy: ToolPolicyGateway | None = None,
     run_id: str | None = None,
@@ -995,8 +1025,6 @@ async def stream_agent_chat(
                 registry=registry,
                 locks=locks,
                 config=config,
-                planner_gateway=planner_gateway,
-                enforce_plan=enforce_plan,
                 principal=principal,
                 policy=policy,
                 run_id=active_run_id,
@@ -1097,8 +1125,6 @@ async def _stream_agent_chat_inner(
     registry: AgentToolRegistry,
     locks: ConversationLockPool,
     config: AgentLoopConfig,
-    planner_gateway: PlannerGateway | None,
-    enforce_plan: bool,
     principal: Principal | None,
     policy: ToolPolicyGateway | None,
     run_id: str,
@@ -1160,6 +1186,9 @@ async def _stream_agent_chat_inner(
                 )
             )
         )
+        chart_dimensions = (
+            _required_chart_dimensions(user_text, datasets) if chart_required else ()
+        )
         pdf_required = report_required and _requests_pdf(user_text)
         try:
             if not resume_existing or clarification_question_id is not None:
@@ -1206,6 +1235,7 @@ async def _stream_agent_chat_inner(
                     chart_required=chart_required,
                     report_required=report_required,
                     pdf_required=pdf_required,
+                    chart_dimensions=chart_dimensions,
                 )
                 reference_assumption = reference_resolution.assumption()
                 if reference_assumption is not None:
@@ -1608,7 +1638,7 @@ async def _stream_agent_chat_inner(
             plan_record = stored_plan
             planned_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
             active_plan = plan_record.plan
-            planner_route = "checkpoint"
+            outline_route = "checkpoint"
         else:
             planning_text = (
                 (
@@ -1636,6 +1666,14 @@ async def _stream_agent_chat_inner(
                 feedback_context = _branch_feedback_context(parent_feedback)
                 if feedback_context:
                     planning_text = f"{planning_text}\n\n{feedback_context}"
+                    # 独立 Planner 已移除，父分支反馈必须直接进入同一次 Agent
+                    # 上下文，不能只影响供界面展示的确定性提纲。
+                    working.append(
+                        ModelMessage(
+                            role="system",
+                            content=feedback_context,
+                        )
+                    )
             effective_request_text = planning_text
             reference_clarification = (
                 reference_resolution.clarification() if reference_resolution is not None else None
@@ -1680,7 +1718,8 @@ async def _stream_agent_chat_inner(
                         hypothesis_screening=hypothesis_screening,
                     )
                     if not resume_existing
-                    or clarification_question_id in {
+                    or clarification_question_id
+                    in {
                         "join_datasets",
                         "join_keys",
                         "join_type",
@@ -1689,40 +1728,30 @@ async def _stream_agent_chat_inner(
                 )
             )
             try:
-                async with asyncio.timeout(
-                    _active_operation_timeout(
-                        control,
-                        total_seconds=config.run_timeout_seconds,
-                        operation_seconds=config.model_timeout_seconds,
-                    )
-                ):
-                    production_plan = await create_production_plan(
-                        user_text=planning_text,
-                        contract=contract,
-                        datasets=datasets,
-                        artifacts=list(context.artifacts),
-                        registry=registry,
-                        gateway=planner_gateway,
-                        blocking_clarification=clarification,
-                        temperature=0.0,
-                        max_steps=min(
-                            config.planner_max_steps,
-                            config.max_tool_calls,
-                        ),
-                        require_available_capabilities=enforce_plan,
-                        capability_catalog=frozen_capability_catalog,
-                    )
-                production_plan = replace(
-                    production_plan,
+                task_outline = create_task_outline(
+                    user_text=planning_text,
+                    contract=contract,
+                    datasets=datasets,
+                    artifacts=list(context.artifacts),
+                    registry=registry,
+                    blocking_clarification=clarification,
+                    max_steps=min(
+                        config.outline_max_steps,
+                        config.max_tool_calls,
+                    ),
+                    capability_catalog=frozen_capability_catalog,
+                )
+                task_outline = replace(
+                    task_outline,
                     plan=_bind_memory_references_to_plan(
                         _bind_reference_to_plan(
-                            production_plan.plan,
+                            task_outline.plan,
                             reference_resolution,
                         ),
                         memory_reference_resolution,
                     ),
                     audit={
-                        **production_plan.audit,
+                        **task_outline.audit,
                         **(
                             {"hypothesis_screening": hypothesis_screening}
                             if hypothesis_screening is not None
@@ -1739,24 +1768,23 @@ async def _stream_agent_chat_inner(
                     task_store.save_plan,
                     run_id,
                     expected_version=run.state_version,
-                    plan=production_plan.plan,
+                    plan=task_outline.plan,
                     reason=(
                         f"clarification:{clarification_question_id}"
                         if resume_existing
-                        else f"initial:{production_plan.route}"
+                        else f"initial:{task_outline.route}"
                     ),
-                    planner=production_plan.audit,
+                    outline_audit=task_outline.audit,
                 )
             except (
                 MemoryReferenceAccessDenied,
                 OpenAIError,
-                PlannerProtocolError,
                 RuntimeError,
                 sqlite3.Error,
                 ValueError,
             ) as exc:
                 _log.warning(
-                    "agent.planning_failed",
+                    "agent.initialization_failed",
                     conversation_id=conversation_id,
                     run_id=run_id,
                     error=str(exc),
@@ -1765,15 +1793,15 @@ async def _stream_agent_chat_inner(
                     task_store,
                     run,
                     event_type="run.failed",
-                    reason="planner_failed",
+                    reason="task_initialization_failed",
                     tool_calls=0,
                 )
                 yield _task_event(failed_event, conversation_id)
                 yield _event(
                     "error",
                     {
-                        "code": "planner_failed",
-                        "message": "任务计划生成失败，请调整需求后重试。",
+                        "code": "task_initialization_failed",
+                        "message": "任务初始化失败，请调整需求后重试。",
                         "retryable": True,
                         "run_id": run_id,
                         "run_status": run.status,
@@ -1781,11 +1809,16 @@ async def _stream_agent_chat_inner(
                 )
                 return
             yield _task_event(plan_event, conversation_id)
-            active_plan = production_plan.plan
-            planner_route = production_plan.route
+            active_plan = task_outline.plan
+            outline_route = task_outline.route
         working[0] = ModelMessage(
             role="system",
-            content=_plan_system_content(system_content, active_plan, planned_steps),
+            content=_plan_system_content(
+                system_content,
+                active_plan,
+                planned_steps,
+                contract,
+            ),
         )
         blocking_questions = (
             []
@@ -1940,34 +1973,24 @@ async def _stream_agent_chat_inner(
                         else None
                     )
                 )
-                async with asyncio.timeout(
-                    _active_operation_timeout(
-                        control,
-                        total_seconds=config.run_timeout_seconds,
-                        operation_seconds=config.model_timeout_seconds,
-                    )
-                ):
-                    production_plan = await create_production_plan(
-                        user_text=clarified_planning_text,
-                        contract=contract,
-                        datasets=datasets,
-                        artifacts=list(context.artifacts),
-                        registry=registry,
-                        gateway=planner_gateway,
-                        blocking_clarification=clarification,
-                        temperature=0.0,
-                        max_steps=min(
-                            config.planner_max_steps,
-                            config.max_tool_calls,
-                        ),
-                        require_available_capabilities=enforce_plan,
-                        capability_catalog=frozen_capability_catalog,
-                    )
-                production_plan = replace(
-                    production_plan,
+                task_outline = create_task_outline(
+                    user_text=clarified_planning_text,
+                    contract=contract,
+                    datasets=datasets,
+                    artifacts=list(context.artifacts),
+                    registry=registry,
+                    blocking_clarification=clarification,
+                    max_steps=min(
+                        config.outline_max_steps,
+                        config.max_tool_calls,
+                    ),
+                    capability_catalog=frozen_capability_catalog,
+                )
+                task_outline = replace(
+                    task_outline,
                     plan=_bind_memory_references_to_plan(
                         _bind_reference_to_plan(
-                            production_plan.plan,
+                            task_outline.plan,
                             reference_resolution,
                         ),
                         memory_reference_resolution,
@@ -1977,20 +2000,19 @@ async def _stream_agent_chat_inner(
                     task_store.save_plan,
                     run_id,
                     expected_version=run.state_version,
-                    plan=production_plan.plan,
+                    plan=task_outline.plan,
                     reason=f"clarification:{question_id}",
-                    planner=production_plan.audit,
+                    outline_audit=task_outline.audit,
                 )
             except (
                 MemoryReferenceAccessDenied,
                 OpenAIError,
-                PlannerProtocolError,
                 RuntimeError,
                 sqlite3.Error,
                 ValueError,
             ) as exc:
                 _log.warning(
-                    "agent.clarification_replan_failed",
+                    "agent.clarification_outline_failed",
                     conversation_id=conversation_id,
                     run_id=run_id,
                     error=str(exc),
@@ -1999,15 +2021,15 @@ async def _stream_agent_chat_inner(
                     task_store,
                     run,
                     event_type="run.failed",
-                    reason="clarification_replan_failed",
+                    reason="clarification_outline_failed",
                     tool_calls=0,
                 )
                 yield _task_event(failed_event, conversation_id)
                 yield _event(
                     "error",
                     {
-                        "code": "planner_failed",
-                        "message": "澄清答案已保存，但计划修订失败，请重试。",
+                        "code": "task_initialization_failed",
+                        "message": "澄清答案已保存，但任务提纲更新失败，请重试。",
                         "retryable": True,
                         "run_id": run_id,
                         "run_status": run.status,
@@ -2024,7 +2046,7 @@ async def _stream_agent_chat_inner(
                 },
             )
             yield _task_event(plan_event, conversation_id)
-            active_plan = production_plan.plan
+            active_plan = task_outline.plan
             remaining_reference_questions = [
                 item
                 for item in cast(list[JsonObject], active_plan.get("clarifications", []))
@@ -2042,8 +2064,7 @@ async def _stream_agent_chat_inner(
                             isinstance(clarification.get("data_role_request"), dict)
                             or isinstance(clarification.get("hypothesis_request"), dict)
                         )
-                        and clarification.get("question_id")
-                        == question_item.get("question_id")
+                        and clarification.get("question_id") == question_item.get("question_id")
                         else None
                     )
                     waiting_payload = _waiting_user_payload(
@@ -2118,6 +2139,7 @@ async def _stream_agent_chat_inner(
                     system_content,
                     active_plan,
                     planned_steps,
+                    contract,
                 ),
             )
 
@@ -2137,7 +2159,7 @@ async def _stream_agent_chat_inner(
                         ),
                         "plan_id": plan_record.plan_id,
                         "plan_version": plan_record.version,
-                        "planner_route": planner_route,
+                        "outline_route": outline_route,
                     },
                 )
             except (sqlite3.Error, RuntimeError, ValueError) as exc:
@@ -2219,7 +2241,6 @@ async def _stream_agent_chat_inner(
                     f"{_normalized_argument_mapping(dict(invocation.args))}"
                 )
                 signature_counts[signature] = signature_counts.get(signature, 0) + 1
-        plan_enforced = enforce_plan
         tools_allowed = (
             attempts_used < config.max_tool_calls
             and invalid_attempts_used < config.max_invalid_tool_calls
@@ -2239,8 +2260,7 @@ async def _stream_agent_chat_inner(
         missing_chart_retries = 0
         missing_report_retries = 0
         unsupported_claim_retries = 0
-        retried_plan_frontiers: set[str] = set()
-        replan_count = max(0, run.plan_version - 1) if resume_existing else 0
+        incomplete_plan_retries = 0
         budget_exhausted = attempts_used >= config.max_tool_calls
 
         for _round in range(config.max_model_rounds):
@@ -2259,27 +2279,20 @@ async def _stream_agent_chat_inner(
             active_plan = persisted_plan.plan
             planned_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
             schedule = schedule_plan_steps(planned_steps)
-            planned_capabilities = schedule.ready_capabilities
-            tools_enabled = tools_allowed and (
-                bool(planned_capabilities) if plan_enforced else True
+            # 普通闲聊既没有数据/Artifact，也没有需要工具的提纲步骤时不发送整套
+            # function schema；一旦存在分析上下文，则向同一个 Agent 提供冻结目录
+            # 中的全部工具，提纲本身不再充当工具白名单。
+            tools_enabled = (
+                tools_allowed
+                and bool(frozen_tool_names)
+                and bool(datasets or context.artifacts or planned_steps)
             )
             tools = (
-                (
-                    registry.openai_tools_for_capabilities(
-                        planned_capabilities,
-                        allowed_tool_names=frozen_tool_names,
-                    )
-                    if plan_enforced
-                    else registry.openai_tools(allowed_tool_names=frozen_tool_names)
-                )
+                registry.openai_tools(allowed_tool_names=frozen_tool_names)
                 if tools_enabled
                 else None
             )
-            offered_step_ids = (
-                {step.step_id for step in schedule.ready}
-                if plan_enforced and tools_enabled
-                else set()
-            )
+            offered_step_ids = {step.step_id for step in schedule.ready} if tools_enabled else set()
             offered_plan_version = run.plan_version
             working[0] = ModelMessage(
                 role="system",
@@ -2287,6 +2300,7 @@ async def _stream_agent_chat_inner(
                     system_content,
                     active_plan,
                     planned_steps,
+                    contract,
                 ),
             )
             turn_parts: list[str] = []
@@ -2420,6 +2434,10 @@ async def _stream_agent_chat_inner(
                 yield _task_event(_verification_started, conversation_id)
                 invocations = await run_in_threadpool(task_store.list_invocations, run_id)
                 evidence = await run_in_threadpool(task_store.list_evidence, run_id)
+                verification_steps = await run_in_threadpool(
+                    task_store.list_plan_steps,
+                    run_id,
+                )
                 claims = extract_claims(
                     final_text=turn_text,
                     goal=contract.goal,
@@ -2457,11 +2475,6 @@ async def _stream_agent_chat_inner(
                     item.artifact_id for item in invocations if item.artifact_id is not None
                 }
                 run_artifacts = [item for item in all_artifacts if item.id in run_artifact_ids]
-                verified_plan_steps = (
-                    await run_in_threadpool(task_store.list_plan_steps, run_id)
-                    if plan_enforced
-                    else None
-                )
                 verification = verify_completion(
                     contract=contract,
                     final_text=turn_text,
@@ -2469,19 +2482,25 @@ async def _stream_agent_chat_inner(
                     invocations=invocations,
                     evidence=evidence,
                     claims=claims,
-                    plan_steps=verified_plan_steps,
+                    plan_steps=verification_steps,
                     budget_exhausted=budget_exhausted,
                 )
 
                 retry_instruction: str | None = None
                 issue_codes = {item.code for item in verification.issues}
+                chart_retry_limit = min(
+                    max(len(_contract_chart_dimensions(contract)), _MISSING_CHART_RETRY_LIMIT),
+                    3,
+                )
                 if (
-                    "missing_chart_artifact" in issue_codes
+                    issue_codes.intersection(
+                        {"missing_chart_artifact", "missing_chart_dimension_artifact"}
+                    )
                     and tools_enabled
-                    and missing_chart_retries < _MISSING_CHART_RETRY_LIMIT
+                    and missing_chart_retries < chart_retry_limit
                 ):
                     missing_chart_retries += 1
-                    retry_instruction = _MISSING_CHART_INSTRUCTION
+                    retry_instruction = _chart_retry_instruction(verification)
                 elif (
                     "missing_report_artifact" in issue_codes
                     and tools_enabled
@@ -2507,23 +2526,15 @@ async def _stream_agent_chat_inner(
                 ):
                     unsupported_claim_retries += 1
                     retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
-                elif "incomplete_plan_steps" in issue_codes and tools_enabled:
-                    verified_schedule = schedule_plan_steps(verified_plan_steps or [])
-                    frontier_key = f"{run.plan_version}:" + ",".join(
-                        step.logical_id for step in verified_schedule.ready
+                elif (
+                    "incomplete_plan_steps" in issue_codes
+                    and tools_enabled
+                    and incomplete_plan_retries < _INCOMPLETE_PLAN_RETRY_LIMIT
+                ):
+                    incomplete_plan_retries += 1
+                    retry_instruction = _incomplete_plan_instruction(
+                        verification_steps
                     )
-                    if verified_schedule.ready and frontier_key not in retried_plan_frontiers:
-                        retried_plan_frontiers.add(frontier_key)
-                        retry_instruction = (
-                            "当前候选答复提前结束，但依赖已满足的计划步骤仍未完成："
-                            + "；".join(
-                                f"{step.logical_id}" f"（{step.definition.get('purpose', '')}）"
-                                for step in verified_schedule.ready[:8]
-                            )
-                            + "。请只调用本轮已提供的工具完成这些就绪步骤后再回答；"
-                            "不能越过依赖，也不能用文字声称步骤已完成。"
-                        )
-
                 auto_repair_actions: tuple[str, ...] = ()
                 if (
                     not verification.passed
@@ -2556,7 +2567,7 @@ async def _stream_agent_chat_inner(
                             invocations=invocations,
                             evidence=evidence,
                             claims=claims,
-                            plan_steps=verified_plan_steps,
+                            plan_steps=verification_steps,
                             budget_exhausted=budget_exhausted,
                         )
                         issue_codes = {item.code for item in verification.issues}
@@ -2821,16 +2832,18 @@ async def _stream_agent_chat_inner(
                     break
                 current_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
                 current_schedule = schedule_plan_steps(current_steps)
-                planned_step = (
-                    match_ready_step(
-                        tool_name=call.name,
-                        schedule=current_schedule,
-                        resolver=registry,
-                        offered_step_ids=offered_step_ids,
-                    )
-                    if plan_enforced
-                    else None
+                planned_step = match_ready_step(
+                    tool_name=call.name,
+                    schedule=current_schedule,
+                    resolver=registry,
+                    offered_step_ids=offered_step_ids,
                 )
+                if planned_step is None:
+                    planned_step = match_planned_step(
+                        tool_name=call.name,
+                        steps=current_steps,
+                        resolver=registry,
+                    )
                 if planned_step is not None:
                     offered_step_ids.discard(planned_step.step_id)
                 logical_step_id = planned_step.logical_id if planned_step is not None else call.id
@@ -2877,9 +2890,7 @@ async def _stream_agent_chat_inner(
                         else None
                     )
                     resource_project_ids.append(
-                        referenced_dataset.project_id
-                        if referenced_dataset is not None
-                        else None
+                        referenced_dataset.project_id if referenced_dataset is not None else None
                     )
                 data_role_guard = await run_in_threadpool(
                     _evaluate_data_role_preconditions,
@@ -2916,7 +2927,7 @@ async def _stream_agent_chat_inner(
                 signature_scope = (
                     f"plan:{offered_plan_version}:{planned_step.logical_id}"
                     if planned_step is not None
-                    else (f"plan:{offered_plan_version}:unbound" if plan_enforced else "legacy")
+                    else f"plan:{offered_plan_version}:unbound"
                 )
                 signature = (
                     f"{signature_scope}:{call.name}:" f"{_normalized_argument_mapping(call_args)}"
@@ -2967,24 +2978,6 @@ async def _stream_agent_chat_inner(
                     if policy_decision.code == "tool_budget_exhausted":
                         tools_allowed = False
                         budget_exhausted = True
-                elif plan_enforced and planned_step is None:
-                    tool_capabilities = set(registry.capabilities_for_tool(call.name))
-                    plan_capabilities = {
-                        str(step.definition.get("capability")) for step in current_steps
-                    }
-                    if tool_capabilities.intersection(plan_capabilities):
-                        feedback = (
-                            f"未执行：工具 {call.name} 对应的计划步骤本轮尚未就绪，"
-                            "或本轮已被调用；必须等待依赖完成和下一轮调度。"
-                        )
-                        failure_code = "step_dependencies_unmet"
-                    else:
-                        feedback = (
-                            f"未执行：工具 {call.name} 不属于当前持久化计划声明的 "
-                            "capability。请遵循当前计划，或等待 Replanner 生成新计划版本。"
-                        )
-                        failure_code = "tool_not_in_plan"
-                    failure_source = "policy"
                 elif join_guard is not None and not join_guard.allowed:
                     feedback = f"未执行：{join_guard.message}"
                     failure_code = join_guard.code
@@ -3020,9 +3013,7 @@ async def _stream_agent_chat_inner(
                 if tool_contract:
                     policy_payload["tool_contract"] = tool_contract
                 if data_role_guard is not None:
-                    policy_payload["data_role_preconditions"] = (
-                        data_role_guard.evidence()
-                    )
+                    policy_payload["data_role_preconditions"] = data_role_guard.evidence()
                 if definition_execution is not None:
                     policy_payload["definition_execution"] = definition_execution
                 reserved_invocation: ToolInvocation | None = None
@@ -3353,120 +3344,6 @@ async def _stream_agent_chat_inner(
                             },
                         )
                         return
-                    observation = (
-                        cast(JsonObject, failure_event.payload["observation"])
-                        if failure_event is not None
-                        else None
-                    )
-                    if (
-                        plan_enforced
-                        and observation is not None
-                        and should_replan_failure(observation)
-                    ):
-                        if replan_count >= config.max_replans:
-                            run, blocked_event = await run_in_threadpool(
-                                task_store.transition,
-                                run_id,
-                                expected_version=run.state_version,
-                                status="blocked",
-                                event_type="replanning.blocked",
-                                payload={
-                                    "reason": "replan_budget_exhausted",
-                                    "max_replans": config.max_replans,
-                                    "observation_id": observation.get("observation_id"),
-                                },
-                                terminal_reason="replan_budget_exhausted",
-                                usage=_tool_usage(
-                                    calls_used,
-                                    attempts_used,
-                                    invalid_attempts_used,
-                                ),
-                            )
-                            yield _task_event(blocked_event, conversation_id)
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replan_budget_exhausted",
-                                    "message": "自动重规划次数已达上限，任务已安全停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        latest_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
-                        latest_artifacts = await run_in_threadpool(
-                            store.list_artifacts, conversation_id
-                        )
-                        outcome = await _replan_from_failure(
-                            task_store,
-                            run,
-                            contract=contract,
-                            current_plan=active_plan,
-                            current_steps=latest_steps,
-                            observation=observation,
-                            datasets=datasets,
-                            artifacts=latest_artifacts,
-                            registry=registry,
-                            capability_catalog=frozen_capability_catalog,
-                            planner_gateway=planner_gateway,
-                            config=config,
-                            tool_calls=calls_used,
-                        )
-                        run = outcome.run
-                        for event in outcome.events:
-                            yield _task_event(event, conversation_id)
-                        if outcome.disposition == "failed":
-                            _log.warning(
-                                "agent.replanning_failed",
-                                conversation_id=conversation_id,
-                                run_id=run_id,
-                                error=outcome.error,
-                            )
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replanner_failed",
-                                    "message": "工具失败后的计划修订未通过校验，任务已停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        if outcome.disposition == "blocked":
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replan_blocked",
-                                    "message": "当前失败没有安全的自动恢复路径，任务已停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        replan_count += 1
-                        active_plan = outcome.plan
-                        planned_steps = list(outcome.steps)
-                        for superseded in tool_calls[call_index + 1 :]:
-                            working.append(
-                                ModelMessage(
-                                    role="tool",
-                                    content="当前工具调用已被新计划版本取代，未执行。",
-                                    tool_call_id=superseded.id,
-                                )
-                            )
-                        working.append(
-                            ModelMessage(
-                                role="user",
-                                content=(
-                                    "已依据失败 Observation 生成新的持久化计划版本。"
-                                    "请重新读取当前计划状态，只执行本轮开放的就绪工具。"
-                                ),
-                            )
-                        )
-                        break
                     continue
 
                 artifact_draft = _prepare_artifact(
@@ -3530,114 +3407,6 @@ async def _stream_agent_chat_inner(
                             "fields": fields,
                         },
                     )
-                    observation = (
-                        cast(JsonObject, failure_event.payload["observation"])
-                        if failure_event is not None
-                        else None
-                    )
-                    if (
-                        plan_enforced
-                        and observation is not None
-                        and should_replan_failure(observation)
-                    ):
-                        if replan_count >= config.max_replans:
-                            run, blocked_event = await run_in_threadpool(
-                                task_store.transition,
-                                run_id,
-                                expected_version=run.state_version,
-                                status="blocked",
-                                event_type="replanning.blocked",
-                                payload={
-                                    "reason": "replan_budget_exhausted",
-                                    "max_replans": config.max_replans,
-                                    "observation_id": observation.get("observation_id"),
-                                },
-                                terminal_reason="replan_budget_exhausted",
-                                usage=_tool_usage(
-                                    calls_used,
-                                    attempts_used,
-                                    invalid_attempts_used,
-                                ),
-                            )
-                            yield _task_event(blocked_event, conversation_id)
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replan_budget_exhausted",
-                                    "message": "自动重规划次数已达上限，任务已安全停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        latest_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
-                        latest_artifacts = await run_in_threadpool(
-                            store.list_artifacts, conversation_id
-                        )
-                        outcome = await _replan_from_failure(
-                            task_store,
-                            run,
-                            contract=contract,
-                            current_plan=active_plan,
-                            current_steps=latest_steps,
-                            observation=observation,
-                            datasets=datasets,
-                            artifacts=latest_artifacts,
-                            registry=registry,
-                            capability_catalog=frozen_capability_catalog,
-                            planner_gateway=planner_gateway,
-                            config=config,
-                            tool_calls=calls_used,
-                        )
-                        run = outcome.run
-                        for event in outcome.events:
-                            yield _task_event(event, conversation_id)
-                        if outcome.disposition == "failed":
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replanner_failed",
-                                    "message": "工具失败后的计划修订未通过校验，任务已停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        if outcome.disposition == "blocked":
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replan_blocked",
-                                    "message": "当前失败没有安全的自动恢复路径，任务已停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        replan_count += 1
-                        active_plan = outcome.plan
-                        planned_steps = list(outcome.steps)
-                        for superseded in tool_calls[call_index + 1 :]:
-                            working.append(
-                                ModelMessage(
-                                    role="tool",
-                                    content="当前工具调用已被新计划版本取代，未执行。",
-                                    tool_call_id=superseded.id,
-                                )
-                            )
-                        working.append(
-                            ModelMessage(
-                                role="user",
-                                content=(
-                                    "已依据后置条件失败生成新的持久化计划版本。"
-                                    "请只执行本轮开放的就绪工具。"
-                                ),
-                            )
-                        )
-                        break
                     continue
                 summary = _summarize_result(call.name, result)
                 join_evidence_context = build_join_evidence_context(
@@ -3763,62 +3532,6 @@ async def _stream_agent_chat_inner(
                     artifact_id=artifact.id if artifact else None,
                 )
                 working.append(ModelMessage(role="tool", content=model_view, tool_call_id=call.id))
-                if plan_enforced and planned_step is not None:
-                    latest_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
-                    conditional_revision = conditional_skip_after_success(
-                        completed_step=planned_step,
-                        tool_name=call.name,
-                        result=result,
-                        current_steps=latest_steps,
-                    )
-                    if conditional_revision is not None and replan_count < config.max_replans:
-                        overrides, revision_reason = conditional_revision
-                        outcome = await _revise_for_conditional_skip(
-                            task_store,
-                            run,
-                            current_plan=active_plan,
-                            current_steps=latest_steps,
-                            reason=revision_reason,
-                            overrides=overrides,
-                            tool_calls=calls_used,
-                        )
-                        run = outcome.run
-                        for event in outcome.events:
-                            yield _task_event(event, conversation_id)
-                        if outcome.disposition == "failed":
-                            yield _event(
-                                "error",
-                                {
-                                    "code": "replanner_failed",
-                                    "message": "条件分支计划修订保存失败，任务已停止。",
-                                    "retryable": True,
-                                    "run_id": run_id,
-                                    "run_status": run.status,
-                                },
-                            )
-                            return
-                        replan_count += 1
-                        active_plan = outcome.plan
-                        planned_steps = list(outcome.steps)
-                        for superseded in tool_calls[call_index + 1 :]:
-                            working.append(
-                                ModelMessage(
-                                    role="tool",
-                                    content="当前工具调用已被条件分支的新计划版本取代，未执行。",
-                                    tool_call_id=superseded.id,
-                                )
-                            )
-                        working.append(
-                            ModelMessage(
-                                role="user",
-                                content=(
-                                    "成功 Observation 已触发条件分支，相关步骤已显式跳过。"
-                                    "请按新的持久化计划状态继续。"
-                                ),
-                            )
-                        )
-                        break
-
         if not final_text.strip() or passed_verification is None:
             run, failed_event = await _transition_after_failure(
                 task_store,
@@ -4025,6 +3738,7 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
         required = raw.get("required", True)
         artifact_type = raw.get("artifact_type")
         artifact_format = raw.get("artifact_format")
+        artifact_dimensions = raw.get("artifact_dimensions", [])
         if (
             not isinstance(criterion_id, str)
             or not criterion_id
@@ -4035,6 +3749,10 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
             or not isinstance(required, bool)
             or not (artifact_type is None or isinstance(artifact_type, str))
             or not (artifact_format is None or isinstance(artifact_format, str))
+            or not isinstance(artifact_dimensions, list)
+            or not all(
+                isinstance(item, str) and item.strip() for item in artifact_dimensions
+            )
         ):
             raise ValueError("持久化 TaskContract 的完成标准字段无效")
         criteria.append(
@@ -4045,6 +3763,7 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
                 required=required,
                 artifact_type=artifact_type,
                 artifact_format=artifact_format,
+                artifact_dimensions=tuple(cast(list[str], artifact_dimensions)),
             )
         )
     if not criteria or not all(isinstance(item, str) for item in raw_constraints):
@@ -4090,243 +3809,21 @@ async def _transition_after_failure(
     return terminated
 
 
-@dataclass(frozen=True, slots=True)
-class _PlanRevisionOutcome:
-    run: TaskRun
-    plan: JsonObject
-    steps: tuple[TaskStepRecord, ...]
-    events: tuple[TaskEvent, ...]
-    disposition: str
-    error: str | None = None
-
-
-async def _replan_from_failure(
-    task_store: TaskStore,
-    run: TaskRun,
-    *,
-    contract: TaskContract,
-    current_plan: JsonObject,
-    current_steps: list[TaskStepRecord],
-    observation: JsonObject,
-    datasets: list[Dataset],
-    artifacts: list[Artifact],
-    registry: AgentToolRegistry,
-    capability_catalog: list[JsonObject],
-    planner_gateway: PlannerGateway | None,
-    config: AgentLoopConfig,
-    tool_calls: int,
-) -> _PlanRevisionOutcome:
-    """进入 planning，依据失败 Observation 生成并持久化不可变新计划版本。"""
-    run, started_event = await run_in_threadpool(
-        task_store.transition,
-        run.run_id,
-        expected_version=run.state_version,
-        status="planning",
-        event_type="replanning.started",
-        payload={
-            "observation_id": observation.get("observation_id"),
-            "observation_code": observation.get("code"),
-            "step_id": observation.get("step_id"),
-            "supersedes_version": run.plan_version,
-        },
-        usage={"tool_calls": tool_calls},
-    )
-    events: list[TaskEvent] = [started_event]
-    try:
-        decision = await create_replan(
-            contract=contract,
-            current_plan=current_plan,
-            current_steps=current_steps,
-            observation=observation,
-            datasets=datasets,
-            artifacts=artifacts,
-            registry=registry,
-            gateway=planner_gateway,
-            temperature=0.0,
-            max_steps=min(config.planner_max_steps, config.max_tool_calls),
-            capability_catalog=capability_catalog,
-        )
-        revised_plan = _preserve_host_reference_assumptions(
-            decision.plan,
-            current_plan,
-        )
-        run, _plan_record, revised_steps, plan_event = await run_in_threadpool(
-            task_store.save_plan,
-            run.run_id,
-            expected_version=run.state_version,
-            plan=revised_plan,
-            reason=decision.reason,
-            planner=decision.audit,
-            step_status_overrides=decision.step_status_overrides,
-        )
-        events.append(plan_event)
-        if decision.disposition == "blocked":
-            run, terminal_event = await run_in_threadpool(
-                task_store.transition,
-                run.run_id,
-                expected_version=run.state_version,
-                status="blocked",
-                event_type="replanning.blocked",
-                payload={
-                    "reason": decision.reason,
-                    "plan_version": run.plan_version,
-                    "observation_id": observation.get("observation_id"),
-                },
-                terminal_reason="replan_blocked",
-                usage={"tool_calls": tool_calls},
-            )
-            events.append(terminal_event)
-            return _PlanRevisionOutcome(
-                run=run,
-                plan=revised_plan,
-                steps=tuple(revised_steps),
-                events=tuple(events),
-                disposition="blocked",
-            )
-        run, completed_event = await run_in_threadpool(
-            task_store.transition,
-            run.run_id,
-            expected_version=run.state_version,
-            status="running",
-            event_type="replanning.completed",
-            payload={
-                "reason": decision.reason,
-                "plan_version": run.plan_version,
-                "observation_id": observation.get("observation_id"),
-            },
-            usage={"tool_calls": tool_calls},
-        )
-        events.append(completed_event)
-        return _PlanRevisionOutcome(
-            run=run,
-            plan=revised_plan,
-            steps=tuple(revised_steps),
-            events=tuple(events),
-            disposition="revised",
-        )
-    except (
-        OpenAIError,
-        PlannerProtocolError,
-        RuntimeError,
-        sqlite3.Error,
-        ValueError,
-    ) as exc:
-        run, failed_event = await run_in_threadpool(
-            task_store.transition,
-            run.run_id,
-            expected_version=run.state_version,
-            status="failed",
-            event_type="replanning.failed",
-            payload={
-                "reason": "replanner_failed",
-                "observation_id": observation.get("observation_id"),
-            },
-            terminal_reason="replanner_failed",
-            usage={"tool_calls": tool_calls},
-        )
-        events.append(failed_event)
-        return _PlanRevisionOutcome(
-            run=run,
-            plan=current_plan,
-            steps=tuple(current_steps),
-            events=tuple(events),
-            disposition="failed",
-            error=str(exc),
-        )
-
-
-async def _revise_for_conditional_skip(
-    task_store: TaskStore,
-    run: TaskRun,
-    *,
-    current_plan: JsonObject,
-    current_steps: list[TaskStepRecord],
-    reason: str,
-    overrides: dict[str, StepStatus],
-    tool_calls: int,
-) -> _PlanRevisionOutcome:
-    """把确定性成功 Observation 产生的条件跳过保存成一个计划版本。"""
-    run, started_event = await run_in_threadpool(
-        task_store.transition,
-        run.run_id,
-        expected_version=run.state_version,
-        status="planning",
-        event_type="replanning.started",
-        payload={
-            "reason": reason,
-            "supersedes_version": run.plan_version,
-            "skipped_steps": sorted(overrides),
-        },
-        usage={"tool_calls": tool_calls},
-    )
-    try:
-        run, _plan_record, revised_steps, plan_event = await run_in_threadpool(
-            task_store.save_plan,
-            run.run_id,
-            expected_version=run.state_version,
-            plan=current_plan,
-            reason=reason,
-            planner={
-                "route": "template",
-                "phase": "executor",
-                "action": "conditional_skip",
-                "skipped_steps": sorted(overrides),
-            },
-            step_status_overrides=overrides,
-        )
-        run, completed_event = await run_in_threadpool(
-            task_store.transition,
-            run.run_id,
-            expected_version=run.state_version,
-            status="running",
-            event_type="replanning.completed",
-            payload={
-                "reason": reason,
-                "plan_version": run.plan_version,
-                "skipped_steps": sorted(overrides),
-            },
-            usage={"tool_calls": tool_calls},
-        )
-        return _PlanRevisionOutcome(
-            run=run,
-            plan=current_plan,
-            steps=tuple(revised_steps),
-            events=(started_event, plan_event, completed_event),
-            disposition="revised",
-        )
-    except (RuntimeError, sqlite3.Error, ValueError) as exc:
-        run, failed_event = await run_in_threadpool(
-            task_store.transition,
-            run.run_id,
-            expected_version=run.state_version,
-            status="failed",
-            event_type="replanning.failed",
-            payload={"reason": "conditional_revision_failed"},
-            terminal_reason="conditional_revision_failed",
-            usage={"tool_calls": tool_calls},
-        )
-        return _PlanRevisionOutcome(
-            run=run,
-            plan=current_plan,
-            steps=tuple(current_steps),
-            events=(started_event, failed_event),
-            disposition="failed",
-            error=str(exc),
-        )
-
-
 def _plan_system_content(
     system_content: str,
     plan: JsonObject,
     steps: list[TaskStepRecord] | tuple[TaskStepRecord, ...],
+    contract: TaskContract,
 ) -> str:
     schedule = schedule_plan_steps(list(steps))
     return (
         system_content
-        + "\n\n当前任务的已验证计划（只能调用当前就绪 capability 对应的工具）：\n"
+        + "\n\n当前任务的确定性提纲（用于说明目标，不限制你选择受治理工具）：\n"
         + _compact_json(plan, 12_000)
-        + "\n当前持久化执行状态：\n"
+        + "\n当前持久化提纲状态；真实执行以 ToolInvocation 与 Evidence 为准：\n"
         + _compact_json(schedule_payload(schedule), 2_000)
+        + "\n当前任务完成契约（必须覆盖全部必选项后才能结束）：\n"
+        + _compact_json(contract.to_dict(), 4_000)
     )
 
 
@@ -4375,36 +3872,6 @@ def _bind_memory_references_to_plan(
     return bound_plan
 
 
-def _preserve_host_reference_assumptions(
-    revised_plan: JsonObject,
-    previous_plan: JsonObject,
-) -> JsonObject:
-    """重规划只能继承 Host 绑定，不能由 Planner 删除、替换或新增。"""
-    host_prefixes = (
-        REFERENCE_ASSUMPTION_PREFIX,
-        MEMORY_REFERENCE_ASSUMPTION_PREFIX,
-    )
-    previous_raw = previous_plan.get("assumptions", [])
-    previous_host = (
-        [item for item in previous_raw if isinstance(item, str) and item.startswith(host_prefixes)]
-        if isinstance(previous_raw, list)
-        else []
-    )
-    revised_raw = revised_plan.get("assumptions", [])
-    revised_non_host = (
-        [
-            item
-            for item in revised_raw
-            if isinstance(item, str) and not item.startswith(host_prefixes)
-        ]
-        if isinstance(revised_raw, list)
-        else []
-    )
-    result = dict(revised_plan)
-    result["assumptions"] = [*revised_non_host, *previous_host]
-    return result
-
-
 def _verification_payload(result: VerificationResult) -> JsonObject:
     return {
         "verdict": result.verdict,
@@ -4419,8 +3886,30 @@ def _verification_payload(result: VerificationResult) -> JsonObject:
     }
 
 
+def _incomplete_plan_instruction(steps: list[TaskStepRecord]) -> str:
+    unfinished = [
+        step
+        for step in steps
+        if step.status not in {"completed", "skipped"}
+    ]
+    labels = "；".join(
+        f"{step.logical_id}（{step.definition.get('capability', 'unknown')}）"
+        for step in unfinished[:8]
+    )
+    return (
+        f"结构化提纲仍有未完成步骤：{labels}。"
+        "请调用已提供且能力匹配的工具完成这些步骤，再基于工具 Evidence 给出最终答复；"
+        "不要再次只返回文字，也不要重复已经成功的工具调用。"
+    )
+
+
 def _verification_error(result: VerificationResult) -> tuple[str, str]:
     codes = {issue.code for issue in result.issues}
+    if "missing_chart_dimension_artifact" in codes:
+        return (
+            "chart_not_generated",
+            "部分请求维度的图表仍未成功生成，请按缺失维度重试。",
+        )
     if "missing_chart_artifact" in codes:
         return "chart_not_generated", "分析过程已完成，但图表未成功生成，请重试。"
     if "missing_report_artifact" in codes:
@@ -4664,6 +4153,11 @@ def _enrich_tool_arguments(
     if tool_name != "gen_chart":
         return enriched
 
+    # ``analysis_id`` is minted by _prepare_artifact after a successful tool
+    # call.  Older model responses sometimes copied that Host-only lineage ID
+    # back into gen_chart, whose closed MCP schema correctly rejects it.
+    enriched.pop("analysis_id", None)
+
     valid_dataset_refs = {dataset.ref for dataset in datasets}
     referenced_dataset_refs = _referenced_dataset_refs(
         references,
@@ -4806,6 +4300,35 @@ def _contract_requires_pdf(contract: TaskContract) -> bool:
         and criterion.artifact_type == "report"
         and criterion.artifact_format == "pdf"
         for criterion in contract.success_criteria
+    )
+
+
+def _contract_chart_dimensions(contract: TaskContract) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            dimension
+            for criterion in contract.success_criteria
+            if criterion.required
+            and criterion.kind == "artifact"
+            and criterion.artifact_type == "chart"
+            for dimension in criterion.artifact_dimensions
+        )
+    )
+
+
+def _chart_retry_instruction(verification: VerificationResult) -> str:
+    missing = [
+        issue.message
+        for issue in verification.issues
+        if issue.code == "missing_chart_dimension_artifact"
+    ]
+    if not missing:
+        return _MISSING_CHART_INSTRUCTION
+    return (
+        "任务完成契约仍未覆盖全部图表："
+        + "；".join(missing)
+        + "。请为每个缺失维度分别调用一次 gen_chart，可以在同一轮发起多个调用；"
+        "全部成功后再给最终结论。不要把 analysis_id 传给 gen_chart。"
     )
 
 
@@ -5242,11 +4765,7 @@ async def _try_execute_parallel_frontier(
                 "tool_call_id": item.call.id,
                 "dataset_ref": item.arguments.get("dataset_ref"),
                 "parallel": True,
-                **(
-                    {"join": join_evidence_context}
-                    if join_evidence_context is not None
-                    else {}
-                ),
+                **({"join": join_evidence_context} if join_evidence_context is not None else {}),
                 **_definition_result_evidence_fields(item.call.name, result),
                 **(
                     {"definition_execution": item.definition_execution}
@@ -5792,8 +5311,7 @@ def _summarize_result(tool: str, result: Any) -> str:
         return f"{len(result.get('columns', []))} 列相关矩阵，n={result.get('n_obs', '?')}"
     if tool == "dimension_contribution":
         return (
-            f"共 {result.get('group_count', '?')} 组，"
-            f"展示覆盖率={result.get('returned_share')}"
+            f"共 {result.get('group_count', '?')} 组，" f"展示覆盖率={result.get('returned_share')}"
         )
     if tool == "group_compare":
         overall = result.get("overall") or {}

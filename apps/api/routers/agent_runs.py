@@ -981,7 +981,6 @@ def _start_recovered_run(
             registry=registry,
             locks=conversation_locks,
             config=config,
-            planner_gateway=execution.gateway,
             principal=principal,
             run_id=run.run_id,
             control=control,

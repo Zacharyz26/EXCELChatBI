@@ -398,7 +398,7 @@ export function ChatWorkspace() {
 
 function runStatusText(status: string): string {
   const labels: Record<string, string> = {
-    planning: "任务规划中",
+    planning: "任务初始化中",
     waiting_user: "等待你的回答",
     running: "任务执行中",
     verifying: "正在验证",

@@ -20,6 +20,7 @@ class SuccessCriterion:
     required: bool = True
     artifact_type: str | None = None
     artifact_format: str | None = None
+    artifact_dimensions: tuple[str, ...] = ()
 
     def to_dict(self) -> JsonObject:
         return {
@@ -29,6 +30,7 @@ class SuccessCriterion:
             "required": self.required,
             "artifact_type": self.artifact_type,
             "artifact_format": self.artifact_format,
+            "artifact_dimensions": list(self.artifact_dimensions),
         }
 
 
@@ -73,6 +75,29 @@ class TaskContract:
         )
         return replace(self, success_criteria=(*self.success_criteria, criterion))
 
+    def require_chart_dimensions(self, dimensions: tuple[str, ...]) -> TaskContract:
+        """Require one verifiable chart artifact for every requested dimension."""
+        unique = tuple(dict.fromkeys(item.strip() for item in dimensions if item.strip()))
+        if not unique:
+            return self
+        contract = self.require_artifact("chart")
+        criteria: list[SuccessCriterion] = []
+        for criterion in contract.success_criteria:
+            if criterion.kind != "artifact" or criterion.artifact_type != "chart":
+                criteria.append(criterion)
+                continue
+            merged = tuple(dict.fromkeys((*criterion.artifact_dimensions, *unique)))
+            criteria.append(
+                replace(
+                    criterion,
+                    description=(
+                        "为每个指定维度生成真实图表工件：" + "、".join(merged)
+                    ),
+                    artifact_dimensions=merged,
+                )
+            )
+        return replace(contract, success_criteria=tuple(criteria))
+
 
 def build_minimal_contract(
     *,
@@ -81,6 +106,7 @@ def build_minimal_contract(
     chart_required: bool,
     report_required: bool,
     pdf_required: bool,
+    chart_dimensions: tuple[str, ...] = (),
 ) -> TaskContract:
     """Compile only high-confidence requirements; stage 2 adds the full interpreter."""
     contract = TaskContract(
@@ -101,6 +127,7 @@ def build_minimal_contract(
     )
     if chart_required:
         contract = contract.require_artifact("chart")
+        contract = contract.require_chart_dimensions(chart_dimensions)
     if report_required:
         contract = contract.require_artifact("report", "pdf" if pdf_required else None)
     return contract

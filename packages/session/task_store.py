@@ -24,8 +24,8 @@ from apps.orchestrator.control.hypothesis_lifecycle import (
     hypothesis_invocation_failed,
     hypothesis_invocation_started,
 )
-from apps.orchestrator.control.planner_contract import validate_task_plan
 from apps.orchestrator.control.state import AgentState, ensure_transition
+from apps.orchestrator.control.task_plan_contract import validate_task_plan
 
 from packages.common.identifiers import dataset_reference_arguments, validate_report_id
 from packages.session.models import Artifact, ArtifactDraft, Conversation, JsonObject, Message
@@ -727,6 +727,13 @@ class TaskStore:
                 checkpoint = _checkpoint_from_row(checkpoint_row)
                 _validate_checkpoint(connection, current, checkpoint)
             ensure_transition(current.status, status)
+            if status == "completed":
+                unfinished = _unfinished_active_plan_steps(connection, run_id)
+                if unfinished:
+                    raise ControlConflict(
+                        "TaskRun 不能在提纲步骤未收敛时完成: "
+                        + "、".join(unfinished)
+                    )
 
             unknown_invocations = 0
             if status == "cancelled":
@@ -2083,16 +2090,16 @@ class TaskStore:
         expected_version: int,
         plan: JsonObject,
         reason: str,
-        planner: JsonObject,
+        outline_audit: JsonObject,
         step_status_overrides: dict[str, StepStatus] | None = None,
     ) -> tuple[TaskRun, TaskPlanRecord, list[TaskStepRecord], TaskEvent]:
-        """原子保存 Planner 生成的不可变计划版本。"""
+        """原子保存确定性任务提纲生成的不可变计划版本。"""
         run, record, steps, event, _ = self._save_plan(
             run_id,
             expected_version=expected_version,
             plan=plan,
             reason=reason,
-            planner=planner,
+            outline_audit=outline_audit,
             step_status_overrides=step_status_overrides,
             allowed_statuses={"planning", "running", "verifying"},
         )
@@ -2143,7 +2150,7 @@ class TaskStore:
             expected_version=expected_version,
             plan=plan,
             reason=f"user:{clean_reason}"[:200],
-            planner={"route": "user", "phase": "collaboration"},
+            outline_audit={"route": "user", "phase": "collaboration"},
             step_status_overrides={step_id: "skipped" for step_id in skipped},
             allowed_statuses={"paused"},
             control=(clean_key, "revise_plan", request_hash),
@@ -2157,7 +2164,7 @@ class TaskStore:
         expected_version: int,
         plan: JsonObject,
         reason: str,
-        planner: JsonObject,
+        outline_audit: JsonObject,
         step_status_overrides: dict[str, StepStatus] | None = None,
         allowed_statuses: set[RunStatus],
         control: tuple[str, str, str] | None = None,
@@ -2403,7 +2410,9 @@ class TaskStore:
                 ],
                 "assumptions": plan.get("assumptions", []),
                 "clarifications": plan.get("clarifications", []),
-                "planner": planner,
+                # 兼容已持久化的 v2.4/v2.5 事件协议；新代码只把这里当作
+                # 确定性任务提纲的审计元数据，不再表示模型 Planner。
+                "planner": outline_audit,
             }
             if hypothesis_execution is not None:
                 event_payload["hypothesis_execution"] = hypothesis_execution
@@ -2436,7 +2445,7 @@ class TaskStore:
                     "active_plan": plan,
                 }
             )
-            hypothesis_screening = planner.get("hypothesis_screening")
+            hypothesis_screening = outline_audit.get("hypothesis_screening")
             if isinstance(hypothesis_screening, dict):
                 snapshot["hypothesis_screening"] = hypothesis_screening
             if hypothesis_execution is not None:
@@ -2706,6 +2715,22 @@ class TaskStore:
             ensure_transition(current.status, status)
             next_version = current.state_version + 1
             now = _utc_now()
+            event_payload = dict(payload)
+            if status == "verifying":
+                reconciled = _skip_satisfied_plan_prerequisites(
+                    connection,
+                    run_id,
+                    plan_version=current.plan_version,
+                    now=now,
+                )
+                if reconciled:
+                    event_payload["reconciled_outline_steps"] = reconciled
+            if status == "completed":
+                unfinished = _unfinished_active_plan_steps(connection, run_id)
+                if unfinished:
+                    raise ControlConflict(
+                        "TaskRun 不能在提纲步骤未收敛时完成: " + "、".join(unfinished)
+                    )
             next_usage = current.usage if usage is None else usage
             finished_at = now if status in {"completed", "blocked", "failed", "cancelled"} else None
             if finished_at is not None:
@@ -2747,7 +2772,14 @@ class TaskStore:
                 ),
             )
             sequence = _next_sequence(connection, run_id)
-            event = TaskEvent(uuid.uuid4().hex, run_id, sequence, event_type, payload, now)
+            event = TaskEvent(
+                uuid.uuid4().hex,
+                run_id,
+                sequence,
+                event_type,
+                event_payload,
+                now,
+            )
             _insert_event(connection, event)
             updated_row = connection.execute(
                 "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
@@ -4814,6 +4846,92 @@ def _completed_step_ids(
         (run_id,),
     ).fetchall()
     return [str(row["logical_id"]) for row in rows]
+
+
+def _active_plan_steps(
+    connection: sqlite3.Connection,
+    run_id: str,
+    *,
+    plan_version: int | None = None,
+) -> list[TaskStepRecord]:
+    if plan_version is None:
+        version_clause = "run.plan_version = plan.version"
+        parameters: tuple[object, ...] = (run_id,)
+    else:
+        version_clause = "plan.version = ?"
+        parameters = (run_id, plan_version)
+    rows = connection.execute(
+        f"""
+        SELECT step.* FROM task_steps AS step
+        JOIN task_plans AS plan ON plan.plan_id = step.plan_id
+        JOIN task_runs AS run ON run.run_id = plan.run_id
+        WHERE step.run_id = ? AND {version_clause}
+        ORDER BY step.position
+        """,
+        parameters,
+    ).fetchall()
+    return [_step_from_row(row) for row in rows]
+
+
+def _skip_satisfied_plan_prerequisites(
+    connection: sqlite3.Connection,
+    run_id: str,
+    *,
+    plan_version: int,
+    now: str,
+) -> list[str]:
+    """Close unfinished ancestors whose downstream capability already succeeded.
+
+    Deterministic outlines are observable guidance, not a tool whitelist. If a
+    governed downstream invocation succeeds before an informational prerequisite
+    is explicitly called, the prerequisite is superseded rather than left
+    permanently pending. Independent unfinished steps remain untouched and will
+    still fail completion verification.
+    """
+    steps = _active_plan_steps(connection, run_id, plan_version=plan_version)
+    by_logical_id = {step.logical_id: step for step in steps}
+    frontier = [
+        step.logical_id for step in steps if step.status in {"completed", "skipped"}
+    ]
+    reconciled: list[str] = []
+    seen = set(frontier)
+    while frontier:
+        logical_id = frontier.pop()
+        step = by_logical_id.get(logical_id)
+        if step is None:
+            continue
+        raw_dependencies = step.definition.get("dependencies", [])
+        dependencies = raw_dependencies if isinstance(raw_dependencies, list) else []
+        for dependency in dependencies:
+            if not isinstance(dependency, str) or dependency in seen:
+                continue
+            seen.add(dependency)
+            prerequisite = by_logical_id.get(dependency)
+            if prerequisite is None:
+                continue
+            if prerequisite.status not in {"completed", "skipped"}:
+                connection.execute(
+                    """
+                    UPDATE task_steps
+                    SET status = 'skipped', completed_at = ?
+                    WHERE step_id = ? AND status IN ('pending', 'failed', 'blocked')
+                    """,
+                    (now, prerequisite.step_id),
+                )
+                reconciled.append(prerequisite.logical_id)
+            frontier.append(prerequisite.logical_id)
+    return reconciled
+
+
+def _unfinished_active_plan_steps(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> list[str]:
+    return [
+        step.logical_id
+        for step in _active_plan_steps(connection, run_id)
+        if step.status not in {"completed", "skipped"}
+    ]
 
 
 def _insert_checkpoint(

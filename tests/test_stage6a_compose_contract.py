@@ -23,7 +23,7 @@ def test_compose_gate_persists_and_rechecks_parallel_control_state() -> None:
     )
 
     assert "verify_parallel_run" in gate
-    assert "parallel_tool_batches !== 1" in gate
+    assert "multi_tool_batches !== 1" in gate
     assert gate.count("verify_parallel_run") >= 3
     assert "COMPOSE_6A_PARALLEL" in browser
     assert "evidence_ledger_sequence" in browser

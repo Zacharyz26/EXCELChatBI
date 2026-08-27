@@ -49,9 +49,7 @@ class _Stage2ScriptedGateway:
                         id="profile-call",
                         name="get_data_profile",
                         arguments=(
-                            '{"dataset_ref":"'
-                            + _fixture_dataset_ref("B01", "orders")
-                            + '"}'
+                            '{"dataset_ref":"' + _fixture_dataset_ref("B01", "orders") + '"}'
                         ),
                     )
                 ],
@@ -60,16 +58,6 @@ class _Stage2ScriptedGateway:
         text = "这份数据共有 120 行。"
         yield text
         yield ModelResponse(content=text, model="stage2-scripted")
-
-    async def complete(
-        self,
-        scenario: Scenario,
-        messages: list[Message],
-        *,
-        params: dict[str, object] | None = None,
-    ) -> ModelResponse:
-        del scenario, messages, params
-        raise AssertionError("B01 fast plan must not call the LLM Planner")
 
 
 def _baseline() -> dict[str, object]:
@@ -86,7 +74,7 @@ def _baseline() -> dict[str, object]:
 
 def _stage2() -> dict[str, object]:
     return {
-        "execution_mode": "stage2_structured_plan",
+        "execution_mode": "single_agent_outline",
         "scenario_set_hash": "frozen-cases",
         "case_count": 20,
         "repetitions": 3,
@@ -138,7 +126,6 @@ def test_fixture_registry_exposes_stage2_capability_partition(
     registry = _FixtureRegistry("B01", tmp_path)
 
     catalog = registry.capability_catalog()
-    offered = registry.openai_tools_for_capabilities({"data.quality"})
 
     assert {str(item["name"]) for item in catalog} >= {
         "data.profile",
@@ -146,7 +133,6 @@ def test_fixture_registry_exposes_stage2_capability_partition(
         "dataset.transform",
         "report.generate",
     }
-    assert [item["function"]["name"] for item in offered] == ["get_data_profile"]
 
     remote_catalogs = asyncio.run(registry.validate_remote_catalog())
     snapshot = registry.capability_catalog_snapshot()
@@ -162,13 +148,11 @@ def test_fixture_registry_exposes_stage2_capability_partition(
     )
     assert [
         item["function"]["name"]
-        for item in registry.openai_tools(
-            allowed_tool_names=frozenset({"kb_search"})
-        )
+        for item in registry.openai_tools(allowed_tool_names=frozenset({"kb_search"}))
     ] == ["kb_search"]
 
 
-def test_stage2_mode_executes_persisted_plan_and_scores_observables(
+def test_stage2_mode_executes_single_agent_outline_and_scores_observables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import apps.orchestrator.agent_loop as agent_loop
@@ -193,13 +177,11 @@ def test_stage2_mode_executes_persisted_plan_and_scores_observables(
             model_name="stage2-scripted",
             repetition=1,
             gateway=gateway,  # type: ignore[arg-type]
-            planner_gateway=gateway,  # type: ignore[arg-type]
-            enforce_plan=True,
         )
     )
 
-    assert row["planner_route"] == "fast"
-    assert row["planned_capabilities"] == ["data.profile"]
+    assert row["outline_route"] == "fast"
+    assert row["outline_capabilities"] == ["data.profile"]
     assert row["plan_steps_total"] == 1
     assert row["plan_steps_completed"] == 1
     assert row["task_satisfied"] is True
@@ -213,11 +195,10 @@ def test_stage2_checkpoint_round_trip_and_protocol_validation(
     protocol = {
         "schema_version": 1,
         "evaluation": "stage2_structured_agent_observable_behavior",
-        "execution_mode": "stage2_structured_plan",
+        "execution_mode": "single_agent_outline",
         "scenario_set_hash": "frozen",
         "repetitions": 3,
         "models": ["deepseek-v4-flash"],
-        "planner_model": "deepseek-v4-flash",
         "case_ids": ["B01"],
     }
     rows = [

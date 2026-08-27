@@ -142,7 +142,6 @@ async def chat_stream(
                 registry=registry,
                 locks=conversation_locks,
                 config=config,
-                planner_gateway=gateway,
                 principal=principal,
                 run_id=run_id,
                 control=control,

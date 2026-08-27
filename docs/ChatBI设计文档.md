@@ -4,13 +4,24 @@
 > 提交 `0b5980c` 的完整 CI/Docker 恢复门禁全绿；G7 人工部分已取消且保持未通过；
 > 提交 `d5a672d` 的阶段 5 及提交 `b67b704` 的阶段 6A Compose 工程门禁全绿；
 > 提交 `3febd68` 的阶段 6D 与提交 `92a6f02` 的阶段 6E 完整 CI 全绿
-> · 文档复核：2026-08-24 · 语言场景：中文优先
+> · 文档复核：2026-08-27 · 语言场景：中文优先
 > 当前开发路线：`docs/Agent自主化开发规划.md` 与本文第 15 章
 > 运行入口和现行/历史文档边界：`README.md`、`docs/README.md`
 
 ---
 
 ## 0. 文档修订说明
+
+**v2.5-closeout（2026-08-27，单一模型规划链收口）**：
+
+- 删除请求前的独立 LLM Planner 与失败后的 LLM Replanner；fast/template 确定性任务提纲
+  只负责澄清、进度和审计，不构成工具白名单或完成条件。
+- 同一个 Agent 获得 TaskRun 冻结目录中的全部可用工具；Schema、权限、预算、数据角色、
+  数据版本、Join 前置条件与 Artifact/Evidence Verifier 继续执行硬约束。工具错误直接回传
+  同一 Agent 修正，不再启动第二个规划模型。
+- 删除 `/analyze`、`/analyze/stats`、报告生成 POST 与 `/kb/query`，保留统一 `/chat/stream`、
+  TaskRun 控制、`/kb/ingest` 和授权报告下载；删除未接线的 Dify/LangGraph、Code Interpreter
+  与内部数据连接器占位模块。
 
 **v2.5-closeout（2026-08-17，单一 Agent 产品收口）**：
 
@@ -215,9 +226,9 @@
 
 | 流程 | 实现 | 状态 |
 |------|------|------|
-| 兼容直调流程（分析 / 统计 / 报告 / KB） | FastAPI 路由直调编排函数（`apps/orchestrator/*`） | 已实现并保留兼容；原端点安全门控不变 |
-| **v2.3 Agent 基线（主入口，第 14 章）** | DeepSeek function-calling 循环（`Scenario.AGENT`），模型选工具并观察结果，SSE 逐步吐事件 | 已完成；属于反应式工具调用 Agent |
-| **v2.4 目标驱动控制面（第 15 章）** | TaskContract + 混合 Planner + Executor + Verifier + Replanner + Finalizer | 阶段 1 已验收；阶段 2A–2D 的 Planner、依赖图 Executor、Replanner、任务控制/恢复与 MCP Gateway 规范执行已实现 |
+| **统一 Agent 主入口** | `/chat/stream` 接收普通聊天和分析目标；同一个 `Scenario.AGENT` 模型自行选择冻结目录中的可用工具并观察结果 | 现行唯一生成路径；普通聊天没有分析上下文时不附加工具 schema |
+| **确定性任务控制面** | TaskContract + fast/template 任务提纲 + Agent 工具反馈循环 + Verifier + Finalizer | 任务提纲只负责澄清、进度、恢复和审计，不限制 Agent 的工具选择；工具错误直接返回同一个 Agent |
+| **知识与报告配套入口** | `/kb/ingest` 等知识库生命周期接口；授权报告文件 GET | 只管理数据和下载工件，不另起模型生成链 |
 
 #### 5.2.1 双轨判定规则（v2.1 作废，留档）
 
@@ -324,7 +335,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 ```
 上传 → parse_excel + infer_schema 生成"数据画像"
      → 仅把画像（列名/类型/空值率/统计摘要/样本行）喂给推理模型
-     → v2.3 由 DeepSeek 选择工具；v2.4 由 TaskContract/Planner 形成受控计划
+     → TaskContract/确定性提纲建立受控任务边界，同一个 Agent 选择工具
      → 调用确定性分析工具执行计算；Code Interpreter 仅在独立安全项目通过后作为补充
      → gen_chart 产出 ECharts JSON + insight_summary 生成中文解读
      → 报告组装并持久化（图表绑定底层 data_ref）
@@ -362,7 +373,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | LLM 返回非法 JSON | schema 校验拦截 → 带错误重试；关键 Task/工具失败则进入 blocked/failed，不得降级为无证据的成功文本 |
 | 工具调用失败 | 捕获异常，向模型回传错误供其重规划；关键工具失败则中止并提示 |
 | 代码执行超时/异常 | 独立安全项目通过后由沙箱强制取消并审计；当前 Code Interpreter 不注册到 Agent |
-| 工具/MCP 不可用 | 熔断并由 Replanner 选择备选；成功标准无法满足时明确 blocked/failed |
+| 工具/MCP 不可用 | 熔断并把稳定错误返回同一个 Agent 选择备选；成功标准无法满足时明确 blocked/failed |
 | 大表 OOM | 超阈值自动切 DuckDB 分块；仍超限则提示用户缩小范围 |
 | 检索无结果（F1） | 明确告知"知识库无相关内容"，不强行编造 |
 
@@ -375,7 +386,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | 层 | 选型 |
 |----|------|
 | 前端 | React + ECharts + SSE + **zustand**（v2.2 拍板，状态管理） |
-| 编排 | 自研统一类型化状态机、混合 Planner、依赖图 Executor、Replanner、Verifier 和 Checkpoint；Dify 已放弃 |
+| 编排 | 自研统一类型化状态机、确定性任务提纲、单一 Agent 工具反馈循环、Verifier 和 Checkpoint；Dify 已放弃 |
 | 持久层 | SQLite v7：项目/对话/消息/工件、Task/Event/Plan/Evidence/Checkpoint、Memory/Compaction/LineageAnchor/ApprovalRecord |
 | 复杂多步 | v2.4 阶段 2 已完成；是否采用 LangGraph 仍由复杂度和评测收益决定 |
 | 核心推理 | DeepSeek-V3 / DeepSeek-R1 |
@@ -425,8 +436,9 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 2. **v2.4 Agent 控制面 — 工程完成、G7 人工部分取消且未通过**：阶段 1 已验收，SQLite v3、TaskRun/
    Contract/Event/Snapshot/Invocation/Evidence、确定性 Verifier、策略/审计/trace、
    MCP 单源 adapter/Gateway、双传输探针、五服务 Compose 与真实全栈 E2E 门禁已落地。
-   阶段 2A 已实现混合 Planner、TaskPlan/TaskStep 版本、能力白名单和计划完成校验；
-   2B 已负责依赖图重规划，2C 已负责任务控制/恢复，2D 已完成 MCP Gateway 规范执行；
+   阶段 2A/2B 曾实现混合 Planner 与依赖图重规划，2026-08-27 已收敛为确定性提纲与
+   单一 Agent 反馈循环；TaskPlan/TaskStep 版本、能力白名单、计划完成校验、任务控制/恢复
+   和 MCP Gateway 规范执行继续保留；
    2E 已交付五服务 Compose。阶段 2 的 20×3 真实行为对照和最新 Docker runner 均已通过；
    现有场景全部为商业语境；代表性场景、人工签字与 ADR 接受已从收尾范围取消，不能把
    自动门禁解释为 G7 完整通过。
@@ -471,7 +483,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 ## 12. 待确认事项（2026-07-21 更新）
 
 - 阶段 0 后是否需要引入 LangGraph；默认先扩展自研类型化状态机。
-- Planner/Verifier 主模型、fallback、结构化输出修复和评测门槛。
+- 离线语义 Verifier 是否存在足够收益；当前评测为 NO_GO，生产保持确定性验证。
 - Code Interpreter 的隔离实现与部署边界。
 - 受限 SQL 的数据源、方言、权限和小群体保护标准。
 - 内部数据源清单、身份体系、行列级权限和数据留存规则。
@@ -500,7 +512,7 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 | 2 | 向量库 | **Milvus Lite 起步**（`pip install pymilvus` 内嵌、零部署，约百万向量内够用）；不够时换 Milvus standalone，同一 pymilvus API 换 URI 即迁移，**代码不动** |
 | 3 | query_dataset（历史决策） | v2.3 已完成结构化 transform/aggregate；“自由 SQL 永久不做”已由第 15 章替代为独立受限 SQL 安全项目，安全评审前仍禁止进入生产 Agent |
 | 4 | 推理 device | **必须是配置项（auto / cpu / cuda）**：本地开发用 CPU 或本地 GPU，部署到公司 GPU 服务器自动用 GPU，**切换不改代码** |
-| 5 | 红线1 修订 | **助手通道例外（保守版）**：仅 `/chat` 助手通道免除白名单门控——允许把数据画像、统计工具完整结果、较多样本行直接给模型；列级 `EXCLUDE` 规则仍生效；**原有端点（analyze/stats/report）的门控行为完全不变**。详见 13.5 |
+| 5 | 红线1 修订 | **统一对话通道例外（保守版）**：`/chat` 允许把数据画像、统计工具完整结果、较多样本行直接给模型；列级 `EXCLUDE` 规则仍生效。旧 analyze/stats/report 生成端点已删除。详见 13.5 |
 | 6 | session | ~~内存版 v1~~ **v2.2 修订（2026-07-15 拍板）**：**SQLite 持久 + 内存热层**——侧边栏历史对话是产品硬需求，纯内存撑不住；对话/消息/工件持久化在 SQLite（14.6），运行态上下文从持久层重建 + 内存 LRU 热缓存。**上 Redis 的触发条件不变**：多 worker / 多实例部署 |
 
 ### 13.3 架构与编排
@@ -528,19 +540,19 @@ MCP 协议以固定版本的官方 SDK 和符合性测试为准。所有现有�
 
 | 现有物 | 处置 |
 |--------|------|
-| `kb_qa` + `/kb/query` | **保留共存**：纯文档问答轻端点；检索升级后自动受益（同一 `HybridRetriever`）；助手稳定后再评估是否下线 |
+| Agent `kb_search` | 唯一知识问答入口；`/kb/query` 与 `kb_qa` 已删除，`/kb/ingest` 继续负责文档摄入 |
 | `packages/rag` | bge-m3、reranker、Milvus Lite/Standalone、阈值评测与生命周期均已落地；v2.5 接入版本化领域语义层 |
 | `/chat` 路由 + 前端 `ChatPanel.tsx` | v2.3 主入口已落地；v2.4 扩展任务事件，v2.5 增加完整干预交互 |
-| `stats_interpreter` 门控 | **原统计端点链路不动**；助手通道走自己的上下文组装（13.5）。门控代码保留，供未来敏感部署复用 |
+| 统计解读 | 统计工具保持零 LLM；同一个 Agent 仅根据已验证工具结果生成中文解读 |
 | `packages/session` | SQLite v7 工作区、LRU、Task/Event/Evidence/Checkpoint、Memory、compaction、coref、lineage 与 ApprovalRecord 已落地 |
 
 ### 13.5 红线1 修订：助手通道例外（保守版，已拍板）
 
-**背景**：红线1（数据与推理分离）当初按"数据可能敏感"的谨慎假设建立。实际部署为**公司局域网 + 数据不敏感**，故放松——但采用**保守版**：例外只开给助手通道，原有端点行为一字不动。
+**背景**：红线1（数据与推理分离）当初按"数据可能敏感"的谨慎假设建立。实际部署为**公司局域网 + 数据不敏感**，故对统一对话通道采用保守例外。
 
 - **助手通道（/chat）**：允许把数据画像、统计工具**完整结果**（非白名单摘要）、较多样本行（如 20~50 行）直接给模型；超长结果只做 token 截断（如异常点列表截前 50 并注明），**动机是 token 经济而非安全**。列级 `EXCLUDE` 显式规则**仍生效**（配置驱动、默认全开、保住未来收紧的口子）。
-- **原有端点（/analyze、/stats/*、/analyze/report）**：白名单门控、脱敏、小分组保护**完全不变**。
-- **两条禁改**（写给后续开发与 AI 会话）：① 不得把助手通道"修"回严格门控；② 不得以助手例外为由放松原有端点。
+- 旧 `/analyze`、`/stats/*` 和报告生成 POST 已删除，不存在第二套模型执行链。
+- **两条禁改**（写给后续开发与 AI 会话）：① 不得把助手通道"修"回严格门控；② 不得以助手例外为由放松工具、权限和 Evidence 门禁。
 - **红线2 不放松**：数值必来自工具，任何场景（含助手）都守。
 - 助手发往模型的数据物料仍整体打结构化日志（可审计）。
 
@@ -732,14 +744,12 @@ Artifact     {id, conversation_id, message_id, type, payload_json|file_ref,
 
 ### 15.1 目标
 
-将 v2.3 的反应式工具循环升级为目标驱动控制面：Agent 理解目标、必要时澄清、形成可修订计划、执行受控工具、记录 Observation/Evidence，并由 Verifier 而不是“模型停止调用工具”决定任务是否完成。
+在 v2.3 的工具循环外增加目标驱动控制面：Agent 理解目标、必要时澄清、形成可修订任务提纲、执行受控工具、记录 Observation/Evidence，并由 Verifier 而不是“模型停止调用工具”决定任务是否完成。任务提纲由本地确定性代码生成，不再额外调用规划模型。
 
 ```text
-Goal Interpreter → TaskContract → Planner → Executor → Observation
-        ↑                                           ↓
-Memory/Context ← Finalizer ← Verifier ← Claim/Evidence
-                       ↑          │
-                       └ Replanner┘
+Goal Interpreter → TaskContract → Deterministic Outline → Agent ↔ Tool Observation
+        ↑                                                        ↓
+Memory/Context ← Finalizer ← Verifier ← Claim/Evidence ← Artifact
 ```
 
 ### 15.2 核心对象
@@ -757,15 +767,16 @@ Memory/Context ← Finalizer ← Verifier ← Claim/Evidence
 |---|---|---|
 | 0. 前置验证与协议 | 混合 Planner/Verifier spike、TaskContract/数据模型、SSE、schema 迁移、不变量责任矩阵、行为基线 | 主模型/fallback/隐藏集可重复评测；技术路线和责任边界评审通过 |
 | 1. 验证驱动结束 | 最小 AgentState、Claim/Evidence、确定性 Verifier、TaskEvent/Checkpoint、幂等、策略/审计骨架 | 固定回归集无虚假 Artifact 完成和无依据数值 Claim；旧接口无回归 |
-| 2. 结构化计划与重规划 | Goal/Planner/Executor/Verifier/Replanner/Finalizer、工具能力契约、澄清、暂停/恢复/取消 | 多步骤任务能按 Observation 改计划；恢复不重复步骤；终态可追溯 |
+| 2. 结构化计划与重规划（历史交付） | 曾实现 Goal/Planner/Executor/Verifier/Replanner/Finalizer；现已收敛为确定性提纲和单 Agent 反馈循环 | 多步骤任务可按 Observation 继续选择工具；恢复不重复步骤；终态可追溯 |
 
-阶段 2A 已交付 Goal 后的混合 Planner、不可变 TaskPlan/TaskStep 版本、能力到工具的
-fail-closed 解析、步骤状态绑定和未完成计划拒绝；阶段 2B 已交付 ready frontier
-依赖图 Executor、失败 Observation Replanner、跨版本步骤保护和条件 skip；任务控制与
-Checkpoint 恢复已按 2C 实现；执行宿主丢失后会校验事件游标、计划版本、已完成步骤和
-unknown invocation，再在同一 run 上继续未完成步骤。
+阶段 2A/2B 的历史实现曾包含混合 Planner、ready-frontier 工具限制和 Observation
+Replanner；2026-08-27 收尾审查已将其简化为 fast/template 确定性任务提纲。TaskPlan/
+TaskStep 仍作为不可变进度与恢复记录，但同一个 Agent 可以从冻结目录选择所有可用工具，
+失败 Observation 直接回到该 Agent。Checkpoint 恢复仍会校验事件游标、提纲版本、已完成
+步骤和 unknown invocation，再在同一 run 上继续。
 
-Planner 采用三条统一输出路径：简单任务确定性快速路径、已知任务族模板路径、开放多步骤 LLM 路径。Verifier 以确定性后置条件为主，语义模型只判断覆盖性等软条件，并返回 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
+Verifier 以确定性 Artifact、Evidence、Claim 和预算后置条件为准，并返回
+`PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`；语义 Verifier 评测未通过，生产保持禁用。
 
 图表和报告正则在阶段 1 先与通用后置条件影子运行；回归等价后才能降级和删除。暂停/恢复必须同时具备 run_id、Checkpoint、取消令牌和工具幂等性。
 

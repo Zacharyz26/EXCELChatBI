@@ -202,17 +202,17 @@ model_audit="$(
 printf '%s\n' "$model_audit" > .data/e2e/model-fixture-audit.json
 MODEL_AUDIT_JSON="$model_audit" node -e '
 const audit = JSON.parse(process.env.MODEL_AUDIT_JSON);
-if (audit.planner_calls < 1) {
-  throw new Error("4D branch did not reach the LLM Planner boundary");
+if (audit.agent_stream_calls < 1) {
+  throw new Error("requests did not reach the single Agent model boundary");
 }
-if (audit.feedback_marker_seen_in_planner !== true) {
-  throw new Error("bounded parent feedback did not reach the LLM Planner request");
+if (audit.feedback_marker_seen_in_agent !== true) {
+  throw new Error("bounded parent feedback did not reach the Agent request");
 }
 if (audit.branch_profile_tool_calls !== 1) {
   throw new Error(`branch profile tool was requested ${audit.branch_profile_tool_calls} times`);
 }
-if (audit.parallel_tool_batches !== 1) {
-  throw new Error(`6A parallel batch was requested ${audit.parallel_tool_batches} times`);
+if (audit.multi_tool_batches !== 1) {
+  throw new Error(`6A multi-tool batch was requested ${audit.multi_tool_batches} times`);
 }
 if (audit.hypothesis_anomaly_tool_calls !== 1) {
   throw new Error(`6C anomaly hypothesis was requested ${audit.hypothesis_anomaly_tool_calls} times`);

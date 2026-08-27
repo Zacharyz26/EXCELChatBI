@@ -1,7 +1,7 @@
-"""v2.4 阶段 2A 的生产混合 Planner。
+"""为生产 Agent 生成轻量、确定性的任务提纲。
 
-fast/template 路径确定性地产生与 LLM 路径相同的 TaskPlan；LLM 只看到经过
-最小化的数据集结构、TaskContract、能力目录和 Artifact 摘要，不接触原始行。
+提纲只负责澄清和界面可观察性；实际工具选择由同一次 Agent function-calling
+完成，不再在用户请求前增加一轮独立模型规划。
 """
 
 from __future__ import annotations
@@ -16,17 +16,13 @@ from packages.session.models import Artifact, Dataset, JsonObject
 
 from apps.orchestrator.agent_tools import AgentToolRegistry
 from apps.orchestrator.control.contracts import TaskContract
-from apps.orchestrator.control.planner_contract import (
+from apps.orchestrator.control.task_plan_contract import (
     PlanValidation,
     validate_task_plan,
 )
-from apps.orchestrator.control.planner_prompt import (
-    PROMPT_VERSION,
-    PlannerGateway,
-    generate_plan,
-)
 
-PlannerRoute = Literal["fast", "template", "llm"]
+OutlineRoute = Literal["fast", "template"]
+PROMPT_VERSION = "deterministic-outline-v1"
 
 _ARTIFACT_CAPABILITY = {
     "profile": "data.profile",
@@ -74,11 +70,10 @@ _RECOMPUTE_TOKENS = ("重新分析", "再分析", "更新分析", "重算", "重
 
 
 @dataclass(frozen=True, slots=True)
-class ProductionPlan:
-    """一次生产规划的计划、路由和可持久审计元数据。"""
+class TaskOutline:
+    """一次确定性任务提纲及其可持久审计元数据。"""
 
-    route: PlannerRoute
-    requested_route: PlannerRoute
+    route: OutlineRoute
     plan: JsonObject
     validation: PlanValidation
     audit: JsonObject
@@ -87,36 +82,28 @@ class ProductionPlan:
     def capabilities(self) -> set[str]:
         """返回计划步骤声明的能力集合。"""
         return {
-            str(item["capability"])
-            for item in cast(list[JsonObject], self.plan.get("steps", []))
+            str(item["capability"]) for item in cast(list[JsonObject], self.plan.get("steps", []))
         }
 
 
-async def create_production_plan(
+def create_task_outline(
     *,
     user_text: str,
     contract: TaskContract,
     datasets: list[Dataset],
     artifacts: list[Artifact],
     registry: AgentToolRegistry,
-    gateway: PlannerGateway | None,
     blocking_clarification: JsonObject | None,
-    temperature: float = 0.0,
     max_steps: int = 12,
-    require_available_capabilities: bool = True,
     capability_catalog: list[JsonObject] | None = None,
-) -> ProductionPlan:
-    """选择 fast/template/LLM 路径，生成并确定性验证统一 TaskPlan。"""
-    context = build_planner_context(datasets=datasets, artifacts=artifacts)
+) -> TaskOutline:
+    """生成并校验不调用模型的 fast/template TaskPlan。"""
+    context = build_outline_context(datasets=datasets, artifacts=artifacts)
     effective_catalog = (
-        registry.capability_catalog()
-        if capability_catalog is None
-        else capability_catalog
+        registry.capability_catalog() if capability_catalog is None else capability_catalog
     )
     capabilities = {
-        str(item["name"])
-        for item in effective_catalog
-        if item.get("allowed") is not False
+        str(item["name"]) for item in effective_catalog if item.get("allowed") is not False
     }
     required_capabilities = criterion_capabilities(contract, artifacts=artifacts)
 
@@ -128,58 +115,20 @@ async def create_production_plan(
             criterion_capabilities=required_capabilities,
             max_steps=max_steps,
         )
-        return ProductionPlan(
+        return TaskOutline(
             route="fast",
-            requested_route="fast",
             plan=plan,
             validation=validation,
-            audit=_deterministic_audit("fast", plan, reason="blocking_clarification"),
+            audit=_deterministic_audit("fast", plan),
         )
 
-    requested_route = choose_planner_route(user_text, context)
-    if requested_route == "llm" and gateway is not None:
-        generated = await generate_plan(
-            gateway,
-            planning_request=user_text,
-            contract=contract.to_dict(),
-            context=context,
-            capability_catalog=effective_catalog,
-            observations=[],
-            criterion_capabilities=required_capabilities,
-            temperature=temperature,
-            max_steps=max_steps,
-        )
-        return ProductionPlan(
-            route="llm",
-            requested_route=requested_route,
-            plan=generated.plan,
-            validation=generated.validation,
-            audit={
-                "route": "llm",
-                "requested_route": requested_route,
-                "prompt_version": generated.prompt_version,
-                "request_hash": generated.request_hash,
-                "response_hash": generated.response_hash,
-                "model": generated.model,
-                "prompt_tokens": generated.prompt_tokens,
-                "completion_tokens": generated.completion_tokens,
-                "latency_ms": round(generated.latency_ms, 3),
-                "cost": generated.cost,
-                "cost_currency": generated.cost_currency,
-                "pricing_effective_date": generated.pricing_effective_date,
-                "repaired": generated.repaired,
-            },
-        )
-
-    route: PlannerRoute = (
-        "template" if requested_route == "llm" and gateway is None else requested_route
-    )
-    plan = build_deterministic_plan(
+    route = choose_outline_route(user_text, context)
+    plan = build_deterministic_outline(
         user_text=user_text,
         context=context,
         route=route,
         available_capabilities=capabilities,
-        require_available_capabilities=require_available_capabilities,
+        require_available_capabilities=False,
     )
     validation = validate_task_plan(
         plan,
@@ -188,28 +137,17 @@ async def create_production_plan(
         max_steps=max_steps,
     )
     if not validation.valid:
-        raise ValueError(
-            "确定性 Planner 生成了非法计划: " + "; ".join(validation.issues)
-        )
-    reason = "llm_gateway_unavailable" if requested_route == "llm" else "deterministic"
-    return ProductionPlan(
+        raise ValueError("确定性任务提纲生成了非法计划: " + "; ".join(validation.issues))
+    return TaskOutline(
         route=route,
-        requested_route=requested_route,
         plan=plan,
         validation=validation,
-        audit=_deterministic_audit(
-            route,
-            plan,
-            reason=reason,
-            requested_route=requested_route,
-        ),
+        audit=_deterministic_audit(route, plan),
     )
 
 
-def build_planner_context(
-    *, datasets: list[Dataset], artifacts: list[Artifact]
-) -> JsonObject:
-    """构造不含原始行、文件路径和 Artifact 正文的 Planner 上下文。"""
+def build_outline_context(*, datasets: list[Dataset], artifacts: list[Artifact]) -> JsonObject:
+    """构造不含原始行、文件路径和 Artifact 正文的任务提纲上下文。"""
     dataset_items: list[JsonObject] = []
     for dataset in datasets:
         raw_columns = dataset.profile.get("columns")
@@ -235,8 +173,7 @@ def build_planner_context(
         safe_params = {
             key: params[key]
             for key in _SAFE_ARTIFACT_PARAM_KEYS
-            if key in params
-            and isinstance(params[key], str | int | float | bool)
+            if key in params and isinstance(params[key], str | int | float | bool)
         }
         artifact_items.append(
             {
@@ -260,7 +197,7 @@ def build_planner_context(
     }
 
 
-def choose_planner_route(user_text: str, context: JsonObject) -> PlannerRoute:
+def choose_outline_route(user_text: str, context: JsonObject) -> OutlineRoute:
     """按可观察请求复杂度选择路由，不读取评测标签。"""
     request = user_text.lower()
     datasets = cast(list[JsonObject], context.get("datasets") or [])
@@ -270,15 +207,15 @@ def choose_planner_route(user_text: str, context: JsonObject) -> PlannerRoute:
         for column in cast(list[object], dataset.get("columns") or [])
     ]
     if context.get("knowledge_conflicts"):
-        return "llm"
+        return "template"
     if "深入分析" in request or "替代解释" in request:
-        return "llm"
+        return "template"
     if (
         ("先" in request and ("最后" in request or "然后" in request))
         or ("排除" in request and ("重新" in request or "再" in request))
         or ("关系" in request and ("不同" in request or "比较" in request))
     ):
-        return "llm"
+        return "template"
     if context.get("observations") or context.get("artifacts"):
         return "template"
     if len([column for column in columns if "时间" in column or "日期" in column]) > 1:
@@ -308,17 +245,15 @@ def choose_planner_route(user_text: str, context: JsonObject) -> PlannerRoute:
     return "fast"
 
 
-def build_deterministic_plan(
+def build_deterministic_outline(
     *,
     user_text: str,
     context: JsonObject,
-    route: PlannerRoute,
+    route: OutlineRoute,
     available_capabilities: set[str],
     require_available_capabilities: bool = True,
 ) -> JsonObject:
     """为已知任务族构造最小、可验证的 fast/template 计划。"""
-    if route == "llm":
-        raise ValueError("LLM 路径不能调用确定性计划构造器")
     requested = _requested_capabilities(user_text, context)
     unavailable = [item for item in requested if item not in available_capabilities]
     if unavailable and require_available_capabilities:
@@ -336,34 +271,24 @@ def build_deterministic_plan(
             "purpose": _capability_purpose(capability),
             "capability": capability,
             "dependencies": dependencies,
-            "expected_evidence": [
-                f"绑定当前 run 与数据集版本的 {capability} Evidence"
-            ],
+            "expected_evidence": [f"绑定当前 run 与数据集版本的 {capability} Evidence"],
             "completion_conditions": [_capability_condition(capability)],
             "fallback": [
                 {
                     "when": "能力调用失败或后置条件不成立",
                     "action": (
-                        "correct_parameters"
-                        if capability.startswith("stats.")
-                        else "retry"
+                        "correct_parameters" if capability.startswith("stats.") else "retry"
                     ),
                 }
             ],
         }
         steps.append(step)
         previous = logical_id
-    assumptions = (
-        ["异常检测方法与阈值必须在结论中披露"]
-        if "异常" in user_text
-        else []
-    )
+    assumptions = ["异常检测方法与阈值必须在结论中披露"] if "异常" in user_text else []
     return {
         "schema_version": 1,
         "summary": (
-            "无需工具，直接生成受约束答复。"
-            if not steps
-            else "按已知任务族执行最小可验证步骤。"
+            "无需工具，直接生成受约束答复。" if not steps else "按已知任务族执行最小可验证步骤。"
         ),
         "steps": steps,
         "assumptions": assumptions,
@@ -410,17 +335,14 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
     if "异常" in request:
         add("stats.anomaly")
     requests_transform = (
-        "排除" in request
-        or "过滤" in request
-        or ("清洗" in request and "清洗建议" not in request)
+        "排除" in request or "过滤" in request or ("清洗" in request and "清洗建议" not in request)
     )
     if requests_transform:
         add("dataset.transform")
     dataset_mentions = sum(
         1
         for dataset in cast(list[JsonObject], context.get("datasets") or [])
-        if str(dataset.get("filename", "")) in user_text
-        or str(dataset.get("ref", "")) in user_text
+        if str(dataset.get("filename", "")) in user_text or str(dataset.get("ref", "")) in user_text
     )
     if any(
         token in request
@@ -431,12 +353,10 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
     ):
         add("dataset.join.preflight")
         mentions_preflight = any(
-            token in request
-            for token in ("预检", "风险评估", "评估风险", "可行性", "先看看能否")
+            token in request for token in ("预检", "风险评估", "评估风险", "可行性", "先看看能否")
         )
         explicitly_executes = any(
-            token in request
-            for token in ("执行", "生成关联", "创建关联", "完成关联", "合并数据集")
+            token in request for token in ("执行", "生成关联", "创建关联", "完成关联", "合并数据集")
         )
         preflight_only = mentions_preflight and not explicitly_executes
         if not preflight_only:
@@ -465,9 +385,13 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("stats.forecast")
     elif any(token in request for token in ("趋势", "随时间", "按月", "按周", "按季度")):
         add("stats.trend")
-    if not contribution_requested and not group_compare_requested and any(
-        token in request
-        for token in ("汇总", "合计", "平均", "各地区", "各产品", "多少", "转化率", "复购率")
+    if (
+        not contribution_requested
+        and not group_compare_requested
+        and any(
+            token in request
+            for token in ("汇总", "合计", "平均", "各地区", "各产品", "多少", "转化率", "复购率")
+        )
     ):
         add("data.aggregate")
     if any(token in request for token in ("图", "可视化", "chart", "plot")):
@@ -483,14 +407,11 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
 
     artifacts = cast(list[JsonObject], context.get("artifacts") or [])
     artifact_types = {
-        str(item.get("type"))
-        for item in artifacts
-        if isinstance(item.get("type"), str)
+        str(item.get("type")) for item in artifacts if isinstance(item.get("type"), str)
     }
     reuses_artifacts = any(token in request for token in _ARTIFACT_REUSE_TOKENS)
-    revises_chart = (
-        "chart" in artifact_types
-        and any(token in request for token in _CHART_REVISION_TOKENS)
+    revises_chart = "chart" in artifact_types and any(
+        token in request for token in _CHART_REVISION_TOKENS
     )
     recomputes_analysis = any(token in request for token in _RECOMPUTE_TOKENS)
 
@@ -505,11 +426,7 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
             result = [item for item in result if item != "visualization.chart"]
     if revises_chart and not recomputes_analysis:
         # “把第二张图改成按月”描述的是已有图表的展示参数，不是重新做趋势分析。
-        result = [
-            item
-            for item in result
-            if item not in {"stats.trend", "data.aggregate"}
-        ]
+        result = [item for item in result if item not in {"stats.trend", "data.aggregate"}]
         if "visualization.chart" not in result:
             result.append("visualization.chart")
 
@@ -586,29 +503,14 @@ def _clarification_plan(clarification: JsonObject) -> JsonObject:
 
 
 def _deterministic_audit(
-    route: PlannerRoute,
+    route: OutlineRoute,
     plan: JsonObject,
-    *,
-    reason: str,
-    requested_route: PlannerRoute | None = None,
 ) -> JsonObject:
-    encoded = json.dumps(
-        plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
+    encoded = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {
         "route": route,
-        "requested_route": requested_route or route,
         "prompt_version": PROMPT_VERSION,
         "response_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
-        "model": None,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "latency_ms": 0.0,
-        "cost": None,
-        "cost_currency": None,
-        "pricing_effective_date": None,
-        "repaired": False,
-        "fallback_reason": reason if reason != "deterministic" else None,
     }
 
 

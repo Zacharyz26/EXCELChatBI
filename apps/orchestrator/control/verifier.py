@@ -91,6 +91,23 @@ def verify_completion(
                     criterion_id=criterion.criterion_id,
                 )
             )
+        if criterion.artifact_type == "chart" and criterion.artifact_dimensions:
+            covered_dimensions = {
+                dimension
+                for item in matching
+                if _valid_artifact(item, criterion.artifact_format)
+                if (dimension := _chart_dimension(item)) is not None
+            }
+            for dimension in criterion.artifact_dimensions:
+                if dimension in covered_dimensions:
+                    continue
+                issues.append(
+                    VerificationIssue(
+                        code="missing_chart_dimension_artifact",
+                        message=f"缺少维度“{dimension}”的可验证图表工件",
+                        criterion_id=criterion.criterion_id,
+                    )
+                )
 
     evidence_by_invocation = {item.invocation_id for item in evidence}
     evidence_ids = {item.evidence_id for item in evidence}
@@ -309,6 +326,14 @@ def _valid_artifact(artifact: Artifact, required_format: str | None) -> bool:
         if Path(artifact.file_ref).suffix.lower() != ".pdf":
             return False
     return _valid_file(artifact.file_ref)
+
+
+def _chart_dimension(artifact: Artifact) -> str | None:
+    """Read the governed x-axis dimension from persisted gen_chart arguments."""
+    params = artifact.params or {}
+    encoding = params.get("encoding")
+    dimension = encoding.get("x") if isinstance(encoding, dict) else None
+    return dimension.strip() if isinstance(dimension, str) and dimension.strip() else None
 
 
 def _last_unrecovered_execution_failure(

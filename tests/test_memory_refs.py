@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import packages.session.memory_refs as memory_refs_module
 import pytest
 from packages.governance.audit import AuditEvent
 from packages.governance.permissions import Principal
@@ -373,7 +375,10 @@ def test_ineligible_mapping_fails_closed(
     assert result.targets == ()
 
 
-def test_conflict_and_missing_target_fail_closed(tmp_path: Path) -> None:
+def test_conflict_and_missing_target_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session, memories, project_id, conversation_id, refs, artifact_id = _workspace(tmp_path)
     active = _remember_mapping(
         session,
@@ -423,6 +428,16 @@ def test_conflict_and_missing_target_fail_closed(tmp_path: Path) -> None:
         memories,
         audit_recorder=lambda _event: None,
     )
+
+    created_at = datetime.fromisoformat(active.created_at.replace("Z", "+00:00"))
+
+    class _ClockRollback(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            del tz
+            return created_at.astimezone(UTC) - timedelta(microseconds=1)
+
+    monkeypatch.setattr(memory_refs_module, "datetime", _ClockRollback)
 
     conflicted = resolver.resolve(
         "使用确认图",

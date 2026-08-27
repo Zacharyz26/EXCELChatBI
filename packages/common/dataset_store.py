@@ -2,7 +2,7 @@
 
 红线1 的支撑：原始/结构化数据只在服务端以 `dataset_ref` 引用，LLM 不直接读。
 本切片用本地 parquet（DuckDB 原生读写，无需 pyarrow）代替 MinIO；
-生产环境切 MinIO / 对象存储（留 TODO）。
+当前正式交付边界是单机本地存储，不声明尚未接线的对象存储能力。
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ def save_dataframe(df: pd.DataFrame) -> str:
 def load_dataframe(dataset_ref: str) -> pd.DataFrame:
     """按 dataset_ref 读回 DataFrame。
 
-    TODO（大表）：当行数超过 large_table_row_threshold 时，应改为 DuckDB 分块/下推
-    聚合，避免整表入内存；当前切片直接整表读回。
+    上传阶段已经按 large_table_row_threshold 拒绝超限工作簿；该函数只读取
+    单机技术预览允许范围内的数据。聚合类操作使用独立 DuckDB 下推函数。
 
     Args:
         dataset_ref: 数据集引用。

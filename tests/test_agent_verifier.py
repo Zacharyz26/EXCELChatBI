@@ -11,17 +11,22 @@ from packages.session.task_models import EvidenceRecord, TaskStepRecord, ToolInv
 
 
 def _artifact(
-    *, artifact_type: str, payload: dict[str, object], file_ref: str | None = None
+    *,
+    artifact_type: str,
+    payload: dict[str, object],
+    file_ref: str | None = None,
+    artifact_id: str = "artifact-1",
+    params: dict[str, object] | None = None,
 ) -> Artifact:
     return Artifact(
-        id="artifact-1",
+        id=artifact_id,
         conversation_id="conversation-1",
         message_id="message-1",
         type=artifact_type,
         payload=payload,
         file_ref=file_ref,
         source_tool="generate_report" if artifact_type == "report" else "gen_chart",
-        params={},
+        params=params or {},
         dataset_ref=None,
         created_at="now",
     )
@@ -46,6 +51,52 @@ def test_model_stopping_does_not_pass_without_required_chart() -> None:
 
     assert result.verdict == "NEEDS_ACTION"
     assert result.issues[0].code == "missing_chart_artifact"
+
+
+def test_chart_contract_requires_coverage_for_every_requested_dimension() -> None:
+    contract = build_minimal_contract(
+        run_id="run-chart-coverage",
+        user_text="为各维度生成图表",
+        chart_required=True,
+        report_required=False,
+        pdf_required=False,
+        chart_dimensions=("地区", "产品"),
+    )
+    region = _artifact(
+        artifact_type="chart",
+        payload={"option": {"series": [{"data": [1]}]}},
+        params={"encoding": {"x": "地区", "y": "销售额", "agg": "sum"}},
+    )
+
+    partial = verify_completion(
+        contract=contract,
+        final_text="图表已生成。",
+        artifacts=[region],
+        invocations=[],
+        evidence=[],
+    )
+
+    assert partial.verdict == "NEEDS_ACTION"
+    missing = [
+        issue for issue in partial.issues if issue.code == "missing_chart_dimension_artifact"
+    ]
+    assert [issue.message for issue in missing] == ["缺少维度“产品”的可验证图表工件"]
+
+    product = _artifact(
+        artifact_type="chart",
+        artifact_id="artifact-2",
+        payload={"option": {"series": [{"data": [2]}]}},
+        params={"encoding": {"x": "产品", "y": "销售额", "agg": "sum"}},
+    )
+    complete = verify_completion(
+        contract=contract,
+        final_text="图表已生成。",
+        artifacts=[region, product],
+        invocations=[],
+        evidence=[],
+    )
+
+    assert complete.verdict == "PASS"
 
 
 def test_model_stopping_does_not_pass_with_pending_production_plan_step() -> None:

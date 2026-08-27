@@ -7,7 +7,7 @@
 > [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。文档入口和现行/历史边界见
 > [`docs/README.md`](./docs/README.md)。
 
-> 文档状态：2026-08-26。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
+> 文档状态：2026-08-27。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
 > 2A–2E、v2.5 阶段 3–6，以及 C1“启动依赖契约”和 C2“未实现工具撤出目录”均已工程完成。
 > 2026-08-24 已在 WSL2/CPU 上实测完整 BGE-M3 + BGE reranker + Docker Milvus
 > Standalone：API/Web readiness、2 文档 6 片段重建和 semantic 门禁均通过。
@@ -87,6 +87,21 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 `waiting_user`，无依据数字和知识来源会在交付前重验或确定性修复；上传源文件、临时截图、
 孤儿数据和项目报告均有清理路径。根 Compose、生产认证登录页和无 Mock 全栈 E2E 也已落地。
 
+2026-08-27 的收尾审查删除了请求前的独立 LLM Planner 和失败后的 LLM Replanner。任务提纲
+现在由本地确定性规则即时生成，仅用于澄清、进度和审计；所有冻结且可用的工具都交给同一次
+Agent function-calling，工具错误直接返回该 Agent 修正。由 Schema、权限、预算、数据版本、
+Join 前置条件、Evidence/Artifact 与最终 Verifier 继续承担硬约束。旧的单次分析/统计/知识问答
+HTTP 入口和未接线占位模块也已删除，Web 只保留统一对话入口及报告下载。
+
+> 2026-08-27 修复备注：数值 Claim 与 Evidence 的匹配现已支持确定性的显示舍入，以及
+> `%`、`千`、`万`、`亿` 明确单位换算，精确值仍优先，避免浮点尾差或常规展示格式导致真实
+> 结论被误删。TaskRun 完成边界现会绑定 Agent 实际选择的下游工具步骤、将已被下游成功结果
+> 覆盖的前置提纲步骤显式记为 `skipped`，并由 Verifier、普通状态迁移和控制迁移共同阻止
+> “运行已完成但步骤仍 pending”。若仍有独立步骤未执行，同一个 Agent 会获得一次有界修复轮次，
+> 重试后仍未收敛才失败关闭。本地相关回归为 65 项通过，Ruff、MyPy 和 `git diff --check`
+> 通过；完整 `test_agent_loop.py` 在当前 WSL 测试环境仍有既有用例停在 TaskRun 创建前的
+> `run_in_threadpool(reference_resolver.resolve)`，因此本次不把整套 Agent 回归记为全绿。
+
 ### 已实现
 
 - Excel 上传、数据画像、质量概况和数据集血缘；
@@ -115,8 +130,8 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   非正文 lineage hash 及项目图 hash/计数；恢复漂移不允许服务就绪；
 - SQLite v6→v7 的历史 ApprovalRecord/幂等操作表继续兼容旧库，但公开审批 API、React
   审批交互和 Agent 审批暂停/消费路径已经撤下；当前生产目录没有需要人工审批的工具；
-- React 任务协作面板以真实 TaskRun 驱动，展示状态、版本、计划、步骤、Evidence 与工具审计，
-  支持结构化澄清、暂停/恢复/取消、计划不可变修订和单步重试；
+- React 任务协作面板以真实 TaskRun 驱动，展示状态、版本、任务提纲、步骤、Evidence 与工具审计，
+  支持结构化澄清、暂停/恢复/取消、提纲不可变修订和单步重试；
 - 单一 Agent 执行路径不再接受 `autonomy_mode`。写入型已注册工具与只读工具一样先经过
   capability、Schema、权限、预算、版本和后置条件校验，通过后自动执行；
 - 同一对话在进程内 RunManager 和 SQLite 原子创建层均只允许一个活动 TaskRun；重复消息会
@@ -143,10 +158,10 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 - 上传、parquet、报告和临时截图的受限生命周期清理；
 - 不使用网络 mock 的 Web→API→Excel→SQLite/parquet Playwright 全栈 E2E；
 - v2 生命周期 SSE 双发以及 `GET /agent/runs/{run_id}` 和事件游标读取接口；
-- fast/template/LLM 混合 Planner、持久化 TaskPlan/TaskStep、计划 capability 工具白名单、
-  步骤状态绑定和未完成计划的确定性拒绝；
-- 按持久化依赖图只开放当前 ready capability；可恢复失败生成不可变计划新版本，
-  已完成步骤和 Evidence 不被改写，零异常可显式跳过条件清洗；
+- fast/template 确定性任务提纲、持久化 TaskPlan/TaskStep 与步骤状态绑定；提纲不限制
+  Agent 的工具选择，也不在首次模型回复前增加额外模型调用；
+- 工具失败、Schema/角色门禁错误会作为结构化观察返回同一个 Agent，由它修正参数或收敛作答；
+  已完成步骤和 Evidence 不被改写，最终成功仍必须通过确定性 Verifier；
 - `/chat/stream` 后台 producer 与浏览器订阅解耦；断线不取消任务，澄清回答、
   pause/resume/cancel 和单步 retry 均使用项目写权限、`If-Match` 与幂等键；
 - pause/等待澄清会原子写入 Checkpoint；API 宿主丢失后可在同一 `run_id` 上恢复
@@ -168,7 +183,7 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   已确认 backend、frontend 与真实 Compose 三项作业全绿，项目已进入功能冻结；当前 WSL
   未启用 Docker Desktop 集成仅是本地环境限制，不再构成发布阻塞；
 
-- 依赖图调度、Observation 自动重规划、结构化澄清回答、单步重试、SSE 游标重连和
+- 任务提纲进度映射、同一 Agent 的 Observation 纠错、结构化澄清回答、单步重试、SSE 游标重连和
   服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁已通过真实 Compose CI；
 - 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
   未通过，生产保持禁用；
@@ -188,7 +203,7 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
   `knowledge-tools` 已提供按签名 project/subject/conversation 过滤的领域定义 Resource
   `list/read`，共享服务 token 不作为用户身份；
 - SQLite v9 为 TaskRun 原子保存内容寻址的 capability/tool 目录快照；新增工具只对新任务可见，
-  已冻结工具缺失、版本/契约或服务路由漂移时恢复失败关闭，Planner/Replanner 与模型工具集不读
+  已冻结工具缺失、版本/契约或服务路由漂移时恢复失败关闭，任务提纲与模型工具集不读
   运行中的新目录；
 - SQLite v10 为 TaskRun 原子固定共享预算、数据集版本绑定和取消树；独立只读幂等分支
   可有界并行，结果由 Host 按统一 Evidence Ledger 原子提交，不跨版本、不分裂预算；
@@ -214,11 +229,11 @@ Bearer token 映射到用户/租户/角色，项目、对话、数据集、任�
 ## Agent 演进路线
 
 ```text
-当前 v2.4 阶段 2E（代码与容器 CI 已完成，G7 人工部分取消且未通过）
-  理解目标 → 必要澄清 → 结构化计划 → 受控执行
-      ↑                      （依赖图 ready frontier）↓
-  持久状态 ← 最终交付 ← Verifier ← Evidence
-          ├── 不可变计划版本 ← Observation 重规划
+当前单一 Agent 收尾基线
+  理解目标 → 必要澄清 → 确定性任务提纲 → Agent function-calling
+      ↑                                      ↓ 工具结果/错误回传同一 Agent
+  持久状态 ← 最终交付 ← Verifier ← Evidence/Artifact
+          ├── 不可变提纲版本与步骤进度
           └── Checkpoint ← 暂停/断线/重启后同 run 恢复
 
 v2.5 阶段 3A（已完成，完整 CI 与 Docker 恢复门禁全绿）

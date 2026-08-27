@@ -1,9 +1,9 @@
 """报告工具实现（Markdown · WeasyPrint）——**纯组装，零 LLM**。
 
 铁律（防重蹈 R1）：本模块三个工具内**绝不调用任何 LLM/gateway**。报告中的中文
-解读一律由编排层调用 `stats_interpreter.interpret_stats`（已接入数据安全策略的唯一
-出口）在报告生成前产出，作为入参传入；这里只做把画像/图片/统计结果/解读文字拼装成
-Markdown 与 PDF 的纯格式化工作。报告里所有数字来自工具真实结果（红线2）。
+解读由同一个 Agent 基于已验证 Evidence 生成后作为入参传入；这里只做把画像、图片、
+统计结果和解读文字拼装成 Markdown 与 PDF 的纯格式化工作。报告里所有数字来自工具
+真实结果（红线2）。
 """
 
 from __future__ import annotations
@@ -81,17 +81,13 @@ def insight_summary(args: dict[str, Any]) -> dict[str, Any]:
     """把已生成的各段解读拼成"要点速览"Markdown（纯拼接，**不调 LLM**）。
 
     Args:
-        args: {items: [{label, text}]}。text 由 stats_interpreter 在编排层产出。
+        args: {items: [{label, text}]}。text 由 Agent 基于已验证 Evidence 产出。
 
     Returns:
         {summary_md}。
     """
     items: list[dict[str, Any]] = args["items"]
-    parts = [
-        f"- **{it.get('label', '')}**：{it['text']}"
-        for it in items
-        if it.get("text")
-    ]
+    parts = [f"- **{it.get('label', '')}**：{it['text']}" for it in items if it.get("text")]
     return {"summary_md": "\n".join(parts)}
 
 
@@ -140,6 +136,7 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 
 # ── 内部：Markdown 片段（纯格式化，数字来自入参的工具结果）──
+
 
 def _img_data_uri(image_path: str) -> str:
     """PNG 文件 → base64 data URI（内嵌，报告自包含）。"""
@@ -191,7 +188,7 @@ _KIND_LABEL = {
 
 
 def _stat_md(section: dict[str, Any]) -> list[str]:
-    """单个统计段：标题 + 结果表（数字来自工具）+ 解读文字（来自 stats_interpreter）。"""
+    """单个统计段：标题 + 结果表（数字来自工具）+ Agent 的 Evidence 解读。"""
     kind = section.get("kind", "")
     result = section.get("result", {})
     caption = section.get("caption") or _KIND_LABEL.get(kind, kind)

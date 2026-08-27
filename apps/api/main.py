@@ -16,13 +16,13 @@ from packages.session.task_store import TaskStore
 from apps.api.deps import (
     embedder_dep,
     kb_store_dep,
+    model_gateway_dep,
     reranker_dep,
     retriever_dep,
     session_store_dep,
 )
 from apps.api.routers import (
     agent_runs,
-    analyze,
     auth_config,
     chat,
     domain_definitions,
@@ -31,7 +31,6 @@ from apps.api.routers import (
     lineage,
     memories,
     report,
-    stats,
     upload,
     workspace,
 )
@@ -69,6 +68,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     # fail-fast：依赖、模型权重、Milvus 连接或现有集合加载失败时启动即报错，
     # 而不是服务看似正常、首次检索请求才 500。
+    model_gateway_dep()
     embedder_dep()
     reranker_dep()
     store = kb_store_dep()
@@ -101,8 +101,6 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(auth_config.router)
     app.include_router(upload.router)
-    app.include_router(analyze.router)
-    app.include_router(stats.router)
     app.include_router(report.router)
     app.include_router(kb.router)
     app.include_router(chat.router)

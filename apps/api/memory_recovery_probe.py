@@ -191,7 +191,7 @@ def seed_probe(
             "clarifications": [],
         },
         reason="compose_recovery_reference_probe",
-        planner={"route": "host-probe"},
+        outline_audit={"route": "host-probe"},
     )
     session.append_message(
         conversation_id=original.conversation_id,

@@ -253,13 +253,18 @@ function persistCollaborationTurn(
     message(assistantId, "assistant", "任务已进入协作安全边界。"),
   );
 
-  if (prompt.includes("选择指标")) {
+  if (prompt.includes("选择指标") || prompt.includes("补充说明")) {
+    const openAnswer = prompt.includes("补充说明");
     const waitingPayload = {
-      question_id: "metric",
-      question: "请选择本次分析指标：销售额或订单量。",
-      reason: "不同指标会改变分析结果。",
-      about: "metric",
-      answer_schema: { type: "string", minLength: 1 },
+      question_id: openAnswer ? "analysis_goal" : "metric",
+      question: openAnswer
+        ? "请补充本次分析想解决的业务问题。"
+        : "请选择本次分析指标：销售额或订单量。",
+      reason: openAnswer ? "当前目标范围过宽。" : "不同指标会改变分析结果。",
+      about: openAnswer ? "analysis_goal" : "metric",
+      answer_schema: openAnswer
+        ? { type: "string", minLength: 1 }
+        : { type: "string", enum: ["销售额", "订单量"] },
       resume_token: "resume-token-metric-0001",
       plan_id: `${runId}-plan-1`,
       plan_version: 1,
@@ -351,6 +356,41 @@ function persistReconnectTurn(
     frames: [
       ["meta", { run_id: runId, conversation_id: "conversation-1" }],
       taskSse(runId, 2, "plan.created", planPayload),
+    ],
+  };
+}
+
+function persistInitializationFailureTurn(
+  state: MockWorkspaceState,
+  prompt: string,
+): { frames: Array<[string, Record<string, unknown>]> } {
+  const suffix = String(++state.turn);
+  const runId = `initialization-failure-run-${suffix}`;
+  const userId = `${runId}-user`;
+  const run = mockAgentRun(runId, prompt, "failed");
+  run.detail.run.user_message_id = userId;
+  run.detail.run.terminal_reason = "task_initialization_failed";
+  run.detail.run.finished_at = NOW;
+  run.detail.run.updated_at = NOW;
+  run.detail.state.last_sequence = 2;
+  run.events = [taskEvent(runId, 2, "run.failed", { reason: "task_initialization_failed" })];
+  state.agentRuns[runId] = run;
+  state.messages.push(message(userId, "user", prompt));
+  return {
+    frames: [
+      ["meta", {
+        run_id: runId,
+        conversation_id: "conversation-1",
+        user_message_id: userId,
+      }],
+      taskSse(runId, 2, "run.failed", { reason: "task_initialization_failed" }),
+      ["error", {
+        code: "task_initialization_failed",
+        message: "任务初始化失败，请调整需求后重试。",
+        retryable: true,
+        run_id: runId,
+        run_status: "failed",
+      }],
     ],
   };
 }
@@ -807,6 +847,34 @@ async function installMockApi(
       await json(route, run?.detail ?? { detail: "TaskRun 不存在" }, run ? 200 : 404);
       return;
     }
+    const cancelRunMatch = path.match(/^\/agent\/runs\/([^/]+)\/cancel$/);
+    if (method === "POST" && cancelRunMatch) {
+      const runId = decodeURIComponent(cancelRunMatch[1]);
+      const run = state.agentRuns[runId];
+      if (!run) {
+        await json(route, { detail: "TaskRun 不存在" }, 404);
+        return;
+      }
+      const expectedRunVersion = Number(request.headers()["if-match"]);
+      if (expectedRunVersion !== run.detail.run.state_version) {
+        await json(route, { detail: "TaskRun 状态版本冲突" }, 409);
+        return;
+      }
+      run.detail.run.status = "cancelled";
+      run.detail.run.state_version += 1;
+      run.detail.run.terminal_reason = "user_cancelled";
+      run.detail.run.finished_at = NOW;
+      run.detail.run.updated_at = NOW;
+      const event = appendTaskEvent(run, runId, "run.cancelled", {
+        reason: "user_requested",
+      });
+      await json(route, {
+        run: run.detail.run,
+        event,
+        replayed: false,
+      });
+      return;
+    }
     const runFeedbackMatch = path.match(/^\/agent\/runs\/([^/]+)\/feedback$/);
     if (method === "POST" && runFeedbackMatch) {
       const runId = decodeURIComponent(runFeedbackMatch[1]);
@@ -1067,11 +1135,17 @@ async function installMockApi(
         message: prompt,
         parent_run_id: parentRunId,
       });
-      const turn = prompt.includes("断线恢复")
+      const repeatedInitializationFailurePrompt = state.chatRequests.filter(
+        (item) => item.message === prompt,
+      ).length > 1;
+      const turn = prompt.includes("触发初始化失败") && !repeatedInitializationFailurePrompt
+        ? persistInitializationFailureTurn(state, prompt)
+        : prompt.includes("断线恢复")
         ? persistReconnectTurn(state, prompt)
         : (
         prompt.includes("修改计划")
         || prompt.includes("选择指标")
+        || prompt.includes("补充说明")
       )
         ? persistCollaborationTurn(state, prompt)
         : prompt.includes("报告")
@@ -1361,34 +1435,106 @@ test("暂停态可以提交不可变计划新版本", async ({ page }) => {
   await controlButton.click();
 
   const panel = page.getByRole("dialog", { name: "任务协作" });
-  await panel.getByRole("button", { name: "修改计划" }).click();
-  await panel.getByLabel("计划摘要").fill("先核对范围，再生成结果");
+  await panel.getByRole("button", { name: "修改提纲" }).click();
+  await panel.getByLabel("提纲摘要").fill("先核对范围，再生成结果");
   await panel.getByLabel("步骤目的").fill("核对销售数据范围与统计口径");
   await panel.getByLabel("修改原因").fill("用户要求先确认统计口径");
   await panel.getByRole("button", { name: "保存新版本" }).click();
 
-  await expect(panel).toContainText("计划已保存为不可变新版本");
+  await expect(panel).toContainText("任务提纲已保存为不可变新版本");
   await expect(panel).toContainText("先核对范围，再生成结果");
-  await expect(panel).toContainText("计划 v2");
+  await expect(panel).toContainText("提纲 v2");
   await expect(panel.locator(".agent-status")).toHaveText("已暂停");
 });
 
-test("阻塞澄清提交答案后继续同一个 TaskRun", async ({ page }) => {
+test("结构化阻塞澄清在聊天区展示选项并继续同一个 TaskRun", async ({ page }) => {
   await installMockApi(page);
   await page.goto("/");
 
   await send(page, "请让我选择指标");
-  const controlButton = page.getByRole("button", { name: "任务协作" });
-  await expect(controlButton).toBeEnabled();
-  await controlButton.click();
+  const prompt = page.locator(".chat-clarification-card");
+  await expect(prompt).toContainText("请选择本次分析指标");
+  await expect(prompt.getByRole("button", { name: "销售额" })).toBeVisible();
+  await expect(prompt.getByRole("button", { name: "订单量" })).toBeVisible();
+  await expect(prompt.getByRole("textbox", { name: "澄清答案" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeDisabled();
+  await prompt.getByRole("button", { name: "销售额" }).click();
 
-  const panel = page.getByRole("dialog", { name: "任务协作" });
-  await expect(panel).toContainText("请选择本次分析指标");
-  await panel.getByRole("textbox", { name: "澄清答案" }).fill("销售额");
-  await panel.getByRole("button", { name: "提交答案并继续" }).click();
-
-  await expect(panel.locator(".agent-status")).toHaveText("已完成");
   await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("等待澄清时可从聊天区直接取消并解除输入锁定", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请让我选择指标");
+  const prompt = page.locator(".chat-clarification-card");
+  await expect(prompt).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await prompt.getByRole("button", { name: "取消当前任务" }).click();
+
+  await expect(prompt).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("刷新后从服务端恢复结构化澄清选项", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请让我选择指标");
+  await expect(
+    page.locator(".chat-clarification-card").getByRole("button", { name: "销售额" }),
+  ).toBeVisible();
+
+  await page.reload();
+  const restoredPrompt = page.locator(".chat-clarification-card");
+  await expect(restoredPrompt).toContainText("请选择本次分析指标");
+  await expect(restoredPrompt.getByRole("button", { name: "销售额" })).toBeVisible();
+  await expect(restoredPrompt.getByRole("button", { name: "订单量" })).toBeVisible();
+
+  await page.getByRole("button", { name: "任务协作" }).click();
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.getByRole("button", { name: "销售额" })).toBeVisible();
+  await expect(panel.getByRole("textbox", { name: "澄清答案" })).toHaveCount(0);
+});
+
+test("无枚举候选的澄清仍使用开放文本回答", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请让我补充说明");
+  const prompt = page.locator(".chat-clarification-card");
+  await expect(prompt).toContainText("请补充本次分析");
+  await expect(prompt.getByRole("group", { name: "澄清选项" })).toHaveCount(0);
+  await prompt.getByRole("textbox", { name: "澄清答案" }).fill("解释销售下降原因");
+  await prompt.getByRole("button", { name: "提交答案并继续" }).click();
+
+  await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("初始化失败在刷新后仍可见并可从原目标重试", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "触发初始化失败");
+  const failure = page.getByRole("alert");
+  await expect(failure).toContainText("任务初始化未能完成");
+  await expect(failure.getByRole("button", { name: "重新尝试" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+
+  await page.reload();
+  const restoredFailure = page.getByRole("alert");
+  await expect(restoredFailure).toContainText("任务初始化未能完成");
+  await restoredFailure.getByRole("button", { name: "重新尝试" }).click();
+
+  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.chatRequests.map((item) => item.message)).toEqual([
+    "触发初始化失败",
+    "触发初始化失败",
+  ]);
 });
 
 test("6C 候选假设验证链展示计划、Evidence 与 Verifier 终态", async ({ page }) => {

@@ -157,7 +157,7 @@ def test_numeric_claim_binds_exact_definition_resource_and_data_evidence() -> No
     }
 
 
-def test_percentage_conversion_is_not_inferred_but_tool_display_value_can_link() -> None:
+def test_explicit_percentage_conversion_and_tool_display_value_can_link() -> None:
     ratio_only = _evidence({"rate": 0.251})
 
     claims = extract_numeric_claims(
@@ -166,7 +166,10 @@ def test_percentage_conversion_is_not_inferred_but_tool_display_value_can_link()
         evidence=[ratio_only],
     )
 
-    assert claims[0].value_refs[0]["supported"] is False
+    assert claims[0].value_refs[0]["supported"] is True
+    assert claims[0].value_refs[0]["path"] == "$.rate"
+    assert claims[0].value_refs[0]["match_kind"] == "unit_scaled"
+    assert claims[0].value_refs[0]["display_factor"] == "0.01"
 
     with_display_value = _evidence({"rate": 0.251, "display": "25.1%"})
     linked = extract_numeric_claims(
@@ -176,6 +179,54 @@ def test_percentage_conversion_is_not_inferred_but_tool_display_value_can_link()
     )
     assert linked[0].value_refs[0]["supported"] is True
     assert linked[0].value_refs[0]["path"] == "$.display#number[0]"
+    assert linked[0].value_refs[0]["match_kind"] == "exact"
+
+
+def test_display_rounding_links_without_accepting_a_different_rounded_value() -> None:
+    evidence = _evidence(
+        {
+            "slope": 9.332628,
+            "chart_value": 511843.5300000001,
+        }
+    )
+
+    linked = extract_numeric_claims(
+        final_text="趋势斜率为 9.33，销售额为 511843.53。",
+        goal="分析趋势",
+        evidence=[evidence],
+    )
+    rejected = extract_numeric_claims(
+        final_text="趋势斜率为 9.34。",
+        goal="分析趋势",
+        evidence=[evidence],
+    )
+
+    assert [ref["supported"] for ref in linked[0].value_refs] == [True, True]
+    assert [ref["match_kind"] for ref in linked[0].value_refs] == [
+        "rounded",
+        "rounded",
+    ]
+    assert rejected[0].value_refs[0]["supported"] is False
+
+
+def test_explicit_chinese_display_unit_links_to_raw_evidence() -> None:
+    evidence = _evidence(
+        {
+            "monthly_sales": 102822.08,
+            "total_sales": 1618228.13,
+        }
+    )
+
+    claims = extract_numeric_claims(
+        final_text="一月销售额为 10.28 万元，总销售额为 161.82万元。",
+        goal="汇总销售额",
+        evidence=[evidence],
+    )
+
+    refs = claims[0].value_refs
+    assert [ref["supported"] for ref in refs] == [True, True]
+    assert [ref["match_kind"] for ref in refs] == ["unit_scaled", "unit_scaled"]
+    assert [ref["display_factor"] for ref in refs] == ["10000", "10000"]
 
 
 def test_unsupported_numeric_claim_fails_completion_verification() -> None:

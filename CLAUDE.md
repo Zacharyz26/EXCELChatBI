@@ -8,7 +8,7 @@
 
 ## 1. 项目一句话
 
-中文优先的目标驱动 ChatBI Agent：通过自然语言协作完成知识问答、数据分析、可视化和报告，并在受约束的计划—执行—验证—重规划循环中调用工具。
+中文优先的目标驱动 ChatBI Agent：通过自然语言协作完成知识问答、数据分析、可视化和报告，并在受治理的单一 function-calling 循环中调用工具。
 
 ## 2. 当前状态与目标架构
 
@@ -27,8 +27,8 @@ React 和 Agent 执行路径中撤下审批及模式切换，只保留计划修�
 验证 backend、frontend 与真实 Compose 三项全绿，阶段 6E 工程关闭：
 
 ```text
-React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executor/Verifier
-                    → ready capability 白名单 → Observation Replanner → MCP Client Gateway
+React 对话工作区 → /chat/stream → Goal/确定性任务提纲/单一 Agent/Verifier
+                    → 冻结工具目录 → 工具结果回传同一 Agent → MCP Client Gateway
                     → Evidence/Artifact/TaskPlan/TaskStep/MemorySnapshot → SQLite v11 + 文件
 ```
 
@@ -36,11 +36,10 @@ React 对话工作区 → /chat/stream → Goal/混合 Planner/依赖图 Executo
 Schema、权限、预算、数据版本、预检和 Evidence 约束通过后自动执行。单一活动 Run 约束和
 前端 SSE 业务事件超时用于避免任务占锁后长期显示“生成中”。
 
-- v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页已下线，旧后端端点作为兼容 API 保留。
-- fast/template/LLM 混合 Planner 已统一输出并持久化 TaskPlan/TaskStep；生产 API 只向
-  Executor 暴露依赖已满足的 ready capability；失败 Observation 会生成不可变计划新版本，
-  模型提前结束时 Verifier 会因未完成步骤拒绝成功。任务控制/Checkpoint 恢复已在阶段 2C
-  落地。
+- v2.3 五阶段迁移已经完成：自然语言对话是唯一前端入口，经典五页和旧单次分析端点已下线。
+- fast/template 确定性任务提纲统一输出并持久化 TaskPlan/TaskStep；提纲用于澄清、进度和审计，
+  不限制同一个 Agent 的工具选择。失败 Observation 直接返回 Agent 修正，任务控制与 Checkpoint
+  恢复继续保留。
 - 知识库第一至第四阶段代码、评测、生命周期、可观测和 Standalone 运维基线已经完成；目标机首次部署与恢复演练仍是运维任务。
 - **v2.4 阶段 1 已正式验收；阶段 2A 已实现**：SQLite schema v3 已包含 TaskRun、
   TaskContract/Event/Snapshot/Plan/Step/Invocation/Evidence/Checkpoint；确定性 Verifier、
@@ -75,16 +74,15 @@ Schema、权限、预算、数据版本、预检和 Evidence 约束通过后自�
 目标控制循环：
 
 ```text
-理解目标 → 必要澄清 → 结构化计划 → 受控工具执行
-    ↑                                  ↓
-持久记忆 ← 最终交付 ← 完成验证 ← Observation/Evidence
-                      ↖ 不满足则重规划
+理解目标 → 必要澄清 → 确定性任务提纲 → 单一 Agent 受控工具执行
+    ↑                                           ↓
+持久记忆 ← 最终交付 ← 完成验证 ← Observation/Evidence 回传 Agent
 ```
 
 重要架构决策：
 
 - Dify 已放弃，不恢复 A/B 低代码双轨。
-- v2.4 采用统一的自研类型化状态机；简单任务、模板任务和 LLM 规划任务输出同一种 TaskPlan。是否引入 LangGraph 只在状态机复杂度和评测收益证明必要时再决定。
+- v2.4 的类型化状态机继续负责持久化与治理；独立 LLM Planner/Replanner 已在收尾审查中删除。
 - 生产 MCP 执行已使用受治理 Client Gateway；单源 Tool Contract、官方 SDK adapter、
   认证的 stdio/Streamable HTTP、Client Gateway、影子校验和双传输探针已实现。阶段 2D
   已切换规范执行路径；进程内适配仅保留给兼容/测试，v3.0 再实现外部服务动态发现、
@@ -123,8 +121,8 @@ Schema、权限、预算、数据版本、预检和 Evidence 约束通过后自�
 |---|---|---|
 | 后端 | Python 3.11、FastAPI、uv | 保持 |
 | 前端 | React 18、ECharts 5、Zustand、SSE；TaskRun 协作面板、计划编辑、结构化澄清、任务控制、恢复与执行审计 | 单一 Agent 入口；阶段 6 的分析、统计护栏和 Join 协作已交付 |
-| 编排 | Goal + 混合 Planner + 依赖图 Executor + Observation Replanner + Verifier + Checkpoint 恢复；受治理 ready-frontier 并行 | 阶段 6 的共享预算、数据版本、取消树和 Evidence Ledger 已交付；v3.0 再评审多 Agent |
-| 模型接入 | OpenAI 兼容网关、集中 registry | Planner/Verifier 单独评测；fallback 不得静默丢工具或结构化能力 |
+| 编排 | Goal + 确定性任务提纲 + 单一 Agent 工具反馈循环 + Verifier + Checkpoint 恢复 | 共享预算、数据版本、取消树和 Evidence Ledger 已交付；v3.0 再评审多 Agent |
+| 模型接入 | OpenAI 兼容网关、集中 registry | Agent fallback 不得静默丢工具能力 |
 | 对话持久层 | SQLite v11 `.data/chatbi.db` + LRU 热缓存；Task/Event/Plan/Step/Evidence/Claim/Checkpoint/MemorySnapshot/ExecutionScope/CancellationTree/EvidenceLedger/多父血缘；ApprovalRecord 持久化结构仅作旧库兼容 | 阶段 3–6 已关闭；v3.0 再按多实例与外置状态需求演进 |
 | 数据与工件 | 本地 parquet、JSON、报告文件 | v3.0 再按连接器和多实例需求演进对象/关系存储 |
 | 工具 | 受治理 MCP Client Gateway + 同源 JSON Schema；stdio/Streamable HTTP | v3.0 增加外部准入与企业授权 |
@@ -152,8 +150,8 @@ tests/                 单元、集成与 Agent 行为评测
 ```
 
 - 新分析能力优先实现为确定性工具，不把业务计算塞入编排层。
-- 工具内部零 LLM；模型规划、解释和 Finalizer 只能位于编排层。
-- Planner 规划 capability，Executor 根据 Tool Capability Contract 解析具体工具。
+- 工具内部零 LLM；解释和最终答复只能由编排层中的 Agent 生成。
+- 确定性提纲映射 capability；Agent 从冻结 Tool Capability Contract 目录选择具体工具。
 
 ## 6. 已关闭阶段范围与后续边界
 
@@ -162,7 +160,8 @@ tests/                 单元、集成与 Agent 行为评测
 - v2.3：模型网关 tools/stream、`Scenario.AGENT`、SQLite 工作区、11 工具注册表、function-calling 循环、Artifact、分析登记表、SSE 卡片、调用预算、同参熔断、带错重试、历史执行卡和经典页面迁移。
 - Excel 画像/分析出图、统计四件套、结构化数据变换/聚合、图表截图、Markdown/PDF 报告、知识问答与引用 Artifact。
 - 知识库 bge-m3 双路、reranker、Milvus Lite/Standalone 代码路径、评测门禁、生命周期、readiness、回滚、清理、备份恢复工具和部署文档。
-- 兼容 API `/analyze`、`/analyze/stats`、`/analyze/report`、`/kb/*` 继续保留原有门控。
+- 统一对话 API `/chat/stream`、任务控制 API、`/kb/ingest` 和报告下载接口为当前入口；
+  `/analyze`、`/analyze/stats`、报告生成 POST 与 `/kb/query` 已删除。
 
 ### 6.2 已关闭：v2.5 阶段 6E 多数据集关联治理
 
@@ -174,8 +173,8 @@ tests/                 单元、集成与 Agent 行为评测
    执行作用域、数据版本绑定、取消树、Evidence Ledger 与 ready-frontier 有界并行；提交
    `b67b704` 的 [CI run 31348476642](https://github.com/Zacharyz26/EXCELChatBI/actions/runs/31348476642)
    已确认 backend、frontend 与真实 Compose 三项全绿并关闭 6A。
-4. 6B-1 已实现 `data.roles`、确定性角色置信/歧义、只读质量建议、严格 MCP 输出契约、Planner
-   路由和 React Artifact 展示；6B-2 已实现绑定计划/数据版本的结构化角色确认与统计/聚合
+4. 6B-1 已实现 `data.roles`、确定性角色置信/歧义、只读质量建议、严格 MCP 输出契约、当时的
+   Planner 路由（现已删除）和 React Artifact 展示；6B-2 已实现绑定计划/数据版本的结构化角色确认与统计/聚合
    执行前门禁；6B-3 已冻结 16 场景/65 列匿名评测集并接入 CI 强制门禁；6B-4 已接入
    stdio/HTTP 等价与真实 `data-tools` 重启恢复门禁，完整边界见
    `docs/v2.5/阶段6B实施记录.md`；提交 `6b89ef6` 的完整 CI 三项全绿，6B 已关闭。
@@ -210,7 +209,8 @@ tests/                 单元、集成与 Agent 行为评测
 
 ## 7. v2.4 及后续实施约束
 
-- Planner 采用混合路线，不做“LLM 不合格则全局退回模板”的一次性选择。
+- 任务提纲只由本地 fast/template 规则生成，不调用模型、不限制 Agent 可见的冻结工具目录；
+  工具失败返回同一个 Agent 继续处理，不得新增旁路 Planner/Replanner。
 - Verifier 以确定性 TaskContract 检查为主，LLM 只判断语义覆盖等软条件，输出 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
 - 图表/报告正则不能直接删除；先与新后置条件影子运行，回归等价后再降级和移除。
 - 任务持久化采用追加 TaskEvent + 当前快照，计划修订有版本，工具调用有幂等键。

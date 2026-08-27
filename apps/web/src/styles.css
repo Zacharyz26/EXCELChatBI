@@ -996,7 +996,7 @@ select {
   flex: 1;
 }
 
-.chat-error button {
+.chat-error__dismiss {
   padding: 0 3px;
   color: #a44351;
   font-size: 17px;
@@ -1004,6 +1004,27 @@ select {
   background: transparent;
   border: 0;
   cursor: pointer;
+}
+
+.chat-error__retry {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  color: #923846;
+  font-size: 10px;
+  font-weight: 700;
+  background: #fff;
+  border: 1px solid #e9bdc5;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chat-error__retry:hover {
+  background: #ffe7eb;
+}
+
+.chat-error__retry:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .dataset-context {
@@ -2793,13 +2814,112 @@ select {
   box-shadow: 0 5px 18px rgba(130, 89, 37, 0.06);
 }
 
-.agent-clarification-card > p {
+.clarification-prompt__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.clarification-prompt__title > span {
+  color: #8a5b27;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.clarification-prompt__title > small {
+  color: #a08d73;
+  font-size: 9px;
+}
+
+.clarification-prompt h3 {
+  margin: 0;
+  color: #263249;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.clarification-prompt > p {
   margin: 0 0 11px;
   color: #81755e;
   font-size: 10px;
 }
 
+.clarification-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.clarification-option {
+  min-height: 39px;
+  padding: 8px 12px;
+  color: #55461f;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+  background: #fffaf0;
+  border: 1px solid #e5d2a8;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.clarification-option:hover:not(:disabled) {
+  color: #3f50ae;
+  background: #f2f4ff;
+  border-color: #bdc7f4;
+}
+
+.clarification-option:disabled,
+.clarification-cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.clarification-prompt__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(190, 155, 98, 0.2);
+}
+
+.clarification-prompt__actions > span {
+  color: #8d816d;
+  font-size: 9.5px;
+}
+
+.clarification-cancel {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  color: #a3424f;
+  font-size: 9.5px;
+  font-weight: 700;
+  background: #fff3f4;
+  border: 1px solid #efd6da;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.chat-clarification-card {
+  width: min(100%, 800px);
+  margin: 0 auto 9px;
+  padding: 14px 16px;
+  background: #fffdf8;
+  border: 1px solid #e9d9b9;
+  border-radius: 12px;
+  box-shadow: 0 7px 24px rgba(105, 75, 34, 0.1);
+}
+
 .agent-clarification-card form,
+.chat-clarification-card form,
 .agent-plan-editor label {
   display: grid;
   gap: 5px;
@@ -2809,6 +2929,7 @@ select {
 }
 
 .agent-clarification-card textarea,
+.chat-clarification-card textarea,
 .agent-plan-editor input,
 .agent-plan-editor textarea {
   width: 100%;
@@ -2824,8 +2945,20 @@ select {
   min-height: 76px;
 }
 
-.agent-clarification-card form button {
+.agent-clarification-card form button,
+.chat-clarification-card form button {
   justify-self: end;
+}
+
+.chat-clarification-card form .agent-primary-button {
+  padding: 7px 11px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  background: #586bd8;
+  border: 1px solid #586bd8;
+  border-radius: 7px;
+  cursor: pointer;
 }
 
 .agent-plan-steps {

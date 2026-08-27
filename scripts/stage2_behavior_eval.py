@@ -1,9 +1,9 @@
-"""Evaluate the Stage 2 structured-plan Agent against the frozen v2.3 baseline.
+"""Evaluate the single-Agent runtime against the frozen v2.3 baseline.
 
 The harness uses the same 20 observable-behavior cases and deterministic fixture
-tools as the frozen baseline, while enabling the production TaskPlan, Executor,
-Replanner and deterministic Verifier path. Real model calls are fail-closed
-behind ``--confirm-paid-run``.
+tools as the frozen baseline, while enabling the production deterministic outline,
+tool feedback loop and verifier. Real model calls are fail-closed behind
+``--confirm-paid-run``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.models.registry import ModelRegistry  # noqa: E402
-from packages.models.types import Scenario  # noqa: E402
 
 from scripts.v23_baseline_eval import (  # noqa: E402
     DEFAULT_CASES,
@@ -33,9 +32,7 @@ from scripts.v23_baseline_eval import (  # noqa: E402
 DEFAULT_BASELINE_REPORT = Path(
     ".data/evaluations/v2.4/stage0-acceptance-20260723/baseline/report.json"
 )
-DEFAULT_OUTPUT = Path(
-    ".data/evaluations/v2.4/stage0-acceptance-20260723/stage2/report.json"
-)
+DEFAULT_OUTPUT = Path(".data/evaluations/v2.4/stage0-acceptance-20260723/stage2/report.json")
 DEFAULT_CHECKPOINT = Path(
     ".data/evaluations/v2.4/stage0-acceptance-20260723/stage2/checkpoint.json"
 )
@@ -60,19 +57,15 @@ def evaluate_stage2_report(
     baseline_hash = baseline_report.get("scenario_set_hash")
     report_hash = report.get("scenario_set_hash")
     scenario_set_matches = (
-        isinstance(baseline_hash, str)
-        and bool(baseline_hash)
-        and report_hash == baseline_hash
+        isinstance(baseline_hash, str) and bool(baseline_hash) and report_hash == baseline_hash
     )
     full_protocol = (
         int(report.get("case_count", 0)) == EXPECTED_CASE_COUNT
         and int(report.get("repetitions", 0)) >= MIN_REPETITIONS
-        and report.get("execution_mode") == "stage2_structured_plan"
+        and report.get("execution_mode") == "single_agent_outline"
         and scenario_set_matches
     )
-    expected_runs = int(report.get("case_count", 0)) * int(
-        report.get("repetitions", 0)
-    )
+    expected_runs = int(report.get("case_count", 0)) * int(report.get("repetitions", 0))
     rows = report.get("rows")
     if not isinstance(rows, list) or len(rows) != expected_runs * len(models):
         full_protocol = False
@@ -129,8 +122,7 @@ def evaluate_stage2_report(
     if not full_protocol:
         blockers.insert(0, "stage2_full_protocol_incomplete")
     hard_failure = any(
-        blocker.endswith(("forbidden_violation", "cost_unavailable"))
-        for blocker in blockers
+        blocker.endswith(("forbidden_violation", "cost_unavailable")) for blocker in blockers
     )
     if not full_protocol:
         decision = "INCOMPLETE"
@@ -159,10 +151,6 @@ def main() -> int:
         "--models",
         default="deepseek-v4-flash",
         help="逗号分隔的隔离 Agent 候选；默认只跑冻结门槛对应的 Flash",
-    )
-    parser.add_argument(
-        "--planner-model",
-        help="隔离 Planner 候选；默认使用 registry 的 complex_reasoning primary",
     )
     parser.add_argument("--repetitions", type=int, default=MIN_REPETITIONS)
     parser.add_argument(
@@ -193,9 +181,7 @@ def main() -> int:
     if args.split != "all":
         cases = [case for case in cases if case["split"] == args.split]
     if args.case_ids:
-        requested = {
-            item.strip() for item in args.case_ids.split(",") if item.strip()
-        }
+        requested = {item.strip() for item in args.case_ids.split(",") if item.strip()}
         available = {str(case["id"]) for case in cases}
         missing = requested - available
         if missing:
@@ -207,21 +193,16 @@ def main() -> int:
     model_names = [item.strip() for item in args.models.split(",") if item.strip()]
     if not model_names:
         parser.error("没有可评测 Agent 模型")
-    planner_model = (
-        args.planner_model
-        or registry.resolve(Scenario.COMPLEX_REASONING).primary
-    )
     for model_name in model_names:
         if not registry.get_model(model_name).supports_tools:
             parser.error(f"模型 {model_name} 不支持 tools，不能运行 Agent 评测")
-    registry.get_model(planner_model)
     scenario_hash = hashlib.sha256(args.cases.read_bytes()).hexdigest()
 
     if args.validate_only:
         print(
             "Stage 2 evaluation preflight: "
             f"cases={len(cases)}, repetitions={args.repetitions}, "
-            f"agent_models={','.join(model_names)}, planner_model={planner_model}, "
+            f"agent_models={','.join(model_names)}, "
             f"paid_calls=disabled"
         )
         return 0
@@ -233,11 +214,10 @@ def main() -> int:
     checkpoint_protocol = {
         "schema_version": 1,
         "evaluation": "stage2_structured_agent_observable_behavior",
-        "execution_mode": "stage2_structured_plan",
+        "execution_mode": "single_agent_outline",
         "scenario_set_hash": scenario_hash,
         "repetitions": args.repetitions,
         "models": model_names,
-        "planner_model": planner_model,
         "case_ids": [str(case["id"]) for case in cases],
     }
     existing_rows = _load_checkpoint_rows(
@@ -263,12 +243,9 @@ def main() -> int:
             registry=registry,
             model_names=model_names,
             repetitions=args.repetitions,
-            enforce_plan=True,
-            planner_model_name=planner_model,
             evaluation_name="stage2_structured_agent_observable_behavior",
             evaluation_label=(
-                "v2.4 stage2 structured Planner/Executor/Replanner/"
-                "deterministic Verifier"
+                "single Agent with deterministic outline, tool feedback and verifier"
             ),
             scenario_set_hash=scenario_hash,
             existing_rows=existing_rows,
@@ -286,9 +263,7 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"Stage 2 decision: {comparison['decision']}")
-    for model, values in cast(
-        dict[str, dict[str, Any]], comparison["models"]
-    ).items():
+    for model, values in cast(dict[str, dict[str, Any]], comparison["models"]).items():
         print(
             f"{model}: success={values['task_success_rate']:.1%} "
             f"(baseline={values['baseline_task_success_rate']:.1%}), "
@@ -327,9 +302,7 @@ def _load_checkpoint_rows(
     if checkpoint.get("privacy") != _PRIVACY:
         raise ValueError("Stage 2 检查点缺少隐私约束")
     raw_rows = checkpoint.get("rows")
-    if not isinstance(raw_rows, list) or not all(
-        isinstance(row, dict) for row in raw_rows
-    ):
+    if not isinstance(raw_rows, list) or not all(isinstance(row, dict) for row in raw_rows):
         raise ValueError("Stage 2 检查点 rows 必须是对象数组")
     return cast(list[dict[str, Any]], raw_rows)
 

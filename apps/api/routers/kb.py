@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from packages.common.config import Settings
 from packages.governance.permissions import Principal
-from packages.models.gateway import ModelGateway
 from packages.rag.embedding import Embedder
 from packages.rag.lifecycle import (
     SourceDocument,
@@ -17,7 +16,6 @@ from packages.rag.lifecycle import (
     load_text_documents,
     sync_documents,
 )
-from packages.rag.retriever import HybridRetriever
 from packages.rag.source_store import SourceDocumentStore
 from packages.rag.store import KnowledgeStore
 
@@ -26,22 +24,16 @@ from apps.api.deps import (
     embedder_dep,
     kb_source_store_dep,
     kb_store_dep,
-    model_gateway_dep,
-    retriever_dep,
     settings_dep,
 )
 from apps.api.schemas import (
-    Citation,
     DeleteDocumentResponse,
     IngestRequest,
     IngestResponse,
     KBDocumentResponse,
     KBOverviewResponse,
-    KBQueryRequest,
-    KBQueryResponse,
     RebuildRequest,
 )
-from apps.orchestrator.kb_qa import answer_question
 
 router = APIRouter(prefix="/kb", tags=["kb"])
 
@@ -119,29 +111,6 @@ async def overview(
         sources=sources,
         topics=topics,
         documents=[KBDocumentResponse(**asdict(item)) for item in documents],
-    )
-
-
-@router.post("/query", response_model=KBQueryResponse)
-async def query(
-    req: KBQueryRequest,
-    retriever: HybridRetriever = Depends(retriever_dep),
-    gateway: ModelGateway = Depends(model_gateway_dep),
-    _principal: Principal = Depends(current_principal_dep),
-) -> KBQueryResponse:
-    """中文提问 → 检索 → 带引用生成 / 诚实无答。"""
-    if not req.question.strip():
-        raise HTTPException(status_code=400, detail="问题不能为空")
-    try:
-        result = await answer_question(req.question, retriever, gateway, top_k=req.top_k)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"生成失败（检查 DEEPSEEK_API_KEY 与网络）：{exc}"
-        ) from exc
-    return KBQueryResponse(
-        answer=result["answer"],
-        citations=[Citation(**citation) for citation in result["citations"]],
-        is_empty=result["is_empty"],
     )
 
 

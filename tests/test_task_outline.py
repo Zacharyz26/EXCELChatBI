@@ -1,4 +1,4 @@
-"""生产混合 Planner 的路由、最小上下文与能力约束测试。"""
+"""确定性任务提纲的路由、最小上下文与能力约束测试。"""
 
 from __future__ import annotations
 
@@ -8,13 +8,12 @@ from typing import Any
 import pytest
 from apps.orchestrator.agent_tools import AgentToolRegistry, AgentToolSpec
 from apps.orchestrator.control.contracts import build_minimal_contract
-from apps.orchestrator.control.production_planner import (
-    build_deterministic_plan,
-    build_planner_context,
-    create_production_plan,
+from apps.orchestrator.control.task_outline import (
+    build_deterministic_outline,
+    build_outline_context,
+    create_task_outline,
 )
 from mcp_servers.common.contracts import ToolCapabilityMetadata
-from packages.models.types import Message, ModelResponse, Scenario
 from packages.session.models import Artifact, Dataset
 
 
@@ -54,9 +53,7 @@ def _registry() -> AgentToolRegistry:
                 description="只读 Join 预检",
                 parameters={"type": "object"},
                 runner=lambda _: {},
-                metadata=ToolCapabilityMetadata(
-                    capabilities=("dataset.join.preflight",)
-                ),
+                metadata=ToolCapabilityMetadata(capabilities=("dataset.join.preflight",)),
             ),
             AgentToolSpec(
                 name="join_datasets",
@@ -140,9 +137,7 @@ def _artifact_registry() -> AgentToolRegistry:
                 description="图表",
                 parameters={"type": "object"},
                 runner=lambda _: {},
-                metadata=ToolCapabilityMetadata(
-                    capabilities=("visualization.chart",)
-                ),
+                metadata=ToolCapabilityMetadata(capabilities=("visualization.chart",)),
             ),
             AgentToolSpec(
                 name="generate_report",
@@ -155,39 +150,14 @@ def _artifact_registry() -> AgentToolRegistry:
     )
 
 
-class _PlannerGateway:
-    def __init__(self, plan: dict[str, Any]) -> None:
-        self.plan = plan
-        self.calls: list[list[Message]] = []
-
-    async def complete(
-        self,
-        scenario: Scenario,
-        messages: list[Message],
-        *,
-        params: dict[str, object] | None = None,
-    ) -> ModelResponse:
-        assert scenario == Scenario.COMPLEX_REASONING
-        assert params is not None
-        self.calls.append(messages)
-        return ModelResponse(
-            content=json.dumps(self.plan, ensure_ascii=False),
-            model="eligible-planner",
-            prompt_tokens=20,
-            completion_tokens=10,
-            cost=0.001,
-            cost_currency="USD",
-        )
-
-
-def test_planner_context_excludes_sample_rows_and_file_paths() -> None:
+def test_outline_context_excludes_sample_rows_and_file_paths() -> None:
     report = _artifact(
         "report-1",
         "report",
         analysis_id="report-analysis",
         file_ref="/private/reports/customer-secret.pdf",
     )
-    context = build_planner_context(datasets=[_dataset()], artifacts=[report])
+    context = build_outline_context(datasets=[_dataset()], artifacts=[report])
     encoded = json.dumps(context, ensure_ascii=False)
 
     assert "SECRET-ROW" not in encoded
@@ -197,8 +167,7 @@ def test_planner_context_excludes_sample_rows_and_file_paths() -> None:
     assert context["artifacts"][0]["file_available"] is False
 
 
-@pytest.mark.asyncio
-async def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
+def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
     artifacts = [
         _artifact(
             "stats-1",
@@ -223,23 +192,19 @@ async def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
         pdf_required=True,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=artifacts,
         registry=_artifact_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
-    assert [step["capability"] for step in result.plan["steps"]] == [
-        "report.generate"
-    ]
+    assert [step["capability"] for step in result.plan["steps"]] == ["report.generate"]
 
 
-@pytest.mark.asyncio
-async def test_report_follow_up_reuses_completed_profile_artifact() -> None:
+def test_report_follow_up_reuses_completed_profile_artifact() -> None:
     artifacts = [
         _artifact(
             "profile-1",
@@ -250,32 +215,25 @@ async def test_report_follow_up_reuses_completed_profile_artifact() -> None:
     ]
     contract = build_minimal_contract(
         run_id="profile-report-follow-up",
-        user_text=(
-            "请把本次对话已完成的数据画像组装成一份报告，"
-            "附要点解读，并导出 PDF。"
-        ),
+        user_text=("请把本次对话已完成的数据画像组装成一份报告，" "附要点解读，并导出 PDF。"),
         chart_required=False,
         report_required=True,
         pdf_required=True,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=artifacts,
         registry=_artifact_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
-    assert [step["capability"] for step in result.plan["steps"]] == [
-        "report.generate"
-    ]
+    assert [step["capability"] for step in result.plan["steps"]] == ["report.generate"]
 
 
-@pytest.mark.asyncio
-async def test_report_follow_up_recomputes_profile_when_explicitly_requested() -> None:
+def test_report_follow_up_recomputes_profile_when_explicitly_requested() -> None:
     artifacts = [
         _artifact(
             "profile-1",
@@ -292,13 +250,12 @@ async def test_report_follow_up_recomputes_profile_when_explicitly_requested() -
         pdf_required=True,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=artifacts,
         registry=_artifact_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
@@ -308,8 +265,7 @@ async def test_report_follow_up_recomputes_profile_when_explicitly_requested() -
     ]
 
 
-@pytest.mark.asyncio
-async def test_chart_revision_reuses_referenced_chart_lineage() -> None:
+def test_chart_revision_reuses_referenced_chart_lineage() -> None:
     artifacts = [
         _artifact(
             "chart-1",
@@ -334,23 +290,19 @@ async def test_chart_revision_reuses_referenced_chart_lineage() -> None:
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=artifacts,
         registry=_artifact_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
-    assert [step["capability"] for step in result.plan["steps"]] == [
-        "visualization.chart"
-    ]
+    assert [step["capability"] for step in result.plan["steps"]] == ["visualization.chart"]
 
 
-@pytest.mark.asyncio
-async def test_fast_path_produces_valid_shared_plan_without_model() -> None:
+def test_fast_path_produces_valid_shared_plan_without_model() -> None:
     contract = build_minimal_contract(
         run_id="fast-run",
         user_text="介绍这份数据的规模和质量",
@@ -359,24 +311,23 @@ async def test_fast_path_produces_valid_shared_plan_without_model() -> None:
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
     assert result.route == "fast"
     assert result.validation.valid is True
     assert result.capabilities == {"data.profile"}
-    assert result.audit["model"] is None
+    assert set(result.audit) == {"route", "prompt_version", "response_hash"}
+    assert result.audit["prompt_version"] == "deterministic-outline-v1"
 
 
-@pytest.mark.asyncio
-async def test_fast_path_selects_role_capability_without_duplicate_profile_step() -> None:
+def test_fast_path_selects_role_capability_without_duplicate_profile_step() -> None:
     contract = build_minimal_contract(
         run_id="role-run",
         user_text="识别时间列、指标列和维度列，并说明不确定的数据角色",
@@ -385,13 +336,12 @@ async def test_fast_path_selects_role_capability_without_duplicate_profile_step(
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
@@ -400,8 +350,7 @@ async def test_fast_path_selects_role_capability_without_duplicate_profile_step(
     assert len(result.plan["steps"]) == 1
 
 
-@pytest.mark.asyncio
-async def test_fast_path_selects_quality_capability_for_quality_only_request() -> None:
+def test_fast_path_selects_quality_capability_for_quality_only_request() -> None:
     contract = build_minimal_contract(
         run_id="quality-run",
         user_text="检查空值、重复和常量列，并给出清洗建议",
@@ -410,13 +359,12 @@ async def test_fast_path_selects_quality_capability_for_quality_only_request() -
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
@@ -425,8 +373,7 @@ async def test_fast_path_selects_quality_capability_for_quality_only_request() -
     assert len(result.plan["steps"]) == 1
 
 
-@pytest.mark.asyncio
-async def test_explicit_cleaning_execution_keeps_transform_capability() -> None:
+def test_explicit_cleaning_execution_keeps_transform_capability() -> None:
     contract = build_minimal_contract(
         run_id="clean-run",
         user_text="按已经确认的规则清洗数据并去掉空值",
@@ -435,22 +382,19 @@ async def test_explicit_cleaning_execution_keeps_transform_capability() -> None:
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=None,
         blocking_clarification=None,
     )
 
     assert "dataset.transform" in result.capabilities
 
 
-@pytest.mark.asyncio
-async def test_deterministic_path_fails_closed_when_requested_capability_is_missing(
-) -> None:
+def test_outline_omits_a_capability_missing_from_the_frozen_catalog() -> None:
     contract = build_minimal_contract(
         run_id="missing-capability",
         user_text="检测销售额异常",
@@ -470,20 +414,20 @@ async def test_deterministic_path_fails_closed_when_requested_capability_is_miss
         ]
     )
 
-    with pytest.raises(ValueError, match="stats.anomaly"):
-        await create_production_plan(
-            user_text=contract.goal,
-            contract=contract,
-            datasets=[_dataset()],
-            artifacts=[],
-            registry=registry,
-            gateway=None,
-            blocking_clarification=None,
-        )
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=registry,
+        blocking_clarification=None,
+    )
+
+    assert result.validation.valid is True
+    assert "stats.anomaly" not in result.capabilities
 
 
-@pytest.mark.asyncio
-async def test_deterministic_path_rejects_present_but_unavailable_capability() -> None:
+def test_outline_omits_a_disabled_capability() -> None:
     contract = build_minimal_contract(
         run_id="unavailable-capability",
         user_text="检测销售额异常",
@@ -498,21 +442,21 @@ async def test_deterministic_path_rejects_present_but_unavailable_capability() -
             item["required_profile"] = "stats"
             item["unavailable_reason"] = "profile_not_enabled"
 
-    with pytest.raises(ValueError, match="stats.anomaly"):
-        await create_production_plan(
-            user_text=contract.goal,
-            contract=contract,
-            datasets=[_dataset()],
-            artifacts=[],
-            registry=_registry(),
-            gateway=None,
-            blocking_clarification=None,
-            capability_catalog=catalog,
-        )
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_registry(),
+        blocking_clarification=None,
+        capability_catalog=catalog,
+    )
+
+    assert result.validation.valid is True
+    assert "stats.anomaly" not in result.capabilities
 
 
-@pytest.mark.asyncio
-async def test_prediction_request_fails_closed_on_governed_forecast_capability() -> None:
+def test_outline_omits_unavailable_forecast_without_blocking_the_agent() -> None:
     contract = build_minimal_contract(
         run_id="forecast-unavailable",
         user_text="预测未来四周的销售额",
@@ -521,20 +465,20 @@ async def test_prediction_request_fails_closed_on_governed_forecast_capability()
         pdf_required=False,
     )
 
-    with pytest.raises(ValueError, match="stats.forecast"):
-        await create_production_plan(
-            user_text=contract.goal,
-            contract=contract,
-            datasets=[_dataset()],
-            artifacts=[],
-            registry=_artifact_registry(),
-            gateway=None,
-            blocking_clarification=None,
-        )
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_artifact_registry(),
+        blocking_clarification=None,
+    )
+
+    assert result.validation.valid is True
+    assert "stats.forecast" not in result.capabilities
 
 
-@pytest.mark.asyncio
-async def test_prediction_request_uses_forecast_when_capability_is_available() -> None:
+def test_prediction_request_uses_forecast_when_capability_is_available() -> None:
     contract = build_minimal_contract(
         run_id="forecast-available",
         user_text="预测未来四周的销售额",
@@ -555,13 +499,12 @@ async def test_prediction_request_uses_forecast_when_capability_is_available() -
         enabled_capability_profiles=frozenset({"forecast"}),
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=registry,
-        gateway=None,
         blocking_clarification=None,
     )
 
@@ -580,7 +523,7 @@ def test_advanced_stats_requests_use_governed_capabilities_only(
     user_text: str,
     expected: str,
 ) -> None:
-    plan = build_deterministic_plan(
+    plan = build_deterministic_outline(
         user_text=user_text,
         context={"datasets": [], "artifacts": []},
         route="template",
@@ -592,7 +535,7 @@ def test_advanced_stats_requests_use_governed_capabilities_only(
 
 
 def test_join_request_plans_preflight_then_governed_execution() -> None:
-    plan = build_deterministic_plan(
+    plan = build_deterministic_outline(
         user_text="把订单数据集和客户数据集按客户ID做 Join",
         context={"datasets": [], "artifacts": []},
         route="template",
@@ -613,20 +556,18 @@ def test_join_request_plans_preflight_then_governed_execution() -> None:
 
 
 def test_explicit_join_preflight_request_remains_read_only() -> None:
-    plan = build_deterministic_plan(
+    plan = build_deterministic_outline(
         user_text="预检订单和客户数据集按客户ID Join 的风险",
         context={"datasets": [], "artifacts": []},
         route="template",
         available_capabilities={"dataset.join.preflight", "dataset.join.execute"},
     )
 
-    assert [step["capability"] for step in plan["steps"]] == [
-        "dataset.join.preflight"
-    ]
+    assert [step["capability"] for step in plan["steps"]] == ["dataset.join.preflight"]
 
 
 def test_join_request_can_explicitly_preflight_then_execute() -> None:
-    plan = build_deterministic_plan(
+    plan = build_deterministic_outline(
         user_text="先预检订单和客户按ID Join 的风险，再执行并生成关联数据集",
         context={"datasets": [], "artifacts": []},
         route="template",
@@ -639,8 +580,7 @@ def test_join_request_can_explicitly_preflight_then_execute() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_generic_report_plan_creates_source_analysis_before_report() -> None:
+def test_generic_report_plan_creates_source_analysis_before_report() -> None:
     report_registry = AgentToolRegistry(
         [
             AgentToolSpec(
@@ -667,13 +607,12 @@ async def test_generic_report_plan_creates_source_analysis_before_report() -> No
         pdf_required=True,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=report_registry,
-        gateway=None,
         blocking_clarification=None,
     )
 
@@ -685,8 +624,7 @@ async def test_generic_report_plan_creates_source_analysis_before_report() -> No
     assert steps[1]["dependencies"] == [steps[0]["step_id"]]
 
 
-@pytest.mark.asyncio
-async def test_blocking_clarification_persists_a_step_free_plan() -> None:
+def test_blocking_clarification_persists_a_step_free_plan() -> None:
     contract = build_minimal_contract(
         run_id="waiting-run",
         user_text="分析数据",
@@ -695,13 +633,12 @@ async def test_blocking_clarification_persists_a_step_free_plan() -> None:
         pdf_required=False,
     )
 
-    result = await create_production_plan(
+    result = create_task_outline(
         user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=None,
         blocking_clarification={
             "question_id": "metric",
             "about": "metric",
@@ -720,64 +657,26 @@ async def test_blocking_clarification_persists_a_step_free_plan() -> None:
     }
 
 
-@pytest.mark.asyncio
-async def test_complex_route_uses_llm_and_records_only_hashes_and_usage() -> None:
+def test_complex_request_uses_deterministic_outline_without_model() -> None:
     contract = build_minimal_contract(
-        run_id="llm-run",
+        run_id="complex-run",
         user_text="先检测异常，然后排除这些行再分析",
         chart_required=False,
         report_required=False,
         pdf_required=False,
     )
-    plan = {
-        "schema_version": 1,
-        "summary": "检测后排除异常",
-        "steps": [
-            {
-                "step_id": "detect",
-                "purpose": "检测异常",
-                "capability": "stats.anomaly",
-                "dependencies": [],
-                "expected_evidence": ["异常行引用"],
-                "completion_conditions": ["返回异常行 Evidence"],
-                "fallback": [{"when": "失败", "action": "correct_parameters"}],
-            },
-            {
-                "step_id": "exclude",
-                "purpose": "排除已识别异常",
-                "capability": "dataset.transform",
-                "dependencies": ["detect"],
-                "expected_evidence": ["衍生数据集引用"],
-                "completion_conditions": ["登记衍生数据集与血缘"],
-                "fallback": [{"when": "失败", "action": "block"}],
-            },
-        ],
-        "assumptions": [],
-        "clarifications": [],
-    }
-    gateway = _PlannerGateway(plan)
-    planning_request = (
-        contract.goal
-        + "\n\n这是基于父 TaskRun 的新分析分支。"
-        + "\n- 需改进：COMPOSE_4D_FEEDBACK 请保留原始数据并重新核对字段"
-    )
 
-    result = await create_production_plan(
-        user_text=planning_request,
+    result = create_task_outline(
+        user_text=contract.goal,
         contract=contract,
         datasets=[_dataset()],
         artifacts=[],
         registry=_registry(),
-        gateway=gateway,
         blocking_clarification=None,
     )
 
-    assert result.route == "llm"
+    assert result.route == "template"
     assert result.validation.valid is True
-    assert result.audit["model"] == "eligible-planner"
-    assert result.audit["prompt_tokens"] == 20
-    assert result.audit["response_hash"]
-    assert len(gateway.calls) == 1
-    request_payload = gateway.calls[0][-1].content
-    assert "SECRET-ROW" not in request_payload
-    assert json.loads(request_payload)["planning_request"] == planning_request
+    assert set(result.audit) == {"route", "prompt_version", "response_hash"}
+    assert result.audit["prompt_version"] == "deterministic-outline-v1"
+    assert result.capabilities == {"stats.anomaly", "dataset.transform"}
