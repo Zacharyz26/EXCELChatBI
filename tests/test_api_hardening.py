@@ -68,7 +68,7 @@ def test_upload_oversize_rejected(tmp_path: Path) -> None:
 def test_upload_rejects_rows_over_threshold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 阈值压到 2，样例表 3 行数据 → 读表前按元数据拒绝（413），且不留盘（大表防护 V3）
+    # 阈值压到 2，样例表 3 行数据 → 按实际行数拒绝（413），且不留盘。
     monkeypatch.setenv("LARGE_TABLE_ROW_THRESHOLD", "2")
     get_settings.cache_clear()
     up = tmp_path / "uploads"

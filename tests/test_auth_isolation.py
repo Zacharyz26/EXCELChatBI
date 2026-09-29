@@ -154,6 +154,16 @@ def test_report_download_is_scoped_to_owning_project(
     response = alice.get(f"/analyze/report/{report_id}.md")
     assert response.status_code == 200
     assert response.text == "# private"
+    # Upgraded Starlette keeps authorized partial downloads and rejects malformed ranges.
+    partial = alice.get(f"/analyze/report/{report_id}.md", headers={"Range": "bytes=0-2"})
+    assert partial.status_code == 206 and partial.content == b"# p"
+    assert partial.headers["content-range"] == "bytes 0-2/9"
+    invalid = alice.get(
+        f"/analyze/report/{report_id}.md", headers={"Range": "bytes=" + "-" * 8000}
+    )
+    assert invalid.status_code == 400
+    forbidden = bob.get(f"/analyze/report/{report_id}.md", headers={"Range": "bytes=0-2"})
+    assert forbidden.status_code == 404
 
 
 def test_task_control_write_is_project_scoped_and_idempotent(

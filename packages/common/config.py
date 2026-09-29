@@ -88,9 +88,11 @@ class Settings(BaseSettings):
 
     # 图表服务端截图（Playwright 无头 chromium）；留空则自动探测已安装的 chromium
     chromium_executable_path: str = ""
-    # 表行数处理上限：parse_excel 读表前按元数据检查，超过直接拒绝（防解压后 OOM）；
-    # 单机技术预览明确不接收超出该边界的工作簿。
-    large_table_row_threshold: int = 500_000
+    # 按实际工作表行（包括中间空行）限流，不信任后缀或 dimension 元数据。
+    large_table_row_threshold: int = Field(default=500_000, ge=1)
+    excel_max_uncompressed_mb: int = Field(default=256, ge=1)
+    excel_max_columns: int = Field(default=1024, ge=1, le=16384)
+    excel_max_cells: int = Field(default=5_000_000, ge=1)
 
     # 数据画像安全策略配置（缺失时用内置宽松默认，见 packages/governance/data_boundary）
     data_policy_path: str = "config/data_policy.yaml"

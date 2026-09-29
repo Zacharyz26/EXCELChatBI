@@ -15,6 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.config import get_settings
+from packages.common.identifiers import validate_report_id
+from packages.common.report_safety import (
+    MAX_PNG_BYTES,
+    escape_report_markup,
+    report_url_fetcher,
+    sanitize_report_html,
+    validate_png,
+)
 
 # ── PDF 用 HTML 模板：CJK 字体 + 基础排版（图片已 base64 内嵌，无需 base_url）──
 _HTML_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8"><style>
@@ -49,11 +57,11 @@ def gen_report_md(args: dict[str, Any]) -> dict[str, Any]:
     Returns:
         {report_id, md_path, markdown}。
     """
-    title: str = args["title"]
-    profile: dict[str, Any] = args["profile"]
+    title: str = escape_report_markup(args["title"])
+    profile: dict[str, Any] = escape_report_markup(args["profile"])
     charts: list[dict[str, Any]] = args.get("charts", [])
-    stats: list[dict[str, Any]] = args.get("stats", [])
-    insights: str | None = args.get("insights")
+    stats: list[dict[str, Any]] = escape_report_markup(args.get("stats", []))
+    insights: str | None = escape_report_markup(args.get("insights"))
 
     lines: list[str] = [f"# {title}", ""]
     lines += _profile_md(profile)
@@ -63,7 +71,7 @@ def gen_report_md(args: dict[str, Any]) -> dict[str, Any]:
         lines += ["## 图表", ""]
         for c in charts:
             if c.get("caption"):
-                lines += [f"### {c['caption']}", ""]
+                lines += [f"### {escape_report_markup(c['caption'])}", ""]
             lines += [f"![chart]({_img_data_uri(c['image_path'])})", ""]
     if stats:
         lines += ["## 统计分析", ""]
@@ -106,7 +114,7 @@ def export_pdf(args: dict[str, Any]) -> dict[str, Any]:
     import weasyprint
 
     md_lib = importlib.import_module("markdown")
-    report_id: str = args["report_id"]
+    report_id = validate_report_id(args["report_id"])
     md_path = _reports_dir() / f"{report_id}.md"
     if not md_path.exists():
         raise FileNotFoundError(f"报告不存在: {report_id}")
@@ -114,8 +122,8 @@ def export_pdf(args: dict[str, Any]) -> dict[str, Any]:
     html_body = md_lib.markdown(
         md_path.read_text(encoding="utf-8"), extensions=["tables", "fenced_code"]
     )
-    html = _HTML_TEMPLATE.format(body=html_body)
-    pdf_bytes = weasyprint.HTML(string=html).write_pdf()
+    html = _HTML_TEMPLATE.format(body=sanitize_report_html(html_body))
+    pdf_bytes = weasyprint.HTML(string=html, url_fetcher=report_url_fetcher).write_pdf()
     pdf_path = _reports_dir() / f"{report_id}.pdf"
     _atomic_write_bytes(pdf_path, pdf_bytes)
     return {"report_id": report_id, "pdf_path": str(pdf_path), "bytes": len(pdf_bytes)}
@@ -140,7 +148,10 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 def _img_data_uri(image_path: str) -> str:
     """PNG 文件 → base64 data URI（内嵌，报告自包含）。"""
-    b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+    with Path(image_path).open("rb") as image:
+        data = image.read(MAX_PNG_BYTES + 1)
+    validate_png(data)
+    b64 = base64.b64encode(data).decode("ascii")
     return f"data:image/png;base64,{b64}"
 
 

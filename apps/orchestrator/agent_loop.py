@@ -5137,6 +5137,8 @@ def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
         }
         if result.get("pdf_path"):
             payload["pdf_url"] = f"/analyze/report/{report_id}.pdf"
+        if isinstance(result.get("validation"), dict):
+            payload["validation"] = result["validation"]
         return payload
     if tool in {
         "trend_analysis",

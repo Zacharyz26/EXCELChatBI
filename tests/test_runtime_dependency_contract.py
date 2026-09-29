@@ -33,6 +33,22 @@ def test_lockfile_matches_core_and_forecast_dependency_tiers() -> None:
     assert {item["name"] for item in optional["forecast"]} == {"prophet"}
 
 
+def test_starlette_security_floor_is_explicit_and_locked() -> None:
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    requirements = {item.name: item for item in map(Requirement, project["dependencies"])}
+    constraint = requirements["starlette"].specifier
+    assert Version("0.49.0") not in constraint  # GHSA-7f5h-v6xp-fcq8
+    assert Version("0.46.2") not in constraint  # GHSA-2c2j-9gv5-cj73
+    locked = tomllib.loads((ROOT / "uv.lock").read_text())
+    versions = {item["name"]: Version(item["version"]) for item in locked["package"]}
+    assert versions["starlette"] >= Version("0.49.1")
+    assert versions["starlette"] in constraint
+    assert versions["fastapi"] in requirements["fastapi"].specifier
+
+
 def test_ci_smokes_core_only_environment_before_full_backend_install() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 

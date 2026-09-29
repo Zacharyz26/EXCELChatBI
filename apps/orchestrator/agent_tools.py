@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -65,6 +66,8 @@ from packages.rag.retriever import HybridRetriever
 from packages.session.file_lifecycle import delete_chart_file
 from packages.session.models import Artifact, ArtifactDraft, JsonObject
 from packages.session.store import SessionStore
+
+from apps.orchestrator.control.report_claims import validate_report_narratives
 
 if TYPE_CHECKING:
     from packages.common.config import Settings
@@ -120,7 +123,7 @@ GENERATE_REPORT_SCHEMA: dict[str, Any] = {
         },
         "insights": {
             "type": "string",
-            "description": "要点速览文字（编排层产出的解读）",
+            "description": "要点速览；数字必须可追溯到 analysis_ids 对应的工具结果，否则拒绝生成",
         },
         "include_pdf": {"type": "boolean", "description": "是否同时导出 PDF"},
     },
@@ -1248,6 +1251,10 @@ def _generate_report(
         raise AgentToolError(f"分析不存在于本对话: {', '.join(missing[:5])}")
     artifacts = [artifact for analysis_id in wanted for artifact in by_analysis_id[analysis_id]]
 
+    try:
+        validation = validate_report_narratives(artifacts, args)
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
     md_args, skipped_charts = _assemble_report_args(chart, artifacts)
     md_args["title"] = args["title"]
     if args.get("insights"):
@@ -1281,6 +1288,8 @@ def _generate_report(
         result["pdf_path"] = pdf["pdf_path"]
     result["skipped_charts"] = skipped_charts
     result["analysis_ids"] = wanted
+    validation["content_sha256"] = hashlib.sha256(result["markdown"].encode()).hexdigest()
+    result["validation"] = validation
     return result
 
 

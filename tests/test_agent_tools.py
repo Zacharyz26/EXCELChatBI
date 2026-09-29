@@ -630,3 +630,149 @@ def test_generate_report_rejects_legacy_or_extra_model_args() -> None:
         _registry().execute(
             "generate_report", '{"title": "T", "analysis_ids": ["a"], "extra": true}'
         )
+
+
+@pytest.mark.parametrize("field,text", [
+    ("insights", "收入达到 987654321 万元。"),
+    ("title", "收入 987654321 万元分析报告"),
+    ("title", "987654321. 收入分析报告"),
+    ("insights", "收入 987**654**321 万元。"),
+    ("insights", "收入 987\u200b654321 万元。"),
+])
+def test_report_rejects_unsupported_prose_before_writing_files(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, text: str,
+) -> None:
+    from mcp_servers.report import tools as report_tools
+
+    monkeypatch.setattr(report_tools, "_reports_dir", lambda: tmp_path)
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    args = {"title": "报告", "analysis_ids": [ids["profile"], ids["stats_analysis"]], field: text}
+    with pytest.raises(AgentToolError, match="数值缺少所选分析的证据"):
+        _registry(context).execute("generate_report", json.dumps(args))
+    assert not list(tmp_path.glob("*.md")) and not list(tmp_path.glob("*.pdf"))
+
+
+def test_report_accepts_supported_numbers_and_records_content_hash(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    import hashlib
+
+    from apps.orchestrator.agent_loop import _artifact_payload_for
+
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    result = _registry(context).execute("generate_report", json.dumps({
+        "title": "报告", "analysis_ids": [ids["profile"], ids["stats_analysis"]],
+        "insights": "样本数为 **4**，拟合优度为 90%。",
+    }))
+    validation = result["validation"]
+    assert validation["status"] == "passed"
+    assert set(validation["source_hashes"]) == {ids["profile"], ids["stats"]}
+    content_hash = hashlib.sha256(Path(result["md_path"]).read_bytes()).hexdigest()
+    assert validation["content_sha256"] == content_hash
+    assert validation["claims"]
+    assert _artifact_payload_for("generate_report", result)["validation"] == validation
+
+
+def test_report_cannot_use_unselected_analysis_to_support_prose(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    with pytest.raises(AgentToolError, match="数值缺少"):
+        _registry(context).execute("generate_report", json.dumps({
+            "title": "报告", "analysis_ids": [ids["profile"]], "insights": "拟合优度为 90%。",
+        }))
+
+
+def test_report_checks_chart_title_before_screenshot(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apps.orchestrator import agent_tools
+
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    message = store.append_message(conversation_id=context.conversation_id,
+                                   role="assistant", content="图表")
+    artifact = store.create_artifact(
+        conversation_id=context.conversation_id, message_id=message.id, type="chart",
+        payload={"option": {"title": {"text": "收入 987654321 万元"},
+                            "series": [{"data": [4]}]}}, source_tool="gen_chart",
+    )
+
+    def must_not_render(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Invalid report must be rejected before chart rendering")
+
+    monkeypatch.setattr(agent_tools, "_assemble_report_args", must_not_render)
+    with pytest.raises(AgentToolError, match="数值缺少"):
+        _registry(context).execute("generate_report", json.dumps({
+            "title": "报告", "analysis_ids": [ids["profile"], artifact.id],
+        }))
+
+
+@pytest.mark.parametrize("field", ["caption", "interpretation"])
+def test_report_cannot_use_old_narrative_as_its_own_evidence(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext], field: str,
+) -> None:
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    message = store.append_message(conversation_id=context.conversation_id,
+                                   role="assistant", content="旧解读")
+    artifact = store.create_artifact(
+        conversation_id=context.conversation_id, message_id=message.id, type="stats",
+        payload={"kind": "regression", "result": {"r_squared": 0.9, "n_obs": 4},
+                 field: "收入 987654321 万元。"},
+        source_tool="regression", dataset_ref=sales_ref,
+    )
+    with pytest.raises(AgentToolError, match="数值缺少"):
+        _registry(context).execute("generate_report", json.dumps({
+            "title": "报告", "analysis_ids": [ids["profile"], artifact.id],
+            "insights": "收入 987654321 万元。",
+        }))
+
+
+@pytest.mark.asyncio
+async def test_real_agent_rejects_invented_report_then_can_correct_it(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common.config import get_settings
+    from packages.models.types import ToolCall
+    from packages.session.task_store import TaskStore
+
+    from tests.test_agent_loop import ScriptedGateway, _run_loop
+
+    monkeypatch.setenv("REPORT_DIR", str(tmp_path / "reports"))
+    get_settings.cache_clear()
+    store, context = workspace
+    ids = _seed_artifacts(store, context, sales_ref)
+    base_args = {"title": "报告", "analysis_ids": [ids["profile"], ids["stats_analysis"]]}
+    gateway = ScriptedGateway([
+        {"tool_calls": [ToolCall(id="invalid-report", name="generate_report", arguments=json.dumps({
+            **base_args, "insights": "收入 987654321 万元。",
+        }))]},
+        {"tool_calls": [ToolCall(
+            id="corrected-report", name="generate_report", arguments=json.dumps({
+                **base_args, "insights": "样本数为 4，拟合优度为 90%。",
+            }),
+        )]},
+        {"deltas": ["报告已生成。"]},
+    ])
+    try:
+        events = await _run_loop(store, store.get_conversation(context.conversation_id),
+                                 gateway, _registry(context),
+                                 user_text="根据已有分析生成 Markdown 报告")
+        run_id = next(payload["run_id"] for kind, payload in events if kind == "meta")
+        assert TaskStore(store.db_path).get_run(run_id).status == "completed"
+        reports = list((tmp_path / "reports").glob("*.md"))
+        assert len(reports) == 1
+        assert "987654321" not in reports[0].read_text()
+        assert "90%" in reports[0].read_text()
+        artifacts = [a for a in store.list_artifacts(context.conversation_id) if a.type == "report"]
+        assert len(artifacts) == 1 and artifacts[0].payload["validation"]["status"] == "passed"
+        assert "数值缺少" in str(gateway.calls[1]["messages"])
+    finally:
+        get_settings.cache_clear()

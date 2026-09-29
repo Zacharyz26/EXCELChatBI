@@ -7,17 +7,15 @@ from __future__ import annotations
 
 import math
 from typing import Any
+from zipfile import ZipFile, is_zipfile
 
 import pandas as pd
 from packages.common.config import get_settings
 from packages.common.dataset_store import load_dataframe, save_dataframe
-from packages.common.logging import get_logger
 from packages.governance.data_boundary import resolve_policy
 from packages.governance.redaction import apply_policy
 
 from mcp_servers.excel_parser.profile import ColumnProfile, DataProfile
-
-_log = get_logger("mcp.excel_parser")
 
 # 默认样本行数（属"画像"范畴，可喂 LLM；见设计文档 6.1）
 _SAMPLE_ROWS = 5
@@ -26,7 +24,7 @@ _SAMPLE_VALUES = 5
 
 
 class TableTooLargeError(ValueError):
-    """表行数超过处理上限（大表防护：整表读回内存前先拒绝）。"""
+    """工作簿超过行数、列数、单元格或解压大小上限。"""
 
 
 def parse_excel(args: dict[str, Any]) -> dict[str, Any]:
@@ -43,9 +41,23 @@ def parse_excel(args: dict[str, Any]) -> dict[str, Any]:
     header_row: int = args.get("header_row", 0)
     nrows: int | None = args.get("nrows")
 
-    # 大表防护：读整表进内存前先查行数元数据，超阈值直接拒绝（防 OOM）。
-    _guard_row_limit(file_ref, sheet, header_row, nrows)
-    df = pd.read_excel(file_ref, sheet_name=sheet, header=header_row, nrows=nrows)
+    settings = get_settings()
+    limit = settings.large_table_row_threshold
+    if not isinstance(header_row, int) or not 0 <= header_row <= limit:
+        raise ValueError(f"header_row 必须在 0 到 {limit} 之间")
+    if nrows is not None and (not isinstance(nrows, int) or nrows < 1):
+        raise ValueError("nrows 必须是正整数")
+    _guard_archive_size(file_ref)
+    # pandas 根据内容选择引擎，不根据扩展名；nrows 始终有界，绝不默认读整表。
+    read_rows = min(nrows, limit + 1) if nrows is not None else limit + 1
+    with pd.ExcelFile(file_ref) as workbook:
+        if workbook.engine == "openpyxl":
+            _guard_worksheet(workbook.book, sheet, header_row, nrows)
+        df = pd.read_excel(workbook, sheet_name=sheet, header=header_row, nrows=read_rows)
+    if len(df) > limit:
+        raise TableTooLargeError(f"表行数超过处理上限（{limit} 行），请拆分文件后重试")
+    if len(df.columns) > settings.excel_max_columns or df.size > settings.excel_max_cells:
+        raise TableTooLargeError("表列数或单元格数超过处理上限，请缩小数据范围后重试")
     dataset_ref = save_dataframe(df)
     return {
         "dataset_ref": dataset_ref,
@@ -89,55 +101,49 @@ def data_preview(args: dict[str, Any]) -> dict[str, Any]:
 
 # ── 内部辅助 ──
 
-def _guard_row_limit(
-    file_ref: str, sheet: str | int, header_row: int, nrows: int | None
+def _guard_archive_size(file_ref: str) -> None:
+    """在 openpyxl 加载共享字符串等内容之前约束 ZIP 解压预算。"""
+    if not is_zipfile(file_ref):
+        return
+    with ZipFile(file_ref) as archive:
+        members = archive.infolist()
+        limit = get_settings().excel_max_uncompressed_mb * 1024 * 1024
+        if len(members) > 10_000 or sum(item.file_size for item in members) > limit:
+            raise TableTooLargeError("工作簿解压大小或文件数超过处理上限，请拆分文件后重试")
+
+
+def _guard_worksheet(
+    workbook: Any, sheet: str | int, header_row: int, nrows: int | None
 ) -> None:
-    """行数上限防护：openpyxl read_only 只读工作表元数据，不解压整表数据。
+    """流式核对实际行/宽度，在 pandas 构造矩形 DataFrame 前拒绝越界。
 
-    上传大小上限只约束压缩后体积，高压缩比 xlsx 解开后仍可能打爆内存，
-    故在 pd.read_excel 之前按 `large_table_row_threshold` 拒绝超大表。
-
-    Args:
-        file_ref: 文件路径（仅 .xlsx/.xlsm 可查；.xls 走不了 openpyxl，跳过）。
-        sheet: 工作表名或序号。
-        header_row: 表头行号（0 基），行数按数据行计算。
-        nrows: 调用方限定的读取行数；不超阈值则无需检查。
-
-    Raises:
-        TableTooLargeError: 数据行数超过阈值。
-        ValueError: 工作表不存在。
+    dimension 可以缺失或伪造，必须 reset；格式化空行及稀疏行也占读取预算。
+    显式 nrows <= 上限表示允许读取样本，不要求工作簿剩余部分也在行数上限内。
     """
-    limit = get_settings().large_table_row_threshold
-    if nrows is not None and nrows <= limit:
-        return
-    if not file_ref.lower().endswith((".xlsx", ".xlsm")):
-        return
-
-    from openpyxl import load_workbook
-
-    wb = load_workbook(file_ref, read_only=True)
+    settings = get_settings()
+    limit = settings.large_table_row_threshold
+    names = workbook.sheetnames
+    if isinstance(sheet, int) and 0 <= sheet < len(names):
+        sheet = names[sheet]
+    if sheet not in names:
+        raise ValueError(f"工作表不存在: {sheet}")
+    worksheet = workbook[sheet]
+    worksheet.reset_dimensions()
+    sample_only = nrows is not None and nrows <= limit
+    max_rows = header_row + 1 + (nrows if sample_only and nrows is not None else limit)
+    width = 0
+    rows = worksheet.iter_rows(values_only=True)
     try:
-        if isinstance(sheet, str):
-            if sheet not in wb.sheetnames:
-                raise ValueError(f"工作表不存在: {sheet}")
-            max_row = wb[sheet].max_row
-        else:
-            if not 0 <= sheet < len(wb.worksheets):
-                raise ValueError(f"工作表不存在: {sheet}")
-            max_row = wb.worksheets[sheet].max_row
+        for count, row in enumerate(rows, start=1):
+            if count > max_rows:
+                raise TableTooLargeError(f"表行数超过处理上限（{limit} 行），请拆分文件后重试")
+            width = max(width, len(row))
+            if width > settings.excel_max_columns or width * count > settings.excel_max_cells:
+                raise TableTooLargeError("表列数或单元格数超过处理上限，请缩小数据范围后重试")
+            if sample_only and count == max_rows:
+                break
     finally:
-        wb.close()
-
-    if max_row is None:
-        # 个别生成器不写 dimension 元数据；跳过检查并告警，不误伤正常文件
-        _log.warning("excel.row_limit.unknown", file_ref=file_ref)
-        return
-    data_rows = max(0, max_row - 1 - header_row)  # 去掉表头及其上方行
-    if data_rows > limit:
-        raise TableTooLargeError(
-            f"表行数超过处理上限（约 {data_rows} 行 > {limit} 行），"
-            f"请拆分文件或缩小数据范围后重试"
-        )
+        rows.close()
 
 
 def _dtype_name(series: pd.Series) -> str:
