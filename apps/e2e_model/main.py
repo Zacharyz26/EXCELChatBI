@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -23,11 +23,13 @@ _FEEDBACK_MARKER = "COMPOSE_4D_FEEDBACK"
 _PARALLEL_MARKER = "COMPOSE_6A_PARALLEL"
 _HYPOTHESIS_MARKER = "请深入分析这份数据"
 _REPORT_MARKER = "COMPOSE_REPORT"
-_audit: dict[str, int | bool] = {
+_PARALLEL_SCENARIO_PATTERN = re.compile(r"COMPOSE_6A_PARALLEL:([a-z0-9][a-z0-9-]*)")
+_audit: dict[str, Any] = {
     "agent_stream_calls": 0,
     "feedback_marker_seen_in_agent": False,
     "branch_profile_tool_calls": 0,
     "multi_tool_batches": 0,
+    "multi_tool_batches_by_scenario": {},
     "hypothesis_anomaly_tool_calls": 0,
 }
 
@@ -38,9 +40,13 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/audit")
-async def audit() -> dict[str, int | bool]:
+async def audit() -> dict[str, object]:
     """Return bounded fixture facts; never expose model messages or prompt text."""
-    return dict(_audit)
+    payload = dict(_audit)
+    payload["multi_tool_batches_by_scenario"] = dict(
+        cast(dict[str, int], _audit["multi_tool_batches_by_scenario"])
+    )
+    return payload
 
 
 @app.post("/v1/chat/completions")
@@ -81,6 +87,7 @@ async def _stream_turn(
     ]
     joined = json.dumps(messages, ensure_ascii=False)
     scenario_marker = _latest_scenario_marker(messages)
+    parallel_scenario = _latest_parallel_scenario(messages)
     if (
         not has_current_tool_result
         and scenario_marker == _PARALLEL_MARKER
@@ -90,6 +97,11 @@ async def _stream_turn(
         if not dataset_refs:
             raise HTTPException(status_code=422, detail="dataset_ref missing")
         _audit["multi_tool_batches"] = int(_audit["multi_tool_batches"]) + 1
+        scenario_counts = cast(
+            dict[str, int], _audit["multi_tool_batches_by_scenario"]
+        )
+        scenario_id = parallel_scenario or "unscoped"
+        scenario_counts[scenario_id] = scenario_counts.get(scenario_id, 0) + 1
         dataset_ref = dataset_refs[-1]
         yield _sse_chunk(
             model,
@@ -386,6 +398,18 @@ def _latest_scenario_marker(messages: list[Any]) -> str | None:
         ):
             if marker in content:
                 return marker
+    return None
+
+
+def _latest_parallel_scenario(messages: list[Any]) -> str | None:
+    """Return the bounded scenario id attached to the active 6A browser turn."""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = str(message.get("content", ""))
+        match = _PARALLEL_SCENARIO_PATTERN.search(content)
+        if match is not None:
+            return match.group(1)
     return None
 
 

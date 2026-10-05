@@ -11,7 +11,7 @@ const BRANCH_GOAL = (
   "COMPOSE_4D_BRANCH：请深入分析这份数据的字段与规模，并根据父分支反馈调整计划。"
 );
 const PARALLEL_GOAL = (
-  "COMPOSE_6A_PARALLEL：请深入分析这份数据的画像和销售额时间趋势。"
+  "COMPOSE_6A_PARALLEL:full-stack：请深入分析这份数据的画像和销售额时间趋势。"
 );
 const COMPOSE_6C_EXPLORATION = "请深入分析这份数据";
 const RUN_NOT_VISIBLE = "run_not_visible";

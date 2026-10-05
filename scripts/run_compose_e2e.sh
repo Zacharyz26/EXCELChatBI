@@ -200,24 +200,8 @@ model_audit="$(
     'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/audit", timeout=5).read().decode())'
 )"
 printf '%s\n' "$model_audit" > .data/e2e/model-fixture-audit.json
-MODEL_AUDIT_JSON="$model_audit" node -e '
-const audit = JSON.parse(process.env.MODEL_AUDIT_JSON);
-if (audit.agent_stream_calls < 1) {
-  throw new Error("requests did not reach the single Agent model boundary");
-}
-if (audit.feedback_marker_seen_in_agent !== true) {
-  throw new Error("bounded parent feedback did not reach the Agent request");
-}
-if (audit.branch_profile_tool_calls !== 1) {
-  throw new Error(`branch profile tool was requested ${audit.branch_profile_tool_calls} times`);
-}
-if (audit.multi_tool_batches !== 1) {
-  throw new Error(`6A multi-tool batch was requested ${audit.multi_tool_batches} times`);
-}
-if (audit.hypothesis_anomaly_tool_calls !== 1) {
-  throw new Error(`6C anomaly hypothesis was requested ${audit.hypothesis_anomaly_tool_calls} times`);
-}
-'
+MODEL_AUDIT_JSON="$model_audit" \
+  .venv/bin/python scripts/verify_e2e_model_audit.py initial
 
 data_role_probe_log=".data/e2e/data-role-recovery.jsonl"
 "${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
@@ -362,6 +346,16 @@ CHATBI_COMPOSE_RECOVERY_ONLY=1 \
   CHATBI_COMPOSE_RECOVERY_RUN_ID="$run_id" \
   CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID="$latest_run_id" \
   pnpm --dir apps/web test:e2e:compose
+
+recovery_model_audit="$(
+  "${compose[@]}" exec -T model-stub \
+    python -c \
+    'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/audit", timeout=5).read().decode())'
+)"
+printf '%s\n' "$recovery_model_audit" > .data/e2e/model-fixture-recovery-audit.json
+INITIAL_MODEL_AUDIT_JSON="$model_audit" \
+RECOVERY_MODEL_AUDIT_JSON="$recovery_model_audit" \
+  .venv/bin/python scripts/verify_e2e_model_audit.py recovery
 
 probe_output="$(
   "${compose[@]}" exec -T api \

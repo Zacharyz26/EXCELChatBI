@@ -92,7 +92,7 @@ test("独立画像趋势并行后一次生成并下载 PDF", async ({ page }, te
 
   const parallelRunId = await sendAndCaptureRun(
     page,
-    "COMPOSE_6A_PARALLEL：请深入分析这份数据的画像和销售额时间趋势。",
+    "COMPOSE_6A_PARALLEL:report-parallel：请深入分析这份数据的画像和销售额时间趋势。",
   );
   await expect(page.getByText(
     "Compose 6A 受控并行画像与趋势分析已完成。",

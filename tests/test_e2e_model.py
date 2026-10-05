@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from apps.e2e_model.main import (
+    _latest_parallel_scenario,
     _latest_scenario_marker,
     _report_analysis_ids,
     _stream_turn,
@@ -23,12 +24,15 @@ def test_compose_fixture_selects_the_latest_marked_user_turn() -> None:
             [
                 {"role": "user", "content": "COMPOSE_4D_BRANCH"},
                 {"role": "assistant", "content": "分支完成"},
-                {"role": "user", "content": "COMPOSE_6A_PARALLEL"},
+                {"role": "user", "content": "COMPOSE_6A_PARALLEL:full-stack"},
                 {"role": "user", "content": "请按当前计划重试"},
             ]
         )
         == "COMPOSE_6A_PARALLEL"
     )
+    assert _latest_parallel_scenario(
+        [{"role": "user", "content": "COMPOSE_6A_PARALLEL:full-stack：分析"}]
+    ) == "full-stack"
     assert (
         _latest_scenario_marker(
             [
@@ -116,7 +120,7 @@ async def test_compose_parallel_fixture_requests_profile_and_trend_in_one_turn(
             "chatbi-e2e",
             [
                 {"role": "system", "content": f"最新数据集 {dataset_ref} 的画像"},
-                {"role": "user", "content": "COMPOSE_6A_PARALLEL"},
+                {"role": "user", "content": "COMPOSE_6A_PARALLEL:full-stack"},
             ],
             [
                 {
