@@ -23,8 +23,8 @@ def test_compose_gate_persists_and_rechecks_parallel_control_state() -> None:
     )
 
     assert "verify_parallel_run" in gate
-    assert "verify_e2e_model_audit.py initial" in gate
-    assert "verify_e2e_model_audit.py recovery" in gate
+    assert "apps.e2e_model.audit initial" in gate
+    assert "apps.e2e_model.audit recovery" in gate
     assert gate.count("verify_parallel_run") >= 3
     assert "COMPOSE_6A_PARALLEL" in browser
     assert "evidence_ledger_sequence" in browser

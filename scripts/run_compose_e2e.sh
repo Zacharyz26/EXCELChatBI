@@ -200,8 +200,8 @@ model_audit="$(
     'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/audit", timeout=5).read().decode())'
 )"
 printf '%s\n' "$model_audit" > .data/e2e/model-fixture-audit.json
-MODEL_AUDIT_JSON="$model_audit" \
-  .venv/bin/python scripts/verify_e2e_model_audit.py initial
+"${compose[@]}" exec -T -e MODEL_AUDIT_JSON="$model_audit" api \
+  python -m apps.e2e_model.audit initial
 
 data_role_probe_log=".data/e2e/data-role-recovery.jsonl"
 "${compose[@]}" exec -T -e LOG_LEVEL=ERROR api \
@@ -353,9 +353,10 @@ recovery_model_audit="$(
     'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/audit", timeout=5).read().decode())'
 )"
 printf '%s\n' "$recovery_model_audit" > .data/e2e/model-fixture-recovery-audit.json
-INITIAL_MODEL_AUDIT_JSON="$model_audit" \
-RECOVERY_MODEL_AUDIT_JSON="$recovery_model_audit" \
-  .venv/bin/python scripts/verify_e2e_model_audit.py recovery
+"${compose[@]}" exec -T \
+  -e INITIAL_MODEL_AUDIT_JSON="$model_audit" \
+  -e RECOVERY_MODEL_AUDIT_JSON="$recovery_model_audit" \
+  api python -m apps.e2e_model.audit recovery
 
 probe_output="$(
   "${compose[@]}" exec -T api \

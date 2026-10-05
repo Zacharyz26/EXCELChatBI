@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from scripts.verify_e2e_model_audit import (
+from apps.e2e_model.audit import (
     verify_initial_model_audit,
     verify_recovery_model_audit,
 )
