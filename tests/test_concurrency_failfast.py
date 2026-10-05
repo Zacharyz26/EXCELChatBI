@@ -6,6 +6,7 @@ bge 存根构造期 fail-fast 与服务启动自检（D5）。
 
 from __future__ import annotations
 
+import builtins
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -87,36 +88,47 @@ def test_kb_reads_keep_one_snapshot_during_concurrent_rebuild(tmp_path: Path) ->
 
 # ── D5：bge 后端缺依赖时的 fail-fast ──
 
-_HAS_FLAG_EMBEDDING = True
-try:
-    import FlagEmbedding  # noqa: F401
-except ImportError:
-    _HAS_FLAG_EMBEDDING = False
+def _block_flag_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministically exercise the missing optional dependency boundary."""
+    real_import = builtins.__import__
 
-_NEEDS_MISSING_RAG_EXTRA = pytest.mark.skipif(
-    _HAS_FLAG_EMBEDDING,
-    reason="已安装 FlagEmbedding：构造会真实加载权重，缺依赖契约不适用",
-)
+    def import_without_flag_embedding(name: str, *args: object, **kwargs: object) -> object:
+        if name == "FlagEmbedding" or name.startswith("FlagEmbedding."):
+            raise ImportError("controlled missing FlagEmbedding")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_flag_embedding)
 
 
-@_NEEDS_MISSING_RAG_EXTRA
-def test_bge_backends_fail_fast_without_rag_extra() -> None:
+def test_bge_backends_fail_fast_without_rag_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     """未装 .[rag] 时 bge 后端构造期即报错，并指引安装或改回替身配置。"""
+    _block_flag_embedding(monkeypatch)
     with pytest.raises(RuntimeError, match="hashing"):
         BGEEmbedder("bge-m3")
     with pytest.raises(RuntimeError, match="lexical"):
         BGEReranker("bge-reranker-v2-m3")
 
 
-@_NEEDS_MISSING_RAG_EXTRA
 def test_startup_failfast_when_bge_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """配置 rag_embedder=bge 但缺依赖时，服务启动即失败，而非请求中途 500。"""
+    _block_flag_embedding(monkeypatch)
     monkeypatch.setenv("RAG_EMBEDDER", "bge")
+    monkeypatch.setenv("RAG_RERANKER", "bge")
     monkeypatch.setenv("RAG_STORE", "milvus")
+    monkeypatch.setenv("RAG_RUNTIME_PROFILE", "cpu")
+    monkeypatch.setenv("EMBEDDING_DEVICE", "cpu")
     get_settings.cache_clear()
     embedder_dep.cache_clear()
     reranker_dep.cache_clear()
     try:
+        settings = get_settings()
+        assert (
+            settings.rag_embedder,
+            settings.rag_reranker,
+            settings.rag_store,
+            settings.rag_runtime_profile,
+            settings.embedding_device,
+        ) == ("bge", "bge", "milvus", "cpu", "cpu")
         with pytest.raises(RuntimeError, match="FlagEmbedding"):
             with TestClient(app):  # context manager 触发 lifespan 启动自检
                 pass

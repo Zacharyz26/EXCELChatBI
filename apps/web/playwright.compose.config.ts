@@ -4,14 +4,13 @@ import { defineConfig, devices } from "@playwright/test";
 
 const webRoot = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(webRoot, "../..");
+const recoveryOnly = process.env.CHATBI_COMPOSE_RECOVERY_ONLY === "1";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: [
-    "compose-full-stack.spec.ts",
-    "compose-recovery.spec.ts",
-    "report-parallel-fix.spec.ts",
-  ],
+  testMatch: recoveryOnly
+    ? ["compose-recovery.spec.ts"]
+    : ["compose-full-stack.spec.ts", "report-parallel-fix.spec.ts"],
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,

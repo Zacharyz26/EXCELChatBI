@@ -10,7 +10,12 @@ for (const key of ["NO_PROXY", "no_proxy"]) {
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: ["full-stack.spec.ts", "compose-full-stack.spec.ts"],
+  testIgnore: [
+    "full-stack.spec.ts",
+    "compose-full-stack.spec.ts",
+    "compose-recovery.spec.ts",
+    "report-parallel-fix.spec.ts",
+  ],
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,

@@ -37,7 +37,12 @@ jobs:
         run: .venv-core/bin/python scripts/api_startup_smoke.py
 
       - name: Install backend dependencies
-        run: uv sync --frozen --extra forecast --extra report --extra rag-store --extra mcp
+        run: uv sync --frozen --extra forecast --extra report --extra rag-store --extra mcp --extra chart-screenshot
+
+      # Python Playwright ships the driver only. Real chart/PDF regression tests
+      # also require a matching Chromium binary and its Ubuntu system libraries.
+      - name: Install Chromium for backend chart rendering tests
+        run: uv run --frozen playwright install --with-deps chromium
 
       - name: Run backend tests
         run: uv run --frozen pytest -q
