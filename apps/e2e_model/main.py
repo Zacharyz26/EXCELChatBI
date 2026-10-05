@@ -72,6 +72,7 @@ async def _stream_turn(
     call_id = f"call-{uuid.uuid4().hex[:16]}"
     last_message = messages[-1] if messages else None
     has_current_tool_result = isinstance(last_message, dict) and last_message.get("role") == "tool"
+    last_tool_name = _tool_result_name(last_message)
     tools = raw_tools if isinstance(raw_tools, list) else []
     tool_names = [
         function.get("name")
@@ -216,8 +217,49 @@ async def _stream_turn(
             },
         )
         yield _sse_chunk(model, {}, finish_reason="tool_calls")
-    elif not has_current_tool_result and "generate_report" in tool_names:
-        analysis_ids = re.findall(r"analysis_id=([A-Za-z0-9_-]+)", joined)
+    elif (
+        scenario_marker == _REPORT_MARKER
+        and not has_current_tool_result
+        and "get_data_profile" in tool_names
+        and not _report_analysis_ids(messages, artifact_type="profile")
+    ):
+        dataset_refs = re.findall(r"最新数据集 ([0-9a-f]{32})", joined)
+        if not dataset_refs:
+            raise HTTPException(status_code=422, detail="dataset_ref missing")
+        yield _sse_chunk(
+            model,
+            {
+                "role": "assistant",
+                "content": "我会先生成本次报告所需的数据画像 Evidence。",
+            },
+        )
+        yield _sse_chunk(
+            model,
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "get_data_profile",
+                            "arguments": json.dumps(
+                                {"dataset_ref": dataset_refs[-1]},
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        },
+                    }
+                ]
+            },
+        )
+        yield _sse_chunk(model, {}, finish_reason="tool_calls")
+    elif (
+        scenario_marker == _REPORT_MARKER
+        and "generate_report" in tool_names
+        and (not has_current_tool_result or last_tool_name == "get_data_profile")
+    ):
+        analysis_ids = _report_analysis_ids(messages)
         if not analysis_ids:
             raise HTTPException(status_code=422, detail="analysis_id missing")
         yield _sse_chunk(
@@ -230,7 +272,7 @@ async def _stream_turn(
         arguments = json.dumps(
             {
                 "title": "销售数据分析报告",
-                "analysis_ids": [analysis_ids[-1]],
+                "analysis_ids": analysis_ids,
                 "insights": "本报告基于已验证的数据画像。",
                 "include_pdf": True,
             },
@@ -291,6 +333,43 @@ async def _stream_turn(
         )
         yield _sse_chunk(model, {}, finish_reason="stop")
     yield "data: [DONE]\n\n"
+
+
+def _report_analysis_ids(
+    messages: list[Any],
+    *,
+    artifact_type: str | None = None,
+) -> list[str]:
+    """Select typed report inputs from the Host artifact registry, not recency alone."""
+    joined = "\n".join(
+        str(message.get("content", ""))
+        for message in messages
+        if isinstance(message, dict)
+    )
+    selected: list[str] = []
+    for analysis_id, current_type in re.findall(
+        r"\[analysis_id=([A-Za-z0-9_-]+)\][^\n]*?类型=(profile|stats|chart|table)",
+        joined,
+    ):
+        if artifact_type is not None and current_type != artifact_type:
+            continue
+        if analysis_id not in selected:
+            selected.append(analysis_id)
+    return selected
+
+
+def _tool_result_name(message: Any) -> str | None:
+    if not isinstance(message, dict) or message.get("role") != "tool":
+        return None
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    tool = payload.get("tool") if isinstance(payload, dict) else None
+    return tool if isinstance(tool, str) else None
 
 
 def _latest_scenario_marker(messages: list[Any]) -> str | None:

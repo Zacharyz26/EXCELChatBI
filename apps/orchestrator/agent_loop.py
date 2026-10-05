@@ -35,6 +35,7 @@ from mcp_servers.common.client_gateway import (
 from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from openai import OpenAIError
+from packages.common.analysis_kinds import ANALYSIS_KIND_BY_TOOL
 from packages.common.config import get_settings
 from packages.common.identifiers import dataset_reference_arguments
 from packages.common.logging import get_logger
@@ -5149,7 +5150,7 @@ def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
         "dimension_contribution",
         "group_compare",
     }:
-        return {"kind": tool, "result": result}
+        return {"kind": ANALYSIS_KIND_BY_TOOL[tool], "result": result}
     return dict(result)
 
 

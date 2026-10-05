@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,12 +38,18 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
     _required_chart_dimensions,
     stream_agent_chat,
 )
-from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
+from apps.orchestrator.agent_tools import (  # noqa: E402
+    AgentContext,
+    AgentToolRegistry,
+    AgentToolSpec,
+    _profile_with_quality,
+)
 from apps.orchestrator.control.contracts import build_minimal_contract  # noqa: E402
 from apps.orchestrator.control.task_plan_contract import validate_task_plan  # noqa: E402
 from apps.orchestrator.run_manager import ManagedRunControl  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from mcp_servers.common.catalog import tool_metadata  # noqa: E402
 from mcp_servers.common.client_gateway import (  # noqa: E402
     GatewayHealth,
     MCPExecutionResult,
@@ -53,7 +60,10 @@ from mcp_servers.common.contracts import (  # noqa: E402
     MCPToolDescriptor,
     ToolCapabilityMetadata,
 )
+from mcp_servers.excel_parser.server import build_server as build_excel  # noqa: E402
+from mcp_servers.stats.server import build_server as build_stats  # noqa: E402
 from packages.common.config import Settings  # noqa: E402
+from packages.common.dataset_store import save_dataframe  # noqa: E402
 from packages.governance.permissions import Principal  # noqa: E402
 from packages.governance.policy import ToolPolicyGateway  # noqa: E402
 from packages.governance.schema_validator import SchemaValidationError  # noqa: E402
@@ -4622,3 +4632,157 @@ async def test_conversation_lock_pool_serializes_same_conversation() -> None:
     release_first.set()
     await asyncio.gather(first_task, second_task)
     assert order == ["first-enter", "first-leave", "second-enter"]
+
+
+def _real_profile_trend_registry(
+    store: SessionStore,
+    conversation: Conversation,
+) -> AgentToolRegistry:
+    excel = build_excel()
+    stats = build_stats()
+    return AgentToolRegistry(
+        [
+            AgentToolSpec(
+                name="get_data_profile",
+                description="真实画像工具",
+                parameters=excel._tools["infer_schema"].input_schema,
+                runner=lambda args: _profile_with_quality(excel, args),
+                metadata=tool_metadata(
+                    ("data.profile", "data.roles", "data.quality"),
+                    "profile",
+                    tool_version="1.1.0",
+                ),
+            ),
+            AgentToolSpec(
+                name="trend_analysis",
+                description="真实趋势工具",
+                parameters=stats._tools["trend_analysis"].input_schema,
+                runner=stats._tools["trend_analysis"].invoke,
+                metadata=tool_metadata(
+                    "stats.trend",
+                    "stats",
+                    tool_version="1.1.0",
+                ),
+            ),
+        ],
+        context=AgentContext(
+            store=store,
+            project_id=conversation.project_id,
+            conversation_id=conversation.id,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_second_time_column", "expected_parallel"),
+    [(False, True), (True, False)],
+)
+async def test_production_planner_executor_respects_real_trend_dataflow(
+    store: SessionStore,
+    conversation: Conversation,
+    include_second_time_column: bool,
+    expected_parallel: bool,
+) -> None:
+    data: dict[str, list[Any]] = {
+        "月份": [
+            "2026-01",
+            "2026-02",
+            "2026-03",
+            "2026-04",
+            "2026-05",
+            "2026-06",
+        ],
+        "销售额": [120, 95, 140, 130, 155, 170],
+    }
+    if include_second_time_column:
+        data["日期"] = [
+            "2026-01-15",
+            "2026-02-15",
+            "2026-03-15",
+            "2026-04-15",
+            "2026-05-15",
+            "2026-06-15",
+        ]
+    dataset_ref = save_dataframe(pd.DataFrame(data))
+    profile = build_excel()._tools["infer_schema"].invoke(
+        {"dataset_ref": dataset_ref}
+    ).to_dict()
+    store.register_dataset(
+        ref=dataset_ref,
+        project_id=conversation.project_id,
+        filename="销售.xlsx",
+        profile=profile,
+    )
+    registry = _real_profile_trend_registry(store, conversation)
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="profile-call",
+                        name="get_data_profile",
+                        arguments=json.dumps({"dataset_ref": dataset_ref}),
+                    ),
+                    ToolCall(
+                        id="trend-call",
+                        name="trend_analysis",
+                        arguments=json.dumps(
+                            {
+                                "dataset_ref": dataset_ref,
+                                "value_col": "销售额",
+                                "time_col": "月份",
+                                "method": "ma",
+                                "forecast_horizon": 0,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ]
+            },
+            {"deltas": ["画像与趋势分析已完成。"]},
+        ]
+    )
+    try:
+        events = await _run_loop(
+            store,
+            conversation,
+            gateway,
+            registry,
+            user_text="请深入分析这份数据的画像和按月份的销售额时间趋势",
+        )
+    finally:
+        await registry.aclose()
+
+    plan_event = next(payload for kind, payload in events if kind == "plan.created")
+    plan = plan_event["payload"]
+    trend_step = next(
+        step for step in plan["steps"] if step["capability"] == "stats.trend"
+    )
+    started_events = [payload for kind, payload in events if kind == "step.started"]
+    completed_events = [payload for kind, payload in events if kind == "step.completed"]
+    started = [event["payload"] for event in started_events]
+    completed = [event["payload"] for event in completed_events]
+    assert {payload["tool"] for payload in completed} == {
+        "get_data_profile",
+        "trend_analysis",
+    }
+    assert all(payload["status"] == "completed" for payload in completed)
+    assert dict(events)["done"]["run_status"] == "completed"
+    assert next(payload for kind, payload in events if kind == "verification")[
+        "payload"
+    ][
+        "verdict"
+    ] == "PASS"
+
+    if expected_parallel:
+        assert trend_step["dependencies"] == []
+        assert len(started) == 2
+        assert all(payload["parallel"] is True for payload in started)
+        assert max(event["sequence"] for event in started_events) < min(
+            event["sequence"] for event in completed_events
+        )
+    else:
+        assert trend_step["dependencies"] == ["data_profile_1"]
+        assert all(payload.get("parallel") is not True for payload in started)
+        assert completed_events[0]["sequence"] < started_events[1]["sequence"]

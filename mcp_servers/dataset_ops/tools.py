@@ -23,7 +23,14 @@ from packages.common.dataset_store import (
     save_dataframe,
     save_metadata,
 )
-from packages.governance.data_boundary import ColumnRule, SensitivityLevel, resolve_policy
+from packages.governance.data_boundary import (
+    ColumnAccess,
+    ColumnPolicyViolation,
+    SensitivityLevel,
+    authorize_columns,
+    policy_metadata,
+    resolve_policy,
+)
 
 # 变换操作的确定性执行顺序（文档化，模型与用户可预期）
 _OPERATION_ORDER = ("exclude_row_indices", "filters", "drop_nulls", "drop_duplicates", "sort")
@@ -53,6 +60,14 @@ def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("transform_dataset 需要至少一个变换操作（filters/drop_nulls/…）")
 
     df = load_dataframe(source_ref)
+    source_policy = authorize_columns(
+        source_ref,
+        _transform_columns(operations, all_columns=[str(column) for column in df.columns]),
+        access=ColumnAccess.VALUES,
+        operation="transform_dataset",
+        dataframe=df,
+    )
+    derived_policy = policy_metadata(source_policy, dataframe=df)
     rows_before = len(df)
 
     if "exclude_row_indices" in operations:
@@ -71,6 +86,11 @@ def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("变换后数据集为空：请放宽过滤条件后重试")
 
     new_ref = save_dataframe(df.reset_index(drop=True))
+    try:
+        save_metadata(new_ref, {"policy": derived_policy})
+    except Exception:
+        delete_dataset(new_ref)
+        raise
     return {
         "dataset_ref": new_ref,
         "parent_ref": source_ref,
@@ -99,6 +119,13 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
     if agg != "count" and not args.get("value_col"):
         raise ValueError(f"agg={agg} 需要提供 value_col")
 
+    dataset_ref = str(args["dataset_ref"])
+    authorize_columns(
+        dataset_ref, [group_col], access=ColumnAccess.VALUES, operation="aggregate_preview"
+    )
+    authorize_columns(
+        dataset_ref, [value_col], access=ColumnAccess.SUMMARY, operation="aggregate_preview"
+    )
     tuples = aggregate(args["dataset_ref"], group_col, value_col, agg)
 
     sort = args.get("sort", "value_desc")
@@ -108,9 +135,7 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
         tuples.sort(key=lambda t: t[1], reverse=(sort == "value_desc"))
 
     limit = int(args.get("limit", 20))
-    rows = [
-        {"group": _plain(g), "value": v, "count": c} for g, v, c in tuples[:limit]
-    ]
+    rows = [{"group": _plain(g), "value": v, "count": c} for g, v, c in tuples[:limit]]
     return {
         "rows": rows,
         "group_total": len(tuples),
@@ -174,9 +199,7 @@ def join_preflight(args: dict[str, Any]) -> dict[str, Any]:
             _join_risk("many_to_many", "warning", "关联键为多对多关系，结果可能出现行数扩张。")
         )
     if expansion_ratio > _JOIN_EXPANSION_CONFIRM_RATIO:
-        risks.append(
-            _join_risk("row_expansion", "warning", "预估结果行数存在明显膨胀。")
-        )
+        risks.append(_join_risk("row_expansion", "warning", "预估结果行数存在明显膨胀。"))
     if int(left["null_count"]) > 0:
         risks.append(_join_risk("left_null_keys", "warning", "左侧关联键包含空值。"))
     if int(right["null_count"]) > 0:
@@ -271,28 +294,21 @@ def _save_join_policy(
         SensitivityLevel.RESTRICTED: 2,
     }
     level = max((left.level, right.level), key=levels.__getitem__)
-    columns = {
-        name: rule.value
-        for name, rule in left.columns.items()
-        if rule is not ColumnRule.NORMAL
-    }
+    left_metadata = policy_metadata(left, dataframe=load_dataframe(left_ref))
+    right_metadata = policy_metadata(right, dataframe=load_dataframe(right_ref))
+    columns: dict[str, str] = dict(left_metadata["columns"])
     columns.update(
         {
-            right_column_mapping.get(name, name): rule.value
-            for name, rule in right.columns.items()
-            if rule is not ColumnRule.NORMAL
-            and name in right_column_mapping
+            right_column_mapping.get(name, name): rule
+            for name, rule in right_metadata["columns"].items()
+            if name in right_column_mapping
         }
     )
     policy: dict[str, Any] = {
         "level": level.value,
-        "small_group_min_size": max(
-            left.small_group_min_size, right.small_group_min_size
-        ),
+        "small_group_min_size": max(left.small_group_min_size, right.small_group_min_size),
         "small_group_mode": (
-            "drop"
-            if "drop" in {left.small_group_mode, right.small_group_mode}
-            else "merge"
+            "drop" if "drop" in {left.small_group_mode, right.small_group_mode} else "merge"
         ),
     }
     if columns:
@@ -301,9 +317,38 @@ def _save_join_policy(
 
 
 def _require_join_key_visible(dataset_ref: str, key: str, *, side: str) -> None:
-    rule = resolve_policy(dataset_ref).rule_of(key)
-    if rule in {ColumnRule.MASK, ColumnRule.EXCLUDE}:
-        raise ValueError(f"{side}关联键受数据策略保护，不能用于 Join: {key}")
+    try:
+        authorize_columns(
+            dataset_ref,
+            [key],
+            access=ColumnAccess.VALUES,
+            operation=f"{side} Join",
+        )
+    except ColumnPolicyViolation as exc:
+        raise ValueError(f"{side}关联键受数据策略保护，不能用于 Join: {key}") from exc
+
+
+def _transform_columns(
+    operations: dict[str, Any], *, all_columns: list[str] | None = None
+) -> list[str]:
+    """Return columns whose values influence a materialized transform."""
+    columns: list[str] = []
+    for condition in operations.get("filters", []):
+        column = condition.get("column")
+        if isinstance(column, str):
+            columns.append(column)
+    for key in ("drop_nulls", "drop_duplicates"):
+        selected = operations.get(key, [])
+        for column in selected:
+            if isinstance(column, str):
+                columns.append(column)
+        if key in operations and not selected and all_columns is not None:
+            columns.extend(all_columns)
+    for sort_key in operations.get("sort", []):
+        column = sort_key.get("column")
+        if isinstance(column, str):
+            columns.append(column)
+    return columns
 
 
 def _join_relationship(

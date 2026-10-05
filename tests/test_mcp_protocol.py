@@ -9,6 +9,7 @@ import json
 import sys
 import textwrap
 import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -370,6 +371,82 @@ async def test_high_risk_tool_requires_exact_approval_at_gateway_and_server() ->
     )
     assert result.result == {"doubled": 8}
     assert executed == [4, 4]
+    await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_process_transport_keeps_sync_tool_attached_to_event_loop() -> None:
+    descriptor = MCPToolDescriptor(
+        name="thread_probe",
+        description="prove compatibility calls stay attached to the caller",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {"worker_thread": {"type": "boolean"}},
+            "required": ["worker_thread"],
+            "additionalProperties": False,
+        },
+        metadata=tool_metadata("test.thread_probe"),
+    )
+
+    def handler(_arguments: dict[str, Any]) -> dict[str, bool]:
+        assert asyncio.get_running_loop() is not None
+        return {"worker_thread": threading.get_ident() != threading.main_thread().ident}
+
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    result = await InProcessMCPTransport(adapter).call_tool("thread_probe", {}, _context())
+
+    assert result.structured_content == {"worker_thread": False}
+
+
+@pytest.mark.asyncio
+async def test_in_process_mutating_tool_never_detaches_a_slow_write(tmp_path: Path) -> None:
+    descriptor = MCPToolDescriptor(
+        name="slow_write",
+        description="write only while the caller remains attached",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        metadata=tool_metadata(
+            "test.slow_write", read_only=False, idempotent=False, risk_level="medium"
+        ),
+    )
+
+    def handler(arguments: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.03)
+        target = tmp_path / f"{arguments['name']}.txt"
+        target.write_text("complete", encoding="utf-8")
+        return {"path": str(target)}
+
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    gateway = ManagedMCPClientGateway(
+        config=MCPClientConfig(),
+        expected=(descriptor,),
+        allowed_tools=frozenset({"slow_write"}),
+        transport_factory=lambda: InProcessMCPTransport(adapter),
+    )
+
+    first = await gateway.execute(
+        "slow_write", {"name": "first"}, _context(), timeout_seconds=0.001
+    )
+    assert first.result == {"path": str(tmp_path / "first.txt")}
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["first.txt"]
+
+    second = await gateway.execute(
+        "slow_write", {"name": "second"}, _context(), timeout_seconds=1
+    )
+    assert second.result == {"path": str(tmp_path / "second.txt")}
+    await asyncio.sleep(0.05)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["first.txt", "second.txt"]
     await gateway.aclose()
 
 

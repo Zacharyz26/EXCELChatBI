@@ -17,10 +17,12 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from mcp_servers.chart.renderer import ChartRenderingUnavailableError
 from mcp_servers.common.adapter import MCPServerAdapter, MCPToolBinding
 from mcp_servers.common.base_server import MCPServer
 from mcp_servers.common.catalog import tool_metadata, tool_output_schema
@@ -1304,6 +1306,23 @@ def _artifact_analysis_id(artifact: Artifact) -> str:
     return artifact.id
 
 
+def _capture_report_chart(chart: MCPServer, option: JsonObject) -> dict[str, Any]:
+    """Run sync Playwright off an active event loop without detaching its writes."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return cast(
+            dict[str, Any],
+            chart._tools["chart_screenshot"].invoke({"option": option}),
+        )
+    # This executor is deliberately local and joined by the context manager.
+    # Report generation cannot return, fail or be cancelled while a screenshot
+    # worker is still able to publish a file behind the Host's back.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="report-chart") as executor:
+        future = executor.submit(chart._tools["chart_screenshot"].invoke, {"option": option})
+        return cast(dict[str, Any], future.result())
+
+
 def _assemble_report_args(
     chart: MCPServer, artifacts: list[Artifact]
 ) -> tuple[dict[str, Any], int]:
@@ -1316,6 +1335,7 @@ def _assemble_report_args(
     charts: list[dict[str, Any]] = []
     stats_items: list[dict[str, Any]] = []
     skipped_charts = 0
+    unavailable_screenshots: list[str] = []
 
     for a in artifacts:
         payload = a.payload or {}
@@ -1328,10 +1348,15 @@ def _assemble_report_args(
                 skipped_charts += 1
                 continue
             try:
-                shot = chart._tools["chart_screenshot"].invoke({"option": option})
-            except Exception as exc:  # 截图环境缺失（无 chromium）不阻断报告
+                shot = _capture_report_chart(chart, cast(JsonObject, option))
+            except ChartRenderingUnavailableError as exc:
                 skipped_charts += 1
-                _log.warning("report.screenshot_skipped", artifact=a.id, error=str(exc))
+                unavailable_screenshots.append(str(exc))
+                _log.warning(
+                    "report.screenshot_unavailable",
+                    artifact=a.id,
+                    error=str(exc),
+                )
                 continue
             item: dict[str, Any] = {"image_path": shot["image_path"]}
             caption = payload.get("caption") or a.source_tool
@@ -1349,6 +1374,11 @@ def _assemble_report_args(
                 stat["interpretation"] = payload["interpretation"]
             stats_items.append(stat)
 
+    if not profile and not charts and not stats_items and unavailable_screenshots:
+        raise AgentToolError(
+            "图表截图环境不可用，无法组装仅含图表的报告："
+            + unavailable_screenshots[0]
+        )
     if not profile and not charts and not stats_items:
         raise AgentToolError("所选工件不含可组装内容（需要画像/图表/统计结果）")
 

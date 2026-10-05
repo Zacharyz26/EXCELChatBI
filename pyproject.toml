@@ -112,6 +112,7 @@ python_version = "3.11"
 strict = true
 ignore_missing_imports = true          # 第三方库缺 stub 时不阻断
 exclude = ["apps/web"]
+mypy_path = ["typings"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

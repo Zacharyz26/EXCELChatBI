@@ -13,7 +13,7 @@ import pandas as pd
 from packages.common.config import get_settings
 from packages.common.dataset_store import load_dataframe, save_dataframe
 from packages.governance.data_boundary import resolve_policy
-from packages.governance.redaction import apply_policy
+from packages.governance.redaction import apply_policy, redact_records
 
 from mcp_servers.excel_parser.profile import ColumnProfile, DataProfile
 
@@ -96,10 +96,13 @@ def data_preview(args: dict[str, Any]) -> dict[str, Any]:
     dataset_ref: str = args["dataset_ref"]
     rows: int = args.get("rows", 20)
     df = load_dataframe(dataset_ref)
-    return {"rows": _json_safe_records(df.head(rows))}
+    records = _json_safe_records(df.head(rows))
+    columns = [_profile_column(df[col]) for col in df.columns]
+    return {"rows": redact_records(records, resolve_policy(dataset_ref), columns)}
 
 
 # ── 内部辅助 ──
+
 
 def _guard_archive_size(file_ref: str) -> None:
     """在 openpyxl 加载共享字符串等内容之前约束 ZIP 解压预算。"""
@@ -112,9 +115,7 @@ def _guard_archive_size(file_ref: str) -> None:
             raise TableTooLargeError("工作簿解压大小或文件数超过处理上限，请拆分文件后重试")
 
 
-def _guard_worksheet(
-    workbook: Any, sheet: str | int, header_row: int, nrows: int | None
-) -> None:
+def _guard_worksheet(workbook: Any, sheet: str | int, header_row: int, nrows: int | None) -> None:
     """流式核对实际行/宽度，在 pandas 构造矩形 DataFrame 前拒绝越界。
 
     dimension 可以缺失或伪造，必须 reset；格式化空行及稀疏行也占读取预算。
@@ -166,9 +167,7 @@ def _profile_column(series: pd.Series) -> ColumnProfile:
     null_ratio = float(series.isna().mean()) if total else 0.0
     distinct_count = int(series.nunique(dropna=True))
     # 先采原始样本值；随后由 governance.redaction 按数据集策略脱敏（见 infer_schema）。
-    sample_values = [
-        _scalar_to_str(v) for v in series.dropna().unique()[:_SAMPLE_VALUES]
-    ]
+    sample_values = [_scalar_to_str(v) for v in series.dropna().unique()[:_SAMPLE_VALUES]]
 
     profile = ColumnProfile(
         name=str(series.name),

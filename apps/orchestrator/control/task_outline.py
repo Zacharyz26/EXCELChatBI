@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from packages.session.models import Artifact, Dataset, JsonObject
 
 from apps.orchestrator.agent_tools import AgentToolRegistry
@@ -157,6 +158,28 @@ def build_outline_context(*, datasets: list[Dataset], artifacts: list[Artifact])
                 value = item.get("name") if isinstance(item, dict) else item
                 if isinstance(value, str) and value.strip():
                     columns.append(value.strip())
+        resolved_roles: list[JsonObject] = []
+        try:
+            role_result = infer_data_roles_from_mapping(
+                dataset.profile,
+                dataset_ref=dataset.ref,
+            )
+        except ValueError:
+            # Older/incomplete upload metadata cannot justify removing a real
+            # profile prerequisite. Dependency inference therefore fails closed.
+            pass
+        else:
+            for item in cast(list[JsonObject], role_result.get("columns") or []):
+                column = item.get("column")
+                role = item.get("primary_role")
+                if isinstance(column, str) and isinstance(role, str):
+                    resolved_roles.append(
+                        {
+                            "column": column,
+                            "role": role,
+                            "ambiguous": bool(item.get("ambiguous")),
+                        }
+                    )
         dataset_items.append(
             {
                 "ref": dataset.ref,
@@ -164,6 +187,7 @@ def build_outline_context(*, datasets: list[Dataset], artifacts: list[Artifact])
                 "row_count": dataset.profile.get("row_count"),
                 "column_count": dataset.profile.get("column_count"),
                 "columns": columns,
+                "resolved_roles": resolved_roles,
                 "parent_ref": dataset.parent_ref,
             }
         )
@@ -260,12 +284,14 @@ def build_deterministic_outline(
         raise ValueError("计划所需能力不可用: " + ", ".join(unavailable))
     selected = [item for item in requested if item in available_capabilities]
     steps: list[JsonObject] = []
-    previous: str | None = None
     for index, capability in enumerate(selected, 1):
         logical_id = f"{capability.replace('.', '_').replace('-', '_')}_{index}"
-        dependencies: list[str] = []
-        if previous is not None:
-            dependencies.append(previous)
+        dependencies = _step_dependencies(
+            capability=capability,
+            prior_steps=steps,
+            user_text=user_text,
+            context=context,
+        )
         step: JsonObject = {
             "step_id": logical_id,
             "purpose": _capability_purpose(capability),
@@ -283,7 +309,6 @@ def build_deterministic_outline(
             ],
         }
         steps.append(step)
-        previous = logical_id
     assumptions = ["异常检测方法与阈值必须在结论中披露"] if "异常" in user_text else []
     return {
         "schema_version": 1,
@@ -294,6 +319,73 @@ def build_deterministic_outline(
         "assumptions": assumptions,
         "clarifications": [],
     }
+
+
+def _step_dependencies(
+    *,
+    capability: str,
+    prior_steps: list[JsonObject],
+    user_text: str,
+    context: JsonObject,
+) -> list[str]:
+    """Return only dependencies supported by an actual data-flow requirement.
+
+    Most existing multi-step intents retain their conservative sequential shape.
+    The narrow exception is a trend read whose time and metric roles are already
+    resolved from governed upload metadata: it does not consume the separately
+    requested profile tool result and may share the same ready frontier.
+    """
+    if not prior_steps:
+        return []
+    prior_capabilities = {str(step.get("capability")) for step in prior_steps}
+    if (
+        capability == "stats.trend"
+        and prior_capabilities == {"data.profile"}
+        and _trend_inputs_resolved(user_text, context)
+    ):
+        return []
+    if capability == "report.generate":
+        return [str(step["step_id"]) for step in prior_steps]
+    return [str(prior_steps[-1]["step_id"])]
+
+
+def _trend_inputs_resolved(user_text: str, context: JsonObject) -> bool:
+    datasets = cast(list[JsonObject], context.get("datasets") or [])
+    explicitly_selected = [
+        dataset
+        for dataset in datasets
+        if str(dataset.get("filename") or "") in user_text
+        or str(dataset.get("ref") or "") in user_text
+    ]
+    candidates = explicitly_selected or (datasets if len(datasets) == 1 else [])
+    for dataset in candidates:
+        raw_roles = dataset.get("resolved_roles")
+        if not isinstance(raw_roles, list):
+            continue
+        roles = [item for item in raw_roles if isinstance(item, dict)]
+        time_columns = [
+            str(item["column"])
+            for item in roles
+            if item.get("role") == "time"
+            and item.get("ambiguous") is False
+            and isinstance(item.get("column"), str)
+        ]
+        metric_columns = [
+            str(item["column"])
+            for item in roles
+            if item.get("role") == "metric"
+            and item.get("ambiguous") is False
+            and isinstance(item.get("column"), str)
+        ]
+        if len(time_columns) != 1 or len(metric_columns) != 1:
+            continue
+        metric_is_bound = metric_columns[0] in user_text or len(metric_columns) == 1
+        time_is_bound = time_columns[0] in user_text or any(
+            token in user_text for token in ("时间", "趋势", "按月", "按周", "按季度")
+        )
+        if metric_is_bound and time_is_bound:
+            return True
+    return False
 
 
 def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:

@@ -33,6 +33,14 @@ _RENDER_JS = """(opt) => {
 }"""
 
 
+class ChartRenderingError(RuntimeError):
+    """The renderer was invoked incorrectly or failed while evaluating a chart."""
+
+
+class ChartRenderingUnavailableError(ChartRenderingError):
+    """Optional local browser dependencies are unavailable."""
+
+
 def _resolve_chromium() -> str | None:
     """定位可用的 chromium 可执行文件。
 
@@ -67,12 +75,13 @@ def render_option_to_png(option: dict[str, Any], width: int = 700, height: int =
         PNG 图像字节。
 
     Raises:
-        RuntimeError: 渲染环境不可用（未装 playwright / chromium 起不来）。
+        ChartRenderingUnavailableError: 未安装 Playwright 或 Chromium 无法启动。
+        ChartRenderingError: Playwright API 使用错误或 ECharts 渲染失败。
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # 未装 .[chart-screenshot]
-        raise RuntimeError(
+        raise ChartRenderingUnavailableError(
             "图表截图需要 playwright：uv sync --extra chart-screenshot && "
             "uv run playwright install chromium"
         ) from exc
@@ -84,26 +93,35 @@ def render_option_to_png(option: dict[str, Any], width: int = 700, height: int =
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                executable_path=chromium,
-                args=["--no-sandbox", "--disable-gpu"],
-            )
+            try:
+                browser = p.chromium.launch(
+                    timeout=30_000,
+                    headless=True,
+                    executable_path=chromium,
+                    args=["--no-sandbox", "--disable-gpu"],
+                )
+            except Exception as exc:
+                raise ChartRenderingUnavailableError(
+                    f"图表截图环境不可用（chromium 无法启动）：{exc}"
+                ) from exc
             try:
                 page = browser.new_page(viewport={"width": width + 40, "height": height + 40})
+                page.set_default_timeout(30_000)
                 page.set_content(_HTML_TEMPLATE.format(w=width, h=height))
                 page.add_script_tag(content=echarts_js)
                 data_url = page.evaluate(_RENDER_JS, render_opt)
             finally:
                 browser.close()
-    except Exception as exc:  # 浏览器起不来/渲染失败
-        raise RuntimeError(f"图表渲染失败（chromium 无法启动或渲染出错）：{exc}") from exc
+    except ChartRenderingUnavailableError:
+        raise
+    except Exception as exc:
+        raise ChartRenderingError(f"图表渲染失败：{exc}") from exc
 
     import base64
 
     header, _, b64 = data_url.partition(",")
     if "png" not in header or not b64:
-        raise RuntimeError(f"渲染未返回 PNG dataURL：{data_url[:60]!r}")
+        raise ChartRenderingError(f"渲染未返回 PNG dataURL：{data_url[:60]!r}")
     return base64.b64decode(b64)
 
 

@@ -12,8 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.orchestrator.agent_loop import _artifact_payload_for  # noqa: E402
 from mcp_servers.report import tools as report_tools  # noqa: E402
 from mcp_servers.report.server import build_server as build_report_server  # noqa: E402
+from packages.common.analysis_kinds import REPORT_ANALYSIS_KINDS  # noqa: E402
 
 # 1x1 PNG，用于免渲染的组装测试
 _TINY_PNG = base64.b64decode(
@@ -171,6 +173,137 @@ def test_report_renders_governed_forecast_evidence() -> None:
     markdown = result["markdown"]
     assert "drift" in markdown and "moderate" in markdown
     assert "1.25" in markdown and "117" in markdown and "123" in markdown
+
+
+@pytest.mark.parametrize(
+    ("tool", "result", "expected"),
+    [
+        (
+            "trend_analysis",
+            {"direction": "\u4e0a\u5347", "slope": 12.34, "n": 24, "forecast": [88.8]},
+            "12.34",
+        ),
+        (
+            "forecast",
+            {
+                "selected_method": "drift",
+                "reliability": "moderate",
+                "horizon": 1,
+                "validation_metrics": {"mae": 2.34, "rmse": 3.45},
+                "baseline": {"beats_baseline": True},
+                "predictions": [{"time": "2026-01", "point": 91.2, "lower": 90.1, "upper": 92.3}],
+            },
+            "91.2",
+        ),
+        (
+            "anomaly_detect",
+            {
+                "method": "iqr",
+                "n_total": 24,
+                "n_anomalies": 1,
+                "anomalies": [{"index": 3, "value": 777.7, "score": 9.1}],
+            },
+            "777.7",
+        ),
+        (
+            "regression",
+            {
+                "kind": "ols",
+                "r_squared": 0.876,
+                "adj_r_squared": 0.865,
+                "n_obs": 24,
+                "coefficients": [{"name": "x", "coef": 6.54, "std_err": 0.2, "p_value": 0.01}],
+            },
+            "6.54",
+        ),
+        (
+            "correlation",
+            {
+                "method": "pearson",
+                "n_obs": 24,
+                "columns": ["a", "b"],
+                "matrix": [[1.0, 0.765], [0.765, 1.0]],
+            },
+            "0.765",
+        ),
+        (
+            "dimension_contribution",
+            {
+                "method": "sum",
+                "total_value": 4321.0,
+                "returned_share": 0.98,
+                "groups": [
+                    {"rank": 1, "dimension": "A", "value": 1234.0, "share": 0.5, "count": 12}
+                ],
+            },
+            "1234",
+        ),
+        (
+            "group_compare",
+            {
+                "method": "welch_t",
+                "overall": {"p_value": 0.0042, "significant": True},
+                "groups": [
+                    {
+                        "group": "A",
+                        "count": 12,
+                        "mean": 55.5,
+                        "median": 54.0,
+                        "ci95_low": 50.0,
+                        "ci95_high": 60.0,
+                    }
+                ],
+            },
+            "55.5",
+        ),
+    ],
+)
+def test_every_production_artifact_kind_preserves_key_numbers(
+    tool: str,
+    result: dict[str, object],
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _artifact_payload_for(tool, result)
+    report = _report_tool("gen_report_md").invoke(
+        {
+            "title": "\u5951\u7ea6\u62a5\u544a",
+            "profile": {"row_count": 24, "columns": []},
+            "stats": [payload],
+        }
+    )
+
+    assert payload["kind"] in REPORT_ANALYSIS_KINDS
+    assert expected in report["markdown"]
+
+    captured: dict[str, str] = {}
+
+    class CapturingHTML:
+        def __init__(self, *, string: str, url_fetcher: object) -> None:
+            del url_fetcher
+            captured["html"] = string
+
+        def write_pdf(self) -> bytes:
+            return b"%PDF-1.4\n% deterministic contract fixture\n"
+
+    import weasyprint
+
+    monkeypatch.setattr(weasyprint, "HTML", CapturingHTML)
+    exported = _report_tool("export_pdf").invoke({"report_id": report["report_id"]})
+
+    assert expected in captured["html"]
+    assert Path(exported["pdf_path"]).read_bytes().startswith(b"%PDF-")
+
+
+def test_unknown_artifact_kind_fails_closed() -> None:
+    with pytest.raises(ValueError, match="kind"):
+        _report_tool("gen_report_md").invoke(
+            {
+                "title": "\u9759\u9ed8\u5931\u8d25\u4e0d\u53ef\u63a5\u53d7",
+                "profile": {"row_count": 1, "columns": []},
+                "stats": [{"kind": "new_unknown_analysis", "result": {"value": 42}}],
+            }
+        )
 
 
 def test_export_pdf_produces_pdf() -> None:

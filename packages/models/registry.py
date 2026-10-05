@@ -15,7 +15,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]  # 存量：yaml 无内置 stubs（装 types-PyYAML 可移除）
+import yaml
 from dotenv import dotenv_values
 
 from packages.models.types import Scenario

@@ -192,6 +192,9 @@ jobs:
       - name: Run Ruff
         run: uv run --frozen ruff check .
 
+      - name: Run strict production type checks
+        run: uv run --frozen mypy apps mcp_servers packages
+
       - name: Validate production and E2E Compose
         run: |
           docker compose -f compose.yaml config --quiet

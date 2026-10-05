@@ -462,11 +462,14 @@ curl --fail http://127.0.0.1:8000/health/ready
 
 ## 测试与检查
 
+pytest 会在导入任何应用模块前将 DB、数据集、报告和 KB 定向到系统临时目录，
+并禁止读取开发根目录 `.env`。后端标准检查命令与 CI 保持一致：
+
 ```bash
 # 后端
-uv run pytest
-uv run ruff check .
-uv run mypy .
+uv run --frozen pytest -q
+uv run --frozen ruff check .
+uv run --frozen mypy apps mcp_servers packages
 
 # 前端
 cd apps/web

@@ -19,7 +19,11 @@ import pandas as pd
 import statsmodels.api as sm
 from packages.common.dataset_store import load_dataframe
 from packages.governance.aggregation_guard import GroupAgg, guard_small_groups
-from packages.governance.data_boundary import ColumnRule, resolve_policy
+from packages.governance.data_boundary import (
+    ColumnAccess,
+    authorize_columns,
+    resolve_policy,
+)
 from scipy import stats as scipy_stats
 from sklearn.ensemble import IsolationForest
 from statsmodels.stats.diagnostic import het_breuschpagan
@@ -77,15 +81,17 @@ def _plain(value: Any) -> Any:
 
 
 def _require_model_visible_columns(dataset_ref: str, columns: list[str]) -> None:
-    """Prevent new stats tools from returning protected labels/aggregates to the model."""
-    policy = resolve_policy(dataset_ref)
-    blocked = [
-        column
-        for column in columns
-        if policy.rule_of(column) in {ColumnRule.MASK, ColumnRule.EXCLUDE}
-    ]
-    if blocked:
-        raise ValueError("列受数据策略保护，不能进入统计模型结果: " + "、".join(blocked))
+    """Require columns whose row/category values appear in the result."""
+    authorize_columns(
+        dataset_ref, columns, access=ColumnAccess.VALUES, operation="stats"
+    )
+
+
+def _require_summary_columns(dataset_ref: str, columns: list[str]) -> None:
+    """Allow masked statistical summaries while always rejecting excluded columns."""
+    authorize_columns(
+        dataset_ref, columns, access=ColumnAccess.SUMMARY, operation="stats"
+    )
 
 
 def _ordered_series(
@@ -95,14 +101,16 @@ def _ordered_series(
 
     序列已丢弃缺失、重置为 0 基定位索引；时间标签与序列位置一一对应，供前端 x 轴。
     """
-    df = load_dataframe(args["dataset_ref"])
-    total_rows = len(df)
+    dataset_ref = str(args["dataset_ref"])
     value_col: str = args["value_col"]
     time_col: str | None = args.get("time_col")
     if require_time and not time_col:
         raise ValueError("该分析需要 time_col（时间列）")
 
     cols = [value_col] + ([time_col] if time_col else [])
+    _require_model_visible_columns(dataset_ref, cols)
+    df = load_dataframe(dataset_ref)
+    total_rows = len(df)
     _require_columns(df, cols)
     df = df[cols].copy()
     df[value_col] = _numeric(df[value_col], value_col)
@@ -341,7 +349,7 @@ def forecast(args: dict[str, Any]) -> dict[str, Any]:
     seasonal_period_raw = args.get("seasonal_period")
     seasonal_period = int(seasonal_period_raw) if seasonal_period_raw is not None else None
 
-    _require_model_visible_columns(dataset_ref, [time_col, value_col])
+    _require_summary_columns(dataset_ref, [time_col, value_col])
     df = load_dataframe(dataset_ref)
     total_rows = len(df)
     _require_columns(df, [time_col, value_col])
@@ -655,6 +663,7 @@ def regression(args: dict[str, Any]) -> dict[str, Any]:
     if len(features) != len(set(features)):
         raise ValueError("自变量不能重复")
 
+    _require_summary_columns(str(args["dataset_ref"]), [target, *features])
     df = load_dataframe(args["dataset_ref"])
     _require_columns(df, [target, *features])
     used = [target, *features]
@@ -826,6 +835,7 @@ def correlation(args: dict[str, Any]) -> dict[str, Any]:
     method: str = args.get("method", "pearson")
     columns: list[str] = args["columns"]
 
+    _require_summary_columns(str(args["dataset_ref"]), columns)
     df = load_dataframe(args["dataset_ref"])
     _require_columns(df, columns)
     total_rows = len(df)
@@ -906,7 +916,8 @@ def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
     method: str = args.get("method", "sum")
     limit = int(args.get("limit", 20))
 
-    _require_model_visible_columns(dataset_ref, [dimension_col, value_col])
+    _require_model_visible_columns(dataset_ref, [dimension_col])
+    _require_summary_columns(dataset_ref, [value_col])
     df = load_dataframe(dataset_ref)
     total_rows = len(df)
     _require_columns(df, [dimension_col, value_col])
@@ -1022,7 +1033,8 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
     dataset_ref: str = args["dataset_ref"]
     group_col: str = args["group_col"]
     value_col: str = args["value_col"]
-    _require_model_visible_columns(dataset_ref, [group_col, value_col])
+    _require_model_visible_columns(dataset_ref, [group_col])
+    _require_summary_columns(dataset_ref, [value_col])
     df = load_dataframe(dataset_ref)
     total_rows = len(df)
     _require_columns(df, [group_col, value_col])

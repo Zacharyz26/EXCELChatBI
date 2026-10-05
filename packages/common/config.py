@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -24,7 +25,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """全局运行配置。字段与 `.env.example` 一一对应。"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=None if os.environ.get("CHATBI_TEST_ISOLATION") == "1" else ".env",
+        extra="ignore",
+    )
 
     app_env: str = "development"
     process_role: Literal["api", "mcp_server"] = "api"
@@ -232,7 +236,11 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """返回全局配置单例（首次调用时读取环境）。"""
-    return Settings()
+    # pytest activates isolation before importing application modules. Never parse the
+    # developer-root .env in that mode; tests/conftest.py injects every writable path.
+    env_file = None if os.environ.get("CHATBI_TEST_ISOLATION") == "1" else ".env"
+    # pydantic-settings accepts this runtime source-control keyword outside model fields.
+    return Settings(_env_file=env_file)  # type: ignore[call-arg]
 
 
 def _parse_string_mapping(raw: str, *, label: str) -> dict[str, str]:

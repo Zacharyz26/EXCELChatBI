@@ -12,9 +12,8 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from packages.governance.data_boundary import (
-    ColumnRule,
     EffectivePolicy,
-    SensitivityLevel,
+    resolve_column_visibility,
 )
 
 if TYPE_CHECKING:  # 仅类型标注，避免 governance 运行时耦合具体 MCP 服务
@@ -24,10 +23,10 @@ if TYPE_CHECKING:  # 仅类型标注，避免 governance 运行时耦合具体 M
 class SampleAction(str, Enum):
     """单列的采样动作。"""
 
-    VALUES = "values"        # 给样本值 + 统计
-    STATS_ONLY = "stats"     # 不给样本值，仅统计（明细单元格也遮蔽）
-    MASK = "mask"            # 样本值打码，保留统计
-    EXCLUDE = "exclude"      # 不给样本值也不给统计，仅留 schema
+    VALUES = "values"  # 给样本值 + 统计
+    STATS_ONLY = "stats"  # 不给样本值，仅统计（明细单元格也遮蔽）
+    MASK = "mask"  # 样本值打码，保留统计
+    EXCLUDE = "exclude"  # 不给样本值也不给统计，仅留 schema
 
 
 class Redactor(abc.ABC):
@@ -48,32 +47,15 @@ class DefaultRedactor(Redactor):
         return self._token
 
 
-_NUMERIC = {"int", "float"}
-
-
 def resolve_action(col: ColumnProfile, policy: EffectivePolicy) -> SampleAction:
     """依据列类型默认行为 + 显式列规则，决定该列的采样动作。"""
-    rule = policy.rule_of(col.name)
-    if rule is ColumnRule.EXCLUDE:
-        return SampleAction.EXCLUDE
-    if rule is ColumnRule.MASK:
-        return SampleAction.MASK
-
-    # NORMAL：按类型 + 级别的默认行为
-    level = policy.level
-    if col.dtype in _NUMERIC or col.dtype == "bool":
-        return SampleAction.VALUES
-    if col.dtype == "datetime":
-        if level is SensitivityLevel.RESTRICTED:
-            return SampleAction.STATS_ONLY
-        return SampleAction.VALUES
-
-    # 文本列
-    if level is SensitivityLevel.RESTRICTED:
-        return SampleAction.MASK
-    if col.distinct_count <= policy.cutoff_for_level():
-        return SampleAction.VALUES
-    return SampleAction.STATS_ONLY
+    visibility = resolve_column_visibility(
+        name=col.name,
+        dtype=col.dtype,
+        distinct_count=col.distinct_count,
+        policy=policy,
+    )
+    return SampleAction(visibility.value)
 
 
 def apply_policy(
@@ -107,3 +89,24 @@ def apply_policy(
                 continue
             row[name] = None if action is SampleAction.EXCLUDE else red.mask(row[name])
     return profile
+
+
+def redact_records(
+    records: list[dict[str, object]],
+    policy: EffectivePolicy,
+    columns: list[ColumnProfile],
+    redactor: Redactor | None = None,
+) -> list[dict[str, object]]:
+    """Redact preview rows without mutating the stored dataset."""
+    red = redactor or DefaultRedactor(policy.mask_token)
+    output: list[dict[str, object]] = []
+    actions = {column.name: resolve_action(column, policy) for column in columns}
+    for record in records:
+        protected: dict[str, object] = {}
+        for name, value in record.items():
+            action = actions[name]
+            if action is SampleAction.EXCLUDE:
+                continue
+            protected[name] = value if action is SampleAction.VALUES else red.mask(value)
+        output.append(protected)
+    return output

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -27,8 +28,12 @@ from apps.orchestrator.agent_tools import (  # noqa: E402
     AgentToolSpec,
     build_registry,
 )
+from mcp_servers.chart.renderer import ChartRenderingError  # noqa: E402
 from mcp_servers.chart.server import build_server as build_chart  # noqa: E402
-from mcp_servers.common.contracts import ToolCapabilityMetadata  # noqa: E402
+from mcp_servers.common.contracts import (  # noqa: E402
+    MCPRequestContext,
+    ToolCapabilityMetadata,
+)
 from mcp_servers.common.service_catalog import parse_capability_profiles  # noqa: E402
 from mcp_servers.dataset_ops.server import build_server as build_ops  # noqa: E402
 from mcp_servers.excel_parser.server import build_server as build_excel  # noqa: E402
@@ -776,3 +781,136 @@ async def test_real_agent_rejects_invented_report_then_can_correct_it(
         assert "数值缺少" in str(gateway.calls[1]["messages"])
     finally:
         get_settings.cache_clear()
+
+
+def _mcp_request_context(context: AgentContext) -> MCPRequestContext:
+    return MCPRequestContext(
+        subject_id="test-user",
+        project_id=context.project_id,
+        conversation_id=context.conversation_id,
+        run_id="report-integration-run",
+        plan_version=1,
+        step_id="report-step",
+        invocation_id="report-invocation",
+        idempotency_key="report-idempotency",
+        permission_snapshot_id="report-permissions",
+        memory_snapshot_id="0" * 32,
+        evidence_ledger_version=0,
+        data_version_hash="0" * 64,
+        cancellation_node_id="0" * 32,
+        trace_id="report-trace",
+        deadline_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_in_process_gateway_generates_chart_only_pdf(
+    workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    message = store.append_message(
+        conversation_id=context.conversation_id,
+        role="assistant",
+        content="图表已验证",
+    )
+    store.create_artifact(
+        conversation_id=context.conversation_id,
+        message_id=message.id,
+        type="chart",
+        payload={
+            "caption": "销售额趋势",
+            "option": {
+                "xAxis": {"type": "category", "data": ["一月", "二月"]},
+                "yAxis": {"type": "value"},
+                "series": [{"type": "line", "data": [10, 15]}],
+            },
+        },
+        source_tool="gen_chart",
+        params={"analysis_id": "chart-analysis"},
+    )
+    registry = _registry(context=context)
+    try:
+        execution = await registry.execute_mcp(
+            "generate_report",
+            {
+                "title": "图表报告",
+                "analysis_ids": ["chart-analysis"],
+                "include_pdf": True,
+            },
+            _mcp_request_context(context),
+            timeout_seconds=30,
+        )
+    finally:
+        await registry.aclose()
+
+    assert execution.result["skipped_charts"] == 0
+    assert Path(execution.result["md_path"]).is_file()
+    pdf_path = Path(execution.result["pdf_path"])
+    assert pdf_path.is_file()
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+
+
+@pytest.mark.asyncio
+async def test_async_in_process_gateway_generates_profile_pdf(
+    workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    message = store.append_message(
+        conversation_id=context.conversation_id,
+        role="assistant",
+        content="画像已验证",
+    )
+    store.create_artifact(
+        conversation_id=context.conversation_id,
+        message_id=message.id,
+        type="profile",
+        payload={"profile": {"row_count": 6, "column_count": 2, "columns": []}},
+        source_tool="get_data_profile",
+        params={"analysis_id": "profile-analysis"},
+    )
+    registry = _registry(context=context)
+    try:
+        execution = await registry.execute_mcp(
+            "generate_report",
+            {
+                "title": "画像报告",
+                "analysis_ids": ["profile-analysis"],
+                "include_pdf": True,
+            },
+            _mcp_request_context(context),
+            timeout_seconds=30,
+        )
+    finally:
+        await registry.aclose()
+
+    assert "6" in execution.result["markdown"]
+    assert Path(execution.result["pdf_path"]).read_bytes().startswith(b"%PDF-")
+
+
+def test_report_does_not_swallow_chart_programming_error(
+    workspace: tuple[SessionStore, AgentContext], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, context = workspace
+    message = store.append_message(
+        conversation_id=context.conversation_id,
+        role="assistant",
+        content="图表已验证",
+    )
+    artifact = store.create_artifact(
+        conversation_id=context.conversation_id,
+        message_id=message.id,
+        type="chart",
+        payload={"option": {"series": []}},
+        source_tool="gen_chart",
+        params={"analysis_id": "broken-chart"},
+    )
+    chart = build_chart()
+    monkeypatch.setattr(
+        chart._tools["chart_screenshot"],
+        "handler",
+        lambda _args: (_ for _ in ()).throw(ChartRenderingError("sync API misuse")),
+    )
+    with pytest.raises(ChartRenderingError, match="sync API misuse"):
+        from apps.orchestrator.agent_tools import _assemble_report_args
+
+        _assemble_report_args(chart, [artifact])

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import TypeVar, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from packages.common.config import get_settings
 from packages.common.logging import configure_logging, get_logger
 from packages.session.artifact_reconcile import reconcile_report_files
 from packages.session.file_lifecycle import cleanup_stale_chart_files
@@ -20,6 +20,7 @@ from apps.api.deps import (
     reranker_dep,
     retriever_dep,
     session_store_dep,
+    settings_dep,
 )
 from apps.api.routers import (
     agent_runs,
@@ -37,14 +38,24 @@ from apps.api.routers import (
 from apps.api.run_host import agent_run_manager
 
 _log = get_logger("api.lifecycle")
+_T = TypeVar("_T")
+
+
+def _lifespan_dependency(
+    app: FastAPI,
+    dependency: Callable[[], _T],
+) -> _T:
+    """Resolve the same override FastAPI uses for request dependencies."""
+    provider = app.dependency_overrides.get(dependency, dependency)
+    return cast(_T, provider())
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """启动时初始化结构化日志，并对 RAG 后端配置做 fail-fast 自检。"""
-    settings = get_settings()
+    settings = _lifespan_dependency(app, settings_dep)
     configure_logging(settings.log_level)
-    session_store = session_store_dep()
+    session_store = _lifespan_dependency(app, session_store_dep)
     recovered = TaskStore(session_store.db_path).recover_stale_runs(
         stale_after_seconds=settings.agent_recovery_stale_seconds
     )
@@ -68,10 +79,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     # fail-fast：依赖、模型权重、Milvus 连接或现有集合加载失败时启动即报错，
     # 而不是服务看似正常、首次检索请求才 500。
-    model_gateway_dep()
-    embedder_dep()
-    reranker_dep()
-    store = kb_store_dep()
+    _lifespan_dependency(app, model_gateway_dep)
+    _lifespan_dependency(app, embedder_dep)
+    _lifespan_dependency(app, reranker_dep)
+    store = _lifespan_dependency(app, kb_store_dep)
     try:
         yield
     finally:

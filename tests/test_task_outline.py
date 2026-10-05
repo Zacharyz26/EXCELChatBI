@@ -680,3 +680,180 @@ def test_complex_request_uses_deterministic_outline_without_model() -> None:
     assert set(result.audit) == {"route", "prompt_version", "response_hash"}
     assert result.audit["prompt_version"] == "deterministic-outline-v1"
     assert result.capabilities == {"stats.anomaly", "dataset.transform"}
+
+
+def test_profile_and_trend_are_independent_when_uploaded_roles_are_resolved() -> None:
+    dataset = Dataset(
+        ref="e" * 32,
+        project_id="project",
+        filename="sales.xlsx",
+        profile={
+            "row_count": 6,
+            "column_count": 2,
+            "columns": [
+                {
+                    "name": "月份",
+                    "dtype": "str",
+                    "null_ratio": 0.0,
+                    "distinct_count": 6,
+                },
+                {
+                    "name": "销售额",
+                    "dtype": "float",
+                    "null_ratio": 0.0,
+                    "distinct_count": 6,
+                },
+            ],
+        },
+        parent_ref=None,
+        transform=None,
+        created_at="now",
+    )
+    contract = build_minimal_contract(
+        run_id="parallel-outline",
+        user_text="请分析这份数据的画像和销售额时间趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[dataset],
+        artifacts=[],
+        registry=_artifact_registry(),
+        blocking_clarification=None,
+    )
+
+    steps = result.plan["steps"]
+    assert [step["capability"] for step in steps] == ["data.profile", "stats.trend"]
+    assert steps[0]["dependencies"] == []
+    assert steps[1]["dependencies"] == []
+
+
+def test_profile_remains_a_prerequisite_when_trend_roles_are_unresolved() -> None:
+    contract = build_minimal_contract(
+        run_id="dependent-outline",
+        user_text="请分析这份数据的画像和趋势",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_artifact_registry(),
+        blocking_clarification=None,
+    )
+
+    steps = result.plan["steps"]
+    assert [step["capability"] for step in steps] == ["data.profile", "stats.trend"]
+    assert steps[1]["dependencies"] == [steps[0]["step_id"]]
+
+
+def _resolved_sales_dataset(ref: str, filename: str = "sales.xlsx") -> Dataset:
+    return Dataset(
+        ref=ref,
+        project_id="project",
+        filename=filename,
+        profile={
+            "row_count": 6,
+            "column_count": 2,
+            "columns": [
+                {
+                    "name": "月份",
+                    "dtype": "str",
+                    "null_ratio": 0.0,
+                    "distinct_count": 6,
+                },
+                {
+                    "name": "销售额",
+                    "dtype": "float",
+                    "null_ratio": 0.0,
+                    "distinct_count": 6,
+                },
+            ],
+        },
+        parent_ref=None,
+        transform=None,
+        created_at="now",
+    )
+
+
+def test_transform_remains_a_trend_dependency_even_with_resolved_upload_roles() -> None:
+    context = build_outline_context(
+        datasets=[_resolved_sales_dataset("a" * 32)],
+        artifacts=[],
+    )
+
+    plan = build_deterministic_outline(
+        user_text="先查看画像，过滤销售额为空的记录，然后按月份分析销售额趋势",
+        context=context,
+        route="template",
+        available_capabilities={"data.profile", "dataset.transform", "stats.trend"},
+    )
+
+    steps = plan["steps"]
+    assert [step["capability"] for step in steps] == [
+        "data.profile",
+        "dataset.transform",
+        "stats.trend",
+    ]
+    assert steps[2]["dependencies"] == [steps[1]["step_id"]]
+
+
+def test_join_execution_remains_a_trend_dependency_with_resolved_source_roles() -> None:
+    customers = Dataset(
+        ref="b" * 32,
+        project_id="project",
+        filename="customers.xlsx",
+        profile={
+            "row_count": 6,
+            "column_count": 1,
+            "columns": [
+                {
+                    "name": "客户ID",
+                    "dtype": "str",
+                    "null_ratio": 0.0,
+                    "distinct_count": 6,
+                }
+            ],
+        },
+        parent_ref=None,
+        transform=None,
+        created_at="now",
+    )
+    context = build_outline_context(
+        datasets=[
+            _resolved_sales_dataset("a" * 32, "sales.xlsx"),
+            customers,
+        ],
+        artifacts=[],
+    )
+
+    plan = build_deterministic_outline(
+        user_text=(
+            "把 sales.xlsx 和 customers.xlsx 按客户ID关联并执行，"
+            "然后按月份分析销售额趋势"
+        ),
+        context=context,
+        route="template",
+        available_capabilities={
+            "dataset.join.preflight",
+            "dataset.join.execute",
+            "stats.trend",
+        },
+    )
+
+    steps = plan["steps"]
+    assert [step["capability"] for step in steps] == [
+        "dataset.join.preflight",
+        "dataset.join.execute",
+        "stats.trend",
+    ]
+    assert steps[1]["dependencies"] == [steps[0]["step_id"]]
+    assert steps[2]["dependencies"] == [steps[1]["step_id"]]

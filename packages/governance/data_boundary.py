@@ -17,26 +17,48 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import yaml
 
 from packages.common.config import get_settings
-from packages.common.dataset_store import load_metadata
+from packages.common.dataset_store import load_dataframe, load_metadata
 
 
 class SensitivityLevel(str, Enum):
     """数据集整体敏感级别（可扩展）。默认 open（最宽松）。"""
 
-    OPEN = "open"            # 宽松：低基数分类/数值给样本值，高基数文本只给统计
-    INTERNAL = "internal"   # 收紧：低基数阈值更小，更多文本列不给样本值
+    OPEN = "open"  # 宽松：低基数分类/数值给样本值，高基数文本只给统计
+    INTERNAL = "internal"  # 收紧：低基数阈值更小，更多文本列不给样本值
     RESTRICTED = "restricted"  # 严格：文本列样本值打码，仅数值列给值
 
 
 class ColumnRule(str, Enum):
     """列级规则（显式覆盖按类型的默认行为）。"""
 
-    NORMAL = "normal"       # 用按类型的默认行为
-    MASK = "mask"           # 样本值打码，保留统计摘要
-    EXCLUDE = "exclude"     # 不给样本值也不给统计摘要，仅留 schema
+    NORMAL = "normal"  # 用按类型的默认行为
+    MASK = "mask"  # 样本值打码，保留统计摘要
+    EXCLUDE = "exclude"  # 不给样本值也不给统计摘要，仅留 schema
+
+
+class ColumnAccess(str, Enum):
+    """The observable shape a tool intends to expose for a column."""
+
+    SCHEMA = "schema"
+    SUMMARY = "summary"
+    VALUES = "values"
+
+
+class ColumnVisibility(str, Enum):
+    """Effective visibility after explicit rules and level/type defaults."""
+
+    VALUES = "values"
+    STATS_ONLY = "stats"
+    MASK = "mask"
+    EXCLUDE = "exclude"
+
+
+class ColumnPolicyViolation(ValueError):
+    """A tool requested more column visibility than the dataset policy permits."""
 
 
 # 各级别的“低基数”判定阈值：文本列 distinct ≤ 阈值 才给样本值。
@@ -53,11 +75,9 @@ class EffectivePolicy:
 
     level: SensitivityLevel = SensitivityLevel.OPEN
     columns: dict[str, ColumnRule] = field(default_factory=dict)
-    low_card_cutoff: dict[str, int] = field(
-        default_factory=lambda: dict(_DEFAULT_LOW_CARD_CUTOFF)
-    )
+    low_card_cutoff: dict[str, int] = field(default_factory=lambda: dict(_DEFAULT_LOW_CARD_CUTOFF))
     small_group_min_size: int = 5
-    small_group_mode: str = "merge"   # merge | drop
+    small_group_mode: str = "merge"  # merge | drop
     other_label: str = "其他"
     mask_token: str = "***"
 
@@ -139,3 +159,118 @@ def resolve_policy(
             if "small_group_mode" in override:
                 policy.small_group_mode = override["small_group_mode"]
     return policy
+
+
+def resolve_column_visibility(
+    *,
+    name: str,
+    dtype: str,
+    distinct_count: int,
+    policy: EffectivePolicy,
+) -> ColumnVisibility:
+    """Resolve explicit rules plus level, type, and cardinality defaults."""
+    rule = policy.rule_of(name)
+    if rule is ColumnRule.EXCLUDE:
+        return ColumnVisibility.EXCLUDE
+    if rule is ColumnRule.MASK:
+        return ColumnVisibility.MASK
+    if dtype in {"int", "float", "bool"}:
+        return ColumnVisibility.VALUES
+    if dtype == "datetime":
+        return (
+            ColumnVisibility.STATS_ONLY
+            if policy.level is SensitivityLevel.RESTRICTED
+            else ColumnVisibility.VALUES
+        )
+    if policy.level is SensitivityLevel.RESTRICTED:
+        return ColumnVisibility.MASK
+    if distinct_count <= policy.cutoff_for_level():
+        return ColumnVisibility.VALUES
+    return ColumnVisibility.STATS_ONLY
+
+
+def authorize_columns(
+    dataset_ref: str,
+    columns: list[str] | tuple[str, ...],
+    *,
+    access: ColumnAccess,
+    operation: str,
+    dataframe: pd.DataFrame | None = None,
+) -> EffectivePolicy:
+    """Fail closed before a data tool reads protected columns.
+
+    NORMAL follows level/type/cardinality defaults. MASK permits schema and
+    summaries but not row/category values. EXCLUDE permits schema only.
+    """
+    policy = resolve_policy(dataset_ref)
+    blocked: list[str] = []
+    frame = dataframe
+    for column in dict.fromkeys(columns):
+        rule = policy.rule_of(column)
+        if rule is ColumnRule.EXCLUDE and access is not ColumnAccess.SCHEMA:
+            blocked.append(f"{column}(exclude)")
+        elif rule is ColumnRule.MASK and access is ColumnAccess.VALUES:
+            blocked.append(f"{column}(mask)")
+        elif rule is ColumnRule.NORMAL and access is ColumnAccess.VALUES:
+            if frame is None:
+                frame = load_dataframe(dataset_ref)
+            if column not in frame.columns:
+                continue
+            series = frame[column]
+            visibility = resolve_column_visibility(
+                name=column,
+                dtype=_dtype_name(series),
+                distinct_count=int(series.nunique(dropna=True)),
+                policy=policy,
+            )
+            if visibility is not ColumnVisibility.VALUES:
+                blocked.append(f"{column}(normal:{visibility.value})")
+    if blocked:
+        raise ColumnPolicyViolation(
+            f"列受数据策略保护，{operation} 不允许访问: " + "、".join(blocked)
+        )
+    return policy
+
+
+def _dtype_name(series: pd.Series) -> str:
+    if pd.api.types.is_bool_dtype(series):
+        return "bool"
+    if pd.api.types.is_integer_dtype(series):
+        return "int"
+    if pd.api.types.is_float_dtype(series):
+        return "float"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "datetime"
+    return "str"
+
+
+def policy_metadata(
+    policy: EffectivePolicy, dataframe: pd.DataFrame | None = None
+) -> dict[str, Any]:
+    """Serialize policy and freeze non-value visibility for a derived dataset."""
+    columns = {
+        name: rule.value for name, rule in policy.columns.items() if rule is not ColumnRule.NORMAL
+    }
+    if dataframe is not None:
+        for raw_name in dataframe.columns:
+            name = str(raw_name)
+            series = dataframe[raw_name]
+            visibility = resolve_column_visibility(
+                name=name,
+                dtype=_dtype_name(series),
+                distinct_count=int(series.nunique(dropna=True)),
+                policy=policy,
+            )
+            if visibility is ColumnVisibility.EXCLUDE:
+                columns[name] = ColumnRule.EXCLUDE.value
+            elif visibility in {
+                ColumnVisibility.MASK,
+                ColumnVisibility.STATS_ONLY,
+            }:
+                columns[name] = ColumnRule.MASK.value
+    return {
+        "level": policy.level.value,
+        "columns": columns,
+        "small_group_min_size": policy.small_group_min_size,
+        "small_group_mode": policy.small_group_mode,
+    }

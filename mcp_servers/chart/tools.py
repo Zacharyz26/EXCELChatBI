@@ -14,7 +14,11 @@ import pandas as pd
 from packages.common.dataset_store import aggregate as pushdown_aggregate
 from packages.common.dataset_store import load_dataframe
 from packages.governance.aggregation_guard import GroupAgg, guard_small_groups
-from packages.governance.data_boundary import resolve_policy
+from packages.governance.data_boundary import (
+    ColumnAccess,
+    authorize_columns,
+    resolve_policy,
+)
 
 
 def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
@@ -38,6 +42,20 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
     agg: str = enc.get("agg", "sum")
     top_n: int | None = enc.get("top_n")
 
+    if chart_type == "scatter" or agg == "none":
+        authorize_columns(
+            dataset_ref,
+            [x_col, y_col],
+            access=ColumnAccess.VALUES,
+            operation="gen_chart",
+        )
+    else:
+        authorize_columns(
+            dataset_ref, [x_col], access=ColumnAccess.VALUES, operation="gen_chart"
+        )
+        authorize_columns(
+            dataset_ref, [y_col], access=ColumnAccess.SUMMARY, operation="gen_chart"
+        )
     if chart_type == "scatter":
         # 数据集已受上传行数上限约束；散点图不对超限工作簿提供隐式降级。
         df = load_dataframe(dataset_ref)

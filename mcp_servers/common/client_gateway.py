@@ -96,9 +96,9 @@ class InProcessMCPTransport:
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: MCPRequestContext
     ) -> MCPCallResult:
-        # Compatibility/test mode is deliberately synchronous. Production tools
-        # execute in independent MCP service processes, where the SDK adapter owns
-        # its worker boundary and cancellation semantics.
+        # Compatibility mode keeps mutating synchronous handlers attached to the
+        # caller. Sync-only subcomponents that need a worker boundary must own and
+        # join that worker themselves so cancellation cannot leave orphan writes.
         return self._adapter.call_tool(name, arguments, context)
 
     async def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:

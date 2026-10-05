@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from packages.common.analysis_kinds import canonical_analysis_kind
 from packages.common.config import get_settings
 from packages.common.identifiers import validate_report_id
 from packages.common.report_safety import (
@@ -200,7 +201,7 @@ _KIND_LABEL = {
 
 def _stat_md(section: dict[str, Any]) -> list[str]:
     """单个统计段：标题 + 结果表（数字来自工具）+ Agent 的 Evidence 解读。"""
-    kind = section.get("kind", "")
+    kind = canonical_analysis_kind(section.get("kind"))
     result = section.get("result", {})
     caption = section.get("caption") or _KIND_LABEL.get(kind, kind)
     out = [f"### {caption}", ""]

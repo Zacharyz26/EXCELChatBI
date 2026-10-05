@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from apps.e2e_model.main import _latest_scenario_marker, _stream_turn
+from apps.e2e_model.main import (
+    _latest_scenario_marker,
+    _report_analysis_ids,
+    _stream_turn,
+)
 from apps.e2e_model.prepare_fixture import main as prepare_compose_fixture
 from mcp_servers.stats.tools import anomaly_detect, trend_analysis
 from packages.common.dataset_store import save_dataframe
@@ -204,3 +208,87 @@ async def test_compose_hypothesis_fixture_requests_only_selected_anomaly(
     }
     result = anomaly_detect(arguments)
     assert result["n_anomalies"] == 0
+
+
+def test_report_fixture_selects_all_typed_artifacts_instead_of_latest_id() -> None:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "分析登记表：\n"
+                "- [analysis_id=profile-1] 工具=get_data_profile 类型=profile 数据集=d\n"
+                "- [analysis_id=chart-1] 工具=gen_chart 类型=chart 数据集=d"
+            ),
+        }
+    ]
+
+    assert _report_analysis_ids(messages) == ["profile-1", "chart-1"]
+    assert _report_analysis_ids(messages, artifact_type="profile") == ["profile-1"]
+
+
+@pytest.mark.asyncio
+async def test_report_fixture_profiles_dataset_before_report_when_profile_missing() -> None:
+    dataset_ref = "d" * 32
+    chunks = [
+        chunk
+        async for chunk in _stream_turn(
+            "chatbi-e2e",
+            [
+                {"role": "system", "content": f"最新数据集 {dataset_ref}"},
+                {"role": "user", "content": "COMPOSE_REPORT"},
+            ],
+            [
+                {"type": "function", "function": {"name": "get_data_profile"}},
+                {"type": "function", "function": {"name": "generate_report"}},
+            ],
+        )
+    ]
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in "".join(chunks).splitlines()
+        if line.startswith("data: {")
+    ]
+    tool_call = next(
+        choice["delta"]["tool_calls"][0]
+        for payload in payloads
+        for choice in payload["choices"]
+        if "tool_calls" in choice["delta"]
+    )
+
+    assert tool_call["function"]["name"] == "get_data_profile"
+    assert json.loads(tool_call["function"]["arguments"]) == {"dataset_ref": dataset_ref}
+
+
+@pytest.mark.asyncio
+async def test_report_fixture_passes_profile_and_chart_ids_to_report() -> None:
+    chunks = [
+        chunk
+        async for chunk in _stream_turn(
+            "chatbi-e2e",
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "- [analysis_id=profile-1] 工具=get_data_profile 类型=profile\n"
+                        "- [analysis_id=chart-1] 工具=gen_chart 类型=chart"
+                    ),
+                },
+                {"role": "user", "content": "COMPOSE_REPORT"},
+            ],
+            [{"type": "function", "function": {"name": "generate_report"}}],
+        )
+    ]
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in "".join(chunks).splitlines()
+        if line.startswith("data: {")
+    ]
+    tool_call = next(
+        choice["delta"]["tool_calls"][0]
+        for payload in payloads
+        for choice in payload["choices"]
+        if "tool_calls" in choice["delta"]
+    )
+
+    arguments = json.loads(tool_call["function"]["arguments"])
+    assert arguments["analysis_ids"] == ["profile-1", "chart-1"]
