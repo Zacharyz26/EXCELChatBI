@@ -1799,6 +1799,16 @@ async def test_open_exploration_persists_screened_hypotheses_before_execution(
     assert created is True
     assert planning.status == "planning"
     selection = answered.payload["hypothesis_selection"]
+    replayed, replay_event, replay_created = tasks.answer_clarification(
+        run_id,
+        expected_version=current.state_version,
+        idempotency_key="valid-hypothesis-selection",
+        question_id="analysis_goal",
+        resume_token=waiting["resume_token"],
+        answer=selected_statement,
+    )
+    assert replay_created is False
+    assert replayed == planning and replay_event == answered
     assert selection["statement"] == selected_statement
     assert selection["data_version_hash"] == screening["data_version_hash"]
     assert selection["tested"] is False

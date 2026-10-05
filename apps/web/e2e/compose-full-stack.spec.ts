@@ -273,13 +273,12 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
     hasText: "异常",
   });
   await expect(anomalyCandidate).toContainText("可验证", { timeout: 30_000 });
-  await anomalyCandidate.getByRole("button", { name: "选择此假设" }).click();
   const hypothesisResumePromise = page.waitForResponse(
     (response) => response.url().endsWith(
       `/api/agent/runs/${hypothesisRunId}/clarifications/analysis_goal/answer/stream`,
     ) && response.request().method() === "POST",
   );
-  await hypothesisPanel.getByRole("button", { name: "提交答案并继续" }).click();
+  await anomalyCandidate.getByRole("button", { name: "选择此假设" }).click();
   const hypothesisResume = await hypothesisResumePromise;
   expect(hypothesisResume.ok()).toBeTruthy();
   await expect.poll(

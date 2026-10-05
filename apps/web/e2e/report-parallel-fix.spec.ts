@@ -14,13 +14,37 @@ interface RunDetail {
   } | null;
 }
 
-async function runDetail(page: Page, runId: string): Promise<RunDetail> {
-  const response = await page.request.get(
-    `/api/agent/runs/${encodeURIComponent(runId)}`,
-    { headers: AUTH_HEADERS },
+async function waitForRunDetail(
+  page: Page,
+  runId: string,
+  expectedStatus: string,
+  timeoutMs = 120_000,
+): Promise<RunDetail> {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = "not_visible";
+  while (Date.now() < deadline) {
+    const response = await page.request.get(
+      `/api/agent/runs/${encodeURIComponent(runId)}`,
+      { headers: AUTH_HEADERS },
+    );
+    if (response.status() === 404) {
+      lastStatus = "not_visible";
+    } else {
+      if (!response.ok()) {
+        const body = await response.text();
+        throw new Error(
+          `获取 Run ${runId} 失败：HTTP ${response.status()} ${body.slice(0, 500)}`,
+        );
+      }
+      const detail = await response.json() as RunDetail;
+      lastStatus = detail.run.status;
+      if (lastStatus === expectedStatus) return detail;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(
+    `Run ${runId} 在 ${timeoutMs}ms 内未达到 ${expectedStatus}，最后状态：${lastStatus}`,
   );
-  expect(response.ok()).toBeTruthy();
-  return response.json() as Promise<RunDetail>;
 }
 
 async function sendAndCaptureRun(page: Page, message: string): Promise<string> {
@@ -44,6 +68,15 @@ test("独立画像趋势并行后一次生成并下载 PDF", async ({ page }, te
   await page.getByRole("button", { name: "进入工作区" }).click();
   await expect(page.getByRole("button", { name: "我的分析项目" })).toBeVisible();
 
+  const isolatedProject = `Compose 报告专项 ${Date.now()}`;
+  await page.getByLabel("新建项目").click();
+  await page.getByPlaceholder("项目名称").fill(isolatedProject);
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await expect(page.getByRole("button", {
+    name: isolatedProject,
+    exact: true,
+  })).toBeVisible();
+
   const uploadButton = page.getByRole("button", { name: "上传 Excel", exact: true });
   const fixture = path.resolve("../../.data/e2e/sales.xlsx");
   const chooserPromise = page.waitForEvent("filechooser");
@@ -65,12 +98,8 @@ test("独立画像趋势并行后一次生成并下载 PDF", async ({ page }, te
     "Compose 6A 受控并行画像与趋势分析已完成。",
     { exact: true },
   )).toBeVisible({ timeout: 120_000 });
-  await expect.poll(
-    async () => (await runDetail(page, parallelRunId)).run.status,
-    { timeout: 120_000 },
-  ).toBe("completed");
 
-  const parallelDetail = await runDetail(page, parallelRunId);
+  const parallelDetail = await waitForRunDetail(page, parallelRunId, "completed");
   const trendStep = parallelDetail.plan?.definition.steps.find(
     (step) => step.capability === "stats.trend",
   );
@@ -131,10 +160,7 @@ test("独立画像趋势并行后一次生成并下载 PDF", async ({ page }, te
   expect(pdfBytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
   await testInfo.attach("report.pdf", { body: pdfBytes, contentType: "application/pdf" });
 
-  await expect.poll(
-    async () => (await runDetail(page, reportRunId)).run.status,
-    { timeout: 120_000 },
-  ).toBe("completed");
+  await waitForRunDetail(page, reportRunId, "completed");
   const reportEventsResponse = await page.request.get(
     `/api/agent/runs/${encodeURIComponent(reportRunId)}/events`,
     { headers: AUTH_HEADERS },

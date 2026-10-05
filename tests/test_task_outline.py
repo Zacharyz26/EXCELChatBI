@@ -857,3 +857,106 @@ def test_join_execution_remains_a_trend_dependency_with_resolved_source_roles() 
     ]
     assert steps[1]["dependencies"] == [steps[0]["step_id"]]
     assert steps[2]["dependencies"] == [steps[1]["step_id"]]
+
+
+def _hypothesis_registry() -> AgentToolRegistry:
+    return AgentToolRegistry(
+        [
+            AgentToolSpec(
+                name=tool_name,
+                description=capability,
+                parameters={"type": "object"},
+                runner=lambda _: {},
+                metadata=ToolCapabilityMetadata(capabilities=(capability,)),
+            )
+            for tool_name, capability in (
+                ("trend_analysis", "stats.trend"),
+                ("anomaly_detect", "stats.anomaly"),
+                ("group_compare", "stats.group_compare"),
+                ("correlation", "stats.correlation"),
+            )
+        ]
+    )
+
+
+def _selected_hypothesis(*, kind: str, capability: str) -> dict[str, object]:
+    return {
+        "schema": "chatbi-hypothesis-selection-v1",
+        "schema_version": 1,
+        "question_id": "analysis_goal",
+        "hypothesis_id": "hyp_0123456789abcdef",
+        "kind": kind,
+        "statement": "只验证用户明确选择的候选",
+        "capability": capability,
+        "expected_evidence": "受治理统计 Evidence",
+        "dataset_ref": "d" * 32,
+        "plan_version": 1,
+        "data_version_hash": "a" * 64,
+        "run_state_version": 2,
+        "selected_at": "2026-10-05T00:00:00+00:00",
+        "tested": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "capability"),
+    [
+        ("trend", "stats.trend"),
+        ("anomaly", "stats.anomaly"),
+        ("segment_comparison", "stats.group_compare"),
+        ("correlation", "stats.correlation"),
+    ],
+)
+def test_selected_hypothesis_plan_contains_only_bound_capability(
+    kind: str,
+    capability: str,
+) -> None:
+    contract = build_minimal_contract(
+        run_id="selected-hypothesis-run",
+        user_text="请深入分析这份数据",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    outline = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_hypothesis_registry(),
+        blocking_clarification=None,
+        selected_hypothesis=_selected_hypothesis(kind=kind, capability=capability),
+    )
+
+    assert [step["capability"] for step in outline.plan["steps"]] == [capability]
+    assert outline.plan["steps"][0]["dependencies"] == []
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        _selected_hypothesis(kind="anomaly", capability="stats.trend"),
+        {**_selected_hypothesis(kind="trend", capability="stats.trend"), "dataset_ref": "x" * 32},
+        _selected_hypothesis(kind="trend", capability="stats.unknown"),
+    ],
+)
+def test_selected_hypothesis_plan_rejects_stale_or_invalid_binding(
+    selection: dict[str, object],
+) -> None:
+    contract = build_minimal_contract(
+        run_id="invalid-selected-hypothesis-run",
+        user_text="请深入分析这份数据",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    with pytest.raises(ValueError, match="候选假设"):
+        create_task_outline(
+            user_text=contract.goal,
+            contract=contract,
+            datasets=[_dataset()],
+            artifacts=[],
+            registry=_hypothesis_registry(),
+            blocking_clarification=None,
+            selected_hypothesis=selection,
+        )

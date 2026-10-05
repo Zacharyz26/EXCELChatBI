@@ -1632,6 +1632,13 @@ async def _stream_agent_chat_inner(
         ]
 
         clarification: JsonObject | None = None
+        selected_hypothesis = (
+            await _selected_hypothesis_for_planning(
+                task_store, run_id, clarification_question_id
+            )
+            if resume_existing and clarification_question_id is not None
+            else None
+        )
         if resume_existing and clarification_question_id is None:
             stored_plan = await run_in_threadpool(task_store.get_active_plan, run_id)
             if stored_plan is None:
@@ -1736,6 +1743,7 @@ async def _stream_agent_chat_inner(
                     artifacts=list(context.artifacts),
                     registry=registry,
                     blocking_clarification=clarification,
+                    selected_hypothesis=selected_hypothesis,
                     max_steps=min(
                         config.outline_max_steps,
                         config.max_tool_calls,
@@ -1920,6 +1928,9 @@ async def _stream_agent_chat_inner(
             if refreshed_run is None or refreshed_run.status != "planning":
                 return
             run = refreshed_run
+            selected_hypothesis = await _selected_hypothesis_for_planning(
+                task_store, run_id, question_id
+            )
             final_message_id = uuid.uuid4().hex
             clarified_text = (
                 f"{user_text}\n\n用户对澄清问题“{question}”的回答：" f"{str(answer)[:20_000]}"
@@ -1981,6 +1992,7 @@ async def _stream_agent_chat_inner(
                     artifacts=list(context.artifacts),
                     registry=registry,
                     blocking_clarification=clarification,
+                    selected_hypothesis=selected_hypothesis,
                     max_steps=min(
                         config.outline_max_steps,
                         config.max_tool_calls,
@@ -3928,6 +3940,27 @@ def _verification_error(result: VerificationResult) -> tuple[str, str]:
     if "incomplete_plan_steps" in codes:
         return "incomplete_plan", "结构化计划仍有未完成步骤，任务不能标记为成功。"
     return "verification_failed", "任务结果未通过完成验证，请重试。"
+
+
+async def _selected_hypothesis_for_planning(
+    task_store: TaskStore,
+    run_id: str,
+    clarification_question_id: str,
+) -> JsonObject | None:
+    """Read the immutable selection persisted by TaskStore before replanning."""
+    if clarification_question_id != "analysis_goal":
+        return None
+    snapshot = await run_in_threadpool(task_store.get_snapshot, run_id)
+    if snapshot is None:
+        raise ValueError("候选假设恢复缺少 TaskRun 快照")
+    selection = snapshot.get("selected_hypothesis")
+    if selection is None:
+        return None
+    if not isinstance(selection, dict):
+        raise ValueError("持久化的候选假设选择格式非法")
+    if selection.get("question_id") != clarification_question_id:
+        raise ValueError("持久化的候选假设不属于当前澄清问题")
+    return cast(JsonObject, selection)
 
 
 def _task_event(event: TaskEvent, conversation_id: str) -> dict[str, str]:

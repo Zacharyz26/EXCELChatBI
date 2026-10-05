@@ -68,6 +68,12 @@ _CHART_REVISION_TOKENS = (
 )
 
 _RECOMPUTE_TOKENS = ("重新分析", "再分析", "更新分析", "重算", "重新计算")
+_HYPOTHESIS_CAPABILITY_BY_KIND = {
+    "trend": "stats.trend",
+    "anomaly": "stats.anomaly",
+    "segment_comparison": "stats.group_compare",
+    "correlation": "stats.correlation",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +101,7 @@ def create_task_outline(
     artifacts: list[Artifact],
     registry: AgentToolRegistry,
     blocking_clarification: JsonObject | None,
+    selected_hypothesis: JsonObject | None = None,
     max_steps: int = 12,
     capability_catalog: list[JsonObject] | None = None,
 ) -> TaskOutline:
@@ -123,6 +130,11 @@ def create_task_outline(
             audit=_deterministic_audit("fast", plan),
         )
 
+    selected_capabilities = (
+        _selected_hypothesis_capabilities(selected_hypothesis, datasets, capabilities)
+        if selected_hypothesis is not None
+        else None
+    )
     route = choose_outline_route(user_text, context)
     plan = build_deterministic_outline(
         user_text=user_text,
@@ -130,6 +142,7 @@ def create_task_outline(
         route=route,
         available_capabilities=capabilities,
         require_available_capabilities=False,
+        requested_capabilities=selected_capabilities,
     )
     validation = validate_task_plan(
         plan,
@@ -276,9 +289,14 @@ def build_deterministic_outline(
     route: OutlineRoute,
     available_capabilities: set[str],
     require_available_capabilities: bool = True,
+    requested_capabilities: tuple[str, ...] | None = None,
 ) -> JsonObject:
     """为已知任务族构造最小、可验证的 fast/template 计划。"""
-    requested = _requested_capabilities(user_text, context)
+    requested = (
+        list(requested_capabilities)
+        if requested_capabilities is not None
+        else _requested_capabilities(user_text, context)
+    )
     unavailable = [item for item in requested if item not in available_capabilities]
     if unavailable and require_available_capabilities:
         raise ValueError("计划所需能力不可用: " + ", ".join(unavailable))
@@ -319,6 +337,38 @@ def build_deterministic_outline(
         "assumptions": assumptions,
         "clarifications": [],
     }
+
+
+def _selected_hypothesis_capabilities(
+    selection: JsonObject,
+    datasets: list[Dataset],
+    available_capabilities: set[str],
+) -> tuple[str, ...]:
+    """Bind a validated 6C selection to one executable statistical capability.
+
+    Candidate screening already used governed upload metadata, so these read-only
+    statistical tools consume the selected dataset directly and need no synthetic
+    profile/tool dependency. TaskStore separately rejects stale plan/data versions.
+    """
+    kind = selection.get("kind")
+    capability = selection.get("capability")
+    dataset_ref = selection.get("dataset_ref")
+    expected_capability = (
+        _HYPOTHESIS_CAPABILITY_BY_KIND.get(kind) if isinstance(kind, str) else None
+    )
+    if (
+        selection.get("schema") != "chatbi-hypothesis-selection-v1"
+        or selection.get("schema_version") != 1
+        or selection.get("question_id") != "analysis_goal"
+        or not isinstance(capability, str)
+        or capability != expected_capability
+    ):
+        raise ValueError("候选假设选择与受支持分析能力不匹配")
+    if not isinstance(dataset_ref, str) or dataset_ref not in {item.ref for item in datasets}:
+        raise ValueError("候选假设引用的数据集已失效")
+    if capability not in available_capabilities:
+        raise ValueError("候选假设所需分析能力不可用")
+    return (capability,)
 
 
 def _step_dependencies(
