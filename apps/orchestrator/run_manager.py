@@ -10,14 +10,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from packages.session.models import JsonObject
 
 SseItem = dict[str, str]
+_DEFAULT_SUBSCRIBER_QUEUE_SIZE = 256
 _END = object()
+_OVERFLOW = object()
 
 
 class RunControl(Protocol):
@@ -125,12 +127,79 @@ class _ManagedRun:
     finished: bool = False
 
 
+class RunSubscription(Protocol):
+    """可确定关闭的 run 事件订阅。"""
+
+    def __aiter__(self) -> AsyncIterator[SseItem]: ...
+
+    async def __anext__(self) -> SseItem: ...
+
+    async def aclose(self) -> None: ...
+
+
+class _QueueSubscription:
+    """Queue-backed subscription whose cleanup does not depend on first iteration."""
+
+    def __init__(
+        self,
+        manager: AgentRunManager,
+        run_id: str,
+        entry: _ManagedRun,
+        queue: asyncio.Queue[object],
+    ) -> None:
+        self._manager = manager
+        self._run_id = run_id
+        self._entry = entry
+        self._queue = queue
+        self._closed = False
+
+    def __aiter__(self) -> _QueueSubscription:
+        return self
+
+    async def __anext__(self) -> SseItem:
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            item = await self._queue.get()
+        except asyncio.CancelledError:
+            self._close()
+            raise
+        if item is _END or item is _OVERFLOW:
+            self._close()
+            raise StopAsyncIteration
+        assert isinstance(item, dict)
+        typed_item = cast(SseItem, item)
+        # done 只结束当前 SSE 订阅；waiting_user/paused 的 producer 继续存活。
+        if typed_item.get("event") == "done":
+            self._close()
+        return typed_item
+
+    async def aclose(self) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._entry.subscribers.discard(self._queue)
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        if self._entry.finished and not self._entry.subscribers:
+            self._manager._runs.pop(self._run_id, None)
+
+
 class AgentRunManager:
     """持有后台 Agent producer，并向一个或多个 SSE 客户端广播事件。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, subscriber_queue_size: int = _DEFAULT_SUBSCRIBER_QUEUE_SIZE) -> None:
+        if subscriber_queue_size <= 0:
+            raise ValueError("subscriber_queue_size 必须为正整数")
         self._runs: dict[str, _ManagedRun] = {}
         self._conversation_runs: dict[str, str] = {}
+        self._subscriber_queue_size = subscriber_queue_size
 
     def start(
         self,
@@ -138,7 +207,7 @@ class AgentRunManager:
         source_factory: Callable[[ManagedRunControl], AsyncIterator[SseItem]],
         *,
         conversation_id: str | None = None,
-    ) -> AsyncGenerator[SseItem, None]:
+    ) -> RunSubscription:
         if run_id in self._runs:
             raise RuntimeError(f"TaskRun 已有活动执行宿主: {run_id}")
         if conversation_id is not None:
@@ -152,7 +221,7 @@ class AgentRunManager:
             control=ManagedRunControl(),
             conversation_id=conversation_id,
         )
-        queue: asyncio.Queue[object] = asyncio.Queue()
+        queue = self._new_subscriber_queue()
         entry.subscribers.add(queue)
         self._runs[run_id] = entry
         if conversation_id is not None:
@@ -175,7 +244,7 @@ class AgentRunManager:
         control.pause()
         return True
 
-    def resume(self, run_id: str) -> AsyncGenerator[SseItem, None] | None:
+    def resume(self, run_id: str) -> RunSubscription | None:
         subscription = self.subscribe(run_id)
         if subscription is None:
             return None
@@ -183,12 +252,12 @@ class AgentRunManager:
         entry.control.resume()
         return subscription
 
-    def subscribe(self, run_id: str) -> AsyncGenerator[SseItem, None] | None:
+    def subscribe(self, run_id: str) -> RunSubscription | None:
         """只订阅活动 producer，不改变暂停、澄清或取消控制状态。"""
         entry = self._runs.get(run_id)
         if entry is None or entry.finished:
             return None
-        queue: asyncio.Queue[object] = asyncio.Queue()
+        queue = self._new_subscriber_queue()
         entry.subscribers.add(queue)
         return self._subscription(run_id, entry, queue)
 
@@ -198,11 +267,11 @@ class AgentRunManager:
         *,
         question_id: str,
         value: object,
-    ) -> AsyncGenerator[SseItem, None] | None:
+    ) -> RunSubscription | None:
         entry = self._runs.get(run_id)
         if entry is None or entry.finished:
             return None
-        queue: asyncio.Queue[object] = asyncio.Queue()
+        queue = self._new_subscriber_queue()
         entry.subscribers.add(queue)
         entry.control.answer(question_id, value)
         return self._subscription(run_id, entry, queue)
@@ -218,8 +287,7 @@ class AgentRunManager:
         entry = self._runs.get(run_id)
         if entry is None:
             return
-        for queue in tuple(entry.subscribers):
-            queue.put_nowait(item)
+        self._broadcast(entry, item)
 
     async def shutdown(self) -> None:
         """停止本进程 producer；调用方应先把可恢复运行态持久化为 paused。"""
@@ -243,8 +311,7 @@ class AgentRunManager:
     ) -> None:
         try:
             async for item in source:
-                for queue in tuple(entry.subscribers):
-                    queue.put_nowait(item)
+                self._broadcast(entry, item)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -258,8 +325,7 @@ class AgentRunManager:
                 "event": "error",
                 "data": json.dumps(payload, ensure_ascii=False),
             }
-            for queue in tuple(entry.subscribers):
-                queue.put_nowait(item)
+            self._broadcast(entry, item)
         finally:
             entry.finished = True
             if (
@@ -268,28 +334,43 @@ class AgentRunManager:
             ):
                 self._conversation_runs.pop(entry.conversation_id, None)
             for queue in tuple(entry.subscribers):
-                queue.put_nowait(_END)
+                try:
+                    queue.put_nowait(_END)
+                except asyncio.QueueFull:
+                    self._evict_lagged_subscriber(entry, queue)
             if not entry.subscribers:
                 self._runs.pop(run_id, None)
 
-    async def _subscription(
+    def _new_subscriber_queue(self) -> asyncio.Queue[object]:
+        return asyncio.Queue(maxsize=self._subscriber_queue_size)
+
+    def _broadcast(self, entry: _ManagedRun, item: SseItem) -> None:
+        """非阻塞广播；单个慢客户端不能给 producer 施加无界背压。"""
+        for queue in tuple(entry.subscribers):
+            try:
+                queue.put_nowait(item)
+            except asyncio.QueueFull:
+                self._evict_lagged_subscriber(entry, queue)
+
+    @staticmethod
+    def _evict_lagged_subscriber(
+        entry: _ManagedRun,
+        queue: asyncio.Queue[object],
+    ) -> None:
+        """结束落后订阅；客户端使用已确认 SSE 游标从持久事件日志重连。"""
+        entry.subscribers.discard(queue)
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # 队列上限已校验为正；清空后 sentinel 必达，不会留下悬挂消费者。
+        queue.put_nowait(_OVERFLOW)
+
+    def _subscription(
         self,
         run_id: str,
         entry: _ManagedRun,
         queue: asyncio.Queue[object],
-    ) -> AsyncGenerator[SseItem, None]:
-        try:
-            while True:
-                item = await queue.get()
-                if item is _END:
-                    return
-                assert isinstance(item, dict)
-                typed_item = cast(SseItem, item)
-                yield typed_item
-                # done 只结束当前 SSE 订阅；waiting_user/paused 的 producer 继续存活。
-                if typed_item.get("event") == "done":
-                    return
-        finally:
-            entry.subscribers.discard(queue)
-            if entry.finished and not entry.subscribers:
-                self._runs.pop(run_id, None)
+    ) -> RunSubscription:
+        return _QueueSubscription(self, run_id, entry, queue)

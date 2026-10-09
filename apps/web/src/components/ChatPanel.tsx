@@ -230,7 +230,7 @@ export function ChatPanel() {
             ref={fileInputRef}
             className="visually-hidden"
             type="file"
-            accept=".xlsx,.xls"
+            accept=".xlsx,.xls,.csv"
             onChange={onFileSelected}
             tabIndex={-1}
           />
@@ -239,8 +239,8 @@ export function ChatPanel() {
             className="composer-upload"
             onClick={() => fileInputRef.current?.click()}
             disabled={!activeConversationId || busy}
-            aria-label="上传 Excel"
-            title="上传 Excel"
+            aria-label="上传表格"
+            title="上传表格（.xlsx / .xls / .csv）"
           >
             <PaperclipIcon />
           </button>
@@ -903,10 +903,10 @@ function ChatWelcome({ onUpload }: { onUpload: () => void }) {
       <div className="chat-welcome__mark" aria-hidden="true">BI</div>
       <span className="chat-welcome__eyebrow">CHATBI WORKSPACE</span>
       <h1>从一份数据，开始一次分析对话</h1>
-      <p>上传 Excel 后直接用自然语言提出需求，Agent 会按需调用画像、统计、图表与报告工具，全过程可见。</p>
+      <p>上传 XLSX、旧版 XLS 或 CSV 后直接用自然语言提出需求，Agent 会按需调用画像、统计、图表与报告工具，全过程可见。</p>
       <button type="button" onClick={onUpload}>
         <PaperclipIcon />
-        上传 Excel 数据
+        上传表格数据
       </button>
     </div>
   );
@@ -920,7 +920,7 @@ function UploadProgress() {
         <div className="message-meta"><strong>ChatBI</strong></div>
         <div className="message-bubble upload-progress">
           <LoadingRing />
-          <p>正在读取 Excel 并生成字段画像…</p>
+          <p>正在读取表格并生成字段画像…</p>
         </div>
       </div>
     </article>

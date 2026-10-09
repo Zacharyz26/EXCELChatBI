@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -84,11 +86,93 @@ class MCPTransport(Protocol):
     async def aclose(self) -> None: ...
 
 
-class InProcessMCPTransport:
-    """Compatibility/test transport that exercises the same contract exactly once."""
+AbandonedResultHandler = Callable[[str, MCPCallResult], None]
+_AbandonedCleanupRecorder = Callable[[str, int, str | None], None]
+_ABANDONED_CLEANUP_MAX_ATTEMPTS = 3
+_ABANDONED_CLEANUP_RETRY_DELAY_SECONDS = 0.01
 
-    def __init__(self, adapter: MCPServerAdapter) -> None:
+
+class _InProcessCallLease:
+    """Own a worker result until its awaiting request accepts or abandons it."""
+
+    def __init__(
+        self,
+        name: str,
+        cleanup: AbandonedResultHandler,
+        record_cleanup: _AbandonedCleanupRecorder,
+    ) -> None:
+        self._name = name
+        self._cleanup = cleanup
+        self._record_cleanup = record_cleanup
+        self._lock = threading.Lock()
+        self._result: MCPCallResult | None = None
+        self._abandoned = False
+        self._cleanup_started = False
+
+    def publish(self, result: MCPCallResult) -> MCPCallResult:
+        cleanup = False
+        with self._lock:
+            self._result = result
+            if self._abandoned and not self._cleanup_started:
+                self._cleanup_started = True
+                cleanup = True
+        if cleanup:
+            self._cleanup_with_retry(result)
+        return result
+
+    def abandon(self) -> MCPCallResult | None:
+        result: MCPCallResult | None = None
+        record_pending = False
+        with self._lock:
+            if self._abandoned:
+                return None
+            self._abandoned = True
+            if self._result is not None and not self._cleanup_started:
+                self._cleanup_started = True
+                result = self._result
+            elif not self._cleanup_started:
+                record_pending = True
+        if record_pending:
+            self._record_cleanup("pending", 0, None)
+        return result
+
+    def _cleanup_with_retry(self, result: MCPCallResult) -> None:
+        for attempt in range(1, _ABANDONED_CLEANUP_MAX_ATTEMPTS + 1):
+            try:
+                self._cleanup(self._name, result)
+            except Exception as exc:
+                error_type = type(exc).__name__
+                if attempt < _ABANDONED_CLEANUP_MAX_ATTEMPTS:
+                    self._record_cleanup("pending", attempt, error_type)
+                    time.sleep(_ABANDONED_CLEANUP_RETRY_DELAY_SECONDS)
+                    continue
+                self._record_cleanup("failed", attempt, error_type)
+                _log.error(
+                    "mcp.in_process_abandoned_cleanup_failed",
+                    tool=self._name,
+                    attempts=attempt,
+                    error_type=error_type,
+                )
+                return
+            self._record_cleanup("completed", attempt, None)
+            return
+
+
+class InProcessMCPTransport:
+    """Compatibility transport with opt-in ownership for sync handlers."""
+
+    def __init__(
+        self,
+        adapter: MCPServerAdapter,
+        *,
+        abandon_result: AbandonedResultHandler | None = None,
+    ) -> None:
         self._adapter = adapter
+        self._abandon_result = abandon_result
+        self._pending_calls: set[asyncio.Task[MCPCallResult]] = set()
+        self._pending_cleanups: set[asyncio.Task[None]] = set()
+        self._abandoned_cleanup_states: dict[str, dict[str, str | int | None]] = {}
+        self._abandoned_cleanup_lock = threading.Lock()
 
     async def list_tools(self) -> tuple[MCPToolDescriptor, ...]:
         return self._adapter.list_tools()
@@ -96,10 +180,81 @@ class InProcessMCPTransport:
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: MCPRequestContext
     ) -> MCPCallResult:
-        # Compatibility mode keeps mutating synchronous handlers attached to the
-        # caller. Sync-only subcomponents that need a worker boundary must own and
-        # join that worker themselves so cancellation cannot leave orphan writes.
-        return self._adapter.call_tool(name, arguments, context)
+        cleanup = self._abandon_result
+        if cleanup is None:
+            return self._adapter.call_tool(name, arguments, context)
+        lease = _InProcessCallLease(
+            name,
+            cleanup,
+            lambda status, attempts, error_type: self._record_abandoned_cleanup(
+                context.invocation_id,
+                name,
+                status,
+                attempts,
+                error_type,
+            ),
+        )
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                lambda: lease.publish(self._adapter.call_tool(name, arguments, context))
+            ),
+            name=f"mcp-in-process:{name}:{context.invocation_id}",
+        )
+        self._pending_calls.add(task)
+        task.add_done_callback(self._finish_call)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            published_result = lease.abandon()
+            if published_result is not None:
+                cleanup_task = asyncio.create_task(
+                    asyncio.to_thread(lease._cleanup_with_retry, published_result),
+                    name=f"mcp-in-process-cleanup:{name}:{context.invocation_id}",
+                )
+                self._pending_cleanups.add(cleanup_task)
+                cleanup_task.add_done_callback(self._finish_cleanup)
+            raise
+
+    def _finish_call(self, task: asyncio.Task[MCPCallResult]) -> None:
+        self._pending_calls.discard(task)
+        if task.cancelled():
+            return
+        # A timed-out caller no longer awaits this task. Retrieving its exception
+        # keeps the owned late worker from producing an unhandled-task warning.
+        task.exception()
+
+    def _finish_cleanup(self, task: asyncio.Task[None]) -> None:
+        self._pending_cleanups.discard(task)
+        if task.cancelled():
+            return
+        # Cleanup retries handle expected failures internally; retrieve any
+        # unexpected exception so a detached task never warns at shutdown.
+        task.exception()
+
+    def _record_abandoned_cleanup(
+        self,
+        invocation_id: str,
+        tool: str,
+        status: str,
+        attempts: int,
+        error_type: str | None,
+    ) -> None:
+        with self._abandoned_cleanup_lock:
+            self._abandoned_cleanup_states[invocation_id] = {
+                "tool": tool,
+                "status": status,
+                "attempts": attempts,
+                "error_type": error_type,
+            }
+
+    def abandoned_cleanup_state(
+        self,
+        invocation_id: str,
+    ) -> dict[str, str | int | None] | None:
+        """Return an immutable snapshot of bounded late-result cleanup state."""
+        with self._abandoned_cleanup_lock:
+            state = self._abandoned_cleanup_states.get(invocation_id)
+            return dict(state) if state is not None else None
 
     async def list_resources(self, context: MCPRequestContext) -> tuple[MCPResourceDescriptor, ...]:
         return self._adapter.list_resources(context)
@@ -153,7 +308,15 @@ class InProcessMCPTransport:
         )
 
     async def aclose(self) -> None:
-        return None
+        pending = tuple(self._pending_calls) + tuple(self._pending_cleanups)
+        if not pending:
+            return
+        _, still_pending = await asyncio.wait(pending, timeout=1.0)
+        if still_pending:
+            _log.error(
+                "mcp.in_process_pending_work_on_close",
+                count=len(still_pending),
+            )
 
 
 class MCPResourceNotificationBuffer:

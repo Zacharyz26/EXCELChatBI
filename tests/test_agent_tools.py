@@ -6,11 +6,14 @@ transform 血缘落库、generate_report 按工件组装。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -490,6 +493,129 @@ def test_transform_registers_lineage(
     assert derived.profile["row_count"] == 3  # 去重后画像是真实重算的
 
 
+@pytest.mark.asyncio
+async def test_mcp_transform_registration_is_rolled_back_until_host_commit(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext]
+) -> None:
+    store, context = workspace
+    store.register_dataset(
+        ref=sales_ref,
+        project_id=context.project_id,
+        filename="销售.xlsx",
+        profile={"row_count": 4},
+    )
+    registry = _registry(context=context)
+    request_context = replace(
+        _mcp_request_context(context),
+        invocation_id="transform-not-committed",
+        idempotency_key="transform-not-committed",
+    )
+    try:
+        execution = await registry.execute_mcp(
+            "transform_dataset",
+            {"dataset_ref": sales_ref, "drop_duplicates": []},
+            request_context,
+            timeout_seconds=30,
+        )
+        derived_ref = str(execution.result["dataset_ref"])
+        assert store.get_dataset(derived_ref) is not None
+        registry.cleanup_uncommitted_result("transform-not-committed")
+        assert store.get_dataset(derived_ref) is None
+        with pytest.raises(FileNotFoundError):
+            load_dataframe(derived_ref)
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_transform_host_commit_releases_cleanup_ownership(
+    sales_ref: str, workspace: tuple[SessionStore, AgentContext]
+) -> None:
+    store, context = workspace
+    store.register_dataset(
+        ref=sales_ref,
+        project_id=context.project_id,
+        filename="销售.xlsx",
+        profile={"row_count": 4},
+    )
+    registry = _registry(context=context)
+    request_context = replace(
+        _mcp_request_context(context),
+        invocation_id="transform-committed",
+        idempotency_key="transform-committed",
+    )
+    try:
+        execution = await registry.execute_mcp(
+            "transform_dataset",
+            {"dataset_ref": sales_ref, "drop_duplicates": []},
+            request_context,
+            timeout_seconds=30,
+        )
+        derived_ref = str(execution.result["dataset_ref"])
+        registry.release_committed_result("transform-committed")
+        registry.cleanup_uncommitted_result("transform-committed")
+        assert store.get_dataset(derived_ref) is not None
+        assert len(load_dataframe(derived_ref)) == 3
+    finally:
+        await registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_transform_finalize_timeout_rolls_back_late_registration(
+    sales_ref: str,
+    workspace: tuple[SessionStore, AgentContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apps.orchestrator import agent_tools
+
+    store, context = workspace
+    store.register_dataset(
+        ref=sales_ref,
+        project_id=context.project_id,
+        filename="销售.xlsx",
+        profile={"row_count": 4},
+    )
+    registered_refs: list[str] = []
+    original = agent_tools._register_transformed_dataset
+
+    def slow_register(**kwargs: object) -> None:
+        registered_refs.append(str(cast(dict[str, object], kwargs["result"])["dataset_ref"]))
+        time.sleep(0.35)
+        original(
+            excel=cast(Any, kwargs["excel"]),
+            context=cast(AgentContext, kwargs["context"]),
+            args=cast(dict[str, object], kwargs["args"]),
+            result=cast(dict[str, object], kwargs["result"]),
+        )
+        registered_refs.append(str(cast(dict[str, object], kwargs["result"])["dataset_ref"]))
+
+    monkeypatch.setattr(agent_tools, "_register_transformed_dataset", slow_register)
+    registry = _registry(context=context)
+    request_context = replace(
+        _mcp_request_context(context),
+        invocation_id="transform-finalize-timeout",
+        idempotency_key="transform-finalize-timeout",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            await registry.execute_mcp(
+                "transform_dataset",
+                {"dataset_ref": sales_ref, "drop_duplicates": []},
+                request_context,
+                timeout_seconds=0.25,
+            )
+        assert time.monotonic() - started < 0.32
+        await asyncio.sleep(0.45)
+        assert len(registered_refs) == 1
+        derived_ref = registered_refs[0]
+        assert store.get_dataset(derived_ref) is None
+        with pytest.raises(FileNotFoundError):
+            load_dataframe(derived_ref)
+    finally:
+        await registry.aclose()
+
+
 def test_transform_rejects_unlisted_parent(
     sales_ref: str, workspace: tuple[SessionStore, AgentContext]
 ) -> None:
@@ -552,6 +678,56 @@ def test_join_registers_complete_two_parent_lineage(
         "right_key": "id",
     }
     assert derived.filename == "订单.xlsx × 客户.xlsx（关联）"
+
+
+@pytest.mark.asyncio
+async def test_mcp_join_registration_is_rolled_back_until_host_commit(
+    workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    left_ref = save_dataframe(pd.DataFrame({"客户ID": [1, 2], "金额": [10, 20]}))
+    right_ref = save_dataframe(pd.DataFrame({"id": [1, 2], "地区": ["东", "西"]}))
+    store.register_dataset(
+        ref=left_ref,
+        project_id=context.project_id,
+        filename="订单.xlsx",
+        profile={"columns": []},
+    )
+    store.register_dataset(
+        ref=right_ref,
+        project_id=context.project_id,
+        filename="客户.xlsx",
+        profile={"columns": []},
+    )
+    args = {
+        "left_dataset_ref": left_ref,
+        "right_dataset_ref": right_ref,
+        "left_key": "客户ID",
+        "right_key": "id",
+        "join_type": "inner",
+    }
+    registry = _registry(context=context)
+    request_context = replace(
+        _mcp_request_context(context),
+        invocation_id="join-not-committed",
+        idempotency_key="join-not-committed",
+    )
+    try:
+        execution = await registry.execute_mcp(
+            "join_datasets",
+            args,
+            request_context,
+            timeout_seconds=30,
+        )
+        derived_ref = str(execution.result["dataset_ref"])
+        assert store.get_dataset(derived_ref) is not None
+        assert store.dataset_parent_refs(derived_ref) == (left_ref, right_ref)
+        registry.cleanup_uncommitted_result("join-not-committed")
+        assert store.get_dataset(derived_ref) is None
+        with pytest.raises(FileNotFoundError):
+            load_dataframe(derived_ref)
+    finally:
+        await registry.aclose()
 
 
 # ── generate_report：按工件组装 ──

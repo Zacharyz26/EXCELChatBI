@@ -77,7 +77,7 @@ test("独立画像趋势并行后一次生成并下载 PDF", async ({ page }, te
     exact: true,
   })).toBeVisible();
 
-  const uploadButton = page.getByRole("button", { name: "上传 Excel", exact: true });
+  const uploadButton = page.getByRole("button", { name: "上传表格", exact: true });
   const fixture = path.resolve("../../.data/e2e/sales.xlsx");
   const chooserPromise = page.waitForEvent("filechooser");
   await uploadButton.click();

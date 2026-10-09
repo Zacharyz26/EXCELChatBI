@@ -51,7 +51,7 @@ def session_store_dep() -> SessionStore:
 
 @lru_cache
 def excel_tools_dep() -> MCPServer:
-    """注入 Excel 解析工具服务（进程内）。"""
+    """注入 XLSX、legacy XLS 与 CSV 解析工具服务（进程内）。"""
     return build_excel_server()
 
 

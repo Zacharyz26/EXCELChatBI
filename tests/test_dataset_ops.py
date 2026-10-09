@@ -164,7 +164,13 @@ def test_aggregate_sum_sorted(sales_ref: str) -> None:
     out = aggregate_preview(
         {"dataset_ref": sales_ref, "group_col": "地区", "value_col": "销量", "agg": "sum"}
     )
-    assert out["rows"][0] == {"group": "华东", "value": 500.0, "count": 3}  # 默认 value_desc
+    assert out["rows"][0] == {
+        "group": "华东",
+        "value": 500.0,
+        "count": 3,
+        "row_count": 3,
+        "valid_value_count": 3,
+    }  # 默认 value_desc
     assert out["group_total"] == 3
     assert out["truncated"] is False
 

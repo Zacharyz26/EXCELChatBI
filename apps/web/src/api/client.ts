@@ -24,6 +24,16 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
+export const AUTHENTICATION_REQUIRED_EVENT = "chatbi:authentication-required";
+const activeTaskStreams = new Set<AbortController>();
+
+export class AuthenticationRequiredError extends Error {
+  constructor() {
+    super("访问令牌已失效，请重新认证。");
+    this.name = "AuthenticationRequiredError";
+  }
+}
+
 function apiToken(): string {
   if (typeof window === "undefined") return "";
   return window.sessionStorage.getItem("chatbi.apiToken") ?? "";
@@ -44,7 +54,7 @@ export function hasApiToken(): boolean {
 }
 
 export async function getAuthMode(): Promise<"disabled" | "bearer"> {
-  const resp = await fetch(`${API_BASE}/auth/config`);
+  const resp = await apiFetch(`${API_BASE}/auth/config`);
   if (!resp.ok) return asError(resp);
   const body: unknown = await resp.json();
   if (
@@ -57,14 +67,27 @@ export async function getAuthMode(): Promise<"disabled" | "bearer"> {
   return (body as { mode: "disabled" | "bearer" }).mode;
 }
 
-function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = apiToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401 && typeof window !== "undefined") {
+    // 凭据已不再可用：先同步删除，再通知 UI 清理工作区状态。
+    abortActiveTaskStreams();
+    setApiToken("");
+    window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT));
+  }
+  return response;
 }
 
 async function asError(resp: Response): Promise<never> {
+  if (resp.status === 401) {
+    throw new AuthenticationRequiredError();
+  }
   let detail = `${resp.status} ${resp.statusText}`;
   try {
     const body = await resp.json();
@@ -81,7 +104,7 @@ async function asError(resp: Response): Promise<never> {
   throw new Error(detail);
 }
 
-/** 上传 Excel，返回数据集引用与数据画像。 */
+/** 上传 XLSX、legacy XLS 或 CSV，返回统一数据集引用与数据画像。 */
 export async function uploadExcel(
   file: File,
   workspace?: { projectId: string; conversationId: string },
@@ -349,7 +372,7 @@ export async function resumeAgentRun(
   stateVersion: number,
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  const resp = await apiFetch(
+  await requestTaskStream(
     `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/resume/stream`,
     {
       method: "POST",
@@ -359,9 +382,9 @@ export async function resumeAgentRun(
         "Idempotency-Key": operationKey("run-resume"),
       },
     },
+    runId,
+    onEvent,
   );
-  if (!resp.ok) return asError(resp);
-  await consumeTaskStream(resp, runId, onEvent);
 }
 
 /** 回答一个服务端持久化的阻塞澄清，并继续原 TaskRun。 */
@@ -373,7 +396,7 @@ export async function answerAgentClarification(
   answer: unknown,
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  const resp = await apiFetch(
+  await requestTaskStream(
     `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/clarifications/`
       + `${encodeURIComponent(questionId)}/answer/stream`,
     {
@@ -386,9 +409,9 @@ export async function answerAgentClarification(
       },
       body: JSON.stringify({ answer, resume_token: resumeToken }),
     },
+    runId,
+    onEvent,
   );
-  if (!resp.ok) return asError(resp);
-  await consumeTaskStream(resp, runId, onEvent);
 }
 
 /** 从 paused 边界只重试一个失败/阻塞步骤，并继续原 TaskRun。 */
@@ -398,7 +421,7 @@ export async function retryAgentStep(
   stepId: string,
   onEvent: (event: ChatStreamEvent) => void,
 ): Promise<void> {
-  const resp = await apiFetch(
+  await requestTaskStream(
     `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/steps/`
       + `${encodeURIComponent(stepId)}/retry/stream`,
     {
@@ -409,9 +432,25 @@ export async function retryAgentStep(
         "Idempotency-Key": operationKey("step-retry"),
       },
     },
+    runId,
+    onEvent,
   );
-  if (!resp.ok) return asError(resp);
-  await consumeTaskStream(resp, runId, onEvent);
+}
+
+async function requestTaskStream(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  runId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const controller = registerTaskStream();
+  try {
+    const resp = await apiFetch(input, { ...init, signal: controller.signal });
+    if (!resp.ok) return asError(resp);
+    await consumeTaskStream(resp, runId, onEvent, controller.signal);
+  } finally {
+    activeTaskStreams.delete(controller);
+  }
 }
 
 /** 提交完整提纲新版本；服务端继续验证 capability 与已完成步骤边界。 */
@@ -455,22 +494,28 @@ export async function streamChat(
     parentRunId?: string;
   } = {},
 ): Promise<void> {
-  const resp = await apiFetch(`${API_BASE}/chat/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({
-      conversation_id: conversationId,
-      message,
-      parent_run_id: options.parentRunId ?? null,
-    }),
-  });
-  if (!resp.ok) return asError(resp);
-  const runId = resp.headers.get("X-ChatBI-Run-ID");
-  if (runId) onOpen?.(runId);
-  if (runId) {
-    await consumeTaskStream(resp, runId, onEvent);
-  } else {
-    await consumeEventStream(resp, onEvent);
+  const controller = registerTaskStream();
+  try {
+    const resp = await apiFetch(`${API_BASE}/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        message,
+        parent_run_id: options.parentRunId ?? null,
+      }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) return asError(resp);
+    const runId = resp.headers.get("X-ChatBI-Run-ID");
+    if (runId) onOpen?.(runId);
+    if (runId) {
+      await consumeTaskStream(resp, runId, onEvent, controller.signal);
+    } else {
+      await consumeEventStream(resp, onEvent, controller.signal);
+    }
+  } finally {
+    activeTaskStreams.delete(controller);
   }
 }
 
@@ -515,6 +560,21 @@ class MeaningfulEventTimeout extends Error {
   }
 }
 
+function registerTaskStream(): AbortController {
+  const controller = new AbortController();
+  activeTaskStreams.add(controller);
+  return controller;
+}
+
+function abortActiveTaskStreams(): void {
+  for (const controller of activeTaskStreams) controller.abort();
+  activeTaskStreams.clear();
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException("任务流已因认证失效而中止。", "AbortError");
+}
+
 /**
  * POST SSE 断开后不重放控制 POST，而以持久 sequence 通过只读 GET 流续接。
  * 服务端与这里都按 event_id/sequence 去重，查询/实时拼接竞态不会重复驱动 UI。
@@ -523,12 +583,15 @@ async function consumeTaskStream(
   initialResponse: Response,
   runId: string,
   onEvent: (event: ChatStreamEvent) => void,
+  signal: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   let cursor = 0;
   let terminal = false;
   let lastError: unknown = null;
   const seenEventIds = new Set<string>();
   const dispatch = (event: ChatStreamEvent) => {
+    if (signal.aborted) return;
     const eventRunId = stringField(event.data.run_id);
     if (eventRunId && eventRunId !== runId) return;
     const eventId = event.id ?? stringField(event.data.event_id);
@@ -545,15 +608,17 @@ async function consumeTaskStream(
   };
 
   try {
-    await consumeEventStream(initialResponse, dispatch);
+    await consumeEventStream(initialResponse, dispatch, signal);
   } catch (error) {
+    throwIfAborted(signal);
     if (error instanceof MeaningfulEventTimeout) throw error;
     lastError = error;
   }
   if (terminal) return;
 
   for (const delayMs of STREAM_RECONNECT_DELAYS_MS) {
-    await delay(delayMs);
+    await delay(delayMs, signal);
+    throwIfAborted(signal);
     try {
       const response = await apiFetch(
         `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/stream`,
@@ -562,6 +627,7 @@ async function consumeTaskStream(
             Accept: "text/event-stream",
             "Last-Event-ID": `${runId}:${cursor}`,
           },
+          signal,
         },
       );
       if (!response.ok) {
@@ -569,10 +635,11 @@ async function consumeTaskStream(
         lastError = new Error(`任务重连暂不可用（${response.status}）`);
         continue;
       }
-      await consumeEventStream(response, dispatch);
+      await consumeEventStream(response, dispatch, signal);
       if (terminal) return;
       lastError = new Error("任务重连流在终态事件前中断");
     } catch (error) {
+      throwIfAborted(signal);
       if (error instanceof MeaningfulEventTimeout) throw error;
       lastError = error;
     }
@@ -585,8 +652,10 @@ async function consumeTaskStream(
 async function consumeEventStream(
   resp: Response,
   onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!resp.body) throw new Error("浏览器未提供可读取的流式响应");
+  if (signal) throwIfAborted(signal);
 
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -596,6 +665,7 @@ async function consumeEventStream(
 
   try {
     while (true) {
+      if (signal) throwIfAborted(signal);
       const remainingMs = Math.max(1, eventDeadline - Date.now());
       const { done, value } = await readStreamChunk(reader, remainingMs);
       buffer += decoder.decode(value, { stream: !done });
@@ -603,7 +673,7 @@ async function consumeEventStream(
 
       let boundary = buffer.indexOf("\n\n");
       while (boundary >= 0) {
-        if (emitSseBlock(buffer.slice(0, boundary), onEvent)) {
+        if ((!signal || !signal.aborted) && emitSseBlock(buffer.slice(0, boundary), onEvent)) {
           meaningfulEventSeen = true;
           eventDeadline = Date.now() + STREAM_IDLE_EVENT_TIMEOUT_MS;
         }
@@ -613,7 +683,9 @@ async function consumeEventStream(
       if (done) break;
     }
 
-    if (buffer.trim() && emitSseBlock(buffer, onEvent)) meaningfulEventSeen = true;
+    if (buffer.trim() && (!signal || !signal.aborted) && emitSseBlock(buffer, onEvent)) {
+      meaningfulEventSeen = true;
+    }
   } catch (error) {
     try {
       await reader.cancel();
@@ -693,8 +765,22 @@ function sequenceFromEventId(eventId: string | undefined, runId: string): number
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("任务流已中止。", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timeoutId);
+      reject(new DOMException("任务流已中止。", "AbortError"));
+    };
+    const timeoutId = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** 通过带认证的 fetch 下载工件，避免普通链接丢失 Authorization header。 */

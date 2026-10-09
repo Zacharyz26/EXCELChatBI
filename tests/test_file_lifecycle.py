@@ -46,6 +46,18 @@ def test_chart_cleanup_rejects_unmanaged_paths(tmp_path: Path) -> None:
     assert unmanaged.read_bytes() == b"keep"
 
 
+def test_chart_cleanup_treats_missing_managed_file_as_idempotent_success(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "reports"
+    charts = report_dir / "charts"
+    charts.mkdir(parents=True)
+    missing = charts / f"chart_{'e' * 32}.png"
+
+    assert delete_chart_file(str(missing), report_dir) is True
+    assert delete_chart_file(str(missing), report_dir) is True
+
+
 def test_startup_cleanup_removes_only_stale_managed_charts(tmp_path: Path) -> None:
     chart_root = tmp_path / "reports" / "charts"
     chart_root.mkdir(parents=True)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -33,7 +33,6 @@ from packages.session.task_store import (
     StateVersionConflict,
     TaskStore,
 )
-from sse_starlette.sse import EventSourceResponse
 
 from apps.api.auth import current_principal_dep
 from apps.api.authz import require_conversation_access, require_run_access
@@ -54,6 +53,12 @@ from apps.api.schemas import (
     PlanRevisionRequest,
     RunFeedbackRequest,
 )
+from apps.api.sse import (
+    ClosingEventSourceResponse as EventSourceResponse,
+)
+from apps.api.sse import (
+    close_async_iterator,
+)
 from apps.orchestrator.agent_loop import AgentLoopConfig, stream_agent_chat
 from apps.orchestrator.agent_tools import (
     AgentContext,
@@ -64,6 +69,7 @@ from apps.orchestrator.agent_tools import (
 from apps.orchestrator.control.join_collaboration import (
     build_join_collaboration_projection,
 )
+from apps.orchestrator.run_manager import RunSubscription
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 
@@ -198,6 +204,7 @@ async def resume_agent_run(
             _sse_task_event(event, updated.conversation_id),
             subscription,
         ),
+        cleanup=subscription,
         ping=15,
     )
 
@@ -259,6 +266,7 @@ async def answer_agent_clarification(
             _sse_task_event(event, updated.conversation_id),
             subscription,
         ),
+        cleanup=subscription,
         ping=15,
     )
 
@@ -351,6 +359,7 @@ async def retry_agent_step(
             _sse_task_event(event, updated.conversation_id),
             subscription,
         ),
+        cleanup=subscription,
         ping=15,
     )
 
@@ -606,6 +615,7 @@ async def reconnect_agent_run_stream(
     subscription = agent_run_manager.subscribe(run_id)
     return EventSourceResponse(
         _replay_and_subscribe(tasks, run, cursor, subscription),
+        cleanup=subscription,
         ping=15,
         headers={"X-ChatBI-Run-ID": run_id},
     )
@@ -656,7 +666,7 @@ async def _replay_and_subscribe(
     tasks: TaskStore,
     original_run: TaskRun,
     cursor: int,
-    subscription: AsyncGenerator[dict[str, str], None] | None,
+    subscription: RunSubscription | None,
 ) -> AsyncIterator[dict[str, str]]:
     """无缝拼接持久日志与实时队列；重复的持久 TaskEvent 只交付一次。"""
     delivered = cursor
@@ -1065,9 +1075,12 @@ async def _prepend_event(
     first: dict[str, str],
     rest: AsyncIterator[dict[str, str]],
 ) -> AsyncIterator[dict[str, str]]:
-    yield first
-    async for item in rest:
-        yield item
+    try:
+        yield first
+        async for item in rest:
+            yield item
+    finally:
+        await close_async_iterator(rest)
 
 
 async def _single_event(item: dict[str, str]) -> AsyncIterator[dict[str, str]]:

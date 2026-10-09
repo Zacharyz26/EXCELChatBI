@@ -99,6 +99,7 @@ interface WorkspaceState {
 
 let navigationSequence = 0;
 let liveItemSequence = 0;
+let workspaceGeneration = 0;
 
 function nextItemId(): string {
   liveItemSequence += 1;
@@ -387,6 +388,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const content = message.trim();
     const projectId = get().activeProjectId;
     const conversationId = get().activeConversationId;
+    const generation = workspaceGeneration;
     if (
       !content
       || !projectId
@@ -408,6 +410,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     };
     let terminalEventReceived = false;
     let streamError: string | null = null;
+    let responseRunIdReceived = false;
     set((state) => ({
       messages: [...state.messages, pendingUser],
       streaming: true,
@@ -415,10 +418,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       pendingClarification: null,
       error: null,
     }));
+    // 新请求的 run 必须由响应头或服务端 latest 端点重新绑定，
+    // 不得在首个响应头前断线时继续沿用上一个 run。
+    forgetRun(conversationId);
+    set({ activeRunId: null, activeRun: null });
 
     try {
       await streamChat(conversationId, content, (event) => {
-        if (get().activeConversationId !== conversationId) return;
+        if (
+          generation !== workspaceGeneration
+          || get().activeConversationId !== conversationId
+        ) return;
         applyCollaborationEvent(event, conversationId, set);
         if (event.event === "meta") {
           applyMetaEvent(event, temporaryUserId, conversationId, set);
@@ -432,7 +442,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           applyTurnEvent(event, set);
         }
       }, (runId) => {
-        if (get().activeConversationId !== conversationId) return;
+        responseRunIdReceived = true;
+        if (
+          generation !== workspaceGeneration
+          || get().activeConversationId !== conversationId
+        ) return;
         rememberRun(conversationId, runId);
         set({ activeRunId: runId, activeRun: null });
       }, {
@@ -443,7 +457,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
     } catch (error) {
       streamError = errorMessage(error);
+      if (
+        generation === workspaceGeneration
+        && !responseRunIdReceived
+        && get().activeConversationId === conversationId
+      ) {
+        // POST 可能已被服务端接收并创建 run，但连接在响应头前中断。
+        // 只按当前对话查询服务端事实源，避免重放 POST 或跨对话错绑。
+        await get().restoreLatestRun(conversationId);
+      }
     }
+
+    if (generation !== workspaceGeneration) return;
 
     try {
       // 工具轮可能产生了新消息、工件与衍生数据集：一并刷新
@@ -452,7 +477,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         listConversations(projectId),
         listDatasets(projectId),
       ]);
-      if (get().activeConversationId === conversationId) {
+      if (
+        generation === workspaceGeneration
+        && get().activeConversationId === conversationId
+      ) {
         const runId = get().activeRunId;
         set({
           messages: detail.messages,
@@ -465,9 +493,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         if (runId) await get().refreshActiveRun(runId);
       }
     } catch (error) {
-      set({ error: streamError ?? errorMessage(error) });
+      if (generation === workspaceGeneration) {
+        set({ error: streamError ?? errorMessage(error) });
+      }
     } finally {
-      set({ streaming: false, liveTurn: [] });
+      if (generation === workspaceGeneration) {
+        set({ streaming: false, liveTurn: [] });
+      }
     }
   },
 
@@ -507,9 +539,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   restoreLatestRun: async (conversationId) => {
+    const generation = workspaceGeneration;
     try {
       const response = await getLatestAgentRun(conversationId);
-      if (get().activeConversationId !== conversationId) return;
+      if (
+        generation !== workspaceGeneration
+        || get().activeConversationId !== conversationId
+      ) return;
       if (!response.run) {
         forgetRun(conversationId);
         set({
@@ -519,11 +555,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         });
         return;
       }
+      if (response.run.conversation_id !== conversationId) {
+        throw new Error("服务端返回的 TaskRun 不属于当前对话。");
+      }
       rememberRun(conversationId, response.run.run_id);
       set({ activeRunId: response.run.run_id });
       await get().refreshActiveRun(response.run.run_id);
     } catch (error) {
-      if (get().activeConversationId === conversationId) {
+      if (
+        generation === workspaceGeneration
+        && get().activeConversationId === conversationId
+      ) {
         set({ error: errorMessage(error) });
       }
     }
@@ -533,6 +575,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const runId = requestedRunId ?? get().activeRunId;
     const conversationId = get().activeConversationId;
     if (!runId || !conversationId) return;
+    const generation = workspaceGeneration;
     const ownsBusy = get().collaborationBusy === null;
     if (ownsBusy) set({ collaborationBusy: "refresh", error: null });
     try {
@@ -543,7 +586,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         Math.max(0, latestSequence - 1000),
       );
       if (
-        get().activeConversationId !== conversationId
+        generation !== workspaceGeneration
+        || get().activeConversationId !== conversationId
         || detail.run.conversation_id !== conversationId
       ) return;
       rememberRun(conversationId, runId);
@@ -553,12 +597,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         pendingClarification: pendingClarification(detail, events.events),
       });
     } catch (error) {
-      if (requestedRunId && rememberedRun(conversationId) === requestedRunId) {
+      if (
+        generation === workspaceGeneration
+        && requestedRunId
+        && rememberedRun(conversationId) === requestedRunId
+      ) {
         forgetRun(conversationId);
       }
-      set({ error: errorMessage(error) });
+      if (generation === workspaceGeneration) set({ error: errorMessage(error) });
     } finally {
-      if (ownsBusy && get().collaborationBusy === "refresh") {
+      if (
+        generation === workspaceGeneration
+        && ownsBusy
+        && get().collaborationBusy === "refresh"
+      ) {
         set({ collaborationBusy: null });
       }
     }
@@ -700,6 +752,7 @@ async function continueActiveRun(
   const runId = get().activeRunId;
   const conversationId = get().activeConversationId;
   const projectId = get().activeProjectId;
+  const generation = workspaceGeneration;
   if (
     !runId
     || !conversationId
@@ -717,12 +770,16 @@ async function continueActiveRun(
   });
   try {
     const fresh = await getAgentRun(runId);
+    if (generation !== workspaceGeneration) return;
     if (fresh.run.conversation_id !== conversationId) {
       throw new Error("当前 TaskRun 不属于活动对话。");
     }
     set({ activeRun: fresh });
     await execute(fresh, (event) => {
-      if (get().activeConversationId !== conversationId) return;
+      if (
+        generation !== workspaceGeneration
+        || get().activeConversationId !== conversationId
+      ) return;
       applyCollaborationEvent(event, conversationId, set);
       if (event.event === "error") {
         streamError = stringValue(event.data.message)
@@ -736,13 +793,18 @@ async function continueActiveRun(
     streamError = errorMessage(error);
   }
 
+  if (generation !== workspaceGeneration) return;
+
   try {
     const [detail, conversations, datasets] = await Promise.all([
       getConversation(conversationId),
       listConversations(projectId),
       listDatasets(projectId),
     ]);
-    if (get().activeConversationId === conversationId) {
+    if (
+      generation === workspaceGeneration
+      && get().activeConversationId === conversationId
+    ) {
       set({
         messages: detail.messages,
         artifacts: detail.artifacts,
@@ -754,13 +816,17 @@ async function continueActiveRun(
       await get().refreshActiveRun(runId);
     }
   } catch (error) {
-    set({ error: streamError ?? errorMessage(error) });
+    if (generation === workspaceGeneration) {
+      set({ error: streamError ?? errorMessage(error) });
+    }
   } finally {
-    set({
-      streaming: false,
-      liveTurn: [],
-      collaborationBusy: null,
-    });
+    if (generation === workspaceGeneration) {
+      set({
+        streaming: false,
+        liveTurn: [],
+        collaborationBusy: null,
+      });
+    }
   }
 }
 
@@ -1100,4 +1166,41 @@ function hasActiveTask(detail: AgentRunDetail | null): boolean {
     "failed",
     "cancelled",
   ].includes(detail.run.status);
+}
+
+/** 401 后清除当前主体的所有内存与会话级 run 指针。 */
+export function resetWorkspaceForReauthentication(): void {
+  workspaceGeneration += 1;
+  navigationSequence += 1;
+  if (typeof window !== "undefined") {
+    try {
+      for (const key of Object.keys(window.sessionStorage)) {
+        if (key.startsWith("chatbi.agentRun.")) {
+          window.sessionStorage.removeItem(key);
+        }
+      }
+    } catch {
+      /* 无存储权限时仍要清理内存状态。 */
+    }
+  }
+  useWorkspaceStore.setState({
+    initialized: false,
+    loading: false,
+    uploading: false,
+    streaming: false,
+    error: null,
+    projects: [],
+    conversations: [],
+    datasets: [],
+    messages: [],
+    artifacts: [],
+    activeProjectId: null,
+    activeConversationId: null,
+    activeDatasetRef: null,
+    liveTurn: [],
+    activeRunId: null,
+    activeRun: null,
+    pendingClarification: null,
+    collaborationBusy: null,
+  });
 }

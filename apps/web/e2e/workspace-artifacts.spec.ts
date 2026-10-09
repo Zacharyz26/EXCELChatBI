@@ -1202,10 +1202,14 @@ async function send(page: Page, prompt: string): Promise<void> {
   await page.getByRole("button", { name: "发送消息" }).click();
 }
 
-test("上传 Excel 后渲染画像卡和数据集", async ({ page }) => {
+test("上传表格后渲染画像卡和数据集", async ({ page }) => {
   await installMockApi(page, { withDataset: false });
   await page.goto("/");
   await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+  await expect(page.locator('input[type="file"]')).toHaveAttribute(
+    "accept",
+    ".xlsx,.xls,.csv",
+  );
 
   await page.locator('input[type="file"]').setInputFiles({
     name: "uploaded-sales.xlsx",
@@ -1672,6 +1676,218 @@ test("SSE 中断后携带游标续接并抑制边界重复事件", async ({ page
   await expect(
     page.getByRole("dialog", { name: "任务协作" }).locator(".agent-status"),
   ).toHaveText("已完成");
+});
+
+test("首个 SSE 响应头前断线后从服务端发现新 Run 并阻止重复提交", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await send(page, "请先完成一个旧任务");
+  await expect(page.getByText("趋势图已生成。", { exact: true })).toBeVisible();
+
+  await page.route("**/api/chat/stream", async (route) => {
+    const body = route.request().postDataJSON() as {
+      message?: string;
+      parent_run_id?: string | null;
+    };
+    const prompt = body.message ?? "";
+    state.chatRequests.push({
+      message: prompt,
+      parent_run_id: body.parent_run_id ?? null,
+    });
+    persistCollaborationTurn(state, prompt);
+    refreshRelatedRuns(state);
+    await route.abort("connectionfailed");
+  }, { times: 1 });
+
+  await send(page, "请暂停并修改计划（响应头前断线）");
+
+  const controlButton = page.getByRole("button", { name: "任务协作" });
+  await expect(controlButton).toBeEnabled();
+  await controlButton.click();
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel.locator(".agent-status")).toHaveText("已暂停");
+  await expect(panel).toContainText("响应头前断线");
+  await page.getByRole("button", { name: "关闭任务协作" }).click();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeDisabled();
+  expect(state.chatRequests.map((item) => item.message)).toEqual([
+    "请先完成一个旧任务",
+    "请暂停并修改计划（响应头前断线）",
+  ]);
+});
+
+test("任意 API 返回 401 均清理凭据与工作区并统一转入重认证", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+  await send(page, "请生成需要清理的图表");
+  await expect(page.locator('[data-chart-id="chart-1"]')).toBeVisible();
+  await page.evaluate(() => {
+    window.sessionStorage.setItem("chatbi.apiToken", "expired-token");
+  });
+
+  await page.route("**/api/kb/ingest", async (route) => {
+    await json(route, { detail: "访问令牌已过期" }, 401);
+  }, { times: 1 });
+  await page.getByRole("button", { name: "同步样例" }).click();
+
+  await expect(page.getByRole("heading", { name: "连接 ChatBI" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("访问令牌已失效");
+  const sessionKeys = await page.evaluate(() => ({
+    token: window.sessionStorage.getItem("chatbi.apiToken"),
+    runKeys: Object.keys(window.sessionStorage).filter((key) => (
+      key.startsWith("chatbi.agentRun.")
+    )),
+  }));
+  expect(sessionKeys).toEqual({ token: null, runKeys: [] });
+
+  state.messages = [];
+  state.artifacts = [];
+  state.agentRuns = {};
+  await page.getByLabel("访问令牌").fill("replacement-token");
+  await page.getByRole("button", { name: "进入工作区" }).click();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+  await expect(page.locator('[data-chart-id="chart-1"]')).toHaveCount(0);
+});
+
+test("活动 SSE 期间并行 API 401 会中止旧流且旧 generation 不得回写", async ({ page }) => {
+  const state = await installMockApi(page);
+  let releaseReconnect: (() => void) | undefined;
+  const reconnectRelease = new Promise<void>((resolve) => {
+    releaseReconnect = resolve;
+  });
+  let markReconnectStarted: (() => void) | undefined;
+  const reconnectStarted = new Promise<void>((resolve) => {
+    markReconnectStarted = resolve;
+  });
+  let reconnectRequests = 0;
+  const failedRequests: string[] = [];
+  page.on("requestfailed", (request) => {
+    failedRequests.push(request.url());
+  });
+
+  await page.route("**/api/agent/runs/auth-abort-run/stream", async (route) => {
+    reconnectRequests += 1;
+    markReconnectStarted?.();
+    await reconnectRelease;
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream; charset=utf-8",
+        body: sse([
+          ["text.delta", {
+            event_id: "auth-abort-run-event-3",
+            run_id: "auth-abort-run",
+            sequence: 3,
+            delta: "旧流的延迟事件不应写入新会话。",
+          }],
+        ]),
+      });
+    } catch {
+      // AbortController 可能在 mock route 释放前已关闭浏览器端请求。
+    }
+  });
+  await page.route("**/api/chat/stream", async (route) => {
+    const request = route.request();
+    const body = request.postDataJSON() as {
+      message?: string;
+      parent_run_id?: string | null;
+    };
+    const prompt = body.message ?? "";
+    state.chatRequests.push({
+      message: prompt,
+      parent_run_id: body.parent_run_id ?? null,
+    });
+    const run = mockAgentRun("auth-abort-run", prompt, "running");
+    run.detail.state.last_sequence = 2;
+    state.agentRuns["auth-abort-run"] = run;
+    refreshRelatedRuns(state);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream; charset=utf-8",
+      headers: {
+        "Cache-Control": "no-cache",
+        "X-ChatBI-Run-ID": "auth-abort-run",
+      },
+      body: sse([
+        ["meta", {
+          run_id: "auth-abort-run",
+          conversation_id: "conversation-1",
+        }],
+        ["text.delta", {
+          event_id: "auth-abort-run-event-2",
+          run_id: "auth-abort-run",
+          sequence: 2,
+          delta: "旧流正在等待后续事件。",
+        }],
+      ]),
+    });
+  }, { times: 1 });
+
+  await page.goto("/");
+  await send(page, "启动需要取消的长流");
+  await expect(page.getByText("旧流正在等待后续事件。")).toBeVisible();
+  await reconnectStarted;
+
+  await page.evaluate(() => {
+    window.sessionStorage.setItem("chatbi.apiToken", "expired-during-stream");
+  });
+  await page.route("**/api/kb/ingest", async (route) => {
+    await json(route, { detail: "访问令牌已过期" }, 401);
+  }, { times: 1 });
+  await page.getByRole("button", { name: "同步样例" }).click();
+  await expect(page.getByRole("heading", { name: "连接 ChatBI" })).toBeVisible();
+
+  state.messages = [];
+  state.artifacts = [];
+  state.agentRuns = {};
+  await page.getByLabel("访问令牌").fill("replacement-after-stream");
+  await page.getByRole("button", { name: "进入工作区" }).click();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+
+  releaseReconnect?.();
+  await expect.poll(() => failedRequests.some((url) => (
+    url.includes("/api/agent/runs/auth-abort-run/stream")
+  ))).toBe(true);
+  await page.waitForTimeout(500);
+  expect(reconnectRequests).toBe(1);
+  await expect(page.getByText("旧流的延迟事件不应写入新会话。")).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("断线发现拒绝绑定其他 conversation 的 Run", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+
+  await page.route("**/api/chat/stream", async (route) => {
+    const body = route.request().postDataJSON() as {
+      message?: string;
+      parent_run_id?: string | null;
+    };
+    const prompt = body.message ?? "";
+    state.chatRequests.push({
+      message: prompt,
+      parent_run_id: body.parent_run_id ?? null,
+    });
+    persistCollaborationTurn(state, prompt);
+    const foreignRun = Object.values(state.agentRuns).at(-1);
+    if (!foreignRun) throw new Error("测试未创建 Run");
+    foreignRun.detail.run.conversation_id = "conversation-2";
+    refreshRelatedRuns(state);
+    await route.abort("connectionfailed");
+  }, { times: 1 });
+
+  await send(page, "请暂停并修改计划（外部对话 Run）");
+
+  await expect(page.getByRole("alert")).toContainText(
+    "TaskRun 不属于当前对话",
+  );
+  await expect(page.getByRole("button", { name: "任务协作" })).toBeDisabled();
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+  const remembered = await page.evaluate(() => (
+    window.sessionStorage.getItem("chatbi.agentRun.conversation-1")
+  ));
+  expect(remembered).toBeNull();
+  expect(state.chatRequests).toHaveLength(1);
 });
 
 test("单一 Agent、反馈和分析分支形成可追踪闭环", async ({ page }) => {

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 
 const E2E_TOKEN = "chatbi-fullstack-e2e-token-00000001";
 
-test("真实 Web/API 完成记忆治理、Excel 上传与血缘查看", async ({ page }) => {
+test("真实 Web/API 完成记忆治理、表格上传与血缘查看", async ({ page }) => {
   const networkFailures: string[] = [];
   page.on("requestfailed", (request) => {
     networkFailures.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText}`);

@@ -208,8 +208,10 @@ def _stat_md(section: dict[str, Any]) -> list[str]:
 
     if kind == "trend":
         fc = result.get("forecast") or []
+        slope_unit = "数值/日" if result.get("slope_unit") == "value_per_day" else "单位未声明"
         out += [
-            f"- 方向：**{result.get('direction', '—')}** · 斜率 {_fmt(result.get('slope'))} · "
+            f"- 方向：**{result.get('direction', '—')}** · "
+            f"斜率 {_fmt(result.get('slope'))} {slope_unit} · "
             f"季节强度 {_fmt(result.get('seasonality_strength'))} · 样本 {_fmt(result.get('n'))}",
             f"- 预测（未来 {len(fc)} 期）：{'、'.join(_fmt(v) for v in fc) or '—'}",
             "",

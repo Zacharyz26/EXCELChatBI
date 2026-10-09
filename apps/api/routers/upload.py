@@ -1,4 +1,4 @@
-"""Excel 上传接口：上传 → 触发数据画像（设计文档 5.1 / 6.1）。"""
+"""表格上传接口：上传 → 触发数据画像（设计文档 5.1 / 6.1）。"""
 
 from __future__ import annotations
 
@@ -39,15 +39,18 @@ async def upload_excel(
     project_id: str | None = Form(default=None),
     conversation_id: str | None = Form(default=None),
 ) -> UploadResponse:
-    """接收 Excel，落盘后经 parse_excel/infer_schema 生成画像供用户确认。
+    """接收 XLSX、legacy XLS 或 CSV，生成统一数据画像供用户确认。
 
     默认仅返回数据画像与 dataset_ref；同时传入 project_id/conversation_id 时，
     原子登记数据集、上传消息与画像工件。原始整表不进入 LLM（红线1）。
     可选 `policy`（JSON 字符串）指定该数据集的安全策略，落为 sidecar 元数据；
     不传则用默认（宽松）策略。
     """
-    if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="仅支持 .xlsx / .xls 文件")
+    if not (file.filename or "").lower().endswith((".xlsx", ".xls", ".csv")):
+        raise HTTPException(
+            status_code=400,
+            detail="仅支持 .xlsx / .xls / .csv 文件；.xlsx 为主格式，.xls 仅用于旧文件只读导入",
+        )
 
     override = _validate_policy(policy)
     workspace_link = await run_in_threadpool(
@@ -77,7 +80,7 @@ async def upload_excel(
         except TableTooLargeError as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"Excel 解析失败：{exc}") from exc
+            raise HTTPException(status_code=422, detail=f"表格解析失败：{exc}") from exc
         dataset_ref = parsed["dataset_ref"]
         if override is not None:
             save_metadata(dataset_ref, {"policy": override})
@@ -116,7 +119,7 @@ async def upload_excel(
             artifact=ArtifactResponse.model_validate(artifact),
         )
     finally:
-        # Excel 只作为解析输入；成功后的系统真相是 parquet + 画像。
+        # 上传文件只作为解析输入；成功后的系统真相是 parquet + 画像。
         try:
             saved.unlink(missing_ok=True)
         except OSError as exc:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,41 @@ from mcp_servers.stats.tools import (  # noqa: E402
     trend_analysis,
 )
 from packages.common.dataset_store import save_dataframe, save_metadata  # noqa: E402
+
+
+class _RecordingProphet:
+    """Deterministic Prophet double exposing cadence and seasonality inputs."""
+
+    last: _RecordingProphet | None = None
+
+    def __init__(self, **_kwargs: object) -> None:
+        self.seasonalities: list[dict[str, object]] = []
+        self.predict_frames: list[pd.DataFrame] = []
+        self.history = pd.DataFrame()
+        type(self).last = self
+
+    def add_seasonality(self, **kwargs: object) -> None:
+        self.seasonalities.append(kwargs)
+
+    def fit(self, frame: pd.DataFrame) -> _RecordingProphet:
+        self.history = frame.copy()
+        return self
+
+    def make_future_dataframe(
+        self, *, periods: int, freq: str, include_history: bool
+    ) -> pd.DataFrame:
+        raise AssertionError(
+            "trend_analysis must pass governed future timestamps directly to Prophet"
+        )
+
+    def predict(self, frame: pd.DataFrame) -> pd.DataFrame:
+        self.predict_frames.append(frame.copy())
+        return pd.DataFrame(
+            {
+                "trend": np.zeros(len(frame), dtype=float),
+                "yhat": np.zeros(len(frame), dtype=float),
+            }
+        )
 
 
 @pytest.fixture
@@ -103,7 +139,7 @@ def test_trend_prophet_forecasts(trend_ref: str) -> None:
                 "forecast_horizon": 3,
             }
         )
-    except (ImportError, RuntimeError) as exc:  # prophet/cmdstan 不可用 → skip
+    except ImportError as exc:  # Prophet 依赖未安装才允许跳过
         pytest.skip(f"prophet 不可用：{exc}")
     assert res["method"] == "prophet"
     assert res["direction"] == "上升"  # 数据本就上升
@@ -135,10 +171,87 @@ def test_trend_prophet_handles_duplicate_dates() -> None:
                 "forecast_horizon": 3,
             }
         )
-    except (ImportError, RuntimeError) as exc:
+    except ImportError as exc:
         pytest.skip(f"prophet 不可用：{exc}")
     assert len(res["points"]["trend"]) == n  # 逐行对齐，无 shape 错
     assert len(res["forecast"]) == 3
+
+
+def test_trend_prophet_irregular_forecast_uses_published_median_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "prophet",
+        types.SimpleNamespace(Prophet=_RecordingProphet),
+    )
+    dates = pd.to_datetime(
+        ["2025-01-01", "2025-01-02", "2025-01-04", "2025-01-11", "2025-01-21"]
+    )
+    values = 10.0 + 2.0 * np.array([0.0, 1.0, 3.0, 10.0, 20.0])
+    ref = save_dataframe(pd.DataFrame({"日期": dates, "指标": values}))
+
+    result = trend_analysis(
+        {
+            "dataset_ref": ref,
+            "value_col": "指标",
+            "time_col": "日期",
+            "method": "prophet",
+            "forecast_horizon": 2,
+        }
+    )
+
+    assert result["time_axis"]["forecast_step_days"] == 4.5
+    assert result["time_axis"]["forecast_frequency"] is None
+    assert result["forecast_time"] == [
+        "2025-01-25T12:00:00",
+        "2025-01-30T00:00:00",
+    ]
+    model = _RecordingProphet.last
+    assert model is not None
+    assert [item.isoformat() for item in model.predict_frames[-1]["ds"]] == result[
+        "forecast_time"
+    ]
+
+
+def test_trend_prophet_monthly_period_is_twelve_observation_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "prophet",
+        types.SimpleNamespace(Prophet=_RecordingProphet),
+    )
+    dates = pd.date_range("2023-01-01", periods=24, freq="MS")
+    values = 100 + 5 * np.sin(2 * np.pi * np.arange(24) / 12)
+    ref = save_dataframe(pd.DataFrame({"月份": dates, "指标": values}))
+
+    result = trend_analysis(
+        {
+            "dataset_ref": ref,
+            "value_col": "指标",
+            "time_col": "月份",
+            "method": "prophet",
+            "period": 12,
+            "forecast_horizon": 2,
+        }
+    )
+
+    expected_period_days = float(
+        np.median((dates[12:] - dates[:-12]) / pd.Timedelta(days=1))
+    )
+    assert expected_period_days > 300
+    assert result["seasonality_period_days"] == expected_period_days
+    assert result["time_axis"]["forecast_frequency"] == "MS"
+    assert result["forecast_time"] == [
+        "2025-01-01T00:00:00",
+        "2025-02-01T00:00:00",
+    ]
+    model = _RecordingProphet.last
+    assert model is not None
+    assert model.seasonalities == [
+        {"name": "seasonal", "period": expected_period_days, "fourier_order": 3}
+    ]
 
 
 def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
@@ -159,6 +272,79 @@ def test_trend_ma_fallback_without_period(trend_ref: str) -> None:
     }
     assert evidence["inference"]["causal_claim_allowed"] is False
     assert any("时间泄漏" in item for item in evidence["limitations"])
+
+
+def test_trend_slope_uses_elapsed_days_and_reports_time_quality() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": [
+                    "2025-01-01",
+                    "2025-01-01",
+                    "2025-01-02",
+                    "2025-01-04",
+                    "not-a-date",
+                    "2025-01-11",
+                    "2025-01-21",
+                ],
+                "指标": [10.0, 10.0, 12.0, 16.0, 999.0, 30.0, 50.0],
+            }
+        )
+    )
+
+    result = trend_analysis(
+        {
+            "dataset_ref": ref,
+            "value_col": "指标",
+            "time_col": "日期",
+            "method": "ma",
+            "forecast_horizon": 2,
+        }
+    )
+
+    assert result["slope"] == pytest.approx(2.0)
+    assert result["slope_unit"] == "value_per_day"
+    assert result["time_axis"] == {
+        "unit": "day",
+        "origin": "2025-01-01T00:00:00",
+        "observed_span_days": 20.0,
+        "duplicate_timestamps": 1,
+        "invalid_timestamps": 1,
+        "forecast_frequency": None,
+        "forecast_step_days": 4.5,
+    }
+    assert result["forecast"] == pytest.approx([59.0, 68.0])
+    assert result["forecast_time"] == [
+        "2025-01-25T12:00:00",
+        "2025-01-30T00:00:00",
+    ]
+    assert result["statistical_evidence"]["sample"]["excluded_rows"] == 1
+    validate_json(
+        result,
+        tool_output_schema("trend_analysis"),
+        code="invalid_tool_output",
+        label="趋势输出",
+    )
+
+
+def test_trend_rejects_zero_time_span() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "日期": ["2025-01-01"] * 5,
+                "指标": [1.0, 2.0, 3.0, 4.0, 5.0],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="时间跨度必须大于 0"):
+        trend_analysis(
+            {
+                "dataset_ref": ref,
+                "value_col": "指标",
+                "time_col": "日期",
+            }
+        )
 
 
 def test_forecast_uses_chronological_holdout_and_beats_naive_baseline() -> None:
@@ -575,6 +761,48 @@ def test_dimension_contribution_merges_small_groups_and_reports_coverage() -> No
     )
 
 
+def test_dimension_contribution_distinguishes_rows_valid_values_nulls_and_zero() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "地区": ["零值组"] * 6 + ["正值组"] * 6,
+                "销售额": [0.0, 0.0, 0.0, 0.0, 0.0, None, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            }
+        )
+    )
+
+    result = dimension_contribution(
+        {
+            "dataset_ref": ref,
+            "dimension_col": "地区",
+            "value_col": "销售额",
+            "method": "sum",
+        }
+    )
+
+    by_dimension = {item["dimension"]: item for item in result["groups"]}
+    zero_group = by_dimension["零值组"]
+    assert zero_group["value"] == 0.0
+    assert zero_group["share"] == 0.0
+    assert zero_group["row_count"] == 6
+    assert zero_group["valid_value_count"] == 5
+    assert zero_group["count"] == 5  # 向后兼容：旧 count 等于有效度量数
+    assert result["statistical_evidence"]["sample"] == {
+        "total_rows": 12,
+        "valid_rows": 11,
+        "excluded_rows": 1,
+        "missing_policy": "complete_case_drop",
+        "minimum_required": 5,
+        "meets_minimum": True,
+    }
+    validate_json(
+        result,
+        tool_output_schema("dimension_contribution"),
+        code="invalid_tool_output",
+        label="贡献输出",
+    )
+
+
 def test_dimension_contribution_rejects_negative_or_protected_columns() -> None:
     negative_ref = save_dataframe(pd.DataFrame({"地区": ["甲"] * 5, "值": [1, 2, -1, 3, 4]}))
     with pytest.raises(ValueError, match="非负"):
@@ -587,6 +815,17 @@ def test_dimension_contribution_rejects_negative_or_protected_columns() -> None:
     with pytest.raises(ValueError, match="受数据策略保护"):
         dimension_contribution(
             {"dataset_ref": protected_ref, "dimension_col": "地区", "value_col": "值"}
+        )
+
+
+def test_dimension_contribution_rejects_all_null_measure_but_not_real_zero() -> None:
+    ref = save_dataframe(
+        pd.DataFrame({"地区": ["甲"] * 5, "值": [None] * 5})
+    )
+
+    with pytest.raises(ValueError, match="没有有效数值（全部为空）"):
+        dimension_contribution(
+            {"dataset_ref": ref, "dimension_col": "地区", "value_col": "值"}
         )
 
 
@@ -624,6 +863,33 @@ def test_group_compare_uses_welch_holm_and_suppresses_small_groups() -> None:
     evidence = result["statistical_evidence"]
     assert evidence["analysis_kind"] == "group_comparison"
     assert evidence["inference"]["multiple_testing_method"] == "holm"
+    validate_json(
+        result,
+        tool_output_schema("group_compare"),
+        code="invalid_tool_output",
+        label="分群输出",
+    )
+
+
+def test_group_compare_distinguishes_rows_from_valid_values() -> None:
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "群体": ["甲"] * 6 + ["乙"] * 6,
+                "指标": [1.0, 2.0, 3.0, 4.0, 5.0, None, 11.0, 12.0, 13.0, 14.0, 15.0, None],
+            }
+        )
+    )
+
+    result = group_compare(
+        {"dataset_ref": ref, "group_col": "群体", "value_col": "指标"}
+    )
+
+    assert result["method"] == "welch_t"
+    assert all(item["row_count"] == 6 for item in result["groups"])
+    assert all(item["valid_value_count"] == 5 for item in result["groups"])
+    assert all(item["count"] == 5 for item in result["groups"])
+    assert result["statistical_evidence"]["sample"]["valid_rows"] == 10
     validate_json(
         result,
         tool_output_schema("group_compare"),

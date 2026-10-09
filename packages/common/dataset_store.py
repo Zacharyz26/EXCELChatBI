@@ -171,7 +171,7 @@ def dataset_columns(dataset_ref: str) -> list[str]:
 
 def aggregate(
     dataset_ref: str, group_col: str, value_col: str, agg: str
-) -> list[tuple[Any, float, int]]:
+) -> list[tuple[Any, float | None, int, int]]:
     """按 group_col 分组聚合 value_col，下推到 DuckDB 执行。
 
     Args:
@@ -197,13 +197,14 @@ def aggregate(
     elif agg == "mean":
         expr = f"AVG({vi})"
     elif agg == "count":
-        expr = "COUNT(*)"
+        expr = f"COUNT({vi})"
     else:
         raise ValueError(f"不支持的聚合方式: {agg}")
 
     path = _path_of(dataset_ref)
     sql = (
-        f"SELECT {gi} AS g, {expr} AS v, COUNT(*) AS c "
+        f"SELECT {gi} AS g, {expr} AS v, COUNT(*) AS row_count, "
+        f"COUNT({vi}) AS valid_value_count "
         f"FROM read_parquet(?) WHERE {gi} IS NOT NULL GROUP BY {gi}"
     )
     con = duckdb.connect()
@@ -211,7 +212,15 @@ def aggregate(
         rows = con.execute(sql, [path.as_posix()]).fetchall()
     finally:
         con.close()
-    return [(r[0], float(r[1]) if r[1] is not None else 0.0, int(r[2])) for r in rows]
+    return [
+        (
+            row[0],
+            float(row[1]) if row[1] is not None else None,
+            int(row[2]),
+            int(row[3]),
+        )
+        for row in rows
+    ]
 
 
 def join_key_statistics(

@@ -19,9 +19,13 @@ GEN_CHART_SCHEMA: dict[str, Any] = {
                 "agg": {
                     "type": "string",
                     "enum": ["sum", "mean", "count", "none"],
-                    "description": "聚合方式；scatter 用 none",
+                    "description": "聚合方式；scatter 仅支持 none，省略时也按 none 处理",
                 },
-                "top_n": {"type": "integer", "minimum": 1, "description": "可选，限制类目数"},
+                "top_n": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "可选，限制类目数；scatter 不支持",
+                },
             },
             "required": ["x", "y"],
             "additionalProperties": False,

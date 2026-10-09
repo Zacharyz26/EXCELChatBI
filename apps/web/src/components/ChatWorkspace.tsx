@@ -501,7 +501,7 @@ function DatasetContext({
           <div className="context-empty">
             <DatasetIcon />
             <strong>尚未连接数据</strong>
-            <p>从输入框左侧上传 Excel 后，字段画像会显示在这里。</p>
+            <p>从输入框左侧上传 XLSX、XLS 或 CSV 后，字段画像会显示在这里。</p>
           </div>
         </>
       )}

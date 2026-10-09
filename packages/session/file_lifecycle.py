@@ -41,6 +41,8 @@ def delete_chart_file(file_ref: object, report_dir: str | Path) -> bool:
         return False
     try:
         path.unlink()
+    except FileNotFoundError:
+        return True
     except OSError:
         return False
     return True

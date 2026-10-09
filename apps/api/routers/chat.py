@@ -18,7 +18,6 @@ from packages.models.gateway import ModelGateway
 from packages.rag.retriever import HybridRetriever
 from packages.session.store import SessionStore
 from packages.session.task_store import TaskStore
-from sse_starlette.sse import EventSourceResponse
 
 from apps.api.auth import current_principal_dep
 from apps.api.authz import require_conversation_access, require_run_access
@@ -35,6 +34,7 @@ from apps.api.deps import (
 )
 from apps.api.run_host import agent_run_manager, conversation_locks
 from apps.api.schemas import ChatStreamRequest
+from apps.api.sse import ClosingEventSourceResponse as EventSourceResponse
 from apps.orchestrator.agent_loop import (
     AgentLoopConfig,
     stream_agent_chat,
@@ -156,6 +156,7 @@ async def chat_stream(
         ) from exc
     return EventSourceResponse(
         subscription,
+        cleanup=subscription,
         ping=15,
         headers={"X-ChatBI-Run-ID": run_id},
     )

@@ -31,6 +31,7 @@ dependencies = [
     # 数据处理（解析 + 大表分块）
     "pandas>=2.2,<3",
     "openpyxl>=3.1,<4",
+    "xlrd>=2,<3",                       # legacy .xls 只读导入
     "duckdb>=1.0,<2",
 
     # API 路由和 Agent 工具目录会在启动时导入基础统计实现

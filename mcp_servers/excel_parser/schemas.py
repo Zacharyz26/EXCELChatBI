@@ -1,4 +1,4 @@
-"""Excel 解析工具的入参 JSON Schema（红线3 校验用）。"""
+"""XLSX、legacy XLS 与 CSV 解析工具的入参 JSON Schema（红线3 校验用）。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,14 @@ _DATASET_REF = {"type": "string", "pattern": DATASET_REF_PATTERN}
 PARSE_EXCEL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "file_ref": {"type": "string", "description": "上传文件落盘后的引用路径"},
-        "sheet": {"type": "string", "description": "工作表名，可选（默认第一个）"},
+        "file_ref": {
+            "type": "string",
+            "description": "XLSX、legacy XLS 或 CSV 上传文件落盘后的引用路径",
+        },
+        "sheet": {
+            "type": "string",
+            "description": "工作表名，可选（默认第一个）；CSV 不支持",
+        },
         "header_row": {
             "type": "integer",
             "minimum": 0,

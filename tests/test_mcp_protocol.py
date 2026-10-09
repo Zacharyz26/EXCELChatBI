@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.orchestrator.agent_tools import AgentToolRegistry  # noqa: E402
 from mcp import ClientSession  # noqa: E402
 from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
@@ -441,13 +442,315 @@ async def test_in_process_mutating_tool_never_detaches_a_slow_write(tmp_path: Pa
     assert first.result == {"path": str(tmp_path / "first.txt")}
     assert sorted(path.name for path in tmp_path.iterdir()) == ["first.txt"]
 
-    second = await gateway.execute(
-        "slow_write", {"name": "second"}, _context(), timeout_seconds=1
-    )
+    second = await gateway.execute("slow_write", {"name": "second"}, _context(), timeout_seconds=1)
     assert second.result == {"path": str(tmp_path / "second.txt")}
     await asyncio.sleep(0.05)
     assert sorted(path.name for path in tmp_path.iterdir()) == ["first.txt", "second.txt"]
     await gateway.aclose()
+
+
+@pytest.mark.asyncio
+async def test_in_process_opt_in_offloads_sync_tool_without_blocking_event_loop() -> None:
+    descriptor = MCPToolDescriptor(
+        name="thread_probe_offloaded",
+        description="prove opted-in compatibility calls do not block the event loop",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {"completed": {"type": "boolean"}},
+            "required": ["completed"],
+            "additionalProperties": False,
+        },
+        metadata=tool_metadata("test.thread_probe"),
+    )
+
+    def handler(_arguments: dict[str, Any]) -> dict[str, bool]:
+        time.sleep(0.05)
+        return {"completed": True}
+
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    transport = InProcessMCPTransport(adapter, abandon_result=lambda _name, _result: None)
+    heartbeat = 0
+
+    async def tick() -> None:
+        nonlocal heartbeat
+        while heartbeat < 3:
+            await asyncio.sleep(0.005)
+            heartbeat += 1
+
+    result, _ = await asyncio.gather(
+        transport.call_tool("thread_probe_offloaded", {}, _context()),
+        tick(),
+    )
+
+    assert result.structured_content == {"completed": True}
+    assert heartbeat == 3
+
+
+@pytest.mark.asyncio
+async def test_in_process_cancel_is_bounded_and_cleans_late_side_effect(tmp_path: Path) -> None:
+    descriptor = MCPToolDescriptor(
+        name="slow_file",
+        description="produce a file after the caller timeout",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={"type": "object", "additionalProperties": True},
+        metadata=tool_metadata("test.slow_file", read_only=False, idempotent=False),
+    )
+    target = tmp_path / "late.txt"
+
+    def handler(_arguments: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.08)
+        target.write_text("late", encoding="utf-8")
+        return {"path": str(target)}
+
+    def abandon(_name: str, result: MCPCallResult) -> None:
+        if result.structured_content is not None:
+            Path(str(result.structured_content["path"])).unlink(missing_ok=True)
+
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    transport = InProcessMCPTransport(adapter, abandon_result=abandon)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.01):
+            await transport.call_tool("slow_file", {}, _context())
+    assert time.monotonic() - started < 0.05
+    await asyncio.sleep(0.12)
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_in_process_abandoned_cleanup_retries_transient_failure(
+    tmp_path: Path,
+) -> None:
+    descriptor = MCPToolDescriptor(
+        name="retry_cleanup",
+        description="produce a late file whose cleanup fails transiently",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={"type": "object", "additionalProperties": True},
+        metadata=tool_metadata("test.retry_cleanup", read_only=False, idempotent=False),
+    )
+    target = tmp_path / "retry.txt"
+    attempts = 0
+
+    def handler(_arguments: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.04)
+        target.write_text("late", encoding="utf-8")
+        return {"path": str(target)}
+
+    def abandon(_name: str, result: MCPCallResult) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise OSError("transient cleanup failure")
+        assert result.structured_content is not None
+        Path(str(result.structured_content["path"])).unlink(missing_ok=True)
+
+    context = _context()
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    transport = InProcessMCPTransport(adapter, abandon_result=abandon)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.005):
+            await transport.call_tool("retry_cleanup", {}, context)
+    await asyncio.sleep(0.12)
+    await transport.aclose()
+
+    assert attempts == 3
+    assert not target.exists()
+    assert transport.abandoned_cleanup_state(context.invocation_id) == {
+        "tool": "retry_cleanup",
+        "status": "completed",
+        "attempts": 3,
+        "error_type": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_in_process_abandoned_cleanup_records_bounded_permanent_failure(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    descriptor = MCPToolDescriptor(
+        name="failed_cleanup",
+        description="produce a late file whose cleanup always fails",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={"type": "object", "additionalProperties": True},
+        metadata=tool_metadata("test.failed_cleanup", read_only=False, idempotent=False),
+    )
+    target = tmp_path / "failed.txt"
+    attempts = 0
+
+    def handler(_arguments: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.04)
+        target.write_text("late", encoding="utf-8")
+        return {"path": str(target)}
+
+    def abandon(_name: str, _result: MCPCallResult) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("permanent cleanup failure")
+
+    context = _context()
+    adapter = MCPServerAdapter("test-tools", [MCPToolBinding(descriptor, handler)])
+    transport = InProcessMCPTransport(adapter, abandon_result=abandon)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.005):
+            await transport.call_tool("failed_cleanup", {}, context)
+    await asyncio.sleep(0.12)
+    await transport.aclose()
+
+    assert attempts == 3
+    assert target.exists()
+    assert transport.abandoned_cleanup_state(context.invocation_id) == {
+        "tool": "failed_cleanup",
+        "status": "failed",
+        "attempts": 3,
+        "error_type": "PermissionError",
+    }
+    assert "mcp.in_process_abandoned_cleanup_failed" in capsys.readouterr().out
+
+
+_LATE_CHART_DESCRIPTOR = MCPToolDescriptor(
+    name="chart_screenshot",
+    description="produce a late managed chart screenshot",
+    input_schema={"type": "object", "additionalProperties": False},
+    output_schema={"type": "object", "additionalProperties": True},
+    metadata=tool_metadata(
+        "test.chart_screenshot",
+        read_only=False,
+        idempotent=False,
+    ),
+)
+
+
+async def _run_late_chart_cleanup(
+    cleanup_owner: AgentToolRegistry,
+    target: Path,
+    context: MCPRequestContext,
+) -> dict[str, str | int | None]:
+    def handler(_arguments: dict[str, Any]) -> dict[str, str]:
+        time.sleep(0.04)
+        target.write_bytes(b"png")
+        return {"image_path": str(target)}
+
+    adapter = MCPServerAdapter(
+        "chart",
+        [MCPToolBinding(_LATE_CHART_DESCRIPTOR, handler)],
+    )
+    transport = InProcessMCPTransport(
+        adapter,
+        abandon_result=cleanup_owner._cleanup_abandoned_mcp_result,
+    )
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.005):
+            await transport.call_tool("chart_screenshot", {}, context)
+    await asyncio.sleep(0.12)
+    await transport.aclose()
+    state = transport.abandoned_cleanup_state(context.invocation_id)
+    assert state is not None
+    return state
+
+
+@pytest.fixture
+def late_chart_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AgentToolRegistry, Path]:
+    report_dir = tmp_path / "reports"
+    chart_dir = report_dir / "charts"
+    chart_dir.mkdir(parents=True)
+    target = chart_dir / f"chart_{'a' * 32}.png"
+    monkeypatch.setattr(
+        "apps.orchestrator.agent_tools.get_settings",
+        lambda: Settings(report_dir=str(report_dir)),
+    )
+    return AgentToolRegistry.__new__(AgentToolRegistry), target
+
+
+@pytest.mark.asyncio
+async def test_real_chart_cleanup_callback_retries_transient_unlink_error(
+    late_chart_cleanup: tuple[AgentToolRegistry, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_owner, target = late_chart_cleanup
+    original_unlink = Path.unlink
+    attempts = 0
+
+    def flaky_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal attempts
+        if path == target:
+            attempts += 1
+            if attempts < 3:
+                raise OSError("transient chart cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    state = await _run_late_chart_cleanup(
+        cleanup_owner,
+        target,
+        _context(invocation_id="chart-transient"),
+    )
+
+    assert attempts == 3
+    assert not target.exists()
+    assert state == {
+        "tool": "chart_screenshot",
+        "status": "completed",
+        "attempts": 3,
+        "error_type": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_real_chart_cleanup_callback_records_permanent_false_as_failure(
+    late_chart_cleanup: tuple[AgentToolRegistry, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_owner, target = late_chart_cleanup
+    attempts = 0
+
+    def refuse_delete(_file_ref: object, _report_dir: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return False
+
+    monkeypatch.setattr(
+        "apps.orchestrator.agent_tools.delete_chart_file",
+        refuse_delete,
+    )
+    state = await _run_late_chart_cleanup(
+        cleanup_owner,
+        target,
+        _context(invocation_id="chart-permanent"),
+    )
+
+    assert attempts == 3
+    assert target.exists()
+    assert state == {
+        "tool": "chart_screenshot",
+        "status": "failed",
+        "attempts": 3,
+        "error_type": "RuntimeError",
+    }
+
+
+@pytest.mark.asyncio
+async def test_real_chart_cleanup_callback_deletes_normally_once(
+    late_chart_cleanup: tuple[AgentToolRegistry, Path],
+) -> None:
+    cleanup_owner, target = late_chart_cleanup
+    state = await _run_late_chart_cleanup(
+        cleanup_owner,
+        target,
+        _context(invocation_id="chart-success"),
+    )
+
+    assert not target.exists()
+    assert state == {
+        "tool": "chart_screenshot",
+        "status": "completed",
+        "attempts": 1,
+        "error_type": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -888,8 +1191,20 @@ async def test_official_sdk_client_transport_stdio_round_trip(
 
     assert result.transport == "stdio"
     assert result.result["rows"] == [
-        {"group": "east", "value": 25.0, "count": 2},
-        {"group": "west", "value": 8.0, "count": 1},
+        {
+            "group": "east",
+            "value": 25.0,
+            "count": 2,
+            "row_count": 2,
+            "valid_value_count": 2,
+        },
+        {
+            "group": "west",
+            "value": 8.0,
+            "count": 1,
+            "row_count": 1,
+            "valid_value_count": 1,
+        },
     ]
 
 

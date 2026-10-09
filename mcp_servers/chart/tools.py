@@ -8,6 +8,9 @@ gen_chart 输出 ECharts JSON（前端渲染）；chart_screenshot 用 Playwrigh
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime
+from decimal import Decimal
+from numbers import Real
 from typing import Any
 
 import pandas as pd
@@ -19,6 +22,7 @@ from packages.governance.data_boundary import (
     authorize_columns,
     resolve_policy,
 )
+from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype
 
 
 def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +43,13 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
     chart_type: str = args["chart_type"]
     enc: dict[str, Any] = args["encoding"]
     x_col, y_col = enc["x"], enc["y"]
-    agg: str = enc.get("agg", "sum")
+    requested_agg = enc.get("agg")
+    if chart_type == "scatter":
+        if requested_agg not in {None, "none"}:
+            raise ValueError("散点图 encoding.agg 只能为 none（省略时按 none 处理）")
+        if enc.get("top_n") is not None:
+            raise ValueError("散点图不支持 encoding.top_n；请先显式筛选数据")
+    agg: str = requested_agg or ("none" if chart_type == "scatter" else "sum")
     top_n: int | None = enc.get("top_n")
 
     if chart_type == "scatter" or agg == "none":
@@ -50,12 +60,8 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
             operation="gen_chart",
         )
     else:
-        authorize_columns(
-            dataset_ref, [x_col], access=ColumnAccess.VALUES, operation="gen_chart"
-        )
-        authorize_columns(
-            dataset_ref, [y_col], access=ColumnAccess.SUMMARY, operation="gen_chart"
-        )
+        authorize_columns(dataset_ref, [x_col], access=ColumnAccess.VALUES, operation="gen_chart")
+        authorize_columns(dataset_ref, [y_col], access=ColumnAccess.SUMMARY, operation="gen_chart")
     if chart_type == "scatter":
         # 数据集已受上传行数上限约束；散点图不对超限工作簿提供隐式降级。
         df = load_dataframe(dataset_ref)
@@ -72,6 +78,7 @@ def gen_chart(args: dict[str, Any]) -> dict[str, Any]:
 
 # ── 内部：聚合与 option 组装（数值全部来自真实数据）──
 
+
 def _aggregate(
     dataset_ref: str, x_col: str, y_col: str, agg: str, chart_type: str, top_n: int | None
 ) -> tuple[list[Any], list[Any]]:
@@ -85,27 +92,39 @@ def _aggregate(
         grouped = df.set_index(x_col)[y_col]
         groups = [GroupAgg(k, v, 1) for k, v in grouped.items()]
     else:
-        rows = pushdown_aggregate(dataset_ref, x_col, y_col, agg)  # (key,value,count)
+        rows = pushdown_aggregate(dataset_ref, x_col, y_col, agg)
         policy = resolve_policy(dataset_ref)
         groups = guard_small_groups(
-            [GroupAgg(k, v, c) for k, v, c in rows],
+            [
+                GroupAgg(key, value, valid_count, row_count)
+                for key, value, row_count, valid_count in rows
+            ],
             agg,
             policy.small_group_min_size,
             mode=policy.small_group_mode,
             other_label=policy.other_label,
         )
 
-    # 折线/时间序列按 x 升序；柱/饼按值降序更直观
+    # 折线按 x 升序；柱/饼先按值选 top_n。柱图若 x 是连续数值/日期，
+    # 再按 x 排列已选分组，避免把连续轴退化成字符串序或值序。
     if chart_type == "line":
-        groups = sorted(groups, key=lambda g: str(g.key))
+        groups = sorted(groups, key=lambda g: _semantic_axis_sort_key(g.key))
     else:
-        groups = sorted(groups, key=lambda g: g.value, reverse=True)
+        groups = sorted(groups, key=_aggregate_value_desc_key)
     if top_n:
         groups = groups[:top_n]
+    if chart_type == "bar" and _has_continuous_axis(groups):
+        groups = sorted(groups, key=lambda g: _semantic_axis_sort_key(g.key))
 
     cats = [_coerce(g.key) for g in groups]
     values = [_coerce(g.value) for g in groups]
     return cats, values
+
+
+def _aggregate_value_desc_key(group: GroupAgg) -> tuple[bool, float]:
+    """聚合空值始终排在真实数值之后，且绝不伪装为 0。"""
+    value = group.value
+    return value is None, -(value if value is not None else 0.0)
 
 
 def _categorical_option(
@@ -129,8 +148,7 @@ def _categorical_option(
                 {
                     "type": "pie",
                     "data": [
-                        {"name": str(c), "value": v}
-                        for c, v in zip(cats, values, strict=False)
+                        {"name": str(c), "value": v} for c, v in zip(cats, values, strict=False)
                     ],
                 }
             ],
@@ -151,6 +169,8 @@ def _categorical_option(
 
 def _scatter_option(df: pd.DataFrame, x_col: str, y_col: str) -> dict[str, Any]:
     """散点图 option：原始 (x, y) 点对。"""
+    x_axis_type = _scatter_axis_type(df[x_col], axis="x", column=x_col)
+    y_axis_type = _scatter_axis_type(df[y_col], axis="y", column=y_col)
     pairs = [
         [_coerce(x), _coerce(y)]
         for x, y in zip(df[x_col].tolist(), df[y_col].tolist(), strict=False)
@@ -158,19 +178,75 @@ def _scatter_option(df: pd.DataFrame, x_col: str, y_col: str) -> dict[str, Any]:
     return {
         "title": {"text": f"{y_col} vs {x_col}"},
         "tooltip": {"trigger": "item"},
-        "xAxis": {"type": "value", "name": x_col},
-        "yAxis": {"type": "value", "name": y_col},
+        "xAxis": {"type": x_axis_type, "name": x_col},
+        "yAxis": {"type": y_axis_type, "name": y_col},
         "series": [{"type": "scatter", "data": pairs}],
     }
 
 
+def _scatter_axis_type(series: pd.Series, *, axis: str, column: str) -> str:
+    """Return an ECharts continuous axis type or reject categorical data."""
+    if is_bool_dtype(series.dtype):
+        dtype = str(series.dtype)
+    elif is_numeric_dtype(series.dtype):
+        return "value"
+    elif is_datetime64_any_dtype(series.dtype):
+        return "time"
+    else:
+        dtype = str(series.dtype)
+    raise ValueError(f"散点图 {axis} 轴字段 {column!r} 必须为数值或日期时间类型，当前类型: {dtype}")
+
+
+def _semantic_axis_sort_key(value: Any) -> tuple[int, Any]:
+    """Sort continuous keys by their native meaning, not rendered text."""
+    if _is_missing_scalar(value):
+        return (3, 0)
+    if isinstance(value, bool):
+        return (2, str(value))
+    if isinstance(value, Real | Decimal):
+        return (0, float(value))
+    if isinstance(value, pd.Timestamp | datetime | date):
+        return (1, pd.Timestamp(value).value)
+    return (2, str(value))
+
+
+def _has_continuous_axis(groups: list[GroupAgg]) -> bool:
+    """Whether all visible keys form one numeric or datetime axis family."""
+    families = [
+        _continuous_axis_family(group.key) for group in groups if not _is_missing_scalar(group.key)
+    ]
+    return (
+        bool(families)
+        and families[0] is not None
+        and all(family == families[0] for family in families)
+    )
+
+
+def _continuous_axis_family(value: Any) -> str | None:
+    if isinstance(value, bool) or _is_missing_scalar(value):
+        return None
+    if isinstance(value, Real | Decimal):
+        return "number"
+    if isinstance(value, pd.Timestamp | datetime | date):
+        return "datetime"
+    return None
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    """Safely recognize scalar missing values, including ``NaT``."""
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _coerce(value: Any) -> Any:
     """numpy/pandas 标量 → JSON 安全的原生类型。"""
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None or _is_missing_scalar(value):
         return None
     if hasattr(value, "item"):  # numpy 标量
         value = value.item()
-    if isinstance(value, pd.Timestamp):
+    if isinstance(value, pd.Timestamp | datetime | date):
         return str(value)
     return value
 

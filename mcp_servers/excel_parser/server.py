@@ -1,4 +1,4 @@
-"""Excel 解析工具注册入口；``MCPServer.run`` 提供官方 SDK stdio 服务。"""
+"""表格解析工具注册入口；``MCPServer.run`` 提供官方 SDK stdio 服务。"""
 
 from __future__ import annotations
 
@@ -9,11 +9,14 @@ from mcp_servers.excel_parser import schemas, tools
 
 
 def build_server() -> MCPServer:
-    """构建并注册 Excel 解析工具。"""
+    """构建并注册 XLSX、legacy XLS 与 CSV 解析工具。"""
     server = MCPServer(name="excel_parser", port=8101)
     server.register(
         Tool(
-            "parse_excel", "解析 Excel 为数据集引用", schemas.PARSE_EXCEL_SCHEMA, tools.parse_excel,
+            "parse_excel",
+            "解析 XLSX、legacy XLS 或 CSV 为数据集引用",
+            schemas.PARSE_EXCEL_SCHEMA,
+            tools.parse_excel,
             output_schema=tool_output_schema("parse_excel"),
             metadata=tool_metadata(
                 "data.ingest", read_only=False, idempotent=False, risk_level="medium"

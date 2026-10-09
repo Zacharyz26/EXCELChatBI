@@ -3262,6 +3262,10 @@ async def _stream_agent_chat_inner(
                 )
                 if controlled_run is None:
                     _cleanup_uncommitted_report_files(call, result)
+                    await _cleanup_uncommitted_registry_result(
+                        registry,
+                        reserved_invocation.invocation_id,
+                    )
                     return
                 run = controlled_run
                 if execution.error_text is not None:
@@ -3482,6 +3486,10 @@ async def _stream_agent_chat_inner(
                     )
                 except (sqlite3.Error, RuntimeError, ValueError) as exc:
                     _cleanup_uncommitted_report_files(call, result)
+                    await _cleanup_uncommitted_registry_result(
+                        registry,
+                        reserved_invocation.invocation_id,
+                    )
                     _log.error(
                         "agent.commit_tool_success_failed",
                         conversation_id=conversation_id,
@@ -3507,6 +3515,10 @@ async def _stream_agent_chat_inner(
                         },
                     )
                     return
+                _release_committed_registry_result(
+                    registry,
+                    reserved_invocation.invocation_id,
+                )
                 store.invalidate_conversation(conversation_id)
                 if artifact is not None:
                     yield _event("artifact", _artifact_payload(artifact))
@@ -4010,7 +4022,7 @@ def _build_system_content(
         profile_json = _compact_json(latest.profile, config.profile_max_chars)
         sections.append(f"最新数据集 {latest.ref} 的画像：\n{profile_json}")
     else:
-        sections.append("当前项目还没有数据集；用户询问数据分析时请提示先上传 Excel。")
+        sections.append("当前项目还没有数据集；用户询问数据分析时请提示先上传表格文件。")
 
     registry_lines = _registry_lines(artifacts, config.registry_max_entries)
     if registry_lines:
@@ -5133,6 +5145,26 @@ def _artifact_type_for(registry: AgentToolRegistry, tool_name: str) -> str | Non
             return first if isinstance(first, str) else None
         return None
     return _LEGACY_ARTIFACT_TYPES.get(tool_name)
+
+
+async def _cleanup_uncommitted_registry_result(
+    registry: AgentToolRegistry,
+    invocation_id: str,
+) -> None:
+    """Roll back only an invocation-owned result that TaskStore did not commit."""
+    cleanup = getattr(registry, "cleanup_uncommitted_result", None)
+    if callable(cleanup):
+        await run_in_threadpool(cleanup, invocation_id)
+
+
+def _release_committed_registry_result(
+    registry: AgentToolRegistry,
+    invocation_id: str,
+) -> None:
+    """Transfer result ownership only after TaskStore's atomic success commit."""
+    release = getattr(registry, "release_committed_result", None)
+    if callable(release):
+        release(invocation_id)
 
 
 def _cleanup_uncommitted_report_files(call: ToolCall, result: Any) -> None:

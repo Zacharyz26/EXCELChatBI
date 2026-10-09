@@ -310,7 +310,7 @@ class PlanRevisionRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """Excel 上传响应：数据集引用 + 数据画像（供前端展示并确认）。
+    """XLSX、legacy XLS 或 CSV 上传响应：数据集引用 + 数据画像。
 
     注意：返回的是画像，原始整表只在服务端以 dataset_ref 引用（红线1）。
     """

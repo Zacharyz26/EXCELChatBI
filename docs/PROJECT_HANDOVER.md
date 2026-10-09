@@ -30,7 +30,7 @@
 
 ## 2. 产品定位与当前状态
 
-EXCELChatBI 是一个中文优先的对话式 Excel BI 技术预览。用户在 Web 工作区上传 Excel，随后通过自然语言完成数据理解、质量检查、统计分析、可视化、知识问答和报告生成。产品把工具执行过程、证据、产物和任务状态以 SSE 实时展示，并将工作区状态持久化到 SQLite、Parquet 和受控文件目录。
+EXCELChatBI 是一个中文优先的对话式表格 BI 技术预览。用户在 Web 工作区上传 XLSX、legacy XLS 或 CSV，随后通过自然语言完成数据理解、质量检查、统计分析、可视化、知识问答和报告生成。产品把工具执行过程、证据、产物和任务状态以 SSE 实时展示，并将工作区状态持久化到 SQLite、Parquet 和受控文件目录。
 
 当前适合：
 
@@ -51,7 +51,7 @@ EXCELChatBI 是一个中文优先的对话式 Excel BI 技术预览。用户在 
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| Excel 上传与画像 | `.xlsx` 已实现且有测试契约；`.xls` 有依赖缺口 | 转换为不透明引用的 Parquet，生成画像、质量与角色建议；API 虽接受 `.xls` 后缀，但核心依赖未安装 `xlrd` |
+| 表格上传与画像 | `.xlsx` 主格式、`.xls` 只读兼容、`.csv` 单表导入均有测试契约 | 统一转换为不透明引用的 Parquet，生成画像、质量与角色建议；`.xls` 由 `xlrd 2.x` 读取已保存值 |
 | 对话式分析 Agent | 已实现，有测试契约 | 单 Agent function-calling，17 个生产工具，统一入口 `/chat/stream` |
 | 任务提纲与控制 | 已实现，有测试契约 | 确定性提纲、步骤状态、暂停/恢复/取消/澄清/单步重试/版本化修订 |
 | 统计分析 | 已实现，有测试契约 | 趋势、异常、回归、相关、维度贡献、组间比较、受治理预测 |
@@ -143,20 +143,20 @@ Docker API 镜像固定一个 Uvicorn worker。这不是简单的默认值：当
 
 ## 5. 主要业务流程
 
-### 5.1 工作区与 Excel 上传
+### 5.1 工作区与表格上传
 
 1. Web 启动后读取认证配置，令牌只保存在浏览器 `sessionStorage`。
 2. `workspace.ts` 拉取项目；空工作区会创建首个项目和对话。
-3. 浏览器向 `POST /upload/excel` 发送 `.xlsx`（API 也接受 `.xls` 后缀），可同时绑定项目/对话。
+3. 浏览器向兼容端点 `POST /upload/excel` 发送 `.xlsx`、`.xls` 或 `.csv`，可同时绑定项目/对话。`.xlsx` 是主格式；`.xls` 仅用于旧文件只读导入；CSV 是单表输入。
 4. API 按块读取并执行文件大小限制，清理用户文件名，写入临时文件。
-5. 按文件内容识别引擎；OOXML 工作簿先限制 ZIP 解压总量，再忽略不可信 dimension 流式检查实际行、列及矩形单元格预算，最后有界读取并再次检查。改为 `.xls` 后缀、缺失/伪造 dimension 均不能跳过检查。当前核心依赖仍没有 `xlrd`，真实 legacy `.xls` 不是已验证能力。
-6. Excel parser 读取数据、生成画像与字段角色建议；原始工作簿不作为长期存储。
-7. 数据写为 UUID 形式的 Parquet，sidecar 保存元数据和治理策略；源 Excel 在完成或失败后清理。
+5. 按内容选择工作簿引擎；OOXML 先限制 ZIP 解压总量，再忽略不可信 dimension 流式检查实际行、列及矩形单元格预算；BIFF `.xls` 先按工作表目录检查行、列和单元格预算；CSV 确定性识别 UTF-8（含 BOM）/GB18030 与逗号、分号、制表符或竖线。所有格式最后都有界读取并再次检查。
+6. parser 只读取文件中已保存的值并生成画像与字段角色建议；不执行宏、不重算公式。`.xlsx` 所选范围的公式缺少缓存值时明确拒绝；legacy `.xls` 由 `xlrd` 读取已保存结果；CSV 没有工作表或公式语义。
+7. 数据写为 UUID 形式的 Parquet，sidecar 保存元数据和治理策略；上传源文件在完成或失败后清理。
 8. SQLite 原子注册 Dataset、来源锚点、对话消息和初始 profile Artifact；浏览器随后重新拉取数据集和产物。
 
 数据集引用必须是服务端生成的 32 位不透明标识，绝不能允许模型或客户端传入路径。相关实现集中在 `packages/common/dataset_store.py`、`mcp_servers/excel_parser/`、`apps/api/routers/upload.py` 和 `packages/session/store.py`。
 
-Excel 默认限制：数据行 500000、ZIP 解压总量 256 MiB、列数 1024、读取矩形 5000000 单元格；表头/前导行计入单元格预算，中间及格式化空行也计入实际行预算。配置项见根 `.env.example` 的 `LARGE_TABLE_ROW_THRESHOLD`、`EXCEL_MAX_*`。显式 `nrows` 在行数上限内时允许采样，但不能绕过解压、宽度或单元格预算。没有新增可硬终止的解析子进程。
+表格默认限制：数据行 500000、OOXML ZIP 解压总量 256 MiB、列数 1024、读取矩形 5000000 单元格；表头/前导行计入单元格预算，中间及格式化空行也计入实际行预算。配置项见根 `.env.example` 的 `LARGE_TABLE_ROW_THRESHOLD`、`EXCEL_MAX_*`。显式 `nrows` 在行数上限内时允许采样，但不能绕过解压、宽度或单元格预算。没有新增可硬终止的解析子进程。
 
 ### 5.2 对话与 Agent 执行
 
@@ -561,7 +561,7 @@ Join 只支持固定等值连接。preflight 检查键类型族、null、基数�
 ### 13.2 用户可见能力
 
 - 工作区、项目、对话和 Dataset 选择；
-- Excel 上传、数据集改名/删除/设为当前上下文；
+- 表格上传、数据集改名/删除/设为当前上下文；
 - 统一聊天和快捷提示词；
 - 结构化 enum/text 澄清和取消；
 - profile、角色、质量、chart、table、统计、forecast、report、citation 卡片；
@@ -929,7 +929,7 @@ pnpm --dir apps/web test:e2e
 - `aggregate_preview` 明确豁免小组保护；
 - scatter 和 `agg=none` 可处理/返回原始点，缺少系统性 downsample；
 - 多个 stats/transform 路径仍在内存中加载 DataFrame；虽有 500,000 行阈值，但不是大数据执行引擎；
-- API 接受 `.xls`，但核心依赖只有 `openpyxl`、没有 pandas 读取 legacy `.xls` 所需的 `xlrd`；该格式既缺少 `.xlsx` 同等的读取前行数保护，也不是当前可验证能力。
+- XLSX/XLS/CSV 解析仍在应用进程中执行；现有有界读取和格式预算不等同于针对任意恶意文件的硬隔离解析沙箱。
 
 #### P1：企业化边界
 
@@ -1026,7 +1026,7 @@ pnpm --dir apps/web test:e2e
 | `/health`, `/health/ready` | 存活与依赖 readiness |
 | `/auth/config` | Web 读取认证模式 |
 | `/projects/*`、`/conversations/*`、`/datasets/*` | 项目、对话、Dataset CRUD 与消息/Artifact 查询；workspace router 没有统一 `/workspace` 前缀 |
-| `/upload/excel` | Excel 上传、转换、画像和工作区绑定 |
+| `/upload/excel` | XLSX/XLS/CSV 上传、转换、画像和工作区绑定（兼容路径名） |
 | `/chat/stream` | 唯一 Agent 对话入口 |
 | `/agent/runs/*` | 状态、事件、SSE 重连、澄清、暂停/恢复/取消/重试/计划修订/反馈 |
 | `/analyze/report/{id}.md|pdf` | 鉴权报告下载 |

@@ -111,7 +111,8 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
         args: 见 AGGREGATE_PREVIEW_SCHEMA。
 
     Returns:
-        {rows: [{group, value, count}], group_total, truncated, agg, group_col, value_col}
+        {rows: [{group, value, count, row_count, valid_value_count}], ...}；其中
+        count 保持为有效值数的兼容别名，全空 sum/mean 的 value 为 null。
     """
     group_col: str = args["group_col"]
     agg: str = args["agg"]
@@ -131,11 +132,22 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
     sort = args.get("sort", "value_desc")
     if sort == "group":
         tuples.sort(key=lambda t: str(t[0]))
-    else:
-        tuples.sort(key=lambda t: t[1], reverse=(sort == "value_desc"))
+    elif sort == "value_desc":
+        tuples.sort(key=lambda t: (t[1] is None, -(t[1] if t[1] is not None else 0.0)))
+    else:  # value_asc
+        tuples.sort(key=lambda t: (t[1] is None, t[1] if t[1] is not None else 0.0))
 
     limit = int(args.get("limit", 20))
-    rows = [{"group": _plain(g), "value": v, "count": c} for g, v, c in tuples[:limit]]
+    rows = [
+        {
+            "group": _plain(group),
+            "value": value,
+            "count": valid_value_count,
+            "row_count": row_count,
+            "valid_value_count": valid_value_count,
+        }
+        for group, value, row_count, valid_value_count in tuples[:limit]
+    ]
     return {
         "rows": rows,
         "group_total": len(tuples),

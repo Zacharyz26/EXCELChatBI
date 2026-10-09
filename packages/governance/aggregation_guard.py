@@ -17,19 +17,27 @@ class GroupAgg:
     """一个聚合分组：类目键、聚合值、分组样本量（行数）。"""
 
     key: object
-    value: float
+    value: float | None
     count: int
+    row_count: int | None = None
+
+    @property
+    def source_row_count(self) -> int:
+        """Return source rows, falling back to the legacy valid-value count."""
+        if self.row_count is None:
+            return self.count
+        return self.row_count
 
 
 def _combine(small: list[GroupAgg], agg: str, total: int) -> float:
     """按聚合方式合并多个小分组的值。"""
     if agg == "sum":
-        return sum(g.value for g in small)
+        return sum(g.value for g in small if g.value is not None)
     if agg == "count":
         return float(total)
     if agg == "mean":
         # 加权平均：Σ(mean_i · count_i) / Σ count_i
-        return sum(g.value * g.count for g in small) / total
+        return sum(g.value * g.count for g in small if g.value is not None) / total
     raise ValueError(f"不支持的聚合方式: {agg}")
 
 
@@ -64,4 +72,12 @@ def guard_small_groups(
     if total < min_size:
         # 合并后仍不足阈值，无法安全展示 → 丢弃
         return kept
-    return [*kept, GroupAgg(other_label, _combine(small, agg, total), total)]
+    return [
+        *kept,
+        GroupAgg(
+            other_label,
+            _combine(small, agg, total),
+            total,
+            sum(group.source_row_count for group in small),
+        ),
+    ]

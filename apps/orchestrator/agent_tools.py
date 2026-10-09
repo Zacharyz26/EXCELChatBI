@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -38,6 +38,7 @@ from mcp_servers.common.client_gateway import (
 )
 from mcp_servers.common.contracts import (
     GENERIC_OBJECT_OUTPUT_SCHEMA,
+    MCPCallResult,
     MCPProtocolError,
     MCPRequestContext,
     MCPToolDescriptor,
@@ -65,7 +66,7 @@ from packages.common.logging import get_logger
 from packages.knowledge.domain_store import DomainDefinitionStore
 from packages.knowledge.formula import FormulaMappingMissing
 from packages.rag.retriever import HybridRetriever
-from packages.session.file_lifecycle import delete_chart_file
+from packages.session.file_lifecycle import delete_chart_file, delete_report_files
 from packages.session.models import Artifact, ArtifactDraft, JsonObject
 from packages.session.store import SessionStore
 
@@ -188,6 +189,16 @@ class AgentToolSpec:
         return MCPToolBinding(descriptor=self.mcp_descriptor(), handler=self.runner)
 
 
+@dataclass(slots=True)
+class _DerivedResultOwnership:
+    """Invocation-scoped ownership of one not-yet-committed derived dataset."""
+
+    invocation_id: str
+    dataset_ref: str
+    project_id: str
+    registered: bool = False
+
+
 class AgentToolRegistry:
     """Agent 工具集：定义导出 + 按名执行（入参 JSON 解析在此完成）。"""
 
@@ -215,6 +226,7 @@ class AgentToolRegistry:
             )
         self._catalog_watch_tasks: list[asyncio.Task[None]] = []
         self._validated_remote_catalogs: dict[str, str] = {}
+        self._derived_ownership: dict[str, _DerivedResultOwnership] = {}
         self._mcp_adapter = MCPServerAdapter(
             "agent-tools", (spec.mcp_binding() for spec in self._specs.values())
         )
@@ -251,15 +263,17 @@ class AgentToolRegistry:
             )
             self._mcp_tool_routes.update((tool_name, "agent-tools") for tool_name in self._specs)
 
-    @staticmethod
     def _build_mcp_executor(
+        self,
         config: MCPClientConfig,
         adapter: MCPServerAdapter,
         allowed_tools: frozenset[str],
     ) -> ManagedMCPClientGateway:
         def transport_factory() -> InProcessMCPTransport | OfficialSDKClientTransport:
             if config.transport == "in_process":
-                return InProcessMCPTransport(adapter)
+                return InProcessMCPTransport(
+                    adapter, abandon_result=self._cleanup_abandoned_mcp_result
+                )
             return OfficialSDKClientTransport(config)
 
         return ManagedMCPClientGateway(
@@ -268,7 +282,11 @@ class AgentToolRegistry:
             allowed_tools=allowed_tools,
             transport_factory=transport_factory,
             compatibility_transport_factory=(
-                (lambda: InProcessMCPTransport(adapter))
+                (
+                    lambda: InProcessMCPTransport(
+                        adapter, abandon_result=self._cleanup_abandoned_mcp_result
+                    )
+                )
                 if config.allow_in_process_fallback
                 else None
             ),
@@ -549,6 +567,7 @@ class AgentToolRegistry:
             invocation_id=context.invocation_id,
             trace_id=context.trace_id,
         )
+        started_at = asyncio.get_running_loop().time()
         execution = await self._mcp_executors[service_name].execute(
             name,
             arguments,
@@ -562,26 +581,96 @@ class AgentToolRegistry:
             and execution.result.get("registered") is not True
         ):
             result = dict(execution.result)
-            if name == "transform_dataset":
-                _register_transformed_dataset(
-                    excel=self._lineage_excel,
-                    context=self._context,
-                    args=arguments,
-                    result=result,
-                )
-            else:
+            ownership = self._claim_derived_result(context, result)
+            self._derived_ownership[context.invocation_id] = ownership
+            abandoned = threading.Event()
+
+            def finalize() -> None:
                 try:
-                    _register_joined_dataset(
-                        excel=self._lineage_excel,
-                        context=self._context,
-                        args=arguments,
-                        result=result,
-                    )
-                except Exception:
-                    delete_dataset(str(result.get("dataset_ref", "")))
-                    raise
+                    self._register_derived_result(name, arguments, result)
+                    ownership.registered = True
+                finally:
+                    if abandoned.is_set():
+                        self._cleanup_derived_ownership(ownership)
+
+            task = asyncio.create_task(
+                asyncio.to_thread(finalize),
+                name=f"agent-derived-finalize:{context.invocation_id}",
+            )
+
+            def consume_late_exception(done: asyncio.Task[None]) -> None:
+                if done.cancelled():
+                    return
+                # Timeout/cancel may delete the staged file before the worker
+                # reaches schema registration. The owned late worker is observed.
+                if (error := done.exception()) is not None:
+                    _log.info("agent_tool.late_finalize_stopped", error_type=type(error).__name__)
+
+            task.add_done_callback(consume_late_exception)
+            try:
+                remaining = max(
+                    0.0,
+                    timeout_seconds - (asyncio.get_running_loop().time() - started_at),
+                )
+                async with asyncio.timeout(remaining):
+                    await asyncio.shield(task)
+            except asyncio.CancelledError:
+                abandoned.set()
+                self.cleanup_uncommitted_result(context.invocation_id)
+                raise
+            except TimeoutError:
+                abandoned.set()
+                self.cleanup_uncommitted_result(context.invocation_id)
+                raise
+            except Exception:
+                self.cleanup_uncommitted_result(context.invocation_id)
+                raise
             execution = replace(execution, result=result)
         return execution
+
+    def release_committed_result(self, invocation_id: str) -> None:
+        """Transfer an invocation-owned result to durable TaskStore state."""
+        self._derived_ownership.pop(invocation_id, None)
+
+    def cleanup_uncommitted_result(self, invocation_id: str) -> None:
+        """Idempotently roll back only the result owned by this invocation."""
+        ownership = self._derived_ownership.pop(invocation_id, None)
+        if ownership is not None:
+            self._cleanup_derived_ownership(ownership)
+
+    def _claim_derived_result(
+        self, context: MCPRequestContext, result: dict[str, Any]
+    ) -> _DerivedResultOwnership:
+        assert self._context is not None
+        dataset_ref = str(result.get("dataset_ref", ""))
+        if not dataset_ref:
+            raise AgentToolError("衍生数据集结果缺少 dataset_ref")
+        if self._context.store.get_dataset(dataset_ref) is not None:
+            raise AgentToolError("衍生数据集引用已存在，拒绝覆盖")
+        return _DerivedResultOwnership(
+            invocation_id=context.invocation_id,
+            dataset_ref=dataset_ref,
+            project_id=self._context.project_id,
+        )
+
+    def _register_derived_result(
+        self, name: str, arguments: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        assert self._context is not None
+        if name == "transform_dataset":
+            _register_transformed_dataset(
+                excel=self._lineage_excel,
+                context=self._context,
+                args=arguments,
+                result=result,
+            )
+        else:
+            _register_joined_dataset(
+                excel=self._lineage_excel,
+                context=self._context,
+                args=arguments,
+                result=result,
+            )
 
     async def validate_remote_catalog(self) -> dict[str, str]:
         """Complete remote discovery before a new immutable snapshot is published."""
@@ -637,6 +726,8 @@ class AgentToolRegistry:
 
     async def aclose(self) -> None:
         """Close a scoped stdio/HTTP session when its TaskRun host exits."""
+        for invocation_id in tuple(self._derived_ownership):
+            await asyncio.to_thread(self.cleanup_uncommitted_result, invocation_id)
         for task in self._catalog_watch_tasks:
             task.cancel()
         if self._catalog_watch_tasks:
@@ -665,7 +756,50 @@ class AgentToolRegistry:
         if not isinstance(args, dict):
             raise AgentToolError("工具入参必须是 JSON 对象")
         _log.info("agent_tool.execute", tool=name, arg_keys=sorted(args.keys()))
-        return spec.runner(args)
+        result = spec.runner(args)
+        if (
+            name in {"transform_dataset", "join_datasets"}
+            and self._context is not None
+            and isinstance(result, dict)
+            and result.get("registered") is not True
+        ):
+            self._register_derived_result(name, args, result)
+        return result
+
+    def _cleanup_derived_ownership(self, ownership: _DerivedResultOwnership) -> None:
+        if self._context is None:
+            return
+        current = self._context.store.get_dataset(ownership.dataset_ref)
+        if (
+            ownership.registered
+            and current is not None
+            and current.project_id == ownership.project_id
+        ):
+            self._context.store.delete_dataset(ownership.dataset_ref)
+        delete_dataset(ownership.dataset_ref)
+
+    def _cleanup_abandoned_mcp_result(
+        self, name: str, call_result: MCPCallResult
+    ) -> None:
+        result = call_result.structured_content
+        if not isinstance(result, dict):
+            return
+        if name in {"transform_dataset", "join_datasets"}:
+            dataset_ref = result.get("dataset_ref")
+            if isinstance(dataset_ref, str) and dataset_ref:
+                delete_dataset(dataset_ref)
+            return
+        if name == "chart_screenshot":
+            if not delete_chart_file(
+                result.get("image_path"),
+                get_settings().report_dir,
+            ):
+                raise RuntimeError("图表截图清理失败")
+            return
+        if name == "generate_report":
+            report_id = result.get("report_id")
+            if isinstance(report_id, str) and report_id:
+                delete_report_files(report_id, get_settings().report_dir)
 
 
 def build_registry(
@@ -783,7 +917,7 @@ def build_registry(
                 "不支持自由 SQL。"
             ),
             parameters=TRANSFORM_DATASET_SCHEMA,
-            runner=lambda args: _transform_with_lineage(dataset_ops, excel, context, args),
+            runner=lambda args: _transform_without_lineage(dataset_ops, context, args),
             output_schema=tool_output_schema("transform_dataset"),
             metadata=tool_metadata(
                 "dataset.transform",
@@ -817,7 +951,7 @@ def build_registry(
                 "不支持自由 SQL、表达式或模型指定输出路径。"
             ),
             parameters=JOIN_DATASETS_SCHEMA,
-            runner=lambda args: _join_with_lineage(dataset_ops, excel, context, args),
+            runner=lambda args: _join_without_lineage(dataset_ops, context, args),
             output_schema=tool_output_schema("join_datasets"),
             metadata=tool_metadata(
                 "dataset.join.execute",
@@ -983,13 +1117,12 @@ def _profile_with_quality(excel: MCPServer, args: dict[str, Any]) -> dict[str, A
     return {"profile": profile, "roles": roles, "quality": quality}
 
 
-def _transform_with_lineage(
+def _transform_without_lineage(
     dataset_ops: MCPServer,
-    excel: MCPServer,
     context: AgentContext | None,
     args: dict[str, Any],
 ) -> dict[str, Any]:
-    """执行变换；有会话上下文时把衍生数据集登记进项目（血缘落库）。"""
+    """Execute a transform; Host lineage registration is a separate commit phase."""
     parent = None
     if context is not None:
         parent = context.store.get_dataset(str(args["dataset_ref"]))
@@ -1000,13 +1133,6 @@ def _transform_with_lineage(
         if parent.project_id != context.project_id:
             raise AgentToolError("源数据集不属于当前项目")
     result: dict[str, Any] = dataset_ops._tools["transform_dataset"].invoke(args)
-    if context is not None:
-        _register_transformed_dataset(
-            excel=excel,
-            context=context,
-            args=args,
-            result=result,
-        )
     return result
 
 
@@ -1045,27 +1171,15 @@ def _register_transformed_dataset(
     )
 
 
-def _join_with_lineage(
+def _join_without_lineage(
     dataset_ops: MCPServer,
-    excel: MCPServer,
     context: AgentContext | None,
     args: dict[str, Any],
 ) -> dict[str, Any]:
-    """执行固定 Join，并在本地兼容路径登记双父血缘。"""
+    """Execute a fixed Join; Host lineage registration is a separate commit phase."""
     if context is not None:
         _require_join_parents(context, args)
     result: dict[str, Any] = dataset_ops._tools["join_datasets"].invoke(args)
-    if context is not None:
-        try:
-            _register_joined_dataset(
-                excel=excel,
-                context=context,
-                args=args,
-                result=result,
-            )
-        except Exception:
-            delete_dataset(str(result.get("dataset_ref", "")))
-            raise
     return result
 
 
@@ -1307,20 +1421,8 @@ def _artifact_analysis_id(artifact: Artifact) -> str:
 
 
 def _capture_report_chart(chart: MCPServer, option: JsonObject) -> dict[str, Any]:
-    """Run sync Playwright off an active event loop without detaching its writes."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return cast(
-            dict[str, Any],
-            chart._tools["chart_screenshot"].invoke({"option": option}),
-        )
-    # This executor is deliberately local and joined by the context manager.
-    # Report generation cannot return, fail or be cancelled while a screenshot
-    # worker is still able to publish a file behind the Host's back.
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="report-chart") as executor:
-        future = executor.submit(chart._tools["chart_screenshot"].invoke, {"option": option})
-        return cast(dict[str, Any], future.result())
+    """Capture synchronously; the in-process transport owns the worker boundary."""
+    return cast(dict[str, Any], chart._tools["chart_screenshot"].invoke({"option": option}))
 
 
 def _assemble_report_args(

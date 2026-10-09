@@ -1,11 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
+  AUTHENTICATION_REQUIRED_EVENT,
+  AuthenticationRequiredError,
   getAuthMode,
   hasApiToken,
   listProjects,
   setApiToken,
 } from "@/api/client";
 import { ChatWorkspace } from "@/components/ChatWorkspace";
+import { resetWorkspaceForReauthentication } from "@/stores/workspace";
 
 /** 对话式数据分析 Agent 唯一入口（阶段4：经典五页已按能力清单核对后下线）。 */
 export default function App() {
@@ -16,11 +19,30 @@ export default function App() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    const requireAuthentication = () => {
+      setApiToken("");
+      resetWorkspaceForReauthentication();
+      setToken("");
+      setError("访问令牌已失效，请重新认证。");
+      setState("login");
+    };
+    window.addEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication);
+    return () => {
+      window.removeEventListener(AUTHENTICATION_REQUIRED_EVENT, requireAuthentication);
+    };
+  }, []);
+
+  useEffect(() => {
     void getAuthMode()
       .then((mode) => {
         setState(mode === "disabled" || hasApiToken() ? "ready" : "login");
       })
       .catch((reason: unknown) => {
+        if (reason instanceof AuthenticationRequiredError) {
+          setError(reason.message);
+          setState("login");
+          return;
+        }
         setError(reason instanceof Error ? reason.message : "无法读取认证配置");
         setState("error");
       });

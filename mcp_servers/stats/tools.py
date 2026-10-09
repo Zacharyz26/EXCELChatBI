@@ -63,7 +63,10 @@ def _require_columns(df: pd.DataFrame, cols: list[str]) -> None:
 def _numeric(series: pd.Series, col: str) -> pd.Series:
     """把列转为数值型；无法转换（非数值列）抛 ValueError。"""
     out = pd.to_numeric(series, errors="coerce")
+    out = out.replace([np.inf, -np.inf], np.nan)
     if out.notna().sum() == 0:
+        if series.isna().all():
+            raise ValueError(f"列 {col} 没有有效数值（全部为空）")
         raise ValueError(f"列 {col} 不是数值型，无法做统计分析")
     return out
 
@@ -96,7 +99,7 @@ def _require_summary_columns(dataset_ref: str, columns: list[str]) -> None:
 
 def _ordered_series(
     args: dict[str, Any], require_time: bool
-) -> tuple[pd.Series, list[str] | None, int]:
+) -> tuple[pd.Series, list[str] | None, int, dict[str, Any] | None]:
     """读取 value_col（可选按 time_col 升序），返回 (数值序列, 时间标签)。
 
     序列已丢弃缺失、重置为 0 基定位索引；时间标签与序列位置一一对应，供前端 x 轴。
@@ -115,29 +118,63 @@ def _ordered_series(
     df = df[cols].copy()
     df[value_col] = _numeric(df[value_col], value_col)
 
+    time_axis: dict[str, Any] | None = None
     if time_col:
         df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        invalid_timestamps = int(df[time_col].isna().sum())
         df = df.dropna(subset=[time_col]).sort_values(time_col)
     df = df.dropna(subset=[value_col]).reset_index(drop=True)
 
     if len(df) < _MIN_POINTS:
         raise ValueError(f"有效样本量不足（{len(df)} < {_MIN_POINTS}），无法做统计分析")
 
-    labels = [str(t) for t in df[time_col]] if time_col else None
-    return df[value_col].astype(float), labels, total_rows
+    labels = [t.isoformat() for t in df[time_col]] if time_col else None
+    if time_col:
+        timestamps = pd.DatetimeIndex(df[time_col])
+        origin = timestamps.min()
+        elapsed_days = np.asarray(
+            (timestamps - origin).total_seconds()
+            / pd.Timedelta(days=1).total_seconds(),
+            dtype=float,
+        )
+        unique_days = np.unique(elapsed_days)
+        positive_deltas = np.diff(unique_days)
+        unique_timestamps = pd.DatetimeIndex(timestamps.unique()).sort_values()
+        forecast_frequency: str | None = None
+        if len(unique_timestamps) >= 3:
+            try:
+                forecast_frequency = pd.infer_freq(unique_timestamps)
+            except (TypeError, ValueError):
+                forecast_frequency = None
+        median_step_days = (
+            float(np.median(positive_deltas)) if len(positive_deltas) else None
+        )
+        time_axis = {
+            "elapsed_days": elapsed_days,
+            "median_step_days": median_step_days,
+            "unit": "day",
+            "origin": origin.isoformat(),
+            "observed_span_days": float(elapsed_days.max()),
+            "duplicate_timestamps": int(timestamps.duplicated().sum()),
+            "invalid_timestamps": invalid_timestamps,
+            "forecast_frequency": forecast_frequency,
+            "forecast_step_days": (
+                None if forecast_frequency is not None else median_step_days
+            ),
+        }
+    return df[value_col].astype(float), labels, total_rows, time_axis
 
 
-def _linear_slope(y: np.ndarray) -> tuple[float, float]:
-    """对序列做一元线性拟合，返回 (斜率, 截距)。"""
-    x = np.arange(len(y), dtype=float)
+def _linear_slope(y: np.ndarray, x: np.ndarray) -> tuple[float, float]:
+    """Fit values against an explicit numeric axis and return slope/intercept."""
     slope, intercept = np.polyfit(x, y, 1)
     return float(slope), float(intercept)
 
 
-def _direction(slope: float, y: np.ndarray) -> str:
+def _direction(slope: float, y: np.ndarray, x_span: float) -> str:
     """按拟合线端到端变化占均值绝对值的比例，判定 上升/下降/平稳。"""
     scale = float(np.mean(np.abs(y))) or 1.0
-    rel = slope * (len(y) - 1) / scale
+    rel = slope * x_span / scale
     if rel > 0.05:
         return "上升"
     if rel < -0.05:
@@ -147,8 +184,44 @@ def _direction(slope: float, y: np.ndarray) -> str:
 
 # ── 趋势分析 ──
 
+def _future_timestamps(
+    labels: list[str],
+    horizon: int,
+    *,
+    frequency: str | None,
+    median_step_days: float,
+) -> pd.DatetimeIndex:
+    """Build future timestamps from a calendar cadence or a fixed median-day step."""
+    if horizon <= 0:
+        return pd.DatetimeIndex([])
+    last = pd.DatetimeIndex(pd.to_datetime(labels)).max()
+    if frequency is not None:
+        return pd.DatetimeIndex(
+            pd.date_range(start=last, periods=horizon + 1, freq=frequency)[1:]
+        )
+    step = pd.Timedelta(days=median_step_days)
+    return pd.DatetimeIndex([last + step * offset for offset in range(1, horizon + 1)])
+
+
+def _seasonality_period_in_days(labels: list[str], period: int) -> float:
+    """Convert an observation-count period into Prophet's elapsed-day unit."""
+    timestamps = pd.DatetimeIndex(pd.to_datetime(labels)).unique().sort_values()
+    if len(timestamps) < 2 * period:
+        raise ValueError(
+            "Prophet 季节周期按唯一时间观测点计算，至少需要两个完整周期"
+            f"（唯一时间点 {len(timestamps)} < 2×{period}）"
+        )
+    spans = (timestamps[period:] - timestamps[:-period]).total_seconds()
+    period_days = float(np.median(spans) / pd.Timedelta(days=1).total_seconds())
+    if not math.isfinite(period_days) or period_days <= 0:
+        raise ValueError("Prophet 季节周期无法换算为正的自然日跨度")
+    return period_days
+
 def _prophet_decompose(
-    y: np.ndarray, labels: list[str], period: int | None, horizon: int
+    y: np.ndarray,
+    labels: list[str],
+    seasonality_period_days: float | None,
+    future_timestamps: pd.DatetimeIndex,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float | None], float | None]:
     """用 Prophet 拟合，返回 (趋势, 季节, 残差, 预测, 季节强度)。
 
@@ -168,8 +241,12 @@ def _prophet_decompose(
     model = Prophet(
         weekly_seasonality=False, daily_seasonality=False, yearly_seasonality=False
     )
-    if period:  # 与 STL 一致：显式周期才做季节项
-        model.add_seasonality(name="seasonal", period=period, fourier_order=3)
+    if seasonality_period_days is not None:
+        model.add_seasonality(
+            name="seasonal",
+            period=seasonality_period_days,
+            fourier_order=3,
+        )
     model.fit(df)
 
     # 历史：对原始每行的 ds 预测，保证与 y 逐行对齐（Prophet 会把历史折叠成唯一日期，
@@ -182,10 +259,14 @@ def _prophet_decompose(
 
     # 未来：单独外推 horizon 期（不含历史）
     forecast: list[float | None] = []
-    if horizon > 0:
-        freq = pd.infer_freq(ds.sort_values()) or "D"
-        future = model.make_future_dataframe(periods=horizon, freq=freq, include_history=False)
-        forecast = [_f(v) for v in model.predict(future)["yhat"].to_numpy()[:horizon]]
+    if len(future_timestamps) > 0:
+        future = pd.DataFrame({"ds": future_timestamps})
+        forecast = [
+            _f(v)
+            for v in model.predict(future)["yhat"].to_numpy()[
+                : len(future_timestamps)
+            ]
+        ]
 
     denom = float(np.var(seasonal + resid))
     strength = _f(max(0.0, 1 - float(np.var(resid)) / denom)) if denom else 0.0
@@ -205,22 +286,43 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         {method, direction, slope, seasonality_strength, ma_window, n,
          time?, points:{trend, seasonal, resid}, forecast}。
     """
-    series, labels, total_rows = _ordered_series(args, require_time=True)
+    series, labels, total_rows, time_axis = _ordered_series(args, require_time=True)
+    assert time_axis is not None
     y = series.to_numpy()
     n = len(y)
+    elapsed_days = time_axis.pop("elapsed_days")
+    median_step_days = time_axis.pop("median_step_days")
+    observed_span_days = float(time_axis["observed_span_days"])
+    forecast_frequency = time_axis["forecast_frequency"]
+    if observed_span_days <= 0 or median_step_days is None:
+        raise ValueError("时间跨度必须大于 0，无法按真实时间单位计算趋势斜率")
 
     period: int | None = args.get("period")
     method: str = args.get("method") or ("stl" if period else "ma")
 
-    slope, intercept = _linear_slope(y)
-    direction = _direction(slope, y)
+    slope, intercept = _linear_slope(y, elapsed_days)
+    direction = _direction(slope, y, observed_span_days)
 
     ma_window: int = args.get("ma_window") or max(2, min(n // 4, 12))
     ma_window = min(ma_window, n)
     ma = pd.Series(y).rolling(window=ma_window, min_periods=1, center=True).mean().to_numpy()
 
     horizon: int = args.get("forecast_horizon", 0)
+    assert labels is not None
+    future_timestamps = _future_timestamps(
+        labels,
+        horizon,
+        frequency=forecast_frequency,
+        median_step_days=median_step_days,
+    )
+    origin = pd.Timestamp(str(time_axis["origin"]))
+    future_elapsed_days = np.asarray(
+        (future_timestamps - origin).total_seconds()
+        / pd.Timedelta(days=1).total_seconds(),
+        dtype=float,
+    )
     seasonality_strength: float | None = None
+    seasonality_period_days: float | None = None
     if method == "stl":
         if not period:
             raise ValueError("method=stl 需要提供 period（季节周期，点数）")
@@ -232,17 +334,19 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         denom = float(np.var(seasonal + resid))
         seasonality_strength = _f(max(0.0, 1 - float(np.var(resid)) / denom)) if denom else 0.0
         # 线性外推预测（红线2：预测值来自拟合，不经 LLM）
-        forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
+        forecast = [_f(slope * x + intercept) for x in future_elapsed_days]
     elif method == "prophet":
-        if period and n < 2 * period:
-            raise ValueError(f"Prophet 季节分解需至少 2 个完整周期（样本 {n} < 2×{period}）")
-        assert labels is not None  # require_time=True 保证有时间列
+        if period:
+            seasonality_period_days = _seasonality_period_in_days(labels, period)
         trend, seasonal, resid, forecast, seasonality_strength = _prophet_decompose(
-            y, labels, period, horizon
+            y,
+            labels,
+            seasonality_period_days,
+            future_timestamps,
         )
     else:  # ma：移动平均作趋势，残差 = 原值 - 趋势，无季节项
         trend, seasonal, resid = ma, np.zeros(n), y - ma
-        forecast = [_f(slope * (n + i) + intercept) for i in range(horizon)]
+        forecast = [_f(slope * x + intercept) for x in future_elapsed_days]
 
     limitations = [
         "趋势方向描述统计关联，不证明时间变化导致指标变化。",
@@ -256,6 +360,8 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
         "method": method,
         "direction": direction,
         "slope": _f(slope),
+        "slope_unit": "value_per_day",
+        "time_axis": time_axis,
         "seasonality_strength": seasonality_strength,
         "ma_window": ma_window,
         "n": n,
@@ -266,6 +372,8 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
             "resid": [_f(v) for v in resid],
         },
         "forecast": forecast,
+        "forecast_time": [timestamp.isoformat() for timestamp in future_timestamps],
+        "seasonality_period_days": _f(seasonality_period_days),
         "statistical_evidence": build_statistical_evidence(
             analysis_kind="trend",
             method=method,
@@ -273,6 +381,8 @@ def trend_analysis(args: dict[str, Any]) -> dict[str, Any]:
             valid_rows=n,
             assumptions=[
                 "有效记录按时间升序排列，缺失的时间或指标记录按完整案例剔除。",
+                "斜率按距首个有效时间点的自然日数拟合，重复时间点保留为同一时间上的独立观测。",
+                "探索性外推优先沿用可推断的日历频率；不规则序列使用相邻唯一时间点间隔的中位数作为固定步长。",
                 "趋势方法假定当前时间粒度和用户指定周期适用于所选序列。",
             ],
             limitations=limitations,
@@ -563,7 +673,9 @@ def anomaly_detect(args: dict[str, Any]) -> dict[str, Any]:
         anomalies 按 score 降序，全量返回供前端渲染（红线1：明细仅到前端）。
     """
     method: str = args.get("method", "iqr")
-    series, labels, total_rows = _ordered_series(args, require_time=(method == "stl"))
+    series, labels, total_rows, _ = _ordered_series(
+        args, require_time=(method == "stl")
+    )
     y = series.to_numpy()
     n = len(y)
 
@@ -923,17 +1035,23 @@ def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
     _require_columns(df, [dimension_col, value_col])
     data = df[[dimension_col, value_col]].copy()
     data[value_col] = _numeric(data[value_col], value_col)
-    data = data.dropna(subset=[dimension_col, value_col])
-    if len(data) < _MIN_POINTS:
-        raise ValueError(f"有效样本量不足（{len(data)} < {_MIN_POINTS}），无法计算维度贡献")
-    if method == "sum" and bool((data[value_col] < 0).any()):
+    data = data.dropna(subset=[dimension_col])
+    valid_value_count = int(data[value_col].notna().sum())
+    if valid_value_count < _MIN_POINTS:
+        raise ValueError(
+            f"有效样本量不足（{valid_value_count} < {_MIN_POINTS}），无法计算维度贡献"
+        )
+    if method == "sum" and bool((data[value_col].dropna() < 0).any()):
         raise ValueError("sum 贡献要求度量值非负；含负值时贡献份额不可解释")
 
     raw_groups: list[GroupAgg] = []
     for key, frame in data.groupby(dimension_col, dropna=False, sort=False):
-        value = float(frame[value_col].sum()) if method == "sum" else float(len(frame))
-        raw_groups.append(GroupAgg(_plain(key), value, len(frame)))
-    total_value = sum(group.value for group in raw_groups)
+        valid = frame[value_col].dropna()
+        value = float(valid.sum()) if method == "sum" else float(len(valid))
+        raw_groups.append(
+            GroupAgg(_plain(key), value, len(valid), row_count=len(frame))
+        )
+    total_value = sum(_required_group_value(group) for group in raw_groups)
     if total_value <= 0:
         raise ValueError("贡献总量必须大于 0")
 
@@ -945,21 +1063,23 @@ def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
         mode=policy.small_group_mode,
         other_label=policy.other_label,
     )
-    protected.sort(key=lambda group: group.value, reverse=True)
+    protected.sort(key=_required_group_value, reverse=True)
     shown = protected[:limit]
     groups = [
         {
             "dimension": _plain(group.key),
-            "value": _f(group.value),
+            "value": _f(_required_group_value(group)),
             "count": group.count,
-            "share": _f(group.value / total_value),
+            "row_count": group.source_row_count,
+            "valid_value_count": group.count,
+            "share": _f(_required_group_value(group) / total_value),
             "rank": rank,
             "protected": not any(group is raw_group for raw_group in raw_groups),
         }
         for rank, group in enumerate(shown, 1)
     ]
     small = [group for group in raw_groups if group.count < policy.small_group_min_size]
-    returned_share = sum(group.value for group in shown) / total_value
+    returned_share = sum(_required_group_value(group) for group in shown) / total_value
     return {
         "method": method,
         "dimension_col": dimension_col,
@@ -973,13 +1093,13 @@ def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
             "minimum_group_size": policy.small_group_min_size,
             "mode": policy.small_group_mode,
             "protected_group_count": len(small),
-            "protected_row_count": sum(group.count for group in small),
+            "protected_row_count": sum(group.source_row_count for group in small),
         },
         "statistical_evidence": build_statistical_evidence(
             analysis_kind="contribution",
             method=method,
             total_rows=total_rows,
-            valid_rows=len(data),
+            valid_rows=valid_value_count,
             assumptions=[
                 "维度和度量缺失记录按完整案例剔除。",
                 "贡献份额仅对可加总的非负 sum 或非空记录 count 定义。",
@@ -990,6 +1110,13 @@ def dimension_contribution(args: dict[str, Any]) -> dict[str, Any]:
             ],
         ),
     }
+def _required_group_value(group: GroupAgg) -> float:
+    """Narrow protected stats groups, which are never allowed to carry NULL values."""
+    if group.value is None:
+        raise ValueError("统计分组缺少有效聚合值")
+    return group.value
+
+
 
 
 # ── 分群比较 ──
@@ -1040,22 +1167,26 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
     _require_columns(df, [group_col, value_col])
     data = df[[group_col, value_col]].copy()
     data[value_col] = _numeric(data[value_col], value_col)
-    data = data.dropna(subset=[group_col, value_col])
+    data = data.dropna(subset=[group_col])
 
     policy = resolve_policy(dataset_ref)
     comparison_minimum = max(2, policy.small_group_min_size)
     raw_groups = [
-        (_plain(key), frame[value_col].to_numpy(dtype=float))
+        (
+            _plain(key),
+            frame[value_col].dropna().to_numpy(dtype=float),
+            len(frame),
+        )
         for key, frame in data.groupby(group_col, dropna=False, sort=False)
     ]
     eligible = [
-        (key, sample)
-        for key, sample in raw_groups
+        (key, sample, row_count)
+        for key, sample, row_count in raw_groups
         if len(sample) >= comparison_minimum
     ]
     protected = [
-        (key, sample)
-        for key, sample in raw_groups
+        (key, sample, row_count)
+        for key, sample, row_count in raw_groups
         if len(sample) < comparison_minimum
     ]
     if len(eligible) < 2:
@@ -1064,13 +1195,13 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"可比较群体过多（{len(eligible)} > {_MAX_COMPARISON_GROUPS}），请先明确分析范围"
         )
-    samples = [sample for _, sample in eligible]
+    samples = [sample for _, sample, _ in eligible]
     if any(float(np.var(sample, ddof=1)) <= 0 for sample in samples):
         raise ValueError("分群比较要求每个纳入群体都具有非零组内方差")
     used_rows = sum(len(sample) for sample in samples)
 
     summaries: list[dict[str, Any]] = []
-    for key, sample in eligible:
+    for key, sample, row_count in eligible:
         mean = float(np.mean(sample))
         std = float(np.std(sample, ddof=1))
         sem = std / math.sqrt(len(sample))
@@ -1079,6 +1210,8 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
             {
                 "group": key,
                 "count": len(sample),
+                "row_count": row_count,
+                "valid_value_count": len(sample),
                 "mean": _f(mean),
                 "std": _f(std),
                 "median": _f(np.median(sample)),
@@ -1109,7 +1242,7 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     raw_pairs: list[tuple[Any, Any, np.ndarray, np.ndarray, float, float]] = []
-    for (left_key, left), (right_key, right) in combinations(eligible, 2):
+    for (left_key, left, _), (right_key, right, _) in combinations(eligible, 2):
         statistic, p_value = scipy_stats.ttest_ind(left, right, equal_var=False)
         raw_pairs.append(
             (left_key, right_key, left, right, float(statistic), float(p_value))
@@ -1141,7 +1274,7 @@ def group_compare(args: dict[str, Any]) -> dict[str, Any]:
             "minimum_group_size": comparison_minimum,
             "mode": "drop",
             "protected_group_count": len(protected),
-            "protected_row_count": sum(len(sample) for _, sample in protected),
+            "protected_row_count": sum(row_count for _, _, row_count in protected),
         },
         "statistical_evidence": build_statistical_evidence(
             analysis_kind="group_comparison",

@@ -149,7 +149,7 @@ test("Compose 完成上传、计划、MCP、Evidence、报告与 PDF 下载", as
   await page.getByRole("button", { name: "进入工作区" }).click();
   await expect(page.getByRole("button", { name: "我的分析项目" })).toBeVisible();
 
-  const uploadButton = page.getByRole("button", { name: "上传 Excel", exact: true });
+  const uploadButton = page.getByRole("button", { name: "上传表格", exact: true });
   await expect(uploadButton).toBeEnabled();
   const fixture = path.resolve("../../.data/e2e/sales.xlsx");
   const fileChooserPromise = page.waitForEvent("filechooser");
