@@ -137,4 +137,8 @@ def retriever_dep() -> HybridRetriever:
         kb_store_dep(),
         reranker_dep(),
         min_relevance=get_settings().rag_min_relevance,
+        max_concurrent_queries=get_settings().rag_max_concurrent_queries,
+        max_queued_queries=get_settings().rag_max_queued_queries,
+        queue_timeout_seconds=get_settings().rag_query_queue_timeout_seconds,
+        max_query_chars=get_settings().rag_max_query_chars,
     )

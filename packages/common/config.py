@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # API 身份边界。开发环境可显式关闭；staging/production 必须使用 Bearer。
     auth_mode: Literal["disabled", "bearer"] = "disabled"
     auth_tokens_json: str = ""
+    auth_tokens_file: str = ""
     auth_default_user_id: str = "local-user"
     auth_default_tenant_id: str = "local"
 
@@ -86,7 +87,8 @@ class Settings(BaseSettings):
     # 当前交付边界为单机本地数据集存储；未接线的 Redis/Postgres/MinIO 配置已删除。
     dataset_dir: str = ".data/datasets"
     upload_dir: str = ".data/uploads"
-    max_upload_mb: int = 50  # 上传文件大小上限（超限 413，防内存 DoS）
+    max_upload_mb: int = Field(default=50, ge=1, le=1024)
+    upload_multipart_overhead_mb: int = Field(default=1, ge=1, le=16)
     report_dir: str = ".data/reports"  # 报告与图表截图落盘目录
     report_temp_grace_seconds: int = Field(default=3600, ge=0)
 
@@ -116,6 +118,10 @@ class Settings(BaseSettings):
     embedding_device: Literal["auto", "cpu", "cuda"] = "auto"
     rag_min_relevance: float = Field(default=0.0, ge=0.0, le=1.0)
     embedding_dim: int = Field(default=256, gt=0)
+    rag_max_concurrent_queries: int = Field(default=2, ge=1, le=32)
+    rag_max_queued_queries: int = Field(default=4, ge=0, le=64)
+    rag_query_queue_timeout_seconds: float = Field(default=5.0, ge=0.01, le=60)
+    rag_max_query_chars: int = Field(default=2_000, ge=1, le=20_000)
     kb_index_dir: str = ".data/kb_index"  # 本地知识库索引落盘目录
     kb_docs_dir: str = "docs/kb_samples"  # 受信导入/初始种子目录，不是运行时事实源
     kb_source_dir: str = ".data/kb_sources"  # 运行时原文事实源（独立备份）
@@ -131,6 +137,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_rag_profile(self) -> Settings:
         """拒绝不安全身份配置及会静默丢能力的 RAG 后端组合。"""
+        auth_tokens_from_file = bool(self.auth_tokens_file.strip())
+        direct_service_token = bool(self.agent_mcp_service_token.strip())
+        direct_service_tokens_provided = bool(self.agent_mcp_service_tokens_json.strip())
+        direct_context_signing_key = bool(self.agent_mcp_context_signing_key.strip())
+        self.auth_tokens_json = _resolve_secret(
+            value=self.auth_tokens_json,
+            file_path=self.auth_tokens_file,
+            label="API Bearer token registry",
+        )
         parse_capability_profiles(self.agent_capability_profiles)
         self.agent_mcp_service_token = _resolve_secret(
             value=self.agent_mcp_service_token,
@@ -170,8 +185,20 @@ class Settings(BaseSettings):
         deployed_api = deployed and self.process_role == "api"
         if deployed_api and self.auth_mode != "bearer":
             raise ValueError("staging/production 必须启用 AUTH_MODE=bearer")
+        if deployed_api and not auth_tokens_from_file:
+            raise ValueError("staging/production 必须通过 AUTH_TOKENS_FILE 注入认证 registry")
         if self.auth_mode == "bearer" and not self.auth_tokens_json.strip():
             raise ValueError("AUTH_MODE=bearer 时 AUTH_TOKENS_JSON 不能为空")
+        if deployed_api:
+            _validate_deployed_auth_tokens(self.auth_tokens_json)
+            if direct_service_token or direct_service_tokens_provided:
+                raise ValueError(
+                    "staging/production 必须通过 MCP 服务令牌文件注入，禁止直接值"
+                )
+            if direct_context_signing_key:
+                raise ValueError(
+                    "staging/production 必须通过 MCP 请求上下文签名密钥文件注入"
+                )
         if not self.auth_default_user_id.strip() or not self.auth_default_tenant_id.strip():
             raise ValueError("默认认证主体和租户不能为空")
         if (self.rag_embedder == "bge") != (self.rag_store == "milvus"):
@@ -274,3 +301,38 @@ def _read_secret_file(file_path: str, *, label: str) -> str:
     if not value:
         raise ValueError(f"{label}文件不能为空")
     return value
+
+
+def _validate_deployed_auth_tokens(raw: str) -> None:
+    """Reject weak or placeholder bearer tokens before a deployed API starts."""
+    try:
+        records = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("AUTH_TOKENS_FILE 不是合法 JSON") from exc
+    if not isinstance(records, dict) or not records:
+        raise ValueError("AUTH_TOKENS_FILE 必须是非空 JSON 对象")
+    forbidden_markers = (
+        "change-me",
+        "not-for-production",
+        "replace-with",
+        "local-e2e",
+        "example-secret",
+    )
+    for token, item in records.items():
+        if not isinstance(token, str) or len(token) < 32:
+            raise ValueError("生产认证 token 至少需要 32 个字符")
+        if any(marker in token.lower() for marker in forbidden_markers):
+            raise ValueError("生产认证 token 不能使用示例或测试占位值")
+        if not isinstance(item, dict):
+            raise ValueError("生产认证主体记录必须是对象")
+        user_id = item.get("user_id")
+        tenant_id = item.get("tenant_id")
+        roles = item.get("roles", [])
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("生产认证主体 user_id 不能为空")
+        if not isinstance(tenant_id, str) or not tenant_id.strip():
+            raise ValueError("生产认证主体 tenant_id 不能为空")
+        if not isinstance(roles, list) or not all(
+            isinstance(role, str) and role.strip() for role in roles
+        ):
+            raise ValueError("生产认证主体 roles 必须是非空字符串数组")

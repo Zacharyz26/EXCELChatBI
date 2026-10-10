@@ -4,6 +4,22 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+source scripts/compose_test_env.sh
+
+compose=()
+cleanup() {
+  status=$?
+  if ((${#compose[@]} > 0)); then
+    if [ "$status" -ne 0 ]; then
+      "${compose[@]}" logs --no-color || true
+    fi
+    "${compose[@]}" down --volumes --remove-orphans || true
+  fi
+  cleanup_compose_test_secrets
+  exit "$status"
+}
+trap cleanup EXIT
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker CLI is required for the Compose recovery gate." >&2
   exit 127
@@ -12,17 +28,7 @@ fi
 project_name="${CHATBI_COMPOSE_PROJECT_NAME:-chatbi-e2e}"
 image_tag="${CHATBI_IMAGE_TAG:-local}"
 compose=(docker compose -p "$project_name" -f compose.yaml -f compose.e2e.yaml)
-auth_header="Authorization: Bearer chatbi-local-e2e-token-00000001"
-
-cleanup() {
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    "${compose[@]}" logs --no-color || true
-  fi
-  "${compose[@]}" down --volumes --remove-orphans || true
-  exit "$status"
-}
-trap cleanup EXIT
+auth_header="Authorization: Bearer chatbi-ci-user-token-20261010-00000001"
 
 wait_for_application() {
   phase="$1"

@@ -28,6 +28,9 @@ DEFAULT_QUERIES = (
     "次日留存率应该怎样计算？",
     "转化率的统计口径是什么？",
 )
+MAX_REQUESTS = 1_000
+MAX_CONCURRENCY = 32
+MAX_WARMUP = 10
 
 
 def _build_retriever() -> HybridRetriever:
@@ -66,6 +69,10 @@ def _build_retriever() -> HybridRetriever:
         store,
         reranker,
         min_relevance=settings.rag_min_relevance,
+        max_concurrent_queries=settings.rag_max_concurrent_queries,
+        max_queued_queries=settings.rag_max_queued_queries,
+        queue_timeout_seconds=settings.rag_query_queue_timeout_seconds,
+        max_query_chars=settings.rag_max_query_chars,
     )
 
 
@@ -85,6 +92,16 @@ def _query_once(retriever: HybridRetriever, query: str) -> dict[str, Any]:
     }
 
 
+def validate_load_shape(requests: int, concurrency: int, warmup: int) -> None:
+    """Reject load shapes that could accidentally exhaust a developer machine."""
+    if not 1 <= requests <= MAX_REQUESTS:
+        raise ValueError(f"requests 必须在 1 到 {MAX_REQUESTS} 之间")
+    if not 1 <= concurrency <= MAX_CONCURRENCY:
+        raise ValueError(f"concurrency 必须在 1 到 {MAX_CONCURRENCY} 之间")
+    if not 0 <= warmup <= MAX_WARMUP:
+        raise ValueError(f"warmup 必须在 0 到 {MAX_WARMUP} 之间")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="知识库只读并发检索冒烟")
     parser.add_argument("--requests", type=int, default=20)
@@ -95,7 +112,11 @@ def main() -> int:
     parser.add_argument("--allow-empty", action="store_true")
     parser.add_argument("--json-output", help="报告路径；'-' 表示 stdout", default="-")
     args = parser.parse_args()
-    if args.requests < 1 or args.concurrency < 1 or args.warmup < 0 or args.max_p95_ms <= 0:
+    try:
+        validate_load_shape(args.requests, args.concurrency, args.warmup)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.max_p95_ms <= 0:
         parser.error("requests、concurrency、max-p95-ms 必须大于 0，warmup 不得小于 0")
 
     retriever = _build_retriever()

@@ -1,7 +1,7 @@
 # 全栈部署与真实 E2E
 
 > 状态：现行根 Compose 与真实 E2E 运维说明；v2.4 阶段 2E、v2.5 阶段 3–6 的
-> Compose 工程门禁已关闭 · 更新日期：2026-08-24
+> Compose 工程门禁已关闭 · 更新日期：2026-10-10
 > 本文描述全栈生产结构；若只需 Docker Milvus + 本机单实例 BGE，请改用
 > [`本地完整BGE与Milvus启动指南.md`](./本地完整BGE与Milvus启动指南.md)。
 
@@ -20,7 +20,7 @@
 ```
 
 - 默认只发布 Web；API 和 `/mcp` 均无宿主端口；
-- API 使用 Bearer 登录，默认 token `chatbi-local-e2e-token-00000001` 只用于本地启动；
+- API 使用 Bearer 登录；生产 Compose 要求从显式 `AUTH_TOKENS_FILE_PATH` 提供 token 注册表；
 - 五个 MCP 服务各自使用独立 Bearer secret，并共同校验另一个上下文 HMAC secret；
 - `storage-init` 先完成 SQLite 迁移和卷初始化，工具 readiness 全部通过后才启动 API；
 - SQLite、upload、dataset、artifact、workspace-backup、KB 是六个独立卷。
@@ -30,26 +30,27 @@
 - Python 容器非 root、只读根文件系统、drop all capabilities、禁止提权并带 CPU/内存/PID
   上限；服务退出有有界宽限期。
 
-本地空环境可直接运行：
+根 Compose 不再内置可预测凭据。本地合成 E2E 请使用脚本；它会在临时目录生成并清理测试
+secret：
 
 ```bash
-docker compose up --build -d
-docker compose ps
-curl --fail http://127.0.0.1:8080/api/health/ready
+./scripts/run_compose_e2e.sh
 ```
-
-打开 `http://127.0.0.1:8080`。仓库内 `deploy/secrets/*.dev` 是公开开发凭据，只为满足
-一条命令启动，绝不能用于 staging/production。
 
 生产部署：
 
 ```bash
 cp deploy/.env.production.example deploy/.env.production
-# 创建六个独立 secret 文件，并把 *_FILE_PATH 改成真实绝对路径；
-# 同时替换 AUTH_TOKENS_JSON 与模型供应商 secret。
+# 创建七个独立 secret 文件，并把全部 *_FILE_PATH 改成宿主机上的真实绝对路径；
+# auth token 注册表格式见 deploy/secrets/README.md。
 docker compose --env-file deploy/.env.production up -d --build
 docker compose ps
 ```
+
+`MAX_UPLOAD_MB` 限制文件本身，默认 50 MiB；`UPLOAD_MULTIPART_OVERHEAD_MB` 为 multipart
+元数据保留包络，默认 1 MiB。API 在 Starlette 解析前按两者之和限制完整请求体，Nginx
+入口脚本计算相同的 `MAX_UPLOAD_BODY_MB`，避免合法边界文件仅因 multipart 开销被代理层
+提前拒绝。代理层和 API 层的超限响应均为 `{"detail":"文件过大（上限 50 MB）"}`。
 
 浏览器令牌只写入 `sessionStorage`。容器内服务地址使用 Docker DNS；不得把
 `127.0.0.1` 当作另一容器。Web 只代理 `/api/`，不会公开 `/mcp`。

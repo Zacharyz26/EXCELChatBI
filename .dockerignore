@@ -9,6 +9,7 @@
 .env.*
 !.env.example
 config/models.yaml
+deploy/secrets/*
 **/__pycache__
 **/*.py[cod]
 **/node_modules

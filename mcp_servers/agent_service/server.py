@@ -271,6 +271,10 @@ class AgentServiceRuntime:
                 HashingEmbedder(dim=settings.embedding_dim),
                 LocalKnowledgeStore("/tmp/chatbi-unused-kb"),
                 LexicalReranker(),
+                max_concurrent_queries=settings.rag_max_concurrent_queries,
+                max_queued_queries=settings.rag_max_queued_queries,
+                queue_timeout_seconds=settings.rag_query_queue_timeout_seconds,
+                max_query_chars=settings.rag_max_query_chars,
             )
         if settings.rag_embedder == "bge":
             embedder: Embedder = BGEEmbedder(
@@ -303,6 +307,10 @@ class AgentServiceRuntime:
             store,
             reranker,
             min_relevance=settings.rag_min_relevance,
+            max_concurrent_queries=settings.rag_max_concurrent_queries,
+            max_queued_queries=settings.rag_max_queued_queries,
+            queue_timeout_seconds=settings.rag_query_queue_timeout_seconds,
+            max_query_chars=settings.rag_max_query_chars,
         )
 
 

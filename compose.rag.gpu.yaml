@@ -3,10 +3,14 @@ services:
     environment:
       RAG_RUNTIME_PROFILE: gpu
       EMBEDDING_DEVICE: cuda
+      RAG_MAX_CONCURRENT_QUERIES: "2"
+      RAG_MAX_QUEUED_QUERIES: "2"
     gpus: all
 
   api:
     environment:
       RAG_RUNTIME_PROFILE: gpu
       EMBEDDING_DEVICE: cuda
+      RAG_MAX_CONCURRENT_QUERIES: "2"
+      RAG_MAX_QUEUED_QUERIES: "2"
     gpus: all

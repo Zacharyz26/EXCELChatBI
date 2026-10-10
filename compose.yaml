@@ -33,6 +33,10 @@ x-mcp-environment: &mcp-environment
   RAG_STORE: local
   RAG_RUNTIME_PROFILE: baseline
   CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
+  RAG_MAX_CONCURRENT_QUERIES: ${RAG_MAX_CONCURRENT_QUERIES:-2}
+  RAG_MAX_QUEUED_QUERIES: ${RAG_MAX_QUEUED_QUERIES:-4}
+  RAG_QUERY_QUEUE_TIMEOUT_SECONDS: ${RAG_QUERY_QUEUE_TIMEOUT_SECONDS:-5}
+  RAG_MAX_QUERY_CHARS: ${RAG_MAX_QUERY_CHARS:-2000}
   WORKSPACE_BACKUP_DIR: /var/lib/chatbi/backups
   DATASET_DIR: /var/lib/chatbi/datasets
   REPORT_DIR: /var/lib/chatbi/artifacts
@@ -184,7 +188,7 @@ services:
       PROCESS_ROLE: api
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTH_MODE: bearer
-      AUTH_TOKENS_JSON: '${AUTH_TOKENS_JSON:-{"chatbi-local-e2e-token-00000001":{"user_id":"local-user","tenant_id":"local","roles":["kb_admin"]}}}'
+      AUTH_TOKENS_FILE: /run/secrets/api_auth_tokens
       MODEL_REGISTRY_PATH: ${MODEL_REGISTRY_PATH:-config/models.example.yaml}
       DEEPSEEK_API_BASE: ${DEEPSEEK_API_BASE:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -193,10 +197,16 @@ services:
       RAG_STORE: ${RAG_STORE:-local}
       RAG_RUNTIME_PROFILE: ${RAG_RUNTIME_PROFILE:-baseline}
       CHAT_DB_PATH: /var/lib/chatbi/db/chatbi.db
+      RAG_MAX_CONCURRENT_QUERIES: ${RAG_MAX_CONCURRENT_QUERIES:-2}
+      RAG_MAX_QUEUED_QUERIES: ${RAG_MAX_QUEUED_QUERIES:-4}
+      RAG_QUERY_QUEUE_TIMEOUT_SECONDS: ${RAG_QUERY_QUEUE_TIMEOUT_SECONDS:-5}
+      RAG_MAX_QUERY_CHARS: ${RAG_MAX_QUERY_CHARS:-2000}
       WORKSPACE_BACKUP_DIR: /var/lib/chatbi/backups
       UPLOAD_DIR: /var/lib/chatbi/uploads
       DATASET_DIR: /var/lib/chatbi/datasets
       REPORT_DIR: /var/lib/chatbi/artifacts
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      UPLOAD_MULTIPART_OVERHEAD_MB: ${UPLOAD_MULTIPART_OVERHEAD_MB:-1}
       KB_INDEX_DIR: /var/lib/chatbi/kb/index
       KB_SOURCE_DIR: /var/lib/chatbi/kb/sources
       KB_BACKUP_DIR: /var/lib/chatbi/kb/backups
@@ -250,6 +260,7 @@ services:
     cpus: 2
     mem_limit: 3g
     secrets:
+      - api_auth_tokens
       - mcp_context_signing_key
       - mcp_data_token
       - mcp_stats_token
@@ -263,6 +274,9 @@ services:
       dockerfile: apps/web/Dockerfile
       target: web
     image: chatbi-web:${CHATBI_IMAGE_TAG:-local}
+    environment:
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      UPLOAD_MULTIPART_OVERHEAD_MB: ${UPLOAD_MULTIPART_OVERHEAD_MB:-1}
     restart: unless-stopped
     init: true
     security_opt:
@@ -304,15 +318,17 @@ volumes:
   chatbi-model-cache:
 
 secrets:
+  api_auth_tokens:
+    file: ${AUTH_TOKENS_FILE_PATH:?set AUTH_TOKENS_FILE_PATH}
   mcp_context_signing_key:
-    file: ${MCP_CONTEXT_SIGNING_KEY_FILE_PATH:-./deploy/secrets/mcp_context_signing_key.dev}
+    file: ${MCP_CONTEXT_SIGNING_KEY_FILE_PATH:?set MCP_CONTEXT_SIGNING_KEY_FILE_PATH}
   mcp_data_token:
-    file: ${MCP_DATA_TOKEN_FILE_PATH:-./deploy/secrets/mcp_data_token.dev}
+    file: ${MCP_DATA_TOKEN_FILE_PATH:?set MCP_DATA_TOKEN_FILE_PATH}
   mcp_stats_token:
-    file: ${MCP_STATS_TOKEN_FILE_PATH:-./deploy/secrets/mcp_stats_token.dev}
+    file: ${MCP_STATS_TOKEN_FILE_PATH:?set MCP_STATS_TOKEN_FILE_PATH}
   mcp_chart_token:
-    file: ${MCP_CHART_TOKEN_FILE_PATH:-./deploy/secrets/mcp_chart_token.dev}
+    file: ${MCP_CHART_TOKEN_FILE_PATH:?set MCP_CHART_TOKEN_FILE_PATH}
   mcp_report_token:
-    file: ${MCP_REPORT_TOKEN_FILE_PATH:-./deploy/secrets/mcp_report_token.dev}
+    file: ${MCP_REPORT_TOKEN_FILE_PATH:?set MCP_REPORT_TOKEN_FILE_PATH}
   mcp_knowledge_token:
-    file: ${MCP_KNOWLEDGE_TOKEN_FILE_PATH:-./deploy/secrets/mcp_knowledge_token.dev}
+    file: ${MCP_KNOWLEDGE_TOKEN_FILE_PATH:?set MCP_KNOWLEDGE_TOKEN_FILE_PATH}

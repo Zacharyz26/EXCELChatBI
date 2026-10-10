@@ -1741,36 +1741,53 @@ async def test_managed_gateway_fallback_is_explicit_read_only_and_fail_closed_on
     assert auth_error.value.code == "mcp_authentication_failed"
 
 
-def test_deployed_settings_require_authenticated_streamable_http_without_fallback() -> None:
+def test_deployed_settings_require_authenticated_streamable_http_without_fallback(
+    tmp_path: Path,
+) -> None:
+    auth_registry = tmp_path / "api-auth.json"
+    auth_registry.write_text(
+        '{"production-auth-token-000000000001":{"user_id":"u","tenant_id":"t"}}',
+        encoding="utf-8",
+    )
+    service_token = tmp_path / "service.token"
+    service_token.write_text("internal-service-secret", encoding="utf-8")
+    signing_key = tmp_path / "context.key"
+    signing_key.write_text("context-signing-secret", encoding="utf-8")
+    base = {
+        "_env_file": None,
+        "app_env": "production",
+        "auth_mode": "bearer",
+        "auth_tokens_file": str(auth_registry),
+    }
+
     with pytest.raises(ValueError, match="Streamable HTTP"):
-        Settings(
-            _env_file=None,
-            app_env="production",
-            auth_mode="bearer",
-            auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
-        )
+        Settings(**base)
 
     settings = Settings(
-        _env_file=None,
-        app_env="production",
-        auth_mode="bearer",
-        auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
+        **base,
         agent_mcp_transport="streamable_http",
         agent_mcp_http_url="http://agent-tools:8000/mcp/",
-        agent_mcp_service_token="internal-secret",
-        agent_mcp_context_signing_key="context-secret",
+        agent_mcp_service_token_file=str(service_token),
+        agent_mcp_context_signing_key_file=str(signing_key),
     )
     assert settings.agent_mcp_transport == "streamable_http"
 
-    with pytest.raises(ValueError, match="禁止降级"):
+    with pytest.raises(ValueError, match="AUTH_TOKENS_FILE"):
         Settings(
-            _env_file=None,
-            app_env="production",
-            auth_mode="bearer",
-            auth_tokens_json='{"token":{"user_id":"u","tenant_id":"t"}}',
+            **{key: value for key, value in base.items() if key != "auth_tokens_file"},
+            auth_tokens_json=auth_registry.read_text(encoding="utf-8"),
             agent_mcp_transport="streamable_http",
             agent_mcp_http_url="http://agent-tools:8000/mcp/",
-            agent_mcp_service_token="internal-secret",
-            agent_mcp_context_signing_key="context-secret",
+            agent_mcp_service_token_file=str(service_token),
+            agent_mcp_context_signing_key_file=str(signing_key),
+        )
+
+    with pytest.raises(ValueError, match="禁止降级"):
+        Settings(
+            **base,
+            agent_mcp_transport="streamable_http",
+            agent_mcp_http_url="http://agent-tools:8000/mcp/",
+            agent_mcp_service_token_file=str(service_token),
+            agent_mcp_context_signing_key_file=str(signing_key),
             agent_mcp_allow_in_process_fallback=True,
         )

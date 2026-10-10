@@ -3,8 +3,12 @@ services:
     environment:
       RAG_RUNTIME_PROFILE: cpu
       EMBEDDING_DEVICE: cpu
+      RAG_MAX_CONCURRENT_QUERIES: "1"
+      RAG_MAX_QUEUED_QUERIES: "1"
 
   api:
     environment:
       RAG_RUNTIME_PROFILE: cpu
       EMBEDDING_DEVICE: cpu
+      RAG_MAX_CONCURRENT_QUERIES: "1"
+      RAG_MAX_QUEUED_QUERIES: "1"

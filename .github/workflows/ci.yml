@@ -22,6 +22,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Scan tracked files for secrets
+        run: python scripts/scan_tracked_secrets.py
+
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
@@ -202,6 +205,8 @@ jobs:
 
       - name: Validate production and E2E Compose
         run: |
+          source scripts/compose_test_env.sh
+          trap cleanup_compose_test_secrets EXIT
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.yaml -f compose.e2e.yaml config --quiet
 
@@ -212,6 +217,8 @@ jobs:
 
       - name: Validate CPU and GPU RAG Compose profiles
         run: |
+          source scripts/compose_test_env.sh
+          trap cleanup_compose_test_secrets EXIT
           docker compose -f compose.yaml -f compose.rag.yaml -f compose.rag.cpu.yaml --profile rag config --quiet
           docker compose -f compose.yaml -f compose.rag.yaml -f compose.rag.gpu.yaml --profile rag config --quiet
         env:

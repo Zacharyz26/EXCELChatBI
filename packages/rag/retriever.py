@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
+from threading import BoundedSemaphore
 
 from packages.common.logging import get_logger
 from packages.rag.embedding import Embedder
@@ -21,6 +22,10 @@ _RRF_K = 60
 # 真实阈值走配置 RAG_MIN_RELEVANCE，按 reranker 分数分布标定（见验收基线文档）。
 _MIN_RELEVANCE = 0.0
 _log = get_logger("rag.retriever")
+
+
+class RetrievalCapacityError(RuntimeError):
+    """Raised when bounded retrieval capacity cannot accept another query."""
 
 
 @dataclass(frozen=True)
@@ -64,11 +69,33 @@ class HybridRetriever:
         reranker: Reranker,
         *,
         min_relevance: float = _MIN_RELEVANCE,
+        max_concurrent_queries: int = 4,
+        max_queued_queries: int = 4,
+        queue_timeout_seconds: float = 5.0,
+        max_query_chars: int = 2_000,
     ) -> None:
+        if max_concurrent_queries < 1:
+            raise ValueError("max_concurrent_queries 必须大于 0")
+        if max_queued_queries < 0:
+            raise ValueError("max_queued_queries 不能小于 0")
+        if queue_timeout_seconds <= 0:
+            raise ValueError("queue_timeout_seconds 必须大于 0")
+        if max_query_chars < 1:
+            raise ValueError("max_query_chars 必须大于 0")
         self.embedder = embedder
         self.store = store
         self._reranker = reranker
         self._min_relevance = min_relevance
+        self.max_concurrent_queries = max_concurrent_queries
+        self.max_queued_queries = max_queued_queries
+        self.queue_timeout_seconds = queue_timeout_seconds
+        self.max_query_chars = max_query_chars
+        self._admission = BoundedSemaphore(
+            max_concurrent_queries + max_queued_queries
+        )
+        self._capacity = BoundedSemaphore(max_concurrent_queries)
+        self._queue_timeout_seconds = queue_timeout_seconds
+        self._max_query_chars = max_query_chars
 
     def retrieve(self, query: str, top_k: int = 5) -> RetrievalResult:
         """混合检索并重排，返回带来源的片段。
@@ -76,8 +103,25 @@ class HybridRetriever:
         无命中时 `is_empty=True`，上层须如实告知"知识库无相关内容"。
         重排分数写回命中项 score，供阈值标定与观测。
         """
-        with self.store.retrieval_snapshot():
-            return self._retrieve_snapshot(query, top_k)
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("检索 query 不能为空")
+        if len(clean_query) > self._max_query_chars:
+            raise ValueError(f"检索 query 长度不能超过 {self._max_query_chars} 字符")
+        if not 1 <= top_k <= 10:
+            raise ValueError("检索 top_k 必须在 1 到 10 之间")
+        if not self._admission.acquire(blocking=False):
+            raise RetrievalCapacityError("知识检索等待队列已满，请稍后重试")
+        try:
+            if not self._capacity.acquire(timeout=self._queue_timeout_seconds):
+                raise RetrievalCapacityError("知识检索并发等待超时，请稍后重试")
+            try:
+                with self.store.retrieval_snapshot():
+                    return self._retrieve_snapshot(clean_query, top_k)
+            finally:
+                self._capacity.release()
+        finally:
+            self._admission.release()
 
     def _retrieve_snapshot(self, query: str, top_k: int) -> RetrievalResult:
         """在同一个存储代际中完成计数、双路召回与重排。"""

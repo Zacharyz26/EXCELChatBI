@@ -51,15 +51,17 @@ def test_upload_filename_traversal_is_basenamed(tmp_path: Path) -> None:
 
 def test_upload_oversize_rejected(tmp_path: Path) -> None:
     up = tmp_path / "uploads"
-    # 上限设为 0 → 任何非空文件都应 413，且不留半成品
-    app.dependency_overrides[settings_dep] = lambda: Settings(upload_dir=str(up), max_upload_mb=0)
+    app.dependency_overrides[settings_dep] = lambda: Settings(
+        upload_dir=str(up), max_upload_mb=1
+    )
     try:
         client = TestClient(app)
         resp = client.post(
             "/upload/excel",
-            files={"file": ("ok.xlsx", _xlsx_bytes(), _XLSX_CT)},
+            files={"file": ("oversize.xlsx", b"x" * (1024 * 1024 + 1), _XLSX_CT)},
         )
         assert resp.status_code == 413, resp.text
+        assert resp.json() == {"detail": "文件过大（上限 1 MB）"}
         assert not up.exists() or list(up.glob("*")) == []  # 无残留半成品
     finally:
         app.dependency_overrides.clear()

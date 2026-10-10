@@ -62,10 +62,14 @@ def test_cpu_gpu_profiles_share_semantic_contract_and_fail_closed_devices() -> N
         assert cpu_service["environment"] == {
             "RAG_RUNTIME_PROFILE": "cpu",
             "EMBEDDING_DEVICE": "cpu",
+            "RAG_MAX_CONCURRENT_QUERIES": "1",
+            "RAG_MAX_QUEUED_QUERIES": "1",
         }
         assert gpu_service["environment"] == {
             "RAG_RUNTIME_PROFILE": "gpu",
             "EMBEDDING_DEVICE": "cuda",
+            "RAG_MAX_CONCURRENT_QUERIES": "2",
+            "RAG_MAX_QUEUED_QUERIES": "2",
         }
         assert gpu_service["gpus"] == "all"
 

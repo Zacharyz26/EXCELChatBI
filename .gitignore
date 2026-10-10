@@ -12,6 +12,9 @@ __pycache__/
 config/models.yaml
 config/*.local.yaml
 
+deploy/secrets/*
+!deploy/secrets/README.md
+!deploy/secrets/*.example
 # 本地代理/编辑器元数据
 .agents/
 .codex/

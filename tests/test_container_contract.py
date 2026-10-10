@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +30,17 @@ def test_web_image_is_non_root_and_preserves_sse_and_download_proxy() -> None:
     assert "location = /mcp" in nginx
     assert "location ^~ /mcp/" in nginx
     assert "try_files /index.html =503;" in nginx
+    assert "client_max_body_size ${MAX_UPLOAD_BODY_MB}m;" in nginx
+    assert 'return 413 \'{"detail":"文件过大（上限 ${MAX_UPLOAD_MB} MB）"}\';' in nginx
+    assert (
+        "COPY apps/web/nginx.conf /etc/nginx/templates/default.conf.template"
+        in dockerfile
+    )
+    assert "docker-entrypoint-upload-limit.sh" in dockerfile
+    assert (
+        'ENTRYPOINT ["/usr/local/bin/chatbi-web-entrypoint"]'
+        in dockerfile
+    )
 
 
 def test_build_context_excludes_local_state_and_secrets() -> None:
@@ -37,3 +50,78 @@ def test_build_context_excludes_local_state_and_secrets() -> None:
     assert ".env" in ignored
     assert "config/models.yaml" in ignored
     assert "**/node_modules" in ignored
+    assert "deploy/secrets/*" in ignored
+
+
+def test_compose_upload_limit_and_secret_inputs_fail_closed() -> None:
+    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    assert compose.count("MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}") == 2
+    assert compose.count("UPLOAD_MULTIPART_OVERHEAD_MB: ${UPLOAD_MULTIPART_OVERHEAD_MB:-1}") == 2
+    assert "AUTH_TOKENS_JSON:" not in compose
+    assert "AUTH_TOKENS_FILE: /run/secrets/api_auth_tokens" in compose
+    assert "chatbi-local-e2e-token" not in compose
+    assert ".dev}" not in compose
+    for variable in (
+        "AUTH_TOKENS_FILE_PATH",
+        "MCP_CONTEXT_SIGNING_KEY_FILE_PATH",
+        "MCP_DATA_TOKEN_FILE_PATH",
+        "MCP_STATS_TOKEN_FILE_PATH",
+        "MCP_CHART_TOKEN_FILE_PATH",
+        "MCP_REPORT_TOKEN_FILE_PATH",
+        "MCP_KNOWLEDGE_TOKEN_FILE_PATH",
+    ):
+        assert f"${{{variable}:?" in compose
+
+
+def test_web_upload_envelope_adds_bounded_multipart_headroom() -> None:
+    script = ROOT / "apps/web/docker-entrypoint-upload-limit.sh"
+    environment = {
+        **os.environ,
+        "MAX_UPLOAD_MB": "50",
+        "UPLOAD_MULTIPART_OVERHEAD_MB": "1",
+    }
+
+    completed = subprocess.run(
+        ["sh", str(script), "--print-upload-body-limit"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.stdout.strip() == "51"
+
+    environment["UPLOAD_MULTIPART_OVERHEAD_MB"] = "0"
+    rejected = subprocess.run(
+        ["sh", str(script), "--print-upload-body-limit"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert rejected.returncode == 2
+
+
+def test_compose_e2e_cleans_synthetic_secrets_when_docker_is_missing(
+    tmp_path: Path,
+) -> None:
+    secret_dir = tmp_path / "compose-secrets"
+    environment = {
+        **os.environ,
+        "PATH": "/usr/bin:/bin",
+        "CHATBI_COMPOSE_TEST_SECRET_DIR": str(secret_dir),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(ROOT / "scripts/run_compose_e2e.sh")],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 127
+    assert "Docker CLI is required" in completed.stderr
+    assert not secret_dir.exists()

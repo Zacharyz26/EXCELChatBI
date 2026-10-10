@@ -48,6 +48,8 @@ def auth_clients(
         auth_tokens_json=json.dumps(records),
         chat_db_path=str(tmp_path / "chatbi.db"),
         report_dir=str(tmp_path / "reports"),
+        upload_dir=str(tmp_path / "uploads"),
+        dataset_dir=str(tmp_path / "datasets"),
     )
     app.dependency_overrides[session_store_dep] = lambda: store
     app.dependency_overrides[settings_dep] = lambda: settings
@@ -135,6 +137,61 @@ def test_conversation_and_dataset_cannot_cross_project_boundary(
     )
 
 
+def test_upload_chat_and_chart_artifact_are_project_and_tenant_scoped(
+    auth_clients: tuple[TestClient, TestClient, TestClient, SessionStore],
+) -> None:
+    alice, bob, same_user_other_tenant, store = auth_clients
+    project = alice.post("/projects", json={"name": "Alice"}).json()
+    conversation = alice.post(
+        f"/projects/{project['id']}/conversations",
+        json={"title": "阶段 5 隔离"},
+    ).json()
+
+    for outsider in (bob, same_user_other_tenant):
+        upload = outsider.post(
+            "/upload/excel",
+            data={
+                "project_id": project["id"],
+                "conversation_id": conversation["id"],
+            },
+            files={
+                "file": (
+                    "synthetic.xlsx",
+                    b"not-read-before-authorization",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert upload.status_code == 404
+        assert outsider.post(
+            "/chat/stream",
+            json={
+                "conversation_id": conversation["id"],
+                "message": "读取该项目图表",
+            },
+        ).status_code == 404
+
+    message = store.append_message(
+        conversation_id=conversation["id"],
+        role="assistant",
+        content="合成图表",
+    )
+    chart = store.create_artifact(
+        conversation_id=conversation["id"],
+        message_id=message.id,
+        type="chart",
+        payload={"option": {"series": [{"data": [1, 2]}]}},
+        source_tool="gen_chart",
+    )
+    detail = alice.get(f"/conversations/{conversation['id']}")
+    assert detail.status_code == 200
+    assert [item["id"] for item in detail.json()["artifacts"]] == [chart.id]
+    assert bob.get(f"/conversations/{conversation['id']}").status_code == 404
+    assert same_user_other_tenant.get(
+        f"/conversations/{conversation['id']}"
+    ).status_code == 404
+
+
 def test_report_download_is_scoped_to_owning_project(
     auth_clients: tuple[TestClient, TestClient, TestClient, SessionStore],
     tmp_path: Path,
@@ -169,7 +226,7 @@ def test_report_download_is_scoped_to_owning_project(
 def test_task_control_write_is_project_scoped_and_idempotent(
     auth_clients: tuple[TestClient, TestClient, TestClient, SessionStore],
 ) -> None:
-    alice, bob, _, store = auth_clients
+    alice, bob, same_user_other_tenant, store = auth_clients
     project = alice.post("/projects", json={"name": "Alice"}).json()
     conversation = alice.post(
         f"/projects/{project['id']}/conversations",
@@ -294,6 +351,7 @@ def test_task_control_write_is_project_scoped_and_idempotent(
 
     reconnect_path = f"/agent/runs/{run.run_id}/stream"
     assert bob.get(reconnect_path).status_code == 404
+    assert same_user_other_tenant.get(reconnect_path).status_code == 404
     reconnect = alice.get(
         reconnect_path,
         headers={"Last-Event-ID": f"{run.run_id}:1"},

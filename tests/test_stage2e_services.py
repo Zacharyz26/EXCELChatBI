@@ -81,12 +81,17 @@ def test_production_routes_resolve_six_secret_files(tmp_path: Path) -> None:
         token_files[service] = str(path)
     signing_key = tmp_path / "context.key"
     signing_key.write_text("separate-context-key", encoding="utf-8")
+    auth_registry = tmp_path / "api-auth.json"
+    auth_registry.write_text(
+        '{"stage2e-production-auth-token-000001":{"user_id":"u","tenant_id":"t"}}',
+        encoding="utf-8",
+    )
 
     settings = Settings(
         _env_file=None,
         app_env="production",
         auth_mode="bearer",
-        auth_tokens_json='{"api":{"user_id":"u","tenant_id":"t"}}',
+        auth_tokens_file=str(auth_registry),
         agent_mcp_transport="streamable_http",
         agent_mcp_server_urls_json=json.dumps(urls),
         agent_mcp_service_token_files_json=json.dumps(token_files),
@@ -97,6 +102,22 @@ def test_production_routes_resolve_six_secret_files(tmp_path: Path) -> None:
         service: f"secret-{service}" for service in AGENT_MCP_SERVICES
     }
     assert settings.agent_mcp_context_signing_key == "separate-context-key"
+
+
+def test_knowledge_service_applies_rag_capacity_settings(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.rag_max_concurrent_queries = 1
+    settings.rag_max_queued_queries = 2
+    settings.rag_query_queue_timeout_seconds = 0.25
+    settings.rag_max_query_chars = 321
+    SessionStore(settings.chat_db_path)
+
+    runtime = AgentServiceRuntime("knowledge-tools", settings)
+
+    assert runtime.retriever.max_concurrent_queries == 1
+    assert runtime.retriever.max_queued_queries == 2
+    assert runtime.retriever.queue_timeout_seconds == 0.25
+    assert runtime.retriever.max_query_chars == 321
 
 
 async def test_registry_routes_each_partition_through_an_independent_gateway(

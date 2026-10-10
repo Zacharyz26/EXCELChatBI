@@ -14,10 +14,14 @@ RUN pnpm build
 
 FROM nginxinc/nginx-unprivileged:1.31.3-alpine3.24 AS web
 
-COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
+ENV MAX_UPLOAD_MB=50 \
+    UPLOAD_MULTIPART_OVERHEAD_MB=1
+COPY apps/web/nginx.conf /etc/nginx/templates/default.conf.template
+COPY --chmod=755 apps/web/docker-entrypoint-upload-limit.sh /usr/local/bin/chatbi-web-entrypoint
 COPY --from=web-builder /app/dist /usr/share/nginx/html
 
 USER 101:101
+ENTRYPOINT ["/usr/local/bin/chatbi-web-entrypoint"]
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
   CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]

@@ -36,6 +36,7 @@ from apps.api.routers import (
     workspace,
 )
 from apps.api.run_host import agent_run_manager
+from apps.api.upload_limits import UploadBodyLimitMiddleware
 
 _log = get_logger("api.lifecycle")
 _T = TypeVar("_T")
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(UploadBodyLimitMiddleware)
     app.include_router(health.router)
     app.include_router(auth_config.router)
     app.include_router(upload.router)
