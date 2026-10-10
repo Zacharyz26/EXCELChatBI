@@ -22,6 +22,7 @@ esac
 umask 077
 mkdir -p "$CHATBI_COMPOSE_TEST_SECRET_DIR"
 chmod 700 "$CHATBI_COMPOSE_TEST_SECRET_DIR"
+export CHATBI_COMPOSE_E2E_TOKEN="chatbi-ci-user-token-20261010-00000001"
 compose_test_secret_paths=(
   "$CHATBI_COMPOSE_TEST_SECRET_DIR/api-auth.json"
   "$CHATBI_COMPOSE_TEST_SECRET_DIR/context.key"
@@ -32,7 +33,8 @@ compose_test_secret_paths=(
   "$CHATBI_COMPOSE_TEST_SECRET_DIR/knowledge.token"
 )
 rm -f -- "${compose_test_secret_paths[@]}"
-printf '%s\n' '{"chatbi-ci-user-token-20261010-00000001":{"user_id":"local-user","tenant_id":"local","roles":["kb_admin"]}}' > "$CHATBI_COMPOSE_TEST_SECRET_DIR/api-auth.json"
+printf '{"%s":{"user_id":"local-user","tenant_id":"local","roles":["kb_admin"]}}\n' \
+  "$CHATBI_COMPOSE_E2E_TOKEN" > "$CHATBI_COMPOSE_TEST_SECRET_DIR/api-auth.json"
 printf '%s\n' 'ci-context-signing-key-20261010-00000001' > "$CHATBI_COMPOSE_TEST_SECRET_DIR/context.key"
 printf '%s\n' 'ci-data-service-token-20261010-00000001' > "$CHATBI_COMPOSE_TEST_SECRET_DIR/data.token"
 printf '%s\n' 'ci-stats-service-token-20261010-00000001' > "$CHATBI_COMPOSE_TEST_SECRET_DIR/stats.token"

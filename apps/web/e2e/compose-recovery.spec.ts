@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { E2E_TOKEN } from "./compose-auth";
 
-const E2E_TOKEN = "chatbi-local-e2e-token-00000001";
 const recoveryOnly = process.env.CHATBI_COMPOSE_RECOVERY_ONLY === "1";
 const runId = process.env.CHATBI_COMPOSE_RECOVERY_RUN_ID ?? "";
 const latestRunId = process.env.CHATBI_COMPOSE_RECOVERY_LATEST_RUN_ID ?? "";

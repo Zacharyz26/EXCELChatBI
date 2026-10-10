@@ -1,9 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { AUTH_HEADERS, E2E_TOKEN } from "./compose-auth";
 
-const E2E_TOKEN = "chatbi-local-e2e-token-00000001";
-const AUTH_HEADERS = { Authorization: `Bearer ${E2E_TOKEN}` };
 const FEEDBACK_COMMENT = (
   "COMPOSE_4D_FEEDBACK：请保留原始数据，只重新核对字段和规模。"
 );

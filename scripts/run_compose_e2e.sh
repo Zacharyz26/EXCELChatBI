@@ -28,7 +28,7 @@ fi
 project_name="${CHATBI_COMPOSE_PROJECT_NAME:-chatbi-e2e}"
 image_tag="${CHATBI_IMAGE_TAG:-local}"
 compose=(docker compose -p "$project_name" -f compose.yaml -f compose.e2e.yaml)
-auth_header="Authorization: Bearer chatbi-ci-user-token-20261010-00000001"
+auth_header="Authorization: Bearer ${CHATBI_COMPOSE_E2E_TOKEN}"
 
 wait_for_application() {
   phase="$1"

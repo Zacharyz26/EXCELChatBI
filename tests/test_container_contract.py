@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -115,7 +116,10 @@ def test_compose_test_secrets_support_non_root_bind_mounts(tmp_path: Path) -> No
         [
             "/bin/bash",
             "-c",
-            "source scripts/compose_test_env.sh; source scripts/compose_test_env.sh",
+            (
+                "source scripts/compose_test_env.sh; "
+                "source scripts/compose_test_env.sh; printf '%s\\n' \"$CHATBI_COMPOSE_E2E_TOKEN\""
+            ),
         ],
         cwd=ROOT,
         check=False,
@@ -128,6 +132,11 @@ def test_compose_test_secrets_support_non_root_bind_mounts(tmp_path: Path) -> No
     )
 
     assert completed.returncode == 0, completed.stderr
+    exported_token = completed.stdout.strip()
+    registry = json.loads(
+        (secret_dir / "api-auth.json").read_text(encoding="utf-8")
+    )
+    assert list(registry) == [exported_token]
     assert stat.S_IMODE(secret_dir.stat().st_mode) == 0o700
     secret_files = sorted(secret_dir.iterdir())
     assert [path.name for path in secret_files] == [
@@ -141,6 +150,29 @@ def test_compose_test_secrets_support_non_root_bind_mounts(tmp_path: Path) -> No
     ]
     assert all(
         stat.S_IMODE(path.stat().st_mode) == 0o444 for path in secret_files
+    )
+
+
+def test_compose_e2e_authentication_uses_one_synthetic_token_source() -> None:
+    helper = (ROOT / "scripts/compose_test_env.sh").read_text(encoding="utf-8")
+    runner = (ROOT / "scripts/run_compose_e2e.sh").read_text(encoding="utf-8")
+    shared_auth = (ROOT / "apps/web/e2e/compose-auth.ts").read_text(
+        encoding="utf-8"
+    )
+    specs = [
+        ROOT / "apps/web/e2e/compose-full-stack.spec.ts",
+        ROOT / "apps/web/e2e/report-parallel-fix.spec.ts",
+        ROOT / "apps/web/e2e/compose-recovery.spec.ts",
+    ]
+    spec_sources = [path.read_text(encoding="utf-8") for path in specs]
+
+    all_sources = "\n".join([helper, runner, shared_auth, *spec_sources])
+    assert all_sources.count("chatbi-ci-user-token-20261010-00000001") == 1
+    assert "chatbi-local-e2e-token-00000001" not in all_sources
+    assert "CHATBI_COMPOSE_E2E_TOKEN" in shared_auth
+    assert "${CHATBI_COMPOSE_E2E_TOKEN}" in runner
+    assert all(
+        'from "./compose-auth"' in source for source in spec_sources
     )
 
 
