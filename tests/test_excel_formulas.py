@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 import pytest
@@ -14,6 +13,8 @@ from fastapi.testclient import TestClient
 from mcp_servers.excel_parser import tools as excel_tools
 from openpyxl import Workbook
 from packages.common.config import Settings
+
+from tests.xlsx_fixtures import inject_formula_caches
 
 _XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -34,14 +35,11 @@ def _formula_workbook(*, cached: bool, formula_on_other_sheet: bool = False) -> 
     if not cached:
         return buffer.getvalue()
 
-    output = io.BytesIO()
-    with ZipFile(buffer) as source, ZipFile(output, "w", ZIP_DEFLATED) as target:
-        for member in source.infolist():
-            data = source.read(member.filename)
-            if member.filename == "xl/worksheets/sheet1.xml":
-                data = data.replace(b"<f>A2*2</f><v></v>", b"<f>A2*2</f><v>4</v>")
-            target.writestr(member, data)
-    return output.getvalue()
+    return inject_formula_caches(
+        buffer.getvalue(),
+        worksheet_name="data",
+        cached_values={"B2": 4},
+    )
 
 
 def test_uncached_formula_is_rejected_before_dataset_publish(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 from pathlib import Path
 from typing import Any, cast
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from mcp_servers.chart.server import build_server as build_chart_server
 from mcp_servers.dataset_ops.tools import aggregate_preview
@@ -13,6 +12,8 @@ from mcp_servers.excel_parser.tools import infer_schema, parse_excel
 from mcp_servers.report.server import build_server as build_report_server
 from mcp_servers.stats.tools import trend_analysis
 from openpyxl import Workbook
+
+from tests.xlsx_fixtures import inject_formula_caches
 
 
 def _standard_workbook() -> bytes:
@@ -34,20 +35,13 @@ def _standard_workbook() -> bytes:
         )
     workbook.save(source)
 
-    output = io.BytesIO()
-    with ZipFile(source) as original, ZipFile(output, "w", ZIP_DEFLATED) as rewritten:
-        for member in original.infolist():
-            data = original.read(member.filename)
-            if member.filename == "xl/worksheets/sheet1.xml":
-                for index in range(10):
-                    row = index + 2
-                    cached = (10 + index * 2) * 2
-                    before = f"<f>C{row}*2</f><v></v>".encode()
-                    after = f"<f>C{row}*2</f><v>{cached}</v>".encode()
-                    assert before in data
-                    data = data.replace(before, after)
-            rewritten.writestr(member, data)
-    return output.getvalue()
+    return inject_formula_caches(
+        source.getvalue(),
+        worksheet_name="sales",
+        cached_values={
+            f"D{index + 2}": (10 + index * 2) * 2 for index in range(10)
+        },
+    )
 
 
 def test_workbook_to_stats_chart_and_report_standard_answer(tmp_path: Path) -> None:
