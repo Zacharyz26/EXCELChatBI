@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -107,14 +108,34 @@ def test_compose_e2e_cleans_synthetic_secrets_when_docker_is_missing(
     tmp_path: Path,
 ) -> None:
     secret_dir = tmp_path / "compose-secrets"
+    isolated_bin = tmp_path / "bin"
+    isolated_bin.mkdir()
+    for command in ("chmod", "dirname", "mkdir", "rm", "rmdir"):
+        executable = shutil.which(command)
+        assert executable is not None
+        (isolated_bin / command).symlink_to(executable)
+
+    # A DEBUG trap records any attempted Docker execution before command lookup.
+    # This proves the early-exit path never reaches real Docker even on CI runners
+    # where /usr/bin/docker exists.
+    docker_called = tmp_path / "docker-called"
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text(
+        "trap 'case \"$BASH_COMMAND\" in docker\\ *) "
+        ": > \"$DOCKER_CALLED_SENTINEL\" ;; esac' DEBUG\n",
+        encoding="utf-8",
+    )
     environment = {
         **os.environ,
-        "PATH": "/usr/bin:/bin",
+        "PATH": str(isolated_bin),
+        "BASH_ENV": str(bash_env),
+        "DOCKER_CALLED_SENTINEL": str(docker_called),
         "CHATBI_COMPOSE_TEST_SECRET_DIR": str(secret_dir),
     }
+    assert shutil.which("docker", path=environment["PATH"]) is None
 
     completed = subprocess.run(
-        ["bash", str(ROOT / "scripts/run_compose_e2e.sh")],
+        ["/bin/bash", str(ROOT / "scripts/run_compose_e2e.sh")],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -125,3 +146,4 @@ def test_compose_e2e_cleans_synthetic_secrets_when_docker_is_missing(
     assert completed.returncode == 127
     assert "Docker CLI is required" in completed.stderr
     assert not secret_dir.exists()
+    assert not docker_called.exists()
