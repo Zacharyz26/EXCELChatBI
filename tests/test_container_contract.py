@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -108,13 +109,48 @@ def test_web_upload_envelope_adds_bounded_multipart_headroom() -> None:
     assert rejected.returncode == 2
 
 
+def test_compose_test_secrets_support_non_root_bind_mounts(tmp_path: Path) -> None:
+    secret_dir = tmp_path / "compose-secrets"
+    completed = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            "source scripts/compose_test_env.sh; source scripts/compose_test_env.sh",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CHATBI_COMPOSE_TEST_SECRET_DIR": str(secret_dir),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert stat.S_IMODE(secret_dir.stat().st_mode) == 0o700
+    secret_files = sorted(secret_dir.iterdir())
+    assert [path.name for path in secret_files] == [
+        "api-auth.json",
+        "chart.token",
+        "context.key",
+        "data.token",
+        "knowledge.token",
+        "report.token",
+        "stats.token",
+    ]
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == 0o444 for path in secret_files
+    )
+
+
 def test_compose_e2e_cleans_synthetic_secrets_when_docker_is_missing(
     tmp_path: Path,
 ) -> None:
     secret_dir = tmp_path / "compose-secrets"
     isolated_bin = tmp_path / "bin"
     isolated_bin.mkdir()
-    for command in ("chmod", "dirname", "mkdir", "rm", "rmdir"):
+    for command in ("chmod", "dirname", "mkdir", "rm", "rmdir", "stat"):
         executable = shutil.which(command)
         assert executable is not None
         (isolated_bin / command).symlink_to(executable)
