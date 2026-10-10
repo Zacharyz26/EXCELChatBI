@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from packages.session.models import JsonObject
+from packages.session.task_hashing import invocation_arguments_hash
 from packages.session.task_models import (
     EvidenceRecord,
     TaskEvent,
     ToolInvocation,
 )
-from packages.session.task_store import invocation_arguments_hash
 
 JOIN_CONTEXT_SCHEMA = "chatbi-join-evidence-context-v1"
 JOIN_COLLABORATION_SCHEMA = "chatbi-join-collaboration-v1"

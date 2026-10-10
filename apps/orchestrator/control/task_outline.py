@@ -13,14 +13,14 @@ from pathlib import Path
 from typing import Literal, cast
 
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
-from packages.session.models import Artifact, Dataset, JsonObject
-
-from apps.orchestrator.agent_tools import AgentToolRegistry
-from apps.orchestrator.control.contracts import TaskContract
-from apps.orchestrator.control.task_plan_contract import (
+from packages.orchestration.contracts import TaskContract
+from packages.orchestration.task_plan_contract import (
     PlanValidation,
     validate_task_plan,
 )
+from packages.session.models import Artifact, Dataset, JsonObject
+
+from apps.orchestrator.agent_tools import AgentToolRegistry
 
 OutlineRoute = Literal["fast", "template"]
 PROMPT_VERSION = "deterministic-outline-v1"

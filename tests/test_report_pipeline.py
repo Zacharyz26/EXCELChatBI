@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import weasyprint
-from apps.orchestrator.agent_loop import _artifact_payload_for
+from apps.orchestrator.artifacts import artifact_payload_for
 from mcp_servers.report.server import build_server as build_report_server
 from mcp_servers.stats.server import build_server as build_stats_server
 from packages.common.analysis_kinds import REPORT_ANALYSIS_KINDS
@@ -108,7 +108,7 @@ def test_computed_values_survive_artifact_markdown_and_pdf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = build_stats_server()._tools[tool].invoke({"dataset_ref": computed_ref, **arguments})
-    payload = _artifact_payload_for(tool, result)
+    payload = artifact_payload_for(tool, result)
     expected = _display(_key_value(tool, result))
     report = (
         build_report_server()

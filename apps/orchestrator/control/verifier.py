@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from packages.orchestration.contracts import TaskContract
 from packages.session.models import Artifact
 from packages.session.task_models import (
     ClaimDraft,
@@ -13,8 +14,6 @@ from packages.session.task_models import (
     TaskStepRecord,
     ToolInvocation,
 )
-
-from apps.orchestrator.control.contracts import TaskContract
 
 VerificationVerdict = Literal["PASS", "NEEDS_ACTION", "WAITING_USER", "BLOCKED", "FAILED"]
 

@@ -11,6 +11,10 @@ from apps.orchestrator.control.contracts import build_minimal_contract
 from packages.session.migrations import CURRENT_SCHEMA_VERSION, downgrade_v2_to_v1
 from packages.session.models import ArtifactDraft
 from packages.session.store import _SCHEMA_V1, SessionStore
+from packages.session.task_hashing import (
+    invocation_arguments_hash,
+    invocation_idempotency_key,
+)
 from packages.session.task_models import ClaimDraft, InvocationStatus, ObservationSource
 from packages.session.task_store import (
     ActiveRunConflict,
@@ -18,9 +22,21 @@ from packages.session.task_store import (
     IdempotencyConflict,
     StateVersionConflict,
     TaskStore,
-    invocation_arguments_hash,
-    invocation_idempotency_key,
 )
+from packages.session.task_store import (
+    invocation_arguments_hash as legacy_invocation_arguments_hash,
+)
+from packages.session.task_store import (
+    invocation_idempotency_key as legacy_invocation_idempotency_key,
+)
+
+
+def test_task_store_keeps_hashing_compatibility_exports() -> None:
+    arguments = {"维度": ["华东", "华南"], "metric": {"name": "销售额", "scale": 2}}
+    assert legacy_invocation_arguments_hash(arguments) == invocation_arguments_hash(arguments)
+    assert legacy_invocation_idempotency_key("run", "call", "tool", arguments) == (
+        invocation_idempotency_key("run", "call", "tool", arguments)
+    )
 
 
 def _workspace(tmp_path: Path) -> tuple[SessionStore, TaskStore, str, str, str]:

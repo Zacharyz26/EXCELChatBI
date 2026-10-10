@@ -1345,11 +1345,63 @@ test("Chart Artifact 在生成后及刷新后都可见", async ({ page }) => {
 
   const chart = page.locator('[data-chart-id="chart-1"]');
   await expect(chart).toBeVisible();
+  await expect(chart).toHaveAttribute(
+    "aria-label",
+    "月度销售趋势，销售额（图表 chart-1）",
+  );
   await expect(chart.locator("canvas")).toBeVisible();
   await expect(page.getByText("趋势图已生成。", { exact: true }).last()).toBeVisible();
 
+  await send(page, "再生成一张月度销售额折线图");
+  await expect(page.locator('[data-chart-id="chart-2"]')).toHaveAttribute(
+    "aria-label",
+    "月度销售趋势，销售额（图表 chart-2）",
+  );
+
   await page.reload();
   await expect(page.locator('[data-chart-id="chart-1"] canvas')).toBeVisible();
+  await expect(page.locator('[data-chart-id="chart-2"] canvas')).toBeVisible();
+});
+
+test("图表 chunk 失败时保留聊天正文并可刷新恢复", async ({ page }) => {
+  await installMockApi(page);
+  let failedOnce = false;
+  await page.route("**/src/components/EChartsRenderer.tsx*", async (route) => {
+    if (!failedOnce) {
+      failedOnce = true;
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto("/");
+
+  await send(page, "请按月份生成销售额折线图");
+
+  await expect(page.getByRole("alert")).toContainText("图表加载失败");
+  await expect(page.getByRole("alert")).toContainText("未发送的聊天草稿");
+  await expect(page.getByText("趋势图已生成。", { exact: true }).last()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "E2E 验收对话" })).toBeVisible();
+
+  const draft = page.getByRole("textbox", { name: "消息内容" });
+  await draft.fill("尚未发送的分析草稿");
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("未发送的聊天草稿");
+    await dialog.dismiss();
+  });
+  await page.getByRole("button", { name: "刷新并重试" }).click();
+  await expect(draft).toHaveValue("尚未发送的分析草稿");
+  await expect(page.getByRole("alert")).toContainText("图表加载失败");
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("面板中未保存的输入");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "刷新并重试" }).click();
+  await expect(page.getByRole("img", {
+    name: "月度销售趋势，销售额（图表 chart-1）",
+  })).toBeVisible();
+  expect(failedOnce).toBe(true);
 });
 
 test("Report Artifact 渲染 PDF 下载入口并可在刷新后恢复", async ({ page }) => {

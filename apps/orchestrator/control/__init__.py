@@ -1,7 +1,8 @@
 """Current production Agent control-plane primitives."""
 
-from apps.orchestrator.control.contracts import TaskContract, build_minimal_contract
-from apps.orchestrator.control.state import AgentState
+from packages.orchestration.contracts import TaskContract, build_minimal_contract
+from packages.orchestration.state import AgentState
+
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
 
 __all__ = [

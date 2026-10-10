@@ -1,16 +1,27 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
 import {
   deleteKnowledgeDocument,
   ingestSamples,
   kbOverview,
   rebuildKnowledgeBase,
 } from "@/api/client";
-import { AgentControlPanel } from "@/components/AgentControlPanel";
 import { ChatPanel } from "@/components/ChatPanel";
-import { LineagePanel } from "@/components/LineagePanel";
-import { MemoryGovernancePanel } from "@/components/MemoryGovernancePanel";
+import { LazyLoadBoundary } from "@/components/LazyLoadBoundary";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { KBOverview, WorkspaceArtifact, WorkspaceDataset } from "@/types";
+
+const AgentControlPanel = lazy(async () => {
+  const module = await import("@/components/AgentControlPanel");
+  return { default: module.AgentControlPanel };
+});
+const LineagePanel = lazy(async () => {
+  const module = await import("@/components/LineagePanel");
+  return { default: module.LineagePanel };
+});
+const MemoryGovernancePanel = lazy(async () => {
+  const module = await import("@/components/MemoryGovernancePanel");
+  return { default: module.MemoryGovernancePanel };
+});
 
 /** 对话式产品主入口（阶段4：经典五页已下线，全部能力经对话链路提供）。 */
 export function ChatWorkspace() {
@@ -374,23 +385,35 @@ export function ChatWorkspace() {
         </div>
       </main>
       {memoryPanelOpen && activeProject && (
-        <MemoryGovernancePanel
-          key={activeProject.id}
-          projectId={activeProject.id}
-          projectName={activeProject.name}
-          onClose={() => setMemoryPanelOpen(false)}
-        />
+        <LazyLoadBoundary label="项目记忆面板" onDismiss={() => setMemoryPanelOpen(false)}>
+          <Suspense fallback={<div role="status" aria-live="polite">项目记忆面板加载中…</div>}>
+            <MemoryGovernancePanel
+              key={activeProject.id}
+              projectId={activeProject.id}
+              projectName={activeProject.name}
+              onClose={() => setMemoryPanelOpen(false)}
+            />
+          </Suspense>
+        </LazyLoadBoundary>
       )}
       {lineagePanelOpen && activeProject && (
-        <LineagePanel
-          key={activeProject.id}
-          projectId={activeProject.id}
-          projectName={activeProject.name}
-          onClose={() => setLineagePanelOpen(false)}
-        />
+        <LazyLoadBoundary label="数据血缘面板" onDismiss={() => setLineagePanelOpen(false)}>
+          <Suspense fallback={<div role="status" aria-live="polite">数据血缘面板加载中…</div>}>
+            <LineagePanel
+              key={activeProject.id}
+              projectId={activeProject.id}
+              projectName={activeProject.name}
+              onClose={() => setLineagePanelOpen(false)}
+            />
+          </Suspense>
+        </LazyLoadBoundary>
       )}
       {agentControlOpen && (
-        <AgentControlPanel onClose={() => setAgentControlOpen(false)} />
+        <LazyLoadBoundary label="任务协作面板" onDismiss={() => setAgentControlOpen(false)}>
+          <Suspense fallback={<div role="status" aria-live="polite">任务协作面板加载中…</div>}>
+            <AgentControlPanel onClose={() => setAgentControlOpen(false)} />
+          </Suspense>
+        </LazyLoadBoundary>
       )}
     </div>
   );

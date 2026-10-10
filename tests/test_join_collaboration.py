@@ -9,12 +9,12 @@ from apps.orchestrator.control.join_collaboration import (
     build_join_evidence_context,
     evaluate_join_execution_guard,
 )
+from packages.session.task_hashing import invocation_arguments_hash
 from packages.session.task_models import (
     EvidenceRecord,
     TaskEvent,
     ToolInvocation,
 )
-from packages.session.task_store import invocation_arguments_hash
 
 _LEFT = "1" * 32
 _RIGHT = "2" * 32

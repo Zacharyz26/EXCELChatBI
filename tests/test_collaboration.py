@@ -261,174 +261,26 @@ def test_v6_database_is_backed_up_and_migrated_to_collaboration_schema(
     assert migration[2] == hashlib.sha256(backups[0].read_bytes()).hexdigest()
 
 
-def test_executor_approval_request_atomically_pauses_running_task(
+def test_legacy_approval_runtime_api_is_not_exposed_but_schema_is_retained(
     tmp_path: Path,
 ) -> None:
-    _, tasks, _, run_id, state_version = _paused_run(tmp_path)
-    running, _, _ = tasks.control_transition(
-        run_id,
-        expected_version=state_version,
-        idempotency_key="resume-for-executor-approval",
-        command="resume",
-        allowed_statuses={"paused"},
-        status="running",
-        event_type="run.resumed",
-        payload={"reason": "test"},
-        require_checkpoint=True,
-    )
-
-    paused, approval, event, created = tasks.request_approval(
-        run_id,
-        expected_version=running.state_version,
-        idempotency_key="executor-pauses-for-approval",
-        tenant_id="tenant-a",
-        subject_user_id="alice",
-        requested_by_user_id="alice",
-        step_id="analyze",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-        risk_level="critical",
-        expires_at=_approval_expiry(),
-        pause_run=True,
-    )
-
-    assert created is True
-    assert paused.status == "paused"
-    assert event.event_type == "approval.requested"
-    assert event.payload["run_status"] == "paused"
-    assert approval.status == "pending"
-    assert tasks.has_valid_pending_approval(run_id) is True
-    checkpoint = tasks.get_latest_checkpoint(run_id)
-    assert checkpoint is not None
-    assert checkpoint.reason == f"approval_requested:{approval.approval_id}"
-
-
-def test_approval_binding_decision_and_consumption_are_fail_closed(
-    tmp_path: Path,
-) -> None:
-    store, tasks, _, run_id, state_version = _paused_run(tmp_path)
-    run, approval, event, created = tasks.request_approval(
-        run_id,
-        expected_version=state_version,
-        idempotency_key="request-approval-once",
-        tenant_id="tenant-a",
-        subject_user_id="alice",
-        requested_by_user_id="alice",
-        step_id="analyze",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-        risk_level="high",
-        expires_at=_approval_expiry(),
-    )
-    replayed_run, replayed, replay_event, replay_created = tasks.request_approval(
-        run_id,
-        expected_version=state_version,
-        idempotency_key="request-approval-once",
-        tenant_id="tenant-a",
-        subject_user_id="alice",
-        requested_by_user_id="alice",
-        step_id="analyze",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-        risk_level="high",
-        expires_at=approval.expires_at,
-    )
-    assert created is True and replay_created is False
-    assert approval.status == "pending" and approval.version == 1
-    assert replayed_run == run and replayed == approval and replay_event == event
-    assert event.payload["parameter_summary_hash"] == _HASH_B
-    assert "parameters" not in event.payload
-
-    with pytest.raises(ControlConflict, match="绑定的授权主体"):
-        tasks.decide_approval(
-            approval.approval_id,
-            expected_run_version=run.state_version,
-            expected_approval_version=approval.version,
-            idempotency_key="bob-cannot-decide",
-            tenant_id="tenant-a",
-            actor_user_id="bob",
-            decision="approved",
-            reason="越权批准",
-        )
-
-    run, approved, decision_event, decision_created = tasks.decide_approval(
-        approval.approval_id,
-        expected_run_version=run.state_version,
-        expected_approval_version=approval.version,
-        idempotency_key="approve-once",
-        tenant_id="tenant-a",
-        actor_user_id="alice",
-        decision="approved",
-        reason="已核对导出范围",
-    )
-    assert decision_created is True
-    assert approved.status == "approved" and approved.version == 2
-    assert decision_event.event_type == "approval.approved"
-
-    with pytest.raises(ControlConflict, match="参数摘要"):
-        tasks.consume_approval(
-            approval.approval_id,
-            expected_run_version=run.state_version,
-            expected_approval_version=approved.version,
-            idempotency_key="consume-wrong-parameters",
-            tenant_id="tenant-a",
-            actor_user_id="alice",
-            tool_name="high_risk_export",
-            tool_schema_hash=_HASH_A,
-            parameter_summary_hash=hashlib.sha256(b"changed").hexdigest(),
-        )
-    run, consumed, consume_event, consume_created = tasks.consume_approval(
-        approval.approval_id,
-        expected_run_version=run.state_version,
-        expected_approval_version=approved.version,
-        idempotency_key="consume-once",
-        tenant_id="tenant-a",
-        actor_user_id="alice",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-    )
-    replayed_run, replayed, replay_event, replay_created = tasks.consume_approval(
-        approval.approval_id,
-        expected_run_version=run.state_version - 1,
-        expected_approval_version=approved.version,
-        idempotency_key="consume-once",
-        tenant_id="tenant-a",
-        actor_user_id="alice",
-        tool_name="high_risk_export",
-        tool_schema_hash=_HASH_A,
-        parameter_summary_hash=_HASH_B,
-    )
-    assert consume_created is True and replay_created is False
-    assert consumed.status == "consumed" and consumed.version == 3
-    assert consume_event.event_type == "approval.consumed"
-    assert replayed_run == run and replayed == consumed and replay_event == consume_event
-    with pytest.raises(IdempotencyConflict):
-        tasks.consume_approval(
-            approval.approval_id,
-            expected_run_version=run.state_version - 1,
-            expected_approval_version=approved.version,
-            idempotency_key="consume-once",
-            tenant_id="tenant-a",
-            actor_user_id="bob",
-            tool_name="high_risk_export",
-            tool_schema_hash=_HASH_A,
-            parameter_summary_hash=_HASH_B,
-        )
-
+    store, tasks, _, _, _ = _paused_run(tmp_path)
+    removed_api = {
+        "request_approval",
+        "get_approval",
+        "list_approvals",
+        "find_execution_approval",
+        "has_valid_pending_approval",
+        "decide_approval",
+        "consume_approval",
+    }
+    assert all(not hasattr(tasks, name) for name in removed_api)
     with sqlite3.connect(store.db_path) as connection:
-        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-            connection.execute(
-                """
-                UPDATE approval_records
-                SET tool_name = 'tampered'
-                WHERE approval_id = ?
-                """,
-                (approval.approval_id,),
-            )
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert {"approval_records", "approval_operations"}.issubset(tables)
 
 
 @pytest.fixture

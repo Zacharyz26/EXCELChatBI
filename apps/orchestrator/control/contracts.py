@@ -1,133 +1,15 @@
-"""TaskContract types and the conservative v2.4 stage-1 interpreter."""
+"""Compatibility exports for the shared orchestration contract package."""
 
-from __future__ import annotations
+from packages.orchestration.contracts import (
+    CriterionKind,
+    SuccessCriterion,
+    TaskContract,
+    build_minimal_contract,
+)
 
-import hashlib
-import json
-from dataclasses import dataclass, replace
-from typing import Literal
-
-from packages.session.models import JsonObject
-
-CriterionKind = Literal["response", "artifact", "evidence", "semantic", "constraint"]
-
-
-@dataclass(frozen=True, slots=True)
-class SuccessCriterion:
-    criterion_id: str
-    kind: CriterionKind
-    description: str
-    required: bool = True
-    artifact_type: str | None = None
-    artifact_format: str | None = None
-    artifact_dimensions: tuple[str, ...] = ()
-
-    def to_dict(self) -> JsonObject:
-        return {
-            "criterion_id": self.criterion_id,
-            "kind": self.kind,
-            "description": self.description,
-            "required": self.required,
-            "artifact_type": self.artifact_type,
-            "artifact_format": self.artifact_format,
-            "artifact_dimensions": list(self.artifact_dimensions),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class TaskContract:
-    run_id: str
-    goal: str
-    success_criteria: tuple[SuccessCriterion, ...]
-    constraints: tuple[str, ...]
-    assumptions: tuple[str, ...] = ()
-
-    def to_dict(self) -> JsonObject:
-        return {
-            "run_id": self.run_id,
-            "goal": self.goal,
-            "success_criteria": [item.to_dict() for item in self.success_criteria],
-            "constraints": list(self.constraints),
-            "assumptions": list(self.assumptions),
-        }
-
-    @property
-    def content_hash(self) -> str:
-        encoded = json.dumps(
-            self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-    def require_artifact(
-        self, artifact_type: str, artifact_format: str | None = None
-    ) -> TaskContract:
-        criterion_id = f"artifact.{artifact_type}"
-        if artifact_format:
-            criterion_id += f".{artifact_format}"
-        if any(item.criterion_id == criterion_id for item in self.success_criteria):
-            return self
-        criterion = SuccessCriterion(
-            criterion_id=criterion_id,
-            kind="artifact",
-            description=f"生成真实的 {artifact_type} 工件",
-            artifact_type=artifact_type,
-            artifact_format=artifact_format,
-        )
-        return replace(self, success_criteria=(*self.success_criteria, criterion))
-
-    def require_chart_dimensions(self, dimensions: tuple[str, ...]) -> TaskContract:
-        """Require one verifiable chart artifact for every requested dimension."""
-        unique = tuple(dict.fromkeys(item.strip() for item in dimensions if item.strip()))
-        if not unique:
-            return self
-        contract = self.require_artifact("chart")
-        criteria: list[SuccessCriterion] = []
-        for criterion in contract.success_criteria:
-            if criterion.kind != "artifact" or criterion.artifact_type != "chart":
-                criteria.append(criterion)
-                continue
-            merged = tuple(dict.fromkeys((*criterion.artifact_dimensions, *unique)))
-            criteria.append(
-                replace(
-                    criterion,
-                    description=(
-                        "为每个指定维度生成真实图表工件：" + "、".join(merged)
-                    ),
-                    artifact_dimensions=merged,
-                )
-            )
-        return replace(contract, success_criteria=tuple(criteria))
-
-
-def build_minimal_contract(
-    *,
-    run_id: str,
-    user_text: str,
-    chart_required: bool,
-    report_required: bool,
-    pdf_required: bool,
-    chart_dimensions: tuple[str, ...] = (),
-) -> TaskContract:
-    """Compile only high-confidence requirements; stage 2 adds the full interpreter."""
-    contract = TaskContract(
-        run_id=run_id,
-        goal=user_text.strip(),
-        success_criteria=(
-            SuccessCriterion(
-                criterion_id="response.non_empty",
-                kind="response",
-                description="交付非空的最终答复",
-            ),
-        ),
-        constraints=(
-            "任务只有在 Verifier 通过后才能完成",
-            "成功工具调用必须形成可追溯 Evidence",
-            "模型文字不能替代用户要求的 Artifact",
-        ),
-    )
-    if chart_required:
-        contract = contract.require_artifact("chart")
-        contract = contract.require_chart_dimensions(chart_dimensions)
-    if report_required:
-        contract = contract.require_artifact("report", "pdf" if pdf_required else None)
-    return contract
+__all__ = [
+    "CriterionKind",
+    "SuccessCriterion",
+    "TaskContract",
+    "build_minimal_contract",
+]

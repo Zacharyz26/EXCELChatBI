@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -9,7 +11,7 @@ import {
 } from "react";
 import { downloadFile } from "@/api/client";
 import { ClarificationPrompt } from "@/components/ClarificationPrompt";
-import { EChartsRenderer } from "@/components/EChartsRenderer";
+import { LazyLoadBoundary } from "@/components/LazyLoadBoundary";
 import { MarkdownText } from "@/components/MarkdownText";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type {
@@ -18,6 +20,11 @@ import type {
   WorkspaceArtifact,
   WorkspaceMessage,
 } from "@/types";
+
+const EChartsRenderer = lazy(async () => {
+  const module = await import("@/components/EChartsRenderer");
+  return { default: module.EChartsRenderer };
+});
 
 /** 阶段 3 对话主区：Agent 透明度卡片流（理解/执行/工件）+ 快捷指令条。 */
 export function ChatPanel() {
@@ -667,7 +674,14 @@ function ChartArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
   if (!option) return null;
   return (
     <section className="chart-artifact">
-      <EChartsRenderer option={option} chartId={stringOf(payload.chart_id) || artifact.id} />
+      <LazyLoadBoundary label="图表">
+        <Suspense fallback={<div role="status" aria-live="polite">图表加载中…</div>}>
+          <EChartsRenderer
+            option={option}
+            chartId={stringOf(payload.chart_id) || artifact.id}
+          />
+        </Suspense>
+      </LazyLoadBoundary>
     </section>
   );
 }

@@ -4319,3 +4319,37 @@ select {
 .auth-card [role="alert"] {
   color: #a12a2a;
 }
+
+.lazy-load-error {
+  display: grid;
+  gap: 8px;
+  margin: 12px;
+  padding: 16px;
+  border: 1px solid #e5b9b9;
+  border-radius: 10px;
+  background: #fff7f7;
+  color: #7d2020;
+}
+
+.lazy-load-error strong,
+.lazy-load-error p {
+  margin: 0;
+}
+
+.lazy-load-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lazy-load-error__actions button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #b34a4a;
+  border-radius: 8px;
+  background: white;
+  color: #7d2020;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}

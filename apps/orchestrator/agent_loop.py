@@ -35,7 +35,6 @@ from mcp_servers.common.client_gateway import (
 from mcp_servers.common.contracts import MCPProtocolError, MCPRequestContext
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from openai import OpenAIError
-from packages.common.analysis_kinds import ANALYSIS_KIND_BY_TOOL
 from packages.common.config import get_settings
 from packages.common.identifiers import dataset_reference_arguments
 from packages.common.logging import get_logger
@@ -45,6 +44,12 @@ from packages.governance.policy import PolicyDecision, ToolPolicyGateway, ToolPo
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
+from packages.orchestration.contracts import (
+    CriterionKind,
+    SuccessCriterion,
+    TaskContract,
+    build_minimal_contract,
+)
 from packages.session.compaction import (
     CompactionAccessDenied,
     CompactionStore,
@@ -74,6 +79,10 @@ from packages.session.models import (
     JsonObject,
 )
 from packages.session.store import SessionStore
+from packages.session.task_hashing import (
+    invocation_arguments_hash,
+    invocation_idempotency_key,
+)
 from packages.session.task_models import (
     CapabilityCatalogSnapshot,
     ObservationSource,
@@ -87,21 +96,19 @@ from packages.session.task_store import (
     ActiveRunConflict,
     ControlConflict,
     TaskStore,
-    invocation_arguments_hash,
-    invocation_idempotency_key,
 )
 
 from apps.orchestrator.agent_tools import AgentToolError, AgentToolRegistry
+from apps.orchestrator.artifacts import (
+    artifact_file_ref as _artifact_file_ref,
+)
+from apps.orchestrator.artifacts import (
+    artifact_payload_for as _artifact_payload_for,
+)
 from apps.orchestrator.control.claims import (
     build_evidence_summary,
     extract_claims,
     repair_candidate_with_evidence,
-)
-from apps.orchestrator.control.contracts import (
-    CriterionKind,
-    SuccessCriterion,
-    TaskContract,
-    build_minimal_contract,
 )
 from apps.orchestrator.control.data_role_guard import (
     DataRoleGuardResult,
@@ -127,7 +134,20 @@ from apps.orchestrator.control.plan_executor import (
 )
 from apps.orchestrator.control.task_outline import create_task_outline
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
+from apps.orchestrator.request_intent import (
+    requests_chart as _requests_chart,
+)
+from apps.orchestrator.request_intent import (
+    requests_pdf as _requests_pdf,
+)
+from apps.orchestrator.request_intent import (
+    requests_report as _requests_report,
+)
+from apps.orchestrator.request_intent import (
+    required_chart_dimensions as _required_chart_dimensions,
+)
 from apps.orchestrator.run_manager import RunControl
+from apps.orchestrator.tool_presentation import humanize_args as _humanize_args
 
 _log = get_logger("orchestrator.agent_loop")
 
@@ -182,46 +202,11 @@ reliability=limited 或 beats_baseline=false 时不得表述为可靠预测。
 15. 最终答复不得自行计算比例、百分比或派生统计量；工具没有直接返回的数字应省略。
 16. 知识回答必须逐字包含知识工具返回的 source 标签，例如“来源：指标口径.md”。"""
 
-_CHART_REQUEST_PATTERN = re.compile(
-    r"(?:图表|图像|可视化|画图|绘图|出图|折线图|柱状图|条形图|饼图|散点图|趋势图|"
-    r"(?:生成|绘制|画|做|出|展示|显示|查看).{0,6}图|chart|plot|graph|visuali[sz])",
-    re.IGNORECASE,
-)
-_CHART_NEGATION_PATTERN = re.compile(
-    r"(?:不要|无需|不需要|不用|别).{0,6}(?:图|图表|图像|可视化|chart|plot|graph)",
-    re.IGNORECASE,
-)
 _MISSING_CHART_RETRY_LIMIT = 1
 _MISSING_CHART_INSTRUCTION = (
     "上一步只返回了文字，但用户明确要求的图表尚未生成。"
     "请先调用 gen_chart 生成真实图表工件，再给最终结论；不要再次只返回文字。"
 )
-_ALL_DIMENSION_CHART_PATTERN = re.compile(
-    r"(?:各|每个|所有|全部)\s*[【\[]?\s*维度(?:列)?\s*[】\]]?",
-    re.IGNORECASE,
-)
-
-_REPORT_REQUEST_PATTERN = re.compile(
-    r"(?:(?:生成|导出|制作|创建|组装|整理|汇总|编制|输出|给我|请给).{0,10}"
-    r"报告|报告.{0,10}(?:生成|导出|制作|创建|下载))",
-    re.IGNORECASE,
-)
-_REPORT_NEGATION_PATTERN = re.compile(r"(?:不要|无需|不需要|不用|别).{0,6}报告", re.IGNORECASE)
-_PDF_REPORT_REQUEST_PATTERN = re.compile(
-    r"(?:(?:生成|导出|制作|创建|输出|给我|请给).{0,10}pdf|"
-    r"pdf.{0,10}(?:生成|导出|制作|创建|下载))",
-    re.IGNORECASE,
-)
-_MARKDOWN_REPORT_REQUEST_PATTERN = re.compile(
-    r"(?:(?:生成|导出|制作|创建|输出|给我|请给).{0,10}markdown|"
-    r"markdown.{0,10}(?:生成|导出|制作|创建|下载))",
-    re.IGNORECASE,
-)
-_MARKDOWN_NEGATION_PATTERN = re.compile(
-    r"(?:不要|无需|不需要|不用|别).{0,6}markdown", re.IGNORECASE
-)
-_PDF_REQUEST_PATTERN = re.compile(r"pdf", re.IGNORECASE)
-_PDF_NEGATION_PATTERN = re.compile(r"(?:不要|无需|不需要|不用|别).{0,6}pdf", re.IGNORECASE)
 _MISSING_REPORT_RETRY_LIMIT = 1
 _MISSING_REPORT_INSTRUCTION = (
     "上一步只返回了文字，但用户明确要求的报告尚未生成。"
@@ -393,77 +378,6 @@ class _ParallelBatchOutcome:
     attempts_reserved: int
     unknown_error: tuple[str, str, str, str] | None = None
     aborted: bool = False
-
-
-def _requests_chart(user_text: str) -> bool:
-    """仅识别用户明确表达的图表意图；普通文字分析不强制出图。"""
-    return (
-        _CHART_NEGATION_PATTERN.search(user_text) is None
-        and _CHART_REQUEST_PATTERN.search(user_text) is not None
-    )
-
-
-def _required_chart_dimensions(
-    user_text: str,
-    datasets: list[Dataset],
-) -> tuple[str, ...]:
-    """Compile explicit/all-dimension chart coverage from governed profiles."""
-    if not _requests_chart(user_text) or not datasets:
-        return ()
-    mentioned = [
-        dataset
-        for dataset in datasets
-        if dataset.ref in user_text or dataset.filename in user_text
-    ]
-    if len(mentioned) == 1:
-        dataset = mentioned[0]
-    elif len(datasets) == 1:
-        dataset = datasets[0]
-    else:
-        # Dataset selection is handled by the blocking clarification boundary.
-        return ()
-    try:
-        inferred = infer_data_roles_from_mapping(dataset.profile, dataset_ref=dataset.ref)
-    except ValueError:
-        return ()
-    raw_columns = inferred.get("columns")
-    columns = cast(list[JsonObject], raw_columns) if isinstance(raw_columns, list) else []
-    dimensions = tuple(
-        str(item["column"])
-        for item in columns
-        if isinstance(item.get("column"), str)
-        and item.get("primary_role") == "dimension"
-        and not bool(item.get("ambiguous"))
-    )
-    explicitly_named = tuple(column for column in dimensions if column in user_text)
-    if _ALL_DIMENSION_CHART_PATTERN.search(user_text) is not None:
-        return dimensions
-    return explicitly_named
-
-
-def _requests_report(user_text: str) -> bool:
-    """仅识别用户明确表达的报告生成意图；讨论报告本身不强制生成。"""
-    report_requested = (
-        _REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _REPORT_NEGATION_PATTERN.search(user_text) is None
-    )
-    pdf_requested = (
-        _PDF_REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _PDF_NEGATION_PATTERN.search(user_text) is None
-    )
-    markdown_requested = (
-        _MARKDOWN_REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _MARKDOWN_NEGATION_PATTERN.search(user_text) is None
-    )
-    return report_requested or pdf_requested or markdown_requested
-
-
-def _requests_pdf(user_text: str) -> bool:
-    """识别报告请求是否明确要求同时导出 PDF。"""
-    return (
-        _PDF_NEGATION_PATTERN.search(user_text) is None
-        and _PDF_REQUEST_PATTERN.search(user_text) is not None
-    )
 
 
 def _blocking_clarification(
@@ -5192,46 +5106,6 @@ def _cleanup_uncommitted_report_files(call: ToolCall, result: Any) -> None:
             )
 
 
-def _artifact_payload_for(tool: str, result: dict[str, Any]) -> JsonObject:
-    """工件落库的 payload：报告存下载引用而非全文，统计包一层 kind。"""
-    if tool == "generate_report":
-        report_id = result.get("report_id", "")
-        payload: JsonObject = {
-            "report_id": report_id,
-            "md_url": f"/analyze/report/{report_id}.md",
-            "skipped_charts": result.get("skipped_charts", 0),
-        }
-        if result.get("pdf_path"):
-            payload["pdf_url"] = f"/analyze/report/{report_id}.pdf"
-        if isinstance(result.get("validation"), dict):
-            payload["validation"] = result["validation"]
-        return payload
-    if tool in {
-        "trend_analysis",
-        "forecast",
-        "anomaly_detect",
-        "regression",
-        "correlation",
-        "dimension_contribution",
-        "group_compare",
-    }:
-        return {"kind": ANALYSIS_KIND_BY_TOOL[tool], "result": result}
-    return dict(result)
-
-
-def _artifact_file_ref(tool: str, result: dict[str, Any]) -> str | None:
-    """Return the concrete generated file used by deterministic verification."""
-    if tool != "generate_report":
-        return None
-    pdf_path = result.get("pdf_path")
-    if isinstance(pdf_path, str) and pdf_path.strip():
-        return pdf_path
-    markdown_path = result.get("md_path")
-    if isinstance(markdown_path, str) and markdown_path.strip():
-        return markdown_path
-    return None
-
-
 def _generated_file_exists(file_ref: str | None) -> bool:
     if not file_ref:
         return False
@@ -5256,98 +5130,6 @@ def _artifact_payload(artifact: Artifact) -> dict[str, Any]:
         "dataset_ref": artifact.dataset_ref,
         "created_at": artifact.created_at,
     }
-
-
-# 参数键 → 中文标签（人话参数摘要用；未列出的键按原名展示）
-_ARG_LABELS = {
-    "dataset_ref": "数据集",
-    "left_dataset_ref": "左数据集",
-    "right_dataset_ref": "右数据集",
-    "left_key": "左关联键",
-    "right_key": "右关联键",
-    "join_type": "Join 类型",
-    "value_col": "数值列",
-    "time_col": "时间列",
-    "method": "方法",
-    "period": "周期",
-    "ma_window": "窗口",
-    "forecast_horizon": "预测步数",
-    "horizon": "预测期数",
-    "validation_size": "验证样本数",
-    "seasonal_period": "季节周期",
-    "contamination": "异常比例",
-    "target": "目标列",
-    "features": "自变量",
-    "columns": "列",
-    "dimension_col": "维度列",
-    "chart_type": "图型",
-    "group_col": "分组列",
-    "agg": "聚合",
-    "sort": "排序",
-    "limit": "行数上限",
-    "query": "检索词",
-    "top_k": "条数",
-    "title": "标题",
-    "analysis_ids": "纳入分析",
-    "insights": "要点",
-    "include_pdf": "导出PDF",
-    "filters": "过滤",
-    "drop_nulls": "去空列",
-    "drop_duplicates": "去重列",
-    "exclude_row_indices": "排除行",
-    "x": "X轴",
-    "y": "Y轴",
-    "top_n": "取前N",
-}
-
-# 摘要里不展示的大值参数（原始 JSON 仍在 args_preview 里供调参表单用）
-_ARG_SKIP = {"option", "encoding", "sample_rows"}
-
-
-def _humanize_args(tool: str, args: dict[str, Any]) -> str:
-    """把工具入参翻译成一行中文摘要（14.5.3：涉及字段/筛选条件，非原始 JSON）。"""
-    if tool == "chart_screenshot":
-        return "渲染当前图表为 PNG"
-    parts: list[str] = []
-    flat = dict(args)
-    # gen_chart 的列映射摊平成普通键
-    encoding = flat.get("encoding")
-    if isinstance(encoding, dict):
-        flat.update(encoding)
-    for key, value in flat.items():
-        if key in _ARG_SKIP or value is None:
-            continue
-        parts.append(f"{_ARG_LABELS.get(key, key)}: {_humanize_value(key, value)}")
-    return " · ".join(parts) if parts else "无参数"
-
-
-def _humanize_value(key: str, value: Any) -> str:
-    """单个参数值的人话展示：短标识、列表截断、布尔汉化。"""
-    if key.endswith("dataset_ref") and isinstance(value, str):
-        return value[:8]
-    if isinstance(value, bool):
-        return "是" if value else "否"
-    if isinstance(value, list):
-        shown = [_filter_condition_text(v) if isinstance(v, dict) else str(v) for v in value[:5]]
-        suffix = f" 等 {len(value)} 项" if len(value) > 5 else ""
-        return "、".join(shown) + suffix
-    if isinstance(value, dict):
-        return _compact_json(value, 60)
-    return str(value)
-
-
-def _filter_condition_text(cond: dict[str, Any]) -> str:
-    """过滤/排序条件的紧凑人话（如 "地区 in [华东,华南]"、"销售额 desc"）。"""
-    if "op" in cond:
-        column, op = cond.get("column", "?"), cond.get("op", "?")
-        if op in ("is_null", "not_null"):
-            return f"{column} {'为空' if op == 'is_null' else '非空'}"
-        value = cond.get("value")
-        value_text = "、".join(str(v) for v in value) if isinstance(value, list) else str(value)
-        return f"{column} {op} {value_text}"
-    if "column" in cond:  # 排序键
-        return f"{cond['column']} {cond.get('order', 'asc')}"
-    return _compact_json(cond, 40)
 
 
 def _summarize_result(tool: str, result: Any) -> str:

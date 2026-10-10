@@ -23,8 +23,9 @@ from packages.knowledge.domain_store import (
 )
 from packages.session.models import ArtifactDraft
 from packages.session.store import SessionStore
+from packages.session.task_hashing import invocation_arguments_hash
 from packages.session.task_models import ClaimDraft
-from packages.session.task_store import TaskStore, invocation_arguments_hash
+from packages.session.task_store import TaskStore
 
 _ALICE = Principal(user_id="alice", tenant_id="tenant-a")
 _BOB = Principal(user_id="bob", tenant_id="tenant-a")

@@ -1157,12 +1157,11 @@ async def test_high_risk_registered_tool_executes_without_human_approval(
     assert saved is not None and saved.status == "completed"
     assert len(tasks.list_invocations(run_id)) == 1
     assert len(registry.contexts) == 1
-    approvals = tasks.list_approvals(
-        run_id,
-        tenant_id="local",
-        subject_user_id="local-user",
-    )
-    assert approvals == []
+    with sqlite3.connect(store.db_path) as connection:
+        approval_count = connection.execute(
+            "SELECT COUNT(*) FROM approval_records WHERE run_id = ?", (run_id,)
+        ).fetchone()
+    assert approval_count is not None and approval_count[0] == 0
     context = registry.contexts[0]
     assert context.approval_id is None
     assert context.approval_version is None
@@ -2816,9 +2815,9 @@ async def test_report_files_are_cleaned_if_atomic_success_commit_fails(
     ],
 )
 def test_chart_intent_detection_is_conservative(text: str, expected: bool) -> None:
-    from apps.orchestrator.agent_loop import _requests_chart
+    from apps.orchestrator.request_intent import requests_chart
 
-    assert _requests_chart(text) is expected
+    assert requests_chart(text) is expected
 
 
 @pytest.mark.parametrize(
@@ -2834,10 +2833,10 @@ def test_chart_intent_detection_is_conservative(text: str, expected: bool) -> No
 def test_report_intent_detection_is_conservative(
     text: str, expected: bool, pdf_expected: bool
 ) -> None:
-    from apps.orchestrator.agent_loop import _requests_pdf, _requests_report
+    from apps.orchestrator.request_intent import requests_pdf, requests_report
 
-    assert _requests_report(text) is expected
-    assert (_requests_report(text) and _requests_pdf(text)) is pdf_expected
+    assert requests_report(text) is expected
+    assert (requests_report(text) and requests_pdf(text)) is pdf_expected
 
 
 @pytest.mark.asyncio
@@ -3771,7 +3770,7 @@ async def test_long_history_uses_fixed_compaction_and_recent_raw_messages(
 
 
 def test_humanize_args_translates_common_tools() -> None:
-    from apps.orchestrator.agent_loop import _humanize_args
+    from apps.orchestrator.tool_presentation import humanize_args as _humanize_args
 
     assert (
         _humanize_args(

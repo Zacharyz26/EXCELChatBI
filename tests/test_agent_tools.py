@@ -840,7 +840,7 @@ def test_report_accepts_supported_numbers_and_records_content_hash(
 ) -> None:
     import hashlib
 
-    from apps.orchestrator.agent_loop import _artifact_payload_for
+    from apps.orchestrator.artifacts import artifact_payload_for
 
     store, context = workspace
     ids = _seed_artifacts(store, context, sales_ref)
@@ -854,7 +854,7 @@ def test_report_accepts_supported_numbers_and_records_content_hash(
     content_hash = hashlib.sha256(Path(result["md_path"]).read_bytes()).hexdigest()
     assert validation["content_sha256"] == content_hash
     assert validation["claims"]
-    assert _artifact_payload_for("generate_report", result)["validation"] == validation
+    assert artifact_payload_for("generate_report", result)["validation"] == validation
 
 
 def test_report_cannot_use_unselected_analysis_to_support_prose(

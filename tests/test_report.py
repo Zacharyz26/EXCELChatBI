@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.orchestrator.agent_loop import _artifact_payload_for  # noqa: E402
+from apps.orchestrator.artifacts import artifact_payload_for  # noqa: E402
 from mcp_servers.report import tools as report_tools  # noqa: E402
 from mcp_servers.report.server import build_server as build_report_server  # noqa: E402
 from packages.common.analysis_kinds import REPORT_ANALYSIS_KINDS  # noqa: E402
@@ -264,7 +264,7 @@ def test_every_production_artifact_kind_preserves_key_numbers(
     expected: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = _artifact_payload_for(tool, result)
+    payload = artifact_payload_for(tool, result)
     report = _report_tool("gen_report_md").invoke(
         {
             "title": "\u5951\u7ea6\u62a5\u544a",

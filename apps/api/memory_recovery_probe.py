@@ -12,6 +12,7 @@ from pathlib import Path
 
 from packages.common.config import Settings, get_settings
 from packages.governance.permissions import Principal
+from packages.orchestration.contracts import build_minimal_contract
 from packages.session.compaction import CompactionStore
 from packages.session.coref import ReferenceResolver, find_reference_assumption
 from packages.session.lineage import LineageStore
@@ -26,8 +27,6 @@ from packages.session.memory_store import MemoryStore
 from packages.session.models import Artifact
 from packages.session.store import SessionStore
 from packages.session.task_store import TaskStore
-
-from apps.orchestrator.control.contracts import build_minimal_contract
 
 
 def seed_probe(
