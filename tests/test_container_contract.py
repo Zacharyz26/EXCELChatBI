@@ -42,6 +42,10 @@ def test_web_image_is_non_root_and_preserves_sse_and_download_proxy() -> None:
         'ENTRYPOINT ["/usr/local/bin/chatbi-web-entrypoint"]'
         in dockerfile
     )
+    entrypoint_position = dockerfile.index("ENTRYPOINT")
+    default_command = 'CMD ["nginx", "-g", "daemon off;"]'
+    assert default_command in dockerfile
+    assert entrypoint_position < dockerfile.index(default_command)
 
 
 def test_build_context_excludes_local_state_and_secrets() -> None:
