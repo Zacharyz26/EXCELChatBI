@@ -2826,6 +2826,22 @@ def test_chart_intent_detection_is_conservative(text: str, expected: bool) -> No
         ("请把本次分析组装成一份报告，并导出 PDF", True, True),
         ("给我一份销售分析报告", True, False),
         ("报告通常包含哪些内容？", False, False),
+        ("请基于工具 Evidence 报告总销售额和各地区销售额", False, False),
+        ("请引用已有报告说明结论", False, False),
+        ("Please report total sales by region", False, False),
+        ("Create a new sales report", True, False),
+        ("Use the previous report to create a new PDF report", True, True),
+        ("Export the existing report", False, False),
+        ("基于已有报告生成一份新报告", True, False),
+        ("Create a report, but not a PDF", True, False),
+        ("Don't create a report", False, False),
+        ("Do not generate a report; summarize the findings", False, False),
+        ("Don't export a PDF; just summarize.", False, False),
+        ("不要使用之前报告，请根据当前数据生成新报告。", True, False),
+        ("Use the previous report to create an updated report.", True, False),
+        ("基于已有报告重新生成报告", True, False),
+        ("Download the previous PDF", False, False),
+        ("导出已有 PDF", False, False),
         ("不要生成报告，只给文字结论", False, False),
         ("生成报告，但不要 PDF", True, False),
     ],
@@ -3214,6 +3230,181 @@ def test_host_enriches_report_delivery_and_referenced_chart_lineage(
     assert "analysis_id" not in chart_args
 
 
+def test_report_enrichment_prefers_multiple_current_run_artifacts_over_stale_ids(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    dataset_ref = "1" * 32
+    _register_dataset(store, conversation, dataset_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="新旧分析",
+    )
+    old = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"value": 1}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "old-analysis"},
+        dataset_ref=dataset_ref,
+    )
+    profile = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="profile",
+        payload={"profile": {"row_count": 2}},
+        source_tool="get_data_profile",
+        params={"analysis_id": "current-profile"},
+        dataset_ref=dataset_ref,
+    )
+    stats = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"value": 2}},
+        source_tool="aggregate_preview",
+        params={"analysis_id": "current-stats"},
+        dataset_ref=dataset_ref,
+    )
+    contract = build_minimal_contract(
+        run_id="same-run-report",
+        user_text="根据刚完成的画像和统计生成报告",
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+
+    report_args = _enrich_tool_arguments(
+        "generate_report",
+        {"analysis_ids": ["old-analysis"]},
+        contract=contract,
+        artifacts=store.list_artifacts(conversation.id),
+        datasets=store.list_datasets(conversation.project_id),
+        run_artifact_ids={profile.id, stats.id},
+    )
+
+    assert report_args["analysis_ids"] == ["current-profile", "current-stats"]
+    assert old.id not in {profile.id, stats.id}
+
+
+def test_report_enrichment_preserves_invalid_ids_for_fail_closed_validation(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    dataset_ref = "1" * 32
+    _register_dataset(store, conversation, dataset_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="本轮分析",
+    )
+    current = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"value": 2}},
+        source_tool="aggregate_preview",
+        params={"analysis_id": "current-stats"},
+        dataset_ref=dataset_ref,
+    )
+    contract = build_minimal_contract(
+        run_id="invalid-lineage-report",
+        user_text="生成报告",
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+
+    report_args = _enrich_tool_arguments(
+        "generate_report",
+        {"analysis_ids": ["foreign-or-missing-analysis"]},
+        contract=contract,
+        artifacts=store.list_artifacts(conversation.id),
+        datasets=store.list_datasets(conversation.project_id),
+        run_artifact_ids={current.id},
+    )
+
+    assert report_args["analysis_ids"] == ["foreign-or-missing-analysis"]
+
+
+def test_report_enrichment_limits_current_run_artifacts_to_verified_dataset(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="两个数据集的新旧分析",
+    )
+    old = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"value": 1}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "old-analysis"},
+        dataset_ref=second_ref,
+    )
+    current_first = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="profile",
+        payload={"profile": {"row_count": 2}},
+        source_tool="get_data_profile",
+        params={"analysis_id": "current-first"},
+        dataset_ref=first_ref,
+    )
+    current_second = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=message.id,
+        type="stats",
+        payload={"result": {"value": 2}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "current-second"},
+        dataset_ref=second_ref,
+    )
+    resolver = ReferenceResolver(store, audit_recorder=lambda _event: None)
+    references = resolver.resolve(
+        f"使用 dataset_ref={first_ref} 生成报告",
+        project_id=conversation.project_id,
+        conversation_id=conversation.id,
+        principal=Principal(user_id="local-user"),
+    )
+    contract = build_minimal_contract(
+        run_id="dataset-scoped-report",
+        user_text=references.rewritten_query,
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+
+    report_args = _enrich_tool_arguments(
+        "generate_report",
+        {"analysis_ids": ["old-analysis"]},
+        contract=contract,
+        artifacts=store.list_artifacts(conversation.id),
+        datasets=store.list_datasets(conversation.project_id),
+        references=references,
+        run_artifact_ids={current_first.id, current_second.id},
+    )
+
+    assert report_args["analysis_ids"] == ["current-first"]
+    assert old.id not in {current_first.id, current_second.id}
+
+    ambiguous_args = _enrich_tool_arguments(
+        "generate_report",
+        {"analysis_ids": ["old-analysis"]},
+        contract=contract,
+        artifacts=store.list_artifacts(conversation.id),
+        datasets=store.list_datasets(conversation.project_id),
+        run_artifact_ids={current_first.id, current_second.id},
+    )
+    assert ambiguous_args["analysis_ids"] == []
+
+
 def test_verified_reference_overrides_model_delivery_lineage(
     store: SessionStore, conversation: Conversation
 ) -> None:
@@ -3300,6 +3491,7 @@ def test_verified_reference_overrides_model_delivery_lineage(
         artifacts=artifacts,
         datasets=datasets,
         references=report_reference,
+        run_artifact_ids={second_chart.id},
     )
     assert report_args["analysis_ids"] == [
         cast(str, stats.params["analysis_id"]),
@@ -3623,6 +3815,301 @@ async def test_system_context_lists_datasets_and_analysis_registry(
     assert "分析登记表" in system.content
     assert "analysis_id=an-001" in system.content
     assert '"direction":"up"' in system.content  # 登记表摘要
+
+
+@pytest.mark.asyncio
+async def test_system_context_refreshes_registry_after_same_run_artifact(
+    store: SessionStore, conversation: Conversation
+) -> None:
+    _register_dataset(store, conversation)
+    gateway = ScriptedGateway(
+        [
+            {
+                "deltas": ["读取画像"],
+                "tool_calls": [
+                    ToolCall(
+                        id="same-run-profile",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ],
+            },
+            {"deltas": ["画像读取完成。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _args: {
+                "profile": {"row_count": 3, "column_count": 2},
+                "quality": {"duplicate_rows": 0},
+            }
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text="查看数据画像",
+    )
+
+    assert dict(events)["done"]["run_status"] == "completed"
+    assert "[analysis_id=" not in gateway.calls[0]["messages"][0].content
+    refreshed_system = gateway.calls[1]["messages"][0].content
+    assert "分析登记表" in refreshed_system
+    assert "[analysis_id=" in refreshed_system
+
+
+@pytest.mark.asyncio
+async def test_same_run_report_replay_refreshes_registry_and_limits_stale_id_to_dataset(
+    store: SessionStore,
+    conversation: Conversation,
+    tmp_path: Path,
+) -> None:
+    first_ref = "1" * 32
+    second_ref = "2" * 32
+    _register_dataset(store, conversation, first_ref)
+    _register_dataset(store, conversation, second_ref)
+    seed = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="旧分析",
+    )
+    store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=seed.id,
+        type="stats",
+        payload={"result": {"direction": "stable"}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "stale-analysis"},
+        dataset_ref=second_ref,
+    )
+    report_id = "a" * 32
+    markdown_path = tmp_path / f"{report_id}.md"
+    markdown_path.write_text("# 同轮报告", encoding="utf-8")
+    report_arguments: list[dict[str, Any]] = []
+
+    def generate_report(arguments: dict[str, Any]) -> dict[str, Any]:
+        report_arguments.append(arguments)
+        return {
+            "report_id": report_id,
+            "md_path": str(markdown_path),
+            "analysis_ids": arguments["analysis_ids"],
+            "skipped_charts": 0,
+        }
+
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="profile-a",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{first_ref}"}}',
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="trend-b",
+                        name="trend_analysis",
+                        arguments=(
+                            f'{{"dataset_ref":"{second_ref}",'
+                            '"time_col":"月份","value_col":"销售额"}'
+                        ),
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="report-stale",
+                        name="generate_report",
+                        arguments=(
+                            '{"title":"同轮报告",'
+                            '"analysis_ids":["stale-analysis"]}'
+                        ),
+                    )
+                ]
+            },
+            {"deltas": ["报告已生成。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _args: {
+                "profile": {"row_count": 3, "column_count": 2},
+                "quality": {"duplicate_rows": 0},
+            },
+            "trend_analysis": lambda _args: {"direction": "up"},
+            "generate_report": generate_report,
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text=(
+            f"请使用 dataset_ref={first_ref} 查看数据画像和销售额趋势，然后生成报告"
+        ),
+    )
+
+    assert dict(events)["done"]["run_status"] == "completed"
+    run_id = cast(str, dict(events)["meta"]["run_id"])
+    invocations = TaskStore(store.db_path).list_invocations(run_id)
+    artifacts_by_id = {
+        artifact.id: artifact for artifact in store.list_artifacts(conversation.id)
+    }
+    profile_invocation = next(
+        item for item in invocations if item.tool_name == "get_data_profile"
+    )
+    trend_invocation = next(item for item in invocations if item.tool_name == "trend_analysis")
+    profile_artifact = artifacts_by_id[cast(str, profile_invocation.artifact_id)]
+    trend_artifact = artifacts_by_id[cast(str, trend_invocation.artifact_id)]
+    assert report_arguments[0]["analysis_ids"] == [profile_artifact.params["analysis_id"]]
+    assert trend_artifact.params["analysis_id"] not in report_arguments[0]["analysis_ids"]
+    report_system = gateway.calls[2]["messages"][0].content
+    assert f"analysis_id={profile_artifact.params['analysis_id']}" in report_system
+    assert f"analysis_id={trend_artifact.params['analysis_id']}" in report_system
+    assert any(name == "artifact" and payload["type"] == "report" for name, payload in events)
+
+
+@pytest.mark.asyncio
+async def test_mixed_visible_and_foreign_report_ids_block_before_model_or_tool(
+    store: SessionStore,
+    conversation: Conversation,
+) -> None:
+    _register_dataset(store, conversation)
+    local_message = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="当前分析",
+    )
+    local = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=local_message.id,
+        type="stats",
+        payload={"result": {"value": 1}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "local-analysis"},
+        dataset_ref=_DATASET_REF,
+    )
+    foreign_project = store.create_project("外部项目")
+    foreign_conversation = store.create_conversation(foreign_project.id)
+    foreign_message = store.append_message(
+        conversation_id=foreign_conversation.id,
+        role="assistant",
+        content="外部分析",
+    )
+    foreign = store.create_artifact(
+        conversation_id=foreign_conversation.id,
+        message_id=foreign_message.id,
+        type="stats",
+        payload={"result": {"value": 99}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "foreign-analysis"},
+        dataset_ref=None,
+    )
+    gateway = ScriptedGateway()
+    registry = FakeRegistry({"generate_report": lambda _args: pytest.fail("must not run")})
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text=f"使用 {local.id} 和 {foreign.id} 生成报告",
+    )
+
+    assert gateway.calls == []
+    assert registry.executed == []
+    assert dict(events)["meta"]["reference_status"] == "unresolved"
+    assert dict(events)["done"]["run_status"] == "waiting_user"
+    waiting = dict(events)["waiting_user"]
+    assert waiting["payload"]["about"] == "reference_target"
+    assert foreign.id not in str(waiting)
+
+
+@pytest.mark.asyncio
+async def test_explicit_old_analysis_reference_wins_after_same_run_refresh(
+    store: SessionStore,
+    conversation: Conversation,
+    tmp_path: Path,
+) -> None:
+    _register_dataset(store, conversation)
+    seed = store.append_message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="明确旧分析",
+    )
+    old = store.create_artifact(
+        conversation_id=conversation.id,
+        message_id=seed.id,
+        type="stats",
+        payload={"result": {"value": 1}},
+        source_tool="trend_analysis",
+        params={"analysis_id": "explicit-old-analysis"},
+        dataset_ref=_DATASET_REF,
+    )
+    report_id = "b" * 32
+    markdown_path = tmp_path / f"{report_id}.md"
+    markdown_path.write_text("# 旧分析报告", encoding="utf-8")
+    report_arguments: list[dict[str, Any]] = []
+
+    def generate_report(arguments: dict[str, Any]) -> dict[str, Any]:
+        report_arguments.append(arguments)
+        return {
+            "report_id": report_id,
+            "md_path": str(markdown_path),
+            "analysis_ids": arguments["analysis_ids"],
+            "skipped_charts": 0,
+        }
+
+    gateway = ScriptedGateway(
+        [
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="profile-current",
+                        name="get_data_profile",
+                        arguments=f'{{"dataset_ref":"{_DATASET_REF}"}}',
+                    )
+                ]
+            },
+            {
+                "tool_calls": [
+                    ToolCall(
+                        id="report-explicit-old",
+                        name="generate_report",
+                        arguments='{"title":"旧分析报告","analysis_ids":[]}',
+                    )
+                ]
+            },
+            {"deltas": ["指定的旧分析报告已生成。"]},
+        ]
+    )
+    registry = FakeRegistry(
+        {
+            "get_data_profile": lambda _args: {"profile": {"row_count": 3}},
+            "generate_report": generate_report,
+        }
+    )
+
+    events = await _run_loop(
+        store,
+        conversation,
+        gateway,
+        registry,
+        user_text=f"请先查看当前数据画像，再使用 analysis_id={old.id} 生成报告",
+    )
+
+    assert dict(events)["done"]["run_status"] == "completed"
+    assert report_arguments[0]["analysis_ids"] == ["explicit-old-analysis"]
+    assert "[analysis_id=" in gateway.calls[1]["messages"][0].content
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ from packages.orchestration.task_plan_contract import (
 from packages.session.models import Artifact, Dataset, JsonObject
 
 from apps.orchestrator.agent_tools import AgentToolRegistry
+from apps.orchestrator.request_intent import requests_report
 
 OutlineRoute = Literal["fast", "template"]
 PROMPT_VERSION = "deterministic-outline-v1"
@@ -257,12 +258,12 @@ def choose_outline_route(user_text: str, context: JsonObject) -> OutlineRoute:
         return "template"
     if len([column for column in columns if "时间" in column or "日期" in column]) > 1:
         return "template"
+    if requests_report(user_text):
+        return "template"
     if any(
         token in request
         for token in (
             "图",
-            "报告",
-            "pdf",
             "趋势",
             "转化率",
             "异常",
@@ -538,7 +539,7 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("data.aggregate")
     if any(token in request for token in ("图", "可视化", "chart", "plot")):
         add("visualization.chart")
-    if "报告" in request or "pdf" in request:
+    if requests_report(user_text):
         if (
             not result
             and cast(list[JsonObject], context.get("datasets") or [])

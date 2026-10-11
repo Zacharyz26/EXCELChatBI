@@ -2737,6 +2737,18 @@ async def _stream_agent_chat_inner(
                         },
                     )
                     return
+                refreshed_artifacts = await run_in_threadpool(
+                    store.list_artifacts, conversation_id
+                )
+                system_content = _refreshed_system_content(
+                    datasets=datasets,
+                    artifacts=refreshed_artifacts,
+                    config=config,
+                    memories=memory_records,
+                    compaction=compaction_view,
+                    references=reference_resolution,
+                    memory_references=memory_reference_resolution,
+                )
                 continue
 
             for call_index, call in enumerate(tool_calls):
@@ -2788,6 +2800,16 @@ async def _stream_agent_chat_inner(
                         if call.name in {"gen_chart", "generate_report"}
                         else []
                     )
+                    current_run_artifact_ids: set[str] = set()
+                    if call.name == "generate_report":
+                        current_invocations = await run_in_threadpool(
+                            task_store.list_invocations, run_id
+                        )
+                        current_run_artifact_ids = {
+                            item.artifact_id
+                            for item in current_invocations
+                            if item.artifact_id is not None
+                        }
                     call_args = _enrich_tool_arguments(
                         call.name,
                         call_args,
@@ -2797,6 +2819,7 @@ async def _stream_agent_chat_inner(
                         references=reference_resolution,
                         memory_references=memory_reference_resolution,
                         request_text=effective_request_text,
+                        run_artifact_ids=current_run_artifact_ids,
                     )
                 definition_execution: JsonObject | None = None
                 definition_execution_error: str | None = None
@@ -3473,6 +3496,16 @@ async def _stream_agent_chat_inner(
                     artifact_id=artifact.id if artifact else None,
                 )
                 working.append(ModelMessage(role="tool", content=model_view, tool_call_id=call.id))
+            refreshed_artifacts = await run_in_threadpool(store.list_artifacts, conversation_id)
+            system_content = _refreshed_system_content(
+                datasets=datasets,
+                artifacts=refreshed_artifacts,
+                config=config,
+                memories=memory_records,
+                compaction=compaction_view,
+                references=reference_resolution,
+                memory_references=memory_reference_resolution,
+            )
         if not final_text.strip() or passed_verification is None:
             run, failed_event = await _transition_after_failure(
                 task_store,
@@ -3987,6 +4020,31 @@ def _verified_reference_system_content(
     )
 
 
+def _refreshed_system_content(
+    *,
+    datasets: list[Dataset],
+    artifacts: list[Artifact],
+    config: AgentLoopConfig,
+    memories: tuple[MemoryRecord, ...],
+    compaction: CompactionView | None,
+    references: ReferenceResolution | None,
+    memory_references: MemoryReferenceResolution | None,
+) -> str:
+    """Refresh the Host-owned registry after tools mint same-run artifacts."""
+    system_content = _build_system_content(
+        datasets,
+        artifacts,
+        config,
+        memories=memories,
+        compaction=compaction,
+    )
+    return _verified_reference_system_content(
+        system_content,
+        references=references,
+        memory_references=memory_references,
+    )
+
+
 def _memory_context_lines(
     records: tuple[MemoryRecord, ...],
     maximum_chars: int,
@@ -4052,6 +4110,7 @@ def _enrich_tool_arguments(
     references: ReferenceResolution | None = None,
     memory_references: MemoryReferenceResolution | None = None,
     request_text: str | None = None,
+    run_artifact_ids: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """按 TaskContract 与 Host 已验证引用约束工具参数和交付血缘。"""
     enriched = dict(arguments)
@@ -4064,21 +4123,74 @@ def _enrich_tool_arguments(
             artifacts,
         )
         analysis_ids = enriched.get("analysis_ids")
-        has_analysis_ids = isinstance(analysis_ids, list) and any(
-            isinstance(item, str) and item.strip() for item in analysis_ids
+        requested_analysis_ids = (
+            [item.strip() for item in analysis_ids if isinstance(item, str) and item.strip()]
+            if isinstance(analysis_ids, list)
+            else []
         )
+        known_analysis_ids = {
+            _analysis_id_of(artifact)
+            for artifact in artifacts
+            if artifact.type in {"profile", "stats", "chart", "table"}
+        }
+        verified_dataset_refs = set(
+            _referenced_dataset_refs(
+                references,
+                memory_references,
+                valid_dataset_refs={dataset.ref for dataset in datasets},
+            )
+        )
+        current_run_artifacts = [
+            artifact
+            for artifact in artifacts
+            if artifact.id in run_artifact_ids
+            and artifact.type in {"profile", "stats", "chart", "table"}
+        ]
+        current_run_dataset_refs = {
+            artifact.dataset_ref
+            for artifact in current_run_artifacts
+            if artifact.dataset_ref is not None
+        }
+        current_run_scope_ambiguous = (
+            not verified_dataset_refs and len(current_run_dataset_refs) > 1
+        )
+        current_run_analysis_ids: list[str] = []
+        for artifact in current_run_artifacts:
+            if verified_dataset_refs and artifact.dataset_ref not in verified_dataset_refs:
+                continue
+            if current_run_scope_ambiguous:
+                continue
+            analysis_id = _analysis_id_of(artifact)
+            if analysis_id not in current_run_analysis_ids:
+                current_run_analysis_ids.append(analysis_id)
         if referenced_analysis_ids:
             enriched["analysis_ids"] = referenced_analysis_ids
-        if not referenced_analysis_ids and not has_analysis_ids:
+        elif requested_analysis_ids:
+            requested_are_known = all(
+                analysis_id in known_analysis_ids for analysis_id in requested_analysis_ids
+            )
+            selects_current_run = any(
+                analysis_id in current_run_analysis_ids for analysis_id in requested_analysis_ids
+            )
+            if current_run_analysis_ids and requested_are_known and not selects_current_run:
+                enriched["analysis_ids"] = current_run_analysis_ids
+            elif current_run_scope_ambiguous and requested_are_known and not selects_current_run:
+                enriched["analysis_ids"] = []
+        else:
             selected: list[str] = []
-            for artifact in artifacts:
-                if artifact.type not in {"profile", "stats", "chart", "table"}:
-                    continue
-                analysis_id = _analysis_id_of(artifact)
-                if analysis_id not in selected:
-                    selected.append(analysis_id)
+            if current_run_analysis_ids:
+                selected.extend(current_run_analysis_ids)
+            elif not current_run_scope_ambiguous:
+                for artifact in artifacts:
+                    if artifact.type not in {"profile", "stats", "chart", "table"}:
+                        continue
+                    analysis_id = _analysis_id_of(artifact)
+                    if analysis_id not in selected:
+                        selected.append(analysis_id)
             if selected:
                 enriched["analysis_ids"] = selected
+            elif current_run_scope_ambiguous:
+                enriched["analysis_ids"] = []
         title = enriched.get("title")
         if not isinstance(title, str) or not title.strip():
             enriched["title"] = "数据分析报告"

@@ -271,6 +271,70 @@ def test_cross_tenant_project_and_forged_reference_fail_closed(
     assert forged.targets == ()
 
 
+@pytest.mark.parametrize("unknown_id", ["f" * 32, "e" * 12])
+def test_mixed_valid_and_unknown_explicit_ids_fail_as_one_reference_set(
+    tmp_path: Path, unknown_id: str
+) -> None:
+    session, project_id, conversation_id, artifacts, _ = _workspace(tmp_path)
+
+    result = ReferenceResolver(
+        session,
+        audit_recorder=lambda _event: None,
+    ).resolve(
+        f"用 analysis_id={artifacts[0].id} 和 analysis_id={unknown_id} 生成报告",
+        project_id=project_id,
+        conversation_id=conversation_id,
+        principal=_OWNER,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason_code == "reference_not_found"
+    assert result.targets == ()
+    assert result.choices == ()
+
+
+def test_mixed_visible_and_cross_project_ids_do_not_reveal_foreign_target(
+    tmp_path: Path,
+) -> None:
+    session, project_id, conversation_id, artifacts, _ = _workspace(tmp_path)
+    foreign_project = session.create_project(
+        "外部项目",
+        owner_user_id=_OWNER.user_id,
+        tenant_id=_OWNER.tenant_scope,
+    )
+    foreign_conversation = session.create_conversation(foreign_project.id)
+    foreign_message = session.append_message(
+        conversation_id=foreign_conversation.id,
+        role="assistant",
+        content="外部分析",
+    )
+    foreign = session.create_artifact(
+        conversation_id=foreign_conversation.id,
+        message_id=foreign_message.id,
+        type="stats",
+        payload={"result": {"value": 99}},
+        source_tool="aggregate_preview",
+        params={"analysis_id": "foreign-ref-1"},
+        dataset_ref=None,
+    )
+
+    result = ReferenceResolver(
+        session,
+        audit_recorder=lambda _event: None,
+    ).resolve(
+        f"用 {artifacts[0].id} 和 {foreign.id} 生成报告",
+        project_id=project_id,
+        conversation_id=conversation_id,
+        principal=_OWNER,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason_code == "reference_not_found"
+    assert result.targets == ()
+    assert result.choices == ()
+    assert foreign.id not in str(result.clarification())
+
+
 def test_audit_contains_only_ids_hashes_and_counts(tmp_path: Path) -> None:
     session, project_id, conversation_id, _, _ = _workspace(tmp_path)
     events: list[AuditEvent] = []

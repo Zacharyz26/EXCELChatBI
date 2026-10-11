@@ -26,22 +26,67 @@ _REPORT_REQUEST_PATTERN = re.compile(
     r"报告|报告.{0,10}(?:生成|导出|制作|创建|下载))",
     re.IGNORECASE,
 )
-_REPORT_NEGATION_PATTERN = re.compile(r"(?:不要|无需|不需要|不用|别).{0,6}报告", re.IGNORECASE)
+_ENGLISH_REPORT_REQUEST_PATTERN = re.compile(
+    r"(?:\b(?:generate|create|produce|export|download|build|compile|write|make|"
+    r"assemble|prepare)\b.{0,40}\breport\b|"
+    r"\bgive\s+me\b.{0,40}\breport\b|"
+    r"\breport\b.{0,20}\b(?:generate|create|export|download)\b)",
+    re.IGNORECASE,
+)
+_REPORT_NEGATION_PATTERN = re.compile(
+    r"(?:(?:不要|无需|不需要|不用|别).{0,10}报告|"
+    r"\b(?:do\s+not|don't|dont|no|without|skip)\b.{0,30}\breport\b)",
+    re.IGNORECASE,
+)
+_EXISTING_REPORT_REFERENCE_PATTERN = re.compile(
+    r"(?:(?:引用|查看|打开|展示|使用|读取|基于|下载|导出).{0,12}"
+    r"(?:已有|现有|之前|上次|刚才|已生成).{0,8}(?:报告|pdf|markdown)|"
+    r"(?:已有|现有|之前|上次|刚才|已生成).{0,4}报告|"
+    r"\b(?:use|reference|cite|open|show|view|read|download|export)\b.{0,30}"
+    r"\b(?:existing|previous|prior|last|generated)\b.{0,12}"
+    r"\b(?:report|pdf|markdown)\b)",
+    re.IGNORECASE,
+)
+_NEW_REPORT_FROM_REFERENCE_PATTERN = re.compile(
+    r"(?:(?:生成|创建|制作|编制|组装).{0,12}(?:一份|新的?|新|更新).{0,8}报告|"
+    r"(?:已有|现有|之前|上次|刚才|已生成).{0,6}报告.{0,16}"
+    r"(?:重新|再次|更新|重做)?(?:生成|创建|制作|编制|组装).{0,8}报告|"
+    r"(?:重新|再次|更新|重做).{0,6}(?:生成|创建|制作|编制|组装).{0,8}报告|"
+    r"\b(?:generate|create|produce|build|compile|write|make|assemble|prepare)\b"
+    r".{0,16}\b(?:a\s+|an\s+)?(?:new|updated|revised|refreshed)\b.{0,20}"
+    r"\breport\b|"
+    r"\b(?:existing|previous|prior|last|generated)\b.{0,12}\breport\b.{0,24}"
+    r"\b(?:generate|create|produce|build|compile|write|make|assemble|prepare)\b"
+    r".{0,20}\breport\b)",
+    re.IGNORECASE,
+)
 _PDF_REPORT_REQUEST_PATTERN = re.compile(
     r"(?:(?:生成|导出|制作|创建|输出|给我|请给).{0,10}pdf|"
-    r"pdf.{0,10}(?:生成|导出|制作|创建|下载))",
+    r"pdf.{0,10}(?:生成|导出|制作|创建|下载)|"
+    r"\b(?:generate|create|produce|export|download|make|prepare)\b.{0,30}\bpdf\b|"
+    r"\bpdf\b.{0,20}\b(?:generate|create|export|download)\b)",
     re.IGNORECASE,
 )
 _MARKDOWN_REPORT_REQUEST_PATTERN = re.compile(
     r"(?:(?:生成|导出|制作|创建|输出|给我|请给).{0,10}markdown|"
-    r"markdown.{0,10}(?:生成|导出|制作|创建|下载))",
+    r"markdown.{0,10}(?:生成|导出|制作|创建|下载)|"
+    r"\b(?:generate|create|produce|export|download|make|prepare)\b.{0,30}"
+    r"\bmarkdown\b|"
+    r"\bmarkdown\b.{0,20}\b(?:generate|create|export|download)\b)",
     re.IGNORECASE,
 )
 _MARKDOWN_NEGATION_PATTERN = re.compile(
-    r"(?:不要|无需|不需要|不用|别).{0,6}markdown", re.IGNORECASE
+    r"(?:(?:不要|无需|不需要|不用|别).{0,6}markdown|"
+    r"\b(?:do\s+not|don't|dont|no|not|without|skip)\b.{0,20}\bmarkdown\b)",
+    re.IGNORECASE,
 )
 _PDF_REQUEST_PATTERN = re.compile(r"pdf", re.IGNORECASE)
-_PDF_NEGATION_PATTERN = re.compile(r"(?:不要|无需|不需要|不用|别).{0,6}pdf", re.IGNORECASE)
+_PDF_NEGATION_PATTERN = re.compile(
+    r"(?:(?:不要|无需|不需要|不用|别).{0,6}pdf|"
+    r"\b(?:do\s+not|don't|dont|no|not|without|skip)\b.{0,20}\bpdf\b)",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_PATTERN = re.compile(r"[,，;；。.!?！？\n]+")
 
 
 def requests_chart(user_text: str) -> bool:
@@ -91,24 +136,47 @@ def required_chart_dimensions(
 
 def requests_report(user_text: str) -> bool:
     """Return whether the user explicitly requests a generated report."""
-    report_requested = (
-        _REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _REPORT_NEGATION_PATTERN.search(user_text) is None
-    )
-    pdf_requested = (
-        _PDF_REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _PDF_NEGATION_PATTERN.search(user_text) is None
-    )
-    markdown_requested = (
-        _MARKDOWN_REPORT_REQUEST_PATTERN.search(user_text) is not None
-        and _MARKDOWN_NEGATION_PATTERN.search(user_text) is None
-    )
-    return report_requested or pdf_requested or markdown_requested
+    for clause in _request_clauses(user_text):
+        references_existing = _EXISTING_REPORT_REFERENCE_PATTERN.search(clause) is not None
+        creates_updated_report = _NEW_REPORT_FROM_REFERENCE_PATTERN.search(clause) is not None
+        report_requested = (
+            _REPORT_NEGATION_PATTERN.search(clause) is None
+            and (
+                _REPORT_REQUEST_PATTERN.search(clause) is not None
+                or _ENGLISH_REPORT_REQUEST_PATTERN.search(clause) is not None
+            )
+        )
+        if report_requested:
+            if not references_existing or creates_updated_report:
+                return True
+        if (
+            _PDF_REPORT_REQUEST_PATTERN.search(clause) is not None
+            and _PDF_NEGATION_PATTERN.search(clause) is None
+            and (not references_existing or creates_updated_report)
+        ):
+            return True
+        if (
+            _MARKDOWN_REPORT_REQUEST_PATTERN.search(clause) is not None
+            and _MARKDOWN_NEGATION_PATTERN.search(clause) is None
+            and (not references_existing or creates_updated_report)
+        ):
+            return True
+    return False
 
 
 def requests_pdf(user_text: str) -> bool:
     """Return whether a report request explicitly asks for PDF export."""
-    return (
-        _PDF_NEGATION_PATTERN.search(user_text) is None
-        and _PDF_REQUEST_PATTERN.search(user_text) is not None
+    return any(
+        _PDF_REQUEST_PATTERN.search(clause) is not None
+        and _PDF_NEGATION_PATTERN.search(clause) is None
+        for clause in _request_clauses(user_text)
+    )
+
+
+def _request_clauses(user_text: str) -> tuple[str, ...]:
+    """Split independent request clauses so a local negation does not mask a later action."""
+    return tuple(
+        clause.strip()
+        for clause in _CLAUSE_SPLIT_PATTERN.split(user_text)
+        if clause.strip()
     )

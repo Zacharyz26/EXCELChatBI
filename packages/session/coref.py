@@ -398,6 +398,11 @@ def _resolve(
         elif dataset is not None:
             targets.append(_dataset_target(dataset, match.group(0)))
             consumed.append(match.span())
+        else:
+            # Explicit opaque references are an all-or-nothing set.  Returning
+            # the visible subset would silently change the user's selection and
+            # disclose whether another ID exists outside the current scope.
+            issues.append(("reference_not_found", []))
 
     for dataset in datasets:
         if dataset.filename and dataset.filename in query:

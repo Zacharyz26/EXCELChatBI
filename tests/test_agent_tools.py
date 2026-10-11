@@ -801,6 +801,34 @@ def test_generate_report_requires_context_and_valid_ids(
         )
 
 
+def test_generate_report_rejects_cross_project_analysis_id(
+    workspace: tuple[SessionStore, AgentContext],
+) -> None:
+    store, context = workspace
+    foreign_project = store.create_project("隔离项目")
+    foreign_conversation = store.create_conversation(foreign_project.id, title="外部分析")
+    foreign_message = store.append_message(
+        conversation_id=foreign_conversation.id,
+        role="assistant",
+        content="外部统计",
+    )
+    store.create_artifact(
+        conversation_id=foreign_conversation.id,
+        message_id=foreign_message.id,
+        type="stats",
+        payload={"result": {"value": 99}},
+        source_tool="aggregate_preview",
+        params={"analysis_id": "foreign-analysis"},
+        dataset_ref=None,
+    )
+
+    with pytest.raises(AgentToolError, match="分析不存在"):
+        _registry(context=context).execute(
+            "generate_report",
+            '{"title": "T", "analysis_ids": ["foreign-analysis"]}',
+        )
+
+
 def test_generate_report_rejects_legacy_or_extra_model_args() -> None:
     """报告组装入口严格采用 analysis_ids，且在检查会话上下文前完成 schema 校验。"""
     with pytest.raises(SchemaValidationError):

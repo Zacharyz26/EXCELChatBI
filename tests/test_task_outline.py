@@ -204,6 +204,39 @@ def test_report_follow_up_reuses_existing_analysis_artifacts() -> None:
     assert [step["capability"] for step in result.plan["steps"]] == ["report.generate"]
 
 
+@pytest.mark.parametrize(
+    ("user_text", "expects_report"),
+    [
+        ("请基于工具 Evidence 报告总销售额和各地区销售额", False),
+        ("请引用已有报告说明结论", False),
+        ("Please report total sales by region", False),
+        ("请生成销售分析报告", True),
+        ("Create a new sales report", True),
+    ],
+)
+def test_outline_report_capability_matches_explicit_artifact_intent(
+    user_text: str, expects_report: bool
+) -> None:
+    contract = build_minimal_contract(
+        run_id="report-intent-outline",
+        user_text=user_text,
+        chart_required=False,
+        report_required=expects_report,
+        pdf_required=False,
+    )
+
+    result = create_task_outline(
+        user_text=user_text,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_artifact_registry(),
+        blocking_clarification=None,
+    )
+
+    assert ("report.generate" in result.capabilities) is expects_report
+
+
 def test_report_follow_up_reuses_completed_profile_artifact() -> None:
     artifacts = [
         _artifact(
