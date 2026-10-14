@@ -774,16 +774,21 @@ def test_generate_report_from_artifacts(
     out = _registry(context=context).execute(
         "generate_report",
         f'{{"title": "销售分析报告", "analysis_ids": ["{ids["profile"]}", '
-        f'"{ids["stats_analysis"]}", '
-        f'"{ids["chart"]}"], "insights": "整体向好"}}',
+        f'"{ids["stats_analysis"]}"], "insights": "整体向好"}}',
     )
     md = out["markdown"]
     assert "# 销售分析报告" in md
     assert "要点速览" in md and "整体向好" in md
     assert "统计分析" in md and "0.9" in md          # 数字来自工件真实结果（红线2）
-    assert out["skipped_charts"] == 1                 # 无 option 的图被跳过不阻断
+    assert out["skipped_charts"] == 0
     assert out["analysis_ids"][1] == "analysis-regression"
     assert Path(out["md_path"]).exists()
+
+    # 所选图表缺失时必须失败，不能用可下载的半份报告掩盖遗漏。
+    with pytest.raises(AgentToolError, match="缺少 option"):
+        _registry(context=context).execute("generate_report", json.dumps({
+            "title": "报告", "analysis_ids": [ids["profile"], ids["chart"]],
+        }))
 
 
 def test_generate_report_requires_context_and_valid_ids(

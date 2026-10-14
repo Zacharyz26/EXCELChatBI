@@ -9,6 +9,8 @@ from typing import Literal
 
 from packages.session.models import JsonObject
 
+from .analysis_requirements import AnalysisRequirements, explicit_analysis_requirements
+
 CriterionKind = Literal["response", "artifact", "evidence", "semantic", "constraint"]
 
 
@@ -41,6 +43,7 @@ class TaskContract:
     success_criteria: tuple[SuccessCriterion, ...]
     constraints: tuple[str, ...]
     assumptions: tuple[str, ...] = ()
+    analysis_requirements: AnalysisRequirements | None = None
 
     def to_dict(self) -> JsonObject:
         return {
@@ -49,6 +52,11 @@ class TaskContract:
             "success_criteria": [item.to_dict() for item in self.success_criteria],
             "constraints": list(self.constraints),
             "assumptions": list(self.assumptions),
+            **(
+                {"analysis_requirements": self.analysis_requirements.to_dict()}
+                if self.analysis_requirements is not None
+                else {}
+            ),
         }
 
     @property
@@ -90,9 +98,7 @@ class TaskContract:
             criteria.append(
                 replace(
                     criterion,
-                    description=(
-                        "为每个指定维度生成真实图表工件：" + "、".join(merged)
-                    ),
+                    description=("为每个指定维度生成真实图表工件：" + "、".join(merged)),
                     artifact_dimensions=merged,
                 )
             )
@@ -107,8 +113,13 @@ def build_minimal_contract(
     report_required: bool,
     pdf_required: bool,
     chart_dimensions: tuple[str, ...] = (),
+    columns: tuple[str, ...] = (),
+    dataset_refs: tuple[str, ...] | None = None,
 ) -> TaskContract:
     """Compile only high-confidence requirements; stage 2 adds the full interpreter."""
+    requirements = explicit_analysis_requirements(
+        user_text, columns=columns, dataset_refs=dataset_refs
+    )
     contract = TaskContract(
         run_id=run_id,
         goal=user_text.strip(),
@@ -123,6 +134,16 @@ def build_minimal_contract(
             "任务只有在 Verifier 通过后才能完成",
             "成功工具调用必须形成可追溯 Evidence",
             "模型文字不能替代用户要求的 Artifact",
+        ),
+        analysis_requirements=(
+            requirements
+            if (
+                requirements.filters
+                or requirements.total
+                or requirements.filter_error
+                or requirements.dataset_ref
+            )
+            else None
         ),
     )
     if chart_required:

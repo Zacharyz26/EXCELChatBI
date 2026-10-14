@@ -357,4 +357,11 @@ def test_failed_tool_requires_a_later_success_before_completion() -> None:
         invocations=[failed, succeeded],
         evidence=[evidence],
     )
-    assert recovered.verdict == "PASS"
+    assert recovered.verdict == "FAILED"  # 无关趋势分析没有完成原来的预测操作
+    from dataclasses import replace
+
+    actual_retry = replace(succeeded, tool_name="forecast")
+    assert verify_completion(
+        contract=contract, final_text="预测已完成。", artifacts=[],
+        invocations=[failed, actual_retry], evidence=[evidence],
+    ).verdict == "PASS"

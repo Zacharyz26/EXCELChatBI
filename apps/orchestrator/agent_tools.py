@@ -1112,7 +1112,10 @@ def _profile_with_quality(excel: MCPServer, args: dict[str, Any]) -> dict[str, A
     quality = diagnose_data_quality(
         data_profile,
         roles,
-        duplicate_rows=duplicate_row_count(args["dataset_ref"]),
+        duplicate_rows=(
+            None if any(c.null_ratio is None for c in data_profile.columns)
+            else duplicate_row_count(args["dataset_ref"])
+        ),
     )
     return {"profile": profile, "roles": roles, "quality": quality}
 
@@ -1431,62 +1434,72 @@ def _assemble_report_args(
     """把对话工件翻译成 gen_report_md 的入参（图表工件现场截图）。
 
     Returns:
-        (gen_report_md 入参, 因缺 option/截图失败而跳过的图表数)。
+        (gen_report_md 入参, 兼容字段 skipped_charts=0)；任一所选分析无法组装则失败。
     """
     profile: JsonObject = {}
     charts: list[dict[str, Any]] = []
+    chart_artifacts: list[Artifact] = []
     stats_items: list[dict[str, Any]] = []
-    skipped_charts = 0
-    unavailable_screenshots: list[str] = []
-
-    for a in artifacts:
-        payload = a.payload or {}
-        if a.type == "profile":
-            # profile 工件可能是 {profile, quality} 包装或裸画像
+    tables: list[dict[str, Any]] = []
+    profile_seen = False
+    for artifact in artifacts:
+        payload = artifact.payload or {}
+        if artifact.type == "profile":
+            if profile_seen:
+                raise AgentToolError("报告一次只能选择一个画像，不能静默覆盖已选画像。")
+            profile_seen = True
             profile = payload.get("profile", payload)
-        elif a.type == "chart":
-            option = payload.get("option")
-            if not option:
-                skipped_charts += 1
-                continue
-            try:
-                shot = _capture_report_chart(chart, cast(JsonObject, option))
-            except ChartRenderingUnavailableError as exc:
-                skipped_charts += 1
-                unavailable_screenshots.append(str(exc))
-                _log.warning(
-                    "report.screenshot_unavailable",
-                    artifact=a.id,
-                    error=str(exc),
-                )
-                continue
-            item: dict[str, Any] = {"image_path": shot["image_path"]}
-            caption = payload.get("caption") or a.source_tool
-            if caption:
-                item["caption"] = str(caption)
-            charts.append(item)
-        elif a.type == "stats":
-            stat: dict[str, Any] = {
-                "kind": payload.get("kind", a.source_tool or "stats"),
-                "result": payload.get("result", payload),
-            }
-            if payload.get("caption"):
-                stat["caption"] = payload["caption"]
-            if payload.get("interpretation"):
-                stat["interpretation"] = payload["interpretation"]
-            stats_items.append(stat)
+            if not isinstance(profile, dict) or not profile:
+                raise AgentToolError("所选画像内容为空，无法组装报告。")
+        elif artifact.type == "chart":
+            if not isinstance(payload.get("option"), dict) or not payload["option"]:
+                raise AgentToolError("所选图表缺少 option，不能生成遗漏该分析的报告。")
+            chart_artifacts.append(artifact)
+        elif artifact.type == "stats":
+            stats_items.append(
+                {
+                    "kind": payload.get("kind", artifact.source_tool or "stats"),
+                    "result": payload.get("result", payload),
+                    **{
+                        key: payload[key]
+                        for key in ("caption", "interpretation")
+                        if payload.get(key)
+                    },
+                }
+            )
+        elif artifact.type == "table" and artifact.source_tool == "aggregate_preview":
+            if not isinstance(payload.get("rows"), list):
+                raise AgentToolError("所选聚合表缺少 rows，无法组装报告。")
+            tables.append({**payload, "analysis_id": _artifact_analysis_id(artifact)})
+        else:
+            raise AgentToolError(
+                f"所选分析 {_artifact_analysis_id(artifact)} 的类型无法组装，不能静默忽略。"
+            )
 
-    if not profile and not charts and not stats_items and unavailable_screenshots:
-        raise AgentToolError(
-            "图表截图环境不可用，无法组装仅含图表的报告："
-            + unavailable_screenshots[0]
-        )
-    if not profile and not charts and not stats_items:
-        raise AgentToolError("所选工件不含可组装内容（需要画像/图表/统计结果）")
+    if not profile and not chart_artifacts and not stats_items and not tables:
+        raise AgentToolError("所选工件不含可组装内容（需要画像/图表/统计结果/聚合表）")
+    try:
+        for artifact in chart_artifacts:
+            payload = artifact.payload or {}
+            shot = _capture_report_chart(chart, cast(JsonObject, payload["option"]))
+            charts.append(
+                {
+                    "image_path": shot["image_path"],
+                    "caption": str(payload.get("caption") or artifact.source_tool),
+                }
+            )
+    except Exception as exc:
+        for section in charts:
+            delete_chart_file(section["image_path"], get_settings().report_dir)
+        if isinstance(exc, ChartRenderingUnavailableError):
+            raise AgentToolError(f"图表截图环境不可用，无法完整组装所选分析：{exc}") from exc
+        raise
 
     args: dict[str, Any] = {"profile": profile}
     if charts:
         args["charts"] = charts
     if stats_items:
         args["stats"] = stats_items
-    return args, skipped_charts
+    if tables:
+        args["tables"] = tables
+    return args, 0

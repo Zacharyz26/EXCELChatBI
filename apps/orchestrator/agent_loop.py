@@ -44,12 +44,18 @@ from packages.governance.policy import PolicyDecision, ToolPolicyGateway, ToolPo
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelResponse, Scenario, ToolCall
+from packages.orchestration.analysis_requirements import (
+    AnalysisRequirements,
+    explicit_analysis_requirements,
+    filter_arguments_match,
+)
 from packages.orchestration.contracts import (
     CriterionKind,
     SuccessCriterion,
     TaskContract,
     build_minimal_contract,
 )
+from packages.orchestration.dataset_scope import verified_analysis_scope
 from packages.session.compaction import (
     CompactionAccessDenied,
     CompactionStore,
@@ -80,8 +86,8 @@ from packages.session.models import (
 )
 from packages.session.store import SessionStore
 from packages.session.task_hashing import (
+    business_invocation_key,
     invocation_arguments_hash,
-    invocation_idempotency_key,
 )
 from packages.session.task_models import (
     CapabilityCatalogSnapshot,
@@ -387,6 +393,7 @@ def _blocking_clarification(
     *,
     verified_dataset_refs: frozenset[str] = frozenset(),
     hypothesis_screening: JsonObject | None = None,
+    analysis_requirements: AnalysisRequirements | None = None,
 ) -> JsonObject | None:
     """识别会实质改变分析结论的阻塞歧义，只生成一个确定性问题。"""
     clean = user_text.strip()
@@ -501,8 +508,26 @@ def _blocking_clarification(
     if not datasets:
         return None
 
-    selected_datasets = [dataset for dataset in datasets if dataset.ref in verified_dataset_refs]
+    selected_datasets = [dataset for dataset in datasets if dataset.ref in selected_dataset_refs]
     dataset = selected_datasets[-1] if selected_datasets else datasets[-1]
+    requirements = analysis_requirements or explicit_analysis_requirements(clean)
+    missing_columns = sorted(
+        {
+            str(item["column"])
+            for item in requirements.filters
+            if item["column"] not in _dataset_column_names(dataset)
+        }
+    )
+    if missing_columns or requirements.filter_error:
+        return {
+            "question_id": "filter_columns",
+            "about": "filter_columns",
+            "question": (
+                requirements.filter_error or "筛选字段不存在：" + "、".join(missing_columns)
+            )
+            + "。请用“过滤条件为 字段=值 AND 字段=值”重述完整条件，或明确取消筛选。",
+            "reason": "缺失字段的条件无法执行；系统不会删除、替换条件后声称完成。",
+        }
     if _TREND_PATTERN.search(clean) is not None:
         time_clarification = _role_selection_clarification(
             clean,
@@ -1101,9 +1126,7 @@ async def _stream_agent_chat_inner(
                 )
             )
         )
-        chart_dimensions = (
-            _required_chart_dimensions(user_text, datasets) if chart_required else ()
-        )
+        chart_dimensions = _required_chart_dimensions(user_text, datasets) if chart_required else ()
         pdf_required = report_required and _requests_pdf(user_text)
         try:
             if not resume_existing or clarification_question_id is not None:
@@ -1151,6 +1174,21 @@ async def _stream_agent_chat_inner(
                     report_required=report_required,
                     pdf_required=pdf_required,
                     chart_dimensions=chart_dimensions,
+                    dataset_refs=tuple(
+                        dict.fromkeys(
+                            target.dataset_ref
+                            for target in reference_resolution.targets
+                            if target.dataset_ref is not None
+                        )
+                    )
+                    or (tuple(dataset.ref for dataset in datasets) if len(datasets) == 1 else None),
+                    columns=tuple(
+                        dict.fromkeys(
+                            column
+                            for dataset in datasets
+                            for column in _dataset_column_names(dataset)
+                        )
+                    ),
                 )
                 reference_assumption = reference_resolution.assumption()
                 if reference_assumption is not None:
@@ -1545,11 +1583,18 @@ async def _stream_agent_chat_inner(
             ),
         ]
 
+        if resume_existing and clarification_question_id == "filter_columns":
+            contract = _filter_contract_after_answer(contract, clarification_answer)
+            run, contract_event = await run_in_threadpool(
+                task_store.update_contract,
+                contract,
+                expected_version=run.state_version,
+            )
+            yield _task_event(contract_event, conversation_id)
+
         clarification: JsonObject | None = None
         selected_hypothesis = (
-            await _selected_hypothesis_for_planning(
-                task_store, run_id, clarification_question_id
-            )
+            await _selected_hypothesis_for_planning(task_store, run_id, clarification_question_id)
             if resume_existing and clarification_question_id is not None
             else None
         )
@@ -1638,6 +1683,7 @@ async def _stream_agent_chat_inner(
                         context.messages,
                         verified_dataset_refs=verified_dataset_refs,
                         hypothesis_screening=hypothesis_screening,
+                        analysis_requirements=contract.analysis_requirements,
                     )
                     if not resume_existing
                     or clarification_question_id
@@ -1645,6 +1691,7 @@ async def _stream_agent_chat_inner(
                         "join_datasets",
                         "join_keys",
                         "join_type",
+                        "filter_columns",
                     }
                     else None
                 )
@@ -1842,6 +1889,14 @@ async def _stream_agent_chat_inner(
             if refreshed_run is None or refreshed_run.status != "planning":
                 return
             run = refreshed_run
+            if question_id == "filter_columns":
+                contract = _filter_contract_after_answer(contract, answer)
+                run, contract_event = await run_in_threadpool(
+                    task_store.update_contract,
+                    contract,
+                    expected_version=run.state_version,
+                )
+                yield _task_event(contract_event, conversation_id)
             selected_hypothesis = await _selected_hypothesis_for_planning(
                 task_store, run_id, question_id
             )
@@ -1886,6 +1941,7 @@ async def _stream_agent_chat_inner(
                             clarified_planning_text,
                             datasets,
                             context.messages,
+                            analysis_requirements=contract.analysis_requirements,
                             verified_dataset_refs=frozenset(
                                 target.dataset_ref
                                 for target in _verified_targets(
@@ -1895,7 +1951,8 @@ async def _stream_agent_chat_inner(
                                 if target.dataset_ref is not None
                             ),
                         )
-                        if question_id in {"join_datasets", "join_keys", "join_type"}
+                        if question_id
+                        in {"join_datasets", "join_keys", "join_type", "filter_columns"}
                         else None
                     )
                 )
@@ -2187,6 +2244,7 @@ async def _stream_agent_chat_inner(
         missing_chart_retries = 0
         missing_report_retries = 0
         unsupported_claim_retries = 0
+        required_analysis_retries = 0
         incomplete_plan_retries = 0
         budget_exhausted = attempts_used >= config.max_tool_calls
 
@@ -2402,6 +2460,7 @@ async def _stream_agent_chat_inner(
                     item.artifact_id for item in invocations if item.artifact_id is not None
                 }
                 run_artifacts = [item for item in all_artifacts if item.id in run_artifact_ids]
+                dataset_bindings = await run_in_threadpool(task_store.list_dataset_bindings, run_id)
                 verification = verify_completion(
                     contract=contract,
                     final_text=turn_text,
@@ -2411,6 +2470,7 @@ async def _stream_agent_chat_inner(
                     claims=claims,
                     plan_steps=verification_steps,
                     budget_exhausted=budget_exhausted,
+                    dataset_bindings=dataset_bindings,
                 )
 
                 retry_instruction: str | None = None
@@ -2431,28 +2491,35 @@ async def _stream_agent_chat_inner(
                         missing_chart_retries += 1
                         retry_instruction = _chart_retry_instruction(verification)
                 elif "missing_report_artifact" in issue_codes:
-                    if (
-                        tools_enabled
-                        and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT
-                    ):
+                    if tools_enabled and missing_report_retries < _MISSING_REPORT_RETRY_LIMIT:
                         missing_report_retries += 1
                         retry_instruction = (
                             _MISSING_PDF_REPORT_INSTRUCTION
                             if pdf_required
                             else _MISSING_REPORT_INSTRUCTION
                         )
+                elif issue_codes.intersection(
+                    {
+                        "required_filter_not_satisfied",
+                        "missing_required_total_evidence",
+                        "missing_required_total_delivery",
+                    }
+                ):
+                    if tools_enabled and required_analysis_retries < 1:
+                        required_analysis_retries += 1
+                        retry_instruction = (
+                            "用户要求的完整筛选或总计尚未交付。保留契约中的全部条件和指标；"
+                            "总计必须来自同一数据集的确定性工具 total_value"
+                            "（如 aggregate_preview 的 sum 汇总），"
+                            "并在最终回答中给出。不得心算、引用其他数据集或删除必需的总计来通过验证。"
+                            "若条件无法满足，请如实说明，不能声称任务完成。"
+                        )
                 elif "unsupported_numeric_claim" in issue_codes:
-                    if (
-                        tools_enabled
-                        and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
-                    ):
+                    if tools_enabled and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT:
                         unsupported_claim_retries += 1
                         retry_instruction = _UNSUPPORTED_CLAIM_INSTRUCTION
                 elif "unsupported_knowledge_claim" in issue_codes:
-                    if (
-                        tools_enabled
-                        and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT
-                    ):
+                    if tools_enabled and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT:
                         unsupported_claim_retries += 1
                         retry_instruction = _UNSUPPORTED_KNOWLEDGE_CLAIM_INSTRUCTION
                 elif (
@@ -2461,9 +2528,7 @@ async def _stream_agent_chat_inner(
                     and incomplete_plan_retries < _INCOMPLETE_PLAN_RETRY_LIMIT
                 ):
                     incomplete_plan_retries += 1
-                    retry_instruction = _incomplete_plan_instruction(
-                        verification_steps
-                    )
+                    retry_instruction = _incomplete_plan_instruction(verification_steps)
                 auto_repair_actions: tuple[str, ...] = ()
                 if (
                     not verification.passed
@@ -2498,6 +2563,7 @@ async def _stream_agent_chat_inner(
                             claims=claims,
                             plan_steps=verification_steps,
                             budget_exhausted=budget_exhausted,
+                            dataset_bindings=dataset_bindings,
                         )
                         issue_codes = {item.code for item in verification.issues}
 
@@ -2737,9 +2803,7 @@ async def _stream_agent_chat_inner(
                         },
                     )
                     return
-                refreshed_artifacts = await run_in_threadpool(
-                    store.list_artifacts, conversation_id
-                )
+                refreshed_artifacts = await run_in_threadpool(store.list_artifacts, conversation_id)
                 system_content = _refreshed_system_content(
                     datasets=datasets,
                     artifacts=refreshed_artifacts,
@@ -2875,16 +2939,90 @@ async def _stream_agent_chat_inner(
                     if call.name == "join_datasets"
                     else None
                 )
-                idempotency_key = invocation_idempotency_key(run_id, call.id, call.name, call_args)
-                signature_scope = (
-                    f"plan:{offered_plan_version}:{planned_step.logical_id}"
-                    if planned_step is not None
-                    else f"plan:{offered_plan_version}:unbound"
+                scope_error = await run_in_threadpool(
+                    _analysis_scope_error, task_store, run_id, contract, call.name, call_args
                 )
-                signature = (
-                    f"{signature_scope}:{call.name}:" f"{_normalized_argument_mapping(call_args)}"
+                business_plan_record = await run_in_threadpool(task_store.get_active_plan, run_id)
+                effect_scope = run_id
+                if (
+                    business_plan_record is not None
+                    and planned_step is not None
+                    and business_plan_record.reason == f"user_retry:{planned_step.logical_id}"
+                ):
+                    effect_scope = f"{run_id}:user_retry:{business_plan_record.plan_id}"
+                signature = business_invocation_key(effect_scope, call.name, call_args)
+                idempotency_key = signature
+                prior_invocations = await run_in_threadpool(task_store.list_invocations, run_id)
+                prior_match = next(
+                    (
+                        item
+                        for item in reversed(prior_invocations)
+                        if item.idempotency_key == signature
+                        or business_invocation_key(run_id, item.tool_name, item.args) == signature
+                    ),
+                    None,
                 )
-                repeated_signature = signature_counts.get(signature, 0) >= 1
+                if (
+                    prior_match is not None
+                    and prior_match.status == "succeeded"
+                    and policy_decision.allowed
+                    and scope_error is None
+                    and definition_execution_error is None
+                    and (data_role_guard is None or data_role_guard.allowed)
+                    and (join_guard is None or join_guard.allowed)
+                ):
+                    prior_evidence = await run_in_threadpool(task_store.list_evidence, run_id)
+                    saved = [
+                        item
+                        for item in prior_evidence
+                        if item.invocation_id == prior_match.invocation_id
+                    ]
+                    if saved:
+                        await _persist_tool_outcome(
+                            store,
+                            conversation_id,
+                            {
+                                "tool_call_id": call.id,
+                                "tool": call.name,
+                                "status": "ok",
+                                "reused": True,
+                                "invocation_id": prior_match.invocation_id,
+                                "artifact_id": prior_match.artifact_id,
+                                "evidence_ids": [item.evidence_id for item in saved],
+                            },
+                        )
+                        working.append(
+                            ModelMessage(
+                                role="tool",
+                                tool_call_id=call.id,
+                                content=_compact_json(
+                                    {
+                                        "reused": True,
+                                        "invocation_id": prior_match.invocation_id,
+                                        "artifact_id": prior_match.artifact_id,
+                                        "evidence": [item.summary for item in saved],
+                                    },
+                                    16000,
+                                ),
+                            )
+                        )
+                        yield _event(
+                            "tool_end",
+                            {
+                                "id": call.id,
+                                "step_id": logical_step_id,
+                                "tool": call.name,
+                                "status": "ok",
+                                "reused": True,
+                                "invocation_id": prior_match.invocation_id,
+                                "artifact_id": prior_match.artifact_id,
+                                "message": "复用已提交的工具证据；未重复执行或创建工件。",
+                            },
+                        )
+                        continue
+                repeated_signature = (
+                    prior_match is not None or signature_counts.get(signature, 0) >= 1
+                )
                 signature_counts[signature] = signature_counts.get(signature, 0) + 1
                 failure_code: str | None = None
                 failure_source: ObservationSource = "system"
@@ -2922,6 +3060,19 @@ async def _stream_agent_chat_inner(
                 elif definition_execution_error is not None:
                     feedback = f"未执行：{definition_execution_error}"
                     failure_code = "definition_execution_mismatch"
+                    failure_source = "policy"
+                elif scope_error is not None:
+                    feedback = f"未执行：{scope_error}"
+                    failure_code = "required_dataset_scope_mismatch"
+                    failure_source = "policy"
+                elif (
+                    call.name == "transform_dataset"
+                    and contract.analysis_requirements is not None
+                    and contract.analysis_requirements.filters
+                    and not filter_arguments_match(contract.analysis_requirements, call_args)
+                ):
+                    feedback = "未执行：筛选参数与用户确认的完整条件或数据集不一致，不得增删条件。"
+                    failure_code = "required_filter_mismatch"
                     failure_source = "policy"
                 elif not policy_decision.allowed:
                     feedback = f"未执行：{policy_decision.reason}"
@@ -2972,9 +3123,10 @@ async def _stream_agent_chat_inner(
                 rejection_event: TaskEvent | None = None
                 step_started_event: TaskEvent | None = None
                 try:
-                    if failure_code == "tool_budget_exhausted" or (
-                        failure_code in _DATA_ROLE_GUARD_CODES
-                    ):
+                    if failure_code in {
+                        "tool_budget_exhausted",
+                        "duplicate_invocation_circuit_break",
+                    } or (failure_code in _DATA_ROLE_GUARD_CODES):
                         run, rejection_event = await run_in_threadpool(
                             task_store.record_tool_rejection,
                             run_id=run_id,
@@ -3002,6 +3154,8 @@ async def _stream_agent_chat_inner(
                             step_id=(planned_step.step_id if planned_step is not None else None),
                         )
                         run, reserved_invocation, step_started_event, _created = start_result
+                        if not _created:
+                            raise RuntimeError("已存在调用的结果尚未安全复用，禁止再次执行")
                 except (sqlite3.Error, RuntimeError, ValueError) as exc:
                     _log.error(
                         "agent.persist_invocation_failed",
@@ -3418,6 +3572,10 @@ async def _stream_agent_chat_inner(
                             summary=summary,
                             result=result,
                             artifact_id=None,
+                            arguments={
+                                **call_args,
+                                "data_version_hash": cancellation_branch.data_version_hash,
+                            },
                         ),
                         artifact_draft=artifact_draft,
                     )
@@ -3724,9 +3882,7 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
             or not (artifact_type is None or isinstance(artifact_type, str))
             or not (artifact_format is None or isinstance(artifact_format, str))
             or not isinstance(artifact_dimensions, list)
-            or not all(
-                isinstance(item, str) and item.strip() for item in artifact_dimensions
-            )
+            or not all(isinstance(item, str) and item.strip() for item in artifact_dimensions)
         ):
             raise ValueError("持久化 TaskContract 的完成标准字段无效")
         criteria.append(
@@ -3750,6 +3906,30 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
         success_criteria=tuple(criteria),
         constraints=tuple(cast(list[str], raw_constraints)),
         assumptions=tuple(cast(list[str], raw_assumptions)),
+        analysis_requirements=(
+            AnalysisRequirements.from_dict(payload["analysis_requirements"])
+            if "analysis_requirements" in payload
+            else None
+        ),
+    )
+
+
+def _filter_contract_after_answer(contract: TaskContract, answer: object) -> TaskContract:
+    """只有实际用户澄清可以修订条件，模型的修复文字不能更改契约。"""
+    previous = contract.analysis_requirements
+    if previous is None:
+        return contract
+    text = str(answer)
+    revised = explicit_analysis_requirements(text)
+    if not revised.filters:
+        revised = explicit_analysis_requirements("过滤条件为 " + text)
+    if not revised.filters and not any(word in text for word in ("取消筛选", "取消过滤")):
+        return contract
+    return replace(
+        contract,
+        analysis_requirements=replace(
+            previous, filters=revised.filters, filter_error=revised.filter_error
+        ),
     )
 
 
@@ -3861,11 +4041,7 @@ def _verification_payload(result: VerificationResult) -> JsonObject:
 
 
 def _incomplete_plan_instruction(steps: list[TaskStepRecord]) -> str:
-    unfinished = [
-        step
-        for step in steps
-        if step.status not in {"completed", "skipped"}
-    ]
+    unfinished = [step for step in steps if step.status not in {"completed", "skipped"}]
     labels = "；".join(
         f"{step.logical_id}（{step.definition.get('capability', 'unknown')}）"
         for step in unfinished[:8]
@@ -3879,6 +4055,13 @@ def _incomplete_plan_instruction(steps: list[TaskStepRecord]) -> str:
 
 def _verification_error(result: VerificationResult) -> tuple[str, str]:
     codes = {issue.code for issue in result.issues}
+    for code in (
+        "required_filter_not_satisfied",
+        "missing_required_total_evidence",
+        "missing_required_total_delivery",
+    ):
+        if code in codes:
+            return code, next(item.message for item in result.issues if item.code == code)
     if "missing_chart_dimension_artifact" in codes:
         return (
             "chart_not_generated",
@@ -4466,6 +4649,55 @@ def _history_messages(
 # ── 工具执行与工件持久化 ──
 
 
+def _analysis_scope_error(
+    task_store: TaskStore,
+    run_id: str,
+    contract: TaskContract,
+    tool_name: str,
+    arguments: JsonObject,
+) -> str | None:
+    """串行/并行共用执行前范围检查，所有 dataset 参数受同一派生约束。"""
+    requirements = contract.analysis_requirements
+    if requirements is None:
+        return None
+    if requirements.filter_error:
+        return requirements.filter_error
+    refs = {
+        ref for _, ref in dataset_reference_arguments(arguments) if isinstance(ref, str)
+    }
+    if not refs:
+        return None
+    scope = verified_analysis_scope(
+        requirements,
+        run_id,
+        task_store.list_invocations(run_id),
+        task_store.list_evidence(run_id),
+        task_store.list_dataset_bindings(run_id),
+    )
+    if requirements.filters:
+        derived = scope
+        scope = {requirements.dataset_ref} if requirements.dataset_ref else set()
+        if tool_name == "transform_dataset":
+            if not filter_arguments_match(requirements, arguments):
+                return "筛选参数与用户确认的完整条件或数据集不一致，不得增删条件。"
+        elif tool_name != "get_data_profile" or derived:
+            scope = derived
+            if not scope:
+                return "完整筛选尚未产生已登记派生数据集，不能分析原始总体。"
+    if scope and not refs.issubset(scope):
+        return "工具引用的数据集不属于用户绑定的版本/完整筛选总体。"
+    if requirements.total and tool_name in {
+        "aggregate_preview",
+        "dimension_contribution",
+    }:
+        if (
+            requirements.total_column
+            and arguments.get("value_col") != requirements.total_column
+        ):
+            return "总计指标与用户要求的字段不一致。"
+    return None
+
+
 async def _try_execute_parallel_frontier(
     *,
     tool_calls: list[ToolCall],
@@ -4592,10 +4824,17 @@ async def _try_execute_parallel_frontier(
         )
         if not decision.allowed:
             return None
-        signature = (
-            f"plan:{offered_plan_version}:{step.logical_id}:{call.name}:"
-            f"{_normalized_argument_mapping(arguments)}"
-        )
+        if await run_in_threadpool(
+            _analysis_scope_error, task_store, run_id, contract, call.name, arguments
+        ):
+            return None
+        signature = business_invocation_key(run_id, call.name, arguments)
+        previous = await run_in_threadpool(task_store.list_invocations, run_id)
+        if any(
+            business_invocation_key(run_id, item.tool_name, item.args) == signature
+            for item in previous
+        ):
+            return None
         if signature_counts.get(signature, 0) >= 1 or signature in proposed_signatures:
             return None
         proposed_signatures.add(signature)
@@ -4618,7 +4857,7 @@ async def _try_execute_parallel_frontier(
                 tool_contract=tool_contract,
                 definition_execution=definition_execution,
                 signature=signature,
-                idempotency_key=invocation_idempotency_key(run_id, call.id, call.name, arguments),
+                idempotency_key=signature,
             )
         )
 
@@ -4856,6 +5095,7 @@ async def _try_execute_parallel_frontier(
                 summary=summary,
                 result=result,
                 artifact_id=None,
+                arguments=item.arguments,
             ),
             artifact_draft=artifact_draft,
         )

@@ -49,6 +49,8 @@ class DefaultRedactor(Redactor):
 
 def resolve_action(col: ColumnProfile, policy: EffectivePolicy) -> SampleAction:
     """依据列类型默认行为 + 显式列规则，决定该列的采样动作。"""
+    if col.distinct_count is None or col.null_ratio is None:
+        return SampleAction.EXCLUDE
     visibility = resolve_column_visibility(
         name=col.name,
         dtype=col.dtype,
@@ -81,6 +83,7 @@ def apply_policy(
             col.sample_values = [red.mask(v) for v in col.sample_values]
         elif action is SampleAction.EXCLUDE:
             col.sample_values = []
+            col.null_ratio = col.distinct_count = None
             col.min = col.max = col.mean = col.std = col.median = None
 
     for row in profile.sample_rows:

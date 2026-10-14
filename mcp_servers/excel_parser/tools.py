@@ -9,6 +9,7 @@ import codecs
 import csv
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from packages.common.config import get_settings
 from packages.common.dataset_store import load_dataframe, save_dataframe
+from packages.common.exact_numbers import MAX_SAFE_INTEGER, exact_number
 from packages.governance.data_boundary import resolve_policy
 from packages.governance.redaction import apply_policy, redact_records
 from xlrd.biffh import XLRDError
@@ -124,6 +126,20 @@ def _read_workbook(
             nrows=read_rows,
             dtype=object,
         )
+    for column in frame.columns:
+        if (
+            frame[column]
+            .dropna()
+            .map(
+                lambda value: isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and abs(value) > MAX_SAFE_INTEGER
+            )
+            .any()
+        ):
+            raise SpreadsheetParseError(
+                "Excel 数值单元格超出安全整数范围，无法保证原始精度；请将该列保存为文本后导入"
+            )
     return frame.infer_objects(copy=False)
 
 
@@ -143,9 +159,7 @@ def _read_csv(file_ref: str, *, header_row: int, nrows: int) -> pd.DataFrame:
             on_bad_lines="error",
         )
     except UnicodeError as exc:
-        raise SpreadsheetParseError(
-            "CSV 编码无法识别；请使用 UTF-8（可带 BOM）或 GB18030"
-        ) from exc
+        raise SpreadsheetParseError("CSV 编码无法识别；请使用 UTF-8（可带 BOM）或 GB18030") from exc
     except pd.errors.ParserError as exc:
         raise SpreadsheetParseError("CSV 结构无效；请检查引号、换行和每行字段数") from exc
     if len(frame.columns) == 0:
@@ -190,6 +204,24 @@ def _normalize_csv_dataframe(frame: pd.DataFrame) -> pd.DataFrame:
             continue
         texts = present.astype(str).str.strip()
         if texts.map(lambda value: bool(_LEADING_ZERO_NUMBER.fullmatch(value))).any():
+            continue
+        if texts.map(
+            lambda value: bool(re.fullmatch(r"[+-]?\d+", value))
+            and abs(int(value)) > MAX_SAFE_INTEGER
+        ).any():
+            # 编号/整数的文本表示必须逐字保留，禁止 pandas 先转 float 再比较。
+            continue
+
+        def loses_precision(value: str) -> bool:
+            try:
+                number = Decimal(value)
+            except InvalidOperation:
+                return False
+            if not number.is_finite():
+                return True
+            return abs(number) > MAX_SAFE_INTEGER or Decimal(str(float(number))) != number
+
+        if texts.map(loses_precision).any():
             continue
         numeric = pd.to_numeric(texts, errors="coerce")
         if numeric.notna().all():
@@ -420,6 +452,11 @@ def _profile_column(series: pd.Series) -> ColumnProfile:
         sample_values=sample_values,
     )
     if dtype in ("int", "float"):
+        if dtype == "int" and any(abs(int(v)) > MAX_SAFE_INTEGER for v in series.dropna()):
+            profile.min = exact_number(int(series.min()))
+            profile.max = exact_number(int(series.max()))
+            # 不用不精确的 float64 describe 冒充精确的均值/标准差。
+            return profile
         desc = series.astype("float64")
         profile.min = _safe_float(desc.min())
         profile.max = _safe_float(desc.max())
@@ -456,7 +493,7 @@ def _json_safe_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     for rec in records:
         out.append(
             {
-                str(k): (None if (isinstance(v, float) and math.isnan(v)) else v)
+                str(k): (None if (isinstance(v, float) and math.isnan(v)) else exact_number(v))
                 for k, v in rec.items()
             }
         )

@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol
 
+from packages.common.identifiers import dataset_reference_arguments
+from packages.orchestration.analysis_requirements import TOTAL_LABEL
 from packages.orchestration.contracts import TaskContract
+from packages.orchestration.dataset_scope import verified_analysis_scope
 from packages.session.models import Artifact
 from packages.session.task_models import (
     ClaimDraft,
     EvidenceRecord,
+    TaskDatasetBinding,
     TaskStepRecord,
     ToolInvocation,
 )
+
+from apps.orchestrator.control.claims import extract_numeric_claims
 
 VerificationVerdict = Literal["PASS", "NEEDS_ACTION", "WAITING_USER", "BLOCKED", "FAILED"]
 
@@ -52,9 +59,57 @@ def verify_completion(
     plan_steps: list[TaskStepRecord] | None = None,
     budget_exhausted: bool = False,
     semantic_checker: SemanticCoverageChecker | None = None,
+    dataset_bindings: list[TaskDatasetBinding] | None = None,
 ) -> VerificationResult:
     """Verify hard postconditions before allowing any semantic judgement."""
     issues: list[VerificationIssue] = []
+    invocation_by_id = {
+        item.invocation_id: item
+        for item in invocations
+        if item.run_id == contract.run_id and item.status == "succeeded"
+    }
+    bound_evidence = [
+        replace(
+            item,
+            summary={
+                **item.summary,
+                "numeric_context": {
+                    **item.summary.get("numeric_context", {}),
+                    **invocation_by_id[item.invocation_id].args,
+                },
+            },
+        )
+        if item.invocation_id in invocation_by_id
+        else item
+        for item in evidence
+    ]
+    previously_supported = claims is None or all(
+        ref.get("supported") is True
+        for claim in claims
+        if claim.claim_kind == "numeric"
+        for ref in claim.value_refs
+    )
+    if previously_supported and any(
+        ref.get("supported") is not True
+        for claim in extract_numeric_claims(
+            final_text=final_text, goal=contract.goal, evidence=bound_evidence
+        )
+        for ref in claim.value_refs
+    ):
+        issues.append(
+            VerificationIssue(
+                "numeric_semantic_mismatch", "数值无法绑定到相同指标、分组、单位和工具证据。"
+            )
+        )
+    issues.extend(
+        _verify_analysis_requirements(
+            contract,
+            invocations,
+            evidence,
+            claims or [],
+            dataset_bindings or [],
+        )
+    )
     if not final_text.strip():
         issues.append(
             VerificationIssue(
@@ -65,9 +120,7 @@ def verify_completion(
         )
 
     incomplete_steps = [
-        step
-        for step in plan_steps or []
-        if step.status not in {"completed", "skipped"}
+        step for step in plan_steps or [] if step.status not in {"completed", "skipped"}
     ]
     if incomplete_steps:
         labels = ", ".join(step.logical_id for step in incomplete_steps[:8])
@@ -118,9 +171,7 @@ def verify_completion(
             issues.append(
                 VerificationIssue(
                     code="unknown_tool_outcome",
-                    message=(
-                        f"工具 {invocation.tool_name} 的执行结果无法确认，必须先按幂等键对账"
-                    ),
+                    message=(f"工具 {invocation.tool_name} 的执行结果无法确认，必须先按幂等键对账"),
                 )
             )
             continue
@@ -168,9 +219,7 @@ def verify_completion(
                 issues.append(
                     VerificationIssue(
                         code="unsupported_numeric_claim",
-                        message=(
-                            f"数值结论缺少当前任务 Evidence：{', '.join(unsupported)}"
-                        ),
+                        message=(f"数值结论缺少当前任务 Evidence：{', '.join(unsupported)}"),
                     )
                 )
         elif claim.claim_kind == "knowledge":
@@ -191,9 +240,7 @@ def verify_completion(
             issues.append(
                 VerificationIssue(
                     code="invalid_definition_lineage",
-                    message=(
-                        "Claim 未同时绑定领域定义 Resource 版本、定义 Evidence 与数据调用"
-                    ),
+                    message=("Claim 未同时绑定领域定义 Resource 版本、定义 Evidence 与数据调用"),
                 )
             )
         linked = set(claim.evidence_ids)
@@ -220,8 +267,7 @@ def verify_completion(
     if issues:
         verdict: VerificationVerdict = (
             "BLOCKED"
-            if budget_exhausted
-            or any(item.code == "unknown_tool_outcome" for item in issues)
+            if budget_exhausted or any(item.code == "unknown_tool_outcome" for item in issues)
             else "FAILED"
             if any(item.code == "unrecovered_tool_failure" for item in issues)
             else "NEEDS_ACTION"
@@ -230,6 +276,137 @@ def verify_completion(
     if semantic_checker is not None:
         return semantic_checker.check(contract, final_text)
     return VerificationResult(verdict="PASS")
+
+
+def _verify_analysis_requirements(
+    contract: TaskContract,
+    invocations: list[ToolInvocation],
+    evidence: list[EvidenceRecord],
+    claims: list[ClaimDraft],
+    bindings: list[TaskDatasetBinding],
+) -> list[VerificationIssue]:
+    requirements = contract.analysis_requirements
+    if requirements is None:
+        return []
+    issues: list[VerificationIssue] = []
+    if requirements.filter_error:
+        issues.append(
+            VerificationIssue(
+                "required_filter_not_satisfied", requirements.filter_error
+            )
+        )
+    by_id = {
+        item.invocation_id: item
+        for item in invocations
+        if item.run_id == contract.run_id
+    }
+    scope = verified_analysis_scope(
+        requirements, contract.run_id, invocations, evidence, bindings
+    )
+
+    def violates_scope(item: ToolInvocation) -> bool:
+        refs = [ref for _, ref in dataset_reference_arguments(item.args)]
+        if item.run_id != contract.run_id or not any(ref not in scope for ref in refs):
+            return False
+        # 失败的越界尝试若没有同工具的正确补做，也不能被无关报告/画像洗成完成。
+        return item.status == "succeeded" or not any(
+            other.status == "succeeded"
+            and other.tool_name == item.tool_name
+            and other.run_id == contract.run_id
+            and all(ref in scope for _, ref in dataset_reference_arguments(other.args))
+            for other in invocations
+        )
+
+    if requirements.filters:
+        if not scope:
+            issues.append(
+                VerificationIssue(
+                    "required_filter_not_satisfied",
+                    "用户要求的完整筛选条件尚未产生已登记的派生数据集。",
+                )
+            )
+        if any(
+            item.tool_name not in {"transform_dataset", "get_data_profile"}
+            and violates_scope(item)
+            for item in invocations
+        ):
+            issues.append(
+                VerificationIssue(
+                    "required_filter_not_satisfied",
+                    "筛选后的分析引用了不符合本次完整条件的数据集。",
+                )
+            )
+    elif scope and any(violates_scope(item) for item in invocations):
+        issues.append(
+            VerificationIssue(
+                "required_dataset_not_satisfied", "分析没有使用用户绑定的数据集。"
+            )
+        )
+    if not requirements.total:
+        return issues
+    total_paths: set[tuple[str, str]] = set()
+    total_scopes: set[tuple[str, str]] = set()
+    for item in evidence:
+        invocation = by_id.get(item.invocation_id)
+        if (
+            item.run_id != contract.run_id
+            or invocation is None
+            or invocation.status != "succeeded"
+            or invocation.tool_name
+            not in {"dimension_contribution", "aggregate_preview"}
+            or invocation.args.get("method", invocation.args.get("agg", "sum")) != "sum"
+            or (scope and invocation.args.get("dataset_ref") not in scope)
+            or (requirements.filters and not scope)
+            or (
+                requirements.total_column
+                and invocation.args.get("value_col") != requirements.total_column
+            )
+        ):
+            continue
+        for value in item.summary.get("value_index", []):
+            if (
+                value.get("path") == "$.total_value"
+                and value.get("source_kind") == "number"
+            ):
+                total_paths.add((item.evidence_id, "$.total_value"))
+                total_scopes.add(
+                    (
+                        str(invocation.args.get("dataset_ref")),
+                        str(invocation.args.get("value_col")),
+                    )
+                )
+    if not total_paths or len(total_scopes) != 1:
+        issues.append(
+            VerificationIssue(
+                "missing_required_total_evidence",
+                "用户要求的总计缺少同一数据集和指标的确定性工具 Evidence。",
+            )
+        )
+        return issues
+    for claim in claims:
+        if claim.claim_kind != "numeric" or not TOTAL_LABEL.search(claim.statement):
+            continue
+        if re.search(
+            r"删除|缺少|无法|未提供|未返回|没有|不(?:是|为)|并非", claim.statement
+        ):
+            continue
+        for ref in claim.value_refs:
+            if ref.get("supported") is not True:
+                continue
+            paths = [(ref.get("evidence_id"), ref.get("path"))]
+            paths.extend(
+                (item.get("evidence_id"), item.get("path"))
+                for item in ref.get("candidate_paths", [])
+            )
+            if any(pair in total_paths for pair in paths):
+                return issues
+    issues.append(
+        VerificationIssue(
+            "missing_required_total_delivery",
+            "最终回答未交付用户要求且由总计 Evidence 支持的数值。",
+        )
+    )
+    return issues
 
 
 def _invalid_definition_lineage(
@@ -241,18 +418,10 @@ def _invalid_definition_lineage(
     bound_data: dict[str, dict[str, object]] = {}
     for evidence_id in linked:
         record = evidence_by_id.get(evidence_id)
-        binding = (
-            record.source.get("definition_execution")
-            if record is not None
-            else None
-        )
+        binding = record.source.get("definition_execution") if record is not None else None
         if isinstance(binding, dict):
             bound_data[evidence_id] = binding
-    refs = [
-        ref
-        for ref in claim.value_refs
-        if ref.get("kind") == "definition_execution"
-    ]
+    refs = [ref for ref in claim.value_refs if ref.get("kind") == "definition_execution"]
     if not bound_data:
         return bool(refs)
     for data_evidence_id, binding in bound_data.items():
@@ -264,10 +433,7 @@ def _invalid_definition_lineage(
         ):
             return True
         definition_evidence_id = binding.get("definition_evidence_id")
-        if (
-            not isinstance(definition_evidence_id, str)
-            or definition_evidence_id not in linked
-        ):
+        if not isinstance(definition_evidence_id, str) or definition_evidence_id not in linked:
             return True
         definition_evidence = evidence_by_id.get(definition_evidence_id)
         resource = (
@@ -338,25 +504,50 @@ def _chart_dimension(artifact: Artifact) -> str | None:
 def _last_unrecovered_execution_failure(
     invocations: list[ToolInvocation],
 ) -> ToolInvocation | None:
-    """Return an actual tool failure unless a later invocation succeeded.
+    """仅用相同操作、步骤和数据作用域的成功重试恢复失败。
 
     Policy denials and local circuit breakers are deliberate non-executions, not
     runtime failures.  Their error messages are generated by the orchestrator
     with stable prefixes and remain eligible for an honest text-only response.
     """
-    last_failure_index: int | None = None
-    for index, invocation in enumerate(invocations):
+    for index in range(len(invocations) - 1, -1, -1):
+        invocation = invocations[index]
         error = (invocation.error_text or "").lstrip()
-        if invocation.status == "failed" and not error.startswith(("未执行：", "熔断：")):
-            last_failure_index = index
-    if last_failure_index is None:
-        return None
-    if any(
-        invocation.status == "succeeded"
-        for invocation in invocations[last_failure_index + 1 :]
+        if invocation.status != "failed" or error.startswith(("未执行：", "熔断：")):
+            continue
+        if not any(_recovers(invocation, later) for later in invocations[index + 1 :]):
+            return invocation
+    return None
+
+
+def _recovers(failed: ToolInvocation, later: ToolInvocation) -> bool:
+    if (
+        later.status != "succeeded"
+        or later.run_id != failed.run_id
+        or later.tool_name != failed.tool_name
+        or later.step_id != failed.step_id
     ):
-        return None
-    return invocations[last_failure_index]
+        return False
+    for key in (
+        "dataset_ref",
+        "left_dataset_ref",
+        "right_dataset_ref",
+        "value_col",
+        "group_col",
+        "dimension_col",
+        "date_col",
+        "time_col",
+    ):
+        if key in failed.args and failed.args[key] != later.args.get(key):
+            return False
+    if failed.tool_name == "transform_dataset":
+        # Removing an unsatisfiable filter is a different task, not a successful retry.
+        filters = later.args.get("filters", [])
+        if not isinstance(filters, list) or any(
+            condition not in filters for condition in failed.args.get("filters", [])
+        ):
+            return False
+    return True
 
 
 def _valid_file(file_ref: str | None) -> bool:

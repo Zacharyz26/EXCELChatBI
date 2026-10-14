@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import math
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -23,6 +25,7 @@ from packages.common.dataset_store import (
     save_dataframe,
     save_metadata,
 )
+from packages.common.exact_numbers import exact_number
 from packages.governance.data_boundary import (
     ColumnAccess,
     ColumnPolicyViolation,
@@ -113,6 +116,7 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
     Returns:
         {rows: [{group, value, count, row_count, valid_value_count}], ...}；其中
         count 保持为有效值数的兼容别名，全空 sum/mean 的 value 为 null。
+        保留缺失分组键；sum 的 total_value 覆盖完整数据，不受展示 limit 影响。
     """
     group_col: str = args["group_col"]
     agg: str = args["agg"]
@@ -127,7 +131,7 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
     authorize_columns(
         dataset_ref, [value_col], access=ColumnAccess.SUMMARY, operation="aggregate_preview"
     )
-    tuples = aggregate(args["dataset_ref"], group_col, value_col, agg)
+    tuples = aggregate(args["dataset_ref"], group_col, value_col, agg, include_null_groups=True)
 
     sort = args.get("sort", "value_desc")
     if sort == "group":
@@ -141,14 +145,26 @@ def aggregate_preview(args: dict[str, Any]) -> dict[str, Any]:
     rows = [
         {
             "group": _plain(group),
-            "value": value,
+            "value": exact_number(value),
             "count": valid_value_count,
             "row_count": row_count,
             "valid_value_count": valid_value_count,
         }
         for group, value, row_count, valid_value_count in tuples[:limit]
     ]
+    totals = {}
+    if agg == "sum":
+        values = [value for _, value, _, _ in tuples if value is not None]
+        # Compute before display truncation; an entirely missing measure is not zero.
+        if all(isinstance(value, int) for value in values):
+            total = sum(values)
+        elif any(isinstance(value, Decimal) for value in values):
+            total = sum((Decimal(str(value)) for value in values), Decimal(0))
+        else:
+            total = math.fsum(values)
+        totals["total_value"] = exact_number(total) if values else None
     return {
+        **totals,
         "rows": rows,
         "group_total": len(tuples),
         "truncated": len(tuples) > limit,

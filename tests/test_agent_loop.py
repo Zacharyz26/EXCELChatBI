@@ -2999,7 +2999,7 @@ async def test_invalid_tool_call_limit_stops_varying_hallucinated_calls(
 async def test_consecutive_same_tool_same_args_circuit_breaks(
     store: SessionStore, conversation: Conversation
 ) -> None:
-    """连续两次同工具同参数 → 熔断，随后禁用 tools 强制作答（14.5.1）。"""
+    """成功后同参调用复用 Evidence，并保留两次模型调用的审计映射。"""
     registry = FakeRegistry({"kb_search": lambda args: {"is_empty": True, "hits": []}})
     same = {"tool_calls": [ToolCall(id="c1", name="kb_search", arguments='{"query":"口径"}')]}
     same2 = {"tool_calls": [ToolCall(id="c2", name="kb_search", arguments='{"query":"口径"}')]}
@@ -3008,17 +3008,16 @@ async def test_consecutive_same_tool_same_args_circuit_breaks(
     events = await _run_loop(store, conversation, gateway, registry)
 
     ends = [payload for name, payload in events if name == "tool_end"]
-    assert [end["status"] for end in ends] == ["ok", "error"]
-    assert "熔断" in ends[1]["message"]
+    assert [end["status"] for end in ends] == ["ok", "ok"]
+    assert ends[1]["reused"] is True
     assert len(registry.executed) == 1  # 第二次没有真正执行
-    assert gateway.calls[2]["tools"] is None  # 熔断后禁用 tools 强制作答
-    # 每步结果都有回放记录（含未执行的熔断步）
+    # 计划可能已收敛；每次模型请求都有回放记录，但只有一个真实执行。
     outcomes = [
         json.loads(m.content) for m in store.list_messages(conversation.id) if m.role == "tool"
     ]
     assert [(o["tool_call_id"], o["status"]) for o in outcomes] == [
         ("c1", "ok"),
-        ("c2", "error"),
+        ("c2", "ok"),
     ]
 
 
@@ -3062,13 +3061,14 @@ async def test_unbound_plan_calls_use_stable_signature_across_random_call_ids(
         gateway,
         registry,
         user_text="介绍这份数据的规模和质量",
+        config=AgentLoopConfig(max_model_rounds=3),
     )
 
     ends = [payload for name, payload in events if name == "tool_end"]
     assert ends[0]["status"] == "ok"
-    assert "熔断" in ends[1]["message"]
+    assert ends[1]["reused"] is True
     assert [item[0] for item in registry.executed] == ["kb_search"]
-    assert gateway.calls[2]["tools"] is None
+    assert gateway.calls[2]["tools"] is not None
 
 
 @pytest.mark.asyncio
@@ -3956,10 +3956,11 @@ async def test_same_run_report_replay_refreshes_registry_and_limits_stale_id_to_
         user_text=(
             f"请使用 dataset_ref={first_ref} 查看数据画像和销售额趋势，然后生成报告"
         ),
+        config=AgentLoopConfig(max_model_rounds=4),
     )
 
-    assert dict(events)["done"]["run_status"] == "completed"
     run_id = cast(str, dict(events)["meta"]["run_id"])
+    assert TaskStore(store.db_path).get_run(run_id).status != "completed"
     invocations = TaskStore(store.db_path).list_invocations(run_id)
     artifacts_by_id = {
         artifact.id: artifact for artifact in store.list_artifacts(conversation.id)
@@ -3969,12 +3970,12 @@ async def test_same_run_report_replay_refreshes_registry_and_limits_stale_id_to_
     )
     trend_invocation = next(item for item in invocations if item.tool_name == "trend_analysis")
     profile_artifact = artifacts_by_id[cast(str, profile_invocation.artifact_id)]
-    trend_artifact = artifacts_by_id[cast(str, trend_invocation.artifact_id)]
+    assert trend_invocation.status == "failed"
+    assert trend_invocation.artifact_id is None
     assert report_arguments[0]["analysis_ids"] == [profile_artifact.params["analysis_id"]]
-    assert trend_artifact.params["analysis_id"] not in report_arguments[0]["analysis_ids"]
     report_system = gateway.calls[2]["messages"][0].content
     assert f"analysis_id={profile_artifact.params['analysis_id']}" in report_system
-    assert f"analysis_id={trend_artifact.params['analysis_id']}" in report_system
+    assert all(name != "trend_analysis" for name, _ in registry.executed)
     assert any(name == "artifact" and payload["type"] == "report" for name, payload in events)
 
 

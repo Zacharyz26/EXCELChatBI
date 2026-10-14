@@ -178,8 +178,8 @@ def test_explicit_percentage_conversion_and_tool_display_value_can_link() -> Non
         evidence=[with_display_value],
     )
     assert linked[0].value_refs[0]["supported"] is True
-    assert linked[0].value_refs[0]["path"] == "$.display#number[0]"
-    assert linked[0].value_refs[0]["match_kind"] == "exact"
+    assert linked[0].value_refs[0]["path"] == "$.rate"
+    assert linked[0].value_refs[0]["match_kind"] == "unit_scaled"
 
 
 def test_display_rounding_links_without_accepting_a_different_rounded_value() -> None:
@@ -303,11 +303,8 @@ def test_same_value_paths_prefer_semantically_matching_field_and_keep_candidates
 
     ref = claims[0].value_refs[0]
     assert ref["path"] == "$.quality.duplicate_rows"
-    assert ref["ambiguous_value"] is True
-    assert ref["candidate_paths"] == [
-        {"evidence_id": "evidence-1", "path": "$.profile.row_count"},
-        {"evidence_id": "evidence-1", "path": "$.quality.duplicate_rows"},
-    ]
+    assert "ambiguous_value" not in ref
+    assert ref["semantic_binding"]["evidence_path"] == "$.quality.duplicate_rows"
 
 
 def test_knowledge_claim_requires_an_explicit_returned_source() -> None:

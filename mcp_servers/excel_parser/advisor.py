@@ -121,9 +121,7 @@ def infer_data_roles(profile: DataProfile) -> dict[str, Any]:
     """Infer one primary role per column with candidates and ambiguity evidence."""
     columns = [_classify_column(column, profile.row_count) for column in profile.columns]
     counts = Counter(str(item["primary_role"]) for item in columns)
-    ambiguous_columns = [
-        str(item["column"]) for item in columns if bool(item["ambiguous"])
-    ]
+    ambiguous_columns = [str(item["column"]) for item in columns if bool(item["ambiguous"])]
     return {
         "schema": ROLE_SCHEMA,
         "method": "deterministic-profile-heuristics-v1",
@@ -169,6 +167,11 @@ def infer_data_roles_from_mapping(
             raise ValueError(f"数据画像第 {index + 1} 列缺少 name")
         if not isinstance(dtype, str) or not dtype.strip():
             raise ValueError(f"数据画像列 {name} 缺少 dtype")
+        if null_ratio is None and distinct_count is None:
+            columns.append(
+                ColumnProfile(name=name, dtype=dtype, null_ratio=None, distinct_count=None)
+            )
+            continue
         if (
             not isinstance(null_ratio, int | float)
             or isinstance(null_ratio, bool)
@@ -207,14 +210,14 @@ def diagnose_data_quality(
     profile: DataProfile,
     roles: dict[str, Any],
     *,
-    duplicate_rows: int,
+    duplicate_rows: int | None,
 ) -> dict[str, Any]:
     """Return profile-backed issues and non-mutating cleaning recommendations."""
     role_items = cast(list[dict[str, Any]], roles.get("columns") or [])
     role_by_name = {str(item.get("column")): item for item in role_items}
     issues: list[dict[str, Any]] = []
 
-    if duplicate_rows > 0:
+    if duplicate_rows is not None and duplicate_rows > 0:
         duplicate_ratio = duplicate_rows / profile.row_count if profile.row_count else 0.0
         _append_issue(
             issues,
@@ -230,6 +233,8 @@ def diagnose_data_quality(
         )
 
     for column in profile.columns:
+        if column.null_ratio is None or column.distinct_count is None:
+            continue
         role_item = role_by_name.get(column.name, {})
         primary_role = str(role_item.get("primary_role", "unknown"))
         non_null_count = _non_null_count(column, profile.row_count)
@@ -319,7 +324,7 @@ def diagnose_data_quality(
     high_null_columns = [
         {"name": column.name, "null_ratio": round(column.null_ratio, 4)}
         for column in profile.columns
-        if column.null_ratio >= 0.3
+        if column.null_ratio is not None and column.null_ratio >= 0.3
     ]
     return {
         "schema": QUALITY_SCHEMA,
@@ -342,11 +347,26 @@ def diagnose_data_quality(
 
 
 def _classify_column(column: ColumnProfile, row_count: int) -> dict[str, Any]:
+    if column.null_ratio is None or column.distinct_count is None:
+        return {
+            "column": column.name,
+            "primary_role": "unknown",
+            "confidence": 0.0,
+            "ambiguous": True,
+            "candidates": [
+                {"role": "unknown", "score": 0.0, "evidence": ["policy:statistics_unavailable"]}
+            ],
+            "profile_evidence": {
+                "dtype": column.dtype,
+                "null_ratio": None,
+                "distinct_count": None,
+                "non_null_count": None,
+                "unique_ratio": None,
+            },
+        }
     normalized_name = _normalize_name(column.name)
     non_null_count = _non_null_count(column, row_count)
-    unique_ratio = (
-        column.distinct_count / non_null_count if non_null_count > 0 else 0.0
-    )
+    unique_ratio = column.distinct_count / non_null_count if non_null_count > 0 else 0.0
     time_hint = _contains_hint(normalized_name, _TIME_HINTS)
     identifier_hint = _is_identifier_name(normalized_name)
     metric_hint = _contains_hint(normalized_name, _METRIC_HINTS)
@@ -425,11 +445,7 @@ def _classify_column(column: ColumnProfile, row_count: int) -> dict[str, Any]:
     primary_role = ranked[0][0]
     confidence = ranked[0][1][0]
     second_score = ranked[1][1][0] if len(ranked) > 1 else 0.0
-    ambiguous = (
-        primary_role == "unknown"
-        or confidence < 0.75
-        or confidence - second_score < 0.1
-    )
+    ambiguous = primary_role == "unknown" or confidence < 0.75 or confidence - second_score < 0.1
     return {
         "column": column.name,
         "primary_role": primary_role,
@@ -498,6 +514,8 @@ def _missing_recommendation(role: str) -> str:
 
 
 def _non_null_count(column: ColumnProfile, row_count: int) -> int:
+    if column.null_ratio is None:
+        raise ValueError("受限列没有可用的非空计数")
     return max(0, min(row_count, round(row_count * (1.0 - column.null_ratio))))
 
 

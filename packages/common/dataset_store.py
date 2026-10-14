@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -170,8 +171,9 @@ def dataset_columns(dataset_ref: str) -> list[str]:
 
 
 def aggregate(
-    dataset_ref: str, group_col: str, value_col: str, agg: str
-) -> list[tuple[Any, float | None, int, int]]:
+    dataset_ref: str, group_col: str, value_col: str, agg: str,
+    *, include_null_groups: bool = False,
+) -> list[tuple[Any, int | float | Decimal | None, int, int]]:
     """按 group_col 分组聚合 value_col，下推到 DuckDB 执行。
 
     Args:
@@ -179,6 +181,7 @@ def aggregate(
         group_col: 维度列。
         value_col: 度量列。
         agg: 聚合方式，sum/mean/count。
+        include_null_groups: 表格汇总可保留缺失分组键，避免总计丢行。
 
     Returns:
         [(分组键, 聚合值, 分组行数)]；分组行数供第3层小分组保护使用。
@@ -202,10 +205,11 @@ def aggregate(
         raise ValueError(f"不支持的聚合方式: {agg}")
 
     path = _path_of(dataset_ref)
+    group_filter = "" if include_null_groups else f"WHERE {gi} IS NOT NULL"
     sql = (
         f"SELECT {gi} AS g, {expr} AS v, COUNT(*) AS row_count, "
         f"COUNT({vi}) AS valid_value_count "
-        f"FROM read_parquet(?) WHERE {gi} IS NOT NULL GROUP BY {gi}"
+        f"FROM read_parquet(?) {group_filter} GROUP BY {gi}"
     )
     con = duckdb.connect()
     try:
@@ -215,7 +219,7 @@ def aggregate(
     return [
         (
             row[0],
-            float(row[1]) if row[1] is not None else None,
+            row[1],
             int(row[2]),
             int(row[3]),
         )

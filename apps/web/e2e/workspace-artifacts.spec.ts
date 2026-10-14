@@ -1202,6 +1202,23 @@ async function send(page: Page, prompt: string): Promise<void> {
   await page.getByRole("button", { name: "发送消息" }).click();
 }
 
+test("精确聚合值经 JSON 和刷新后保持逐位一致", async ({ page }) => {
+  const state = await installMockApi(page);
+  const assistant = message("exact-value-message", "assistant", "精确汇总已完成。");
+  state.messages.push(assistant);
+  state.artifacts.push(artifact("exact-table", assistant.id, "table", {
+    group_col: "group", value_col: "amount", agg: "sum", group_total: 1,
+    truncated: false,
+    rows: [{ group: "A", value: { exact_number: "9007199254740993", number_type: "integer" }, count: 2 }],
+    total_value: { exact_number: "9007199254740993", number_type: "integer" },
+  }, "aggregate_preview"));
+  await page.goto("/");
+  await expect(page.locator(".table-artifact")).toContainText("9007199254740993");
+  await expect(page.locator(".table-artifact")).not.toContainText("9007199254740992");
+  await page.reload();
+  await expect(page.locator(".table-artifact")).toContainText("9007199254740993");
+});
+
 test("上传表格后渲染画像卡和数据集", async ({ page }) => {
   await installMockApi(page, { withDataset: false });
   await page.goto("/");

@@ -1,12 +1,17 @@
 // 前后端共享的前端类型定义
 
+export interface ExactNumber {
+  exact_number: string;
+  number_type: "integer" | "decimal";
+}
+
 export interface ColumnProfile {
   name: string;
   dtype: string;
-  null_ratio: number;
-  distinct_count: number;
-  min: number | null;
-  max: number | null;
+  null_ratio: number | null;
+  distinct_count: number | null;
+  min: number | ExactNumber | null;
+  max: number | ExactNumber | null;
   mean: number | null;
   std: number | null;
   median: number | null;

@@ -1,0 +1,647 @@
+{
+  "source": "synthetic r9b persisted artifacts and exact failed report arguments",
+  "args": {
+    "analysis_ids": [
+      "c81f33604c4a",
+      "8074b9f94bb2",
+      "7e93661cc0b8"
+    ],
+    "include_pdf": true,
+    "insights": "\u57fa\u4e8e\u6d3e\u751f\u6570\u636e\u96c6 ac5845a0b6df45e0a803579dc56e3d5d\uff08\u5730\u533a=\u534e\u4e1c \u4e14 \u6e20\u9053=\u7ebf\u4e0a\uff0c30 \u884c \u00d7 5 \u5217\uff09\u3002\u6309\u6708\u6c47\u603b\u9500\u552e\u989d\uff08sum\uff09\u603b\u8ba1 1170.0\uff0c\u5171 6 \u4e2a\u6708\u4efd\uff1a2026-01 \u4e3a 120.0\u30012026-02 \u4e3a 150.0\u30012026-03 \u4e3a 180.0\u30012026-04 \u4e3a 210.0\u30012026-05 \u4e3a 240.0\u30012026-06 \u4e3a 270.0\uff0c\u5448\u9010\u6708\u4e0a\u5347\u8d8b\u52bf\u3002\u6570\u636e\u8d28\u91cf\u63d0\u793a\uff1a\u5730\u533a\u3001\u6e20\u9053\u3001\u8ba2\u5355\u6570\u4e3a\u5e38\u91cf\u5217\uff0c\u5b58\u5728 24 \u884c\u91cd\u590d\u8bb0\u5f55\uff08\u91cd\u590d\u7387 0.8\uff09\uff0c\u5efa\u8bae\u53bb\u91cd\u6216\u5efa\u6a21\u524d\u786e\u8ba4\u4e1a\u52a1\u4e3b\u952e\u3002",
+    "title": "\u534e\u4e1c\u7ebf\u4e0a\u9500\u552e\u5206\u6790"
+  },
+  "artifacts": [
+    {
+      "id": "0a511e17649c45af97cc538cbfc09581",
+      "conversation_id": "3c62dffd390b4ff1ba775834073520fe",
+      "message_id": "bb14697746d64d2ab987f9a7c5e455ad",
+      "type": "profile",
+      "file_ref": null,
+      "source_tool": "get_data_profile",
+      "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+      "created_at": "2026-10-12T19:00:57.399093Z",
+      "payload": {
+        "profile": {
+          "column_count": 5,
+          "columns": [
+            {
+              "distinct_count": 6,
+              "dtype": "str",
+              "max": null,
+              "mean": null,
+              "median": null,
+              "min": null,
+              "name": "\u6708\u4efd",
+              "null_ratio": 0,
+              "sample_values": [
+                "2026-01",
+                "2026-02",
+                "2026-03",
+                "2026-04",
+                "2026-05"
+              ],
+              "std": null
+            },
+            {
+              "distinct_count": 1,
+              "dtype": "str",
+              "max": null,
+              "mean": null,
+              "median": null,
+              "min": null,
+              "name": "\u5730\u533a",
+              "null_ratio": 0,
+              "sample_values": [
+                "\u534e\u4e1c"
+              ],
+              "std": null
+            },
+            {
+              "distinct_count": 1,
+              "dtype": "str",
+              "max": null,
+              "mean": null,
+              "median": null,
+              "min": null,
+              "name": "\u6e20\u9053",
+              "null_ratio": 0,
+              "sample_values": [
+                "\u7ebf\u4e0a"
+              ],
+              "std": null
+            },
+            {
+              "distinct_count": 6,
+              "dtype": "int",
+              "max": 54,
+              "mean": 39,
+              "median": 39,
+              "min": 24,
+              "name": "\u9500\u552e\u989d",
+              "null_ratio": 0,
+              "sample_values": [
+                "24",
+                "30",
+                "36",
+                "42",
+                "48"
+              ],
+              "std": 10.422125
+            },
+            {
+              "distinct_count": 1,
+              "dtype": "int",
+              "max": 1,
+              "mean": 1,
+              "median": 1,
+              "min": 1,
+              "name": "\u8ba2\u5355\u6570",
+              "null_ratio": 0,
+              "sample_values": [
+                "1"
+              ],
+              "std": 0
+            }
+          ],
+          "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+          "row_count": 30,
+          "sample_rows": [
+            {
+              "\u5730\u533a": "\u534e\u4e1c",
+              "\u6708\u4efd": "2026-01",
+              "\u6e20\u9053": "\u7ebf\u4e0a",
+              "\u8ba2\u5355\u6570": 1,
+              "\u9500\u552e\u989d": 24
+            },
+            {
+              "\u5730\u533a": "\u534e\u4e1c",
+              "\u6708\u4efd": "2026-01",
+              "\u6e20\u9053": "\u7ebf\u4e0a",
+              "\u8ba2\u5355\u6570": 1,
+              "\u9500\u552e\u989d": 24
+            },
+            {
+              "\u5730\u533a": "\u534e\u4e1c",
+              "\u6708\u4efd": "2026-01",
+              "\u6e20\u9053": "\u7ebf\u4e0a",
+              "\u8ba2\u5355\u6570": 1,
+              "\u9500\u552e\u989d": 24
+            },
+            {
+              "\u5730\u533a": "\u534e\u4e1c",
+              "\u6708\u4efd": "2026-01",
+              "\u6e20\u9053": "\u7ebf\u4e0a",
+              "\u8ba2\u5355\u6570": 1,
+              "\u9500\u552e\u989d": 24
+            },
+            {
+              "\u5730\u533a": "\u534e\u4e1c",
+              "\u6708\u4efd": "2026-01",
+              "\u6e20\u9053": "\u7ebf\u4e0a",
+              "\u8ba2\u5355\u6570": 1,
+              "\u9500\u552e\u989d": 24
+            }
+          ]
+        },
+        "quality": {
+          "constant_columns": [
+            "\u5730\u533a",
+            "\u6e20\u9053",
+            "\u8ba2\u5355\u6570"
+          ],
+          "duplicate_rows": 24,
+          "high_null_columns": [],
+          "issues": [
+            {
+              "code": "duplicate_rows",
+              "columns": [],
+              "evidence": {
+                "duplicate_ratio": 0.8,
+                "duplicate_rows": 24
+              },
+              "issue_id": "quality-001",
+              "recommendation": "\u786e\u8ba4\u91cd\u590d\u8bb0\u5f55\u7684\u4e1a\u52a1\u4e3b\u952e\u548c\u4fdd\u7559\u89c4\u5219\u540e\u518d\u53bb\u91cd\uff0c\u4e0d\u80fd\u76f4\u63a5\u9759\u9ed8\u5220\u9664\u3002",
+              "severity": "high",
+              "suggested_action": "review_duplicate_rows"
+            },
+            {
+              "code": "constant_column",
+              "columns": [
+                "\u5730\u533a"
+              ],
+              "evidence": {
+                "distinct_count": 1,
+                "role": "unknown"
+              },
+              "issue_id": "quality-002",
+              "recommendation": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002",
+              "severity": "low",
+              "suggested_action": "exclude_constant_from_analysis"
+            },
+            {
+              "code": "ambiguous_data_role",
+              "columns": [
+                "\u5730\u533a"
+              ],
+              "evidence": {
+                "candidate_roles": [
+                  "unknown",
+                  "dimension"
+                ],
+                "confidence": 0.9,
+                "primary_role": "unknown"
+              },
+              "issue_id": "quality-003",
+              "recommendation": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002",
+              "severity": "medium",
+              "suggested_action": "confirm_data_role"
+            },
+            {
+              "code": "constant_column",
+              "columns": [
+                "\u6e20\u9053"
+              ],
+              "evidence": {
+                "distinct_count": 1,
+                "role": "unknown"
+              },
+              "issue_id": "quality-004",
+              "recommendation": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002",
+              "severity": "low",
+              "suggested_action": "exclude_constant_from_analysis"
+            },
+            {
+              "code": "ambiguous_data_role",
+              "columns": [
+                "\u6e20\u9053"
+              ],
+              "evidence": {
+                "candidate_roles": [
+                  "unknown",
+                  "dimension"
+                ],
+                "confidence": 0.9,
+                "primary_role": "unknown"
+              },
+              "issue_id": "quality-005",
+              "recommendation": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002",
+              "severity": "medium",
+              "suggested_action": "confirm_data_role"
+            },
+            {
+              "code": "constant_column",
+              "columns": [
+                "\u8ba2\u5355\u6570"
+              ],
+              "evidence": {
+                "distinct_count": 1,
+                "role": "unknown"
+              },
+              "issue_id": "quality-006",
+              "recommendation": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002",
+              "severity": "low",
+              "suggested_action": "exclude_constant_from_analysis"
+            },
+            {
+              "code": "ambiguous_data_role",
+              "columns": [
+                "\u8ba2\u5355\u6570"
+              ],
+              "evidence": {
+                "candidate_roles": [
+                  "unknown",
+                  "dimension"
+                ],
+                "confidence": 0.9,
+                "primary_role": "unknown"
+              },
+              "issue_id": "quality-007",
+              "recommendation": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002",
+              "severity": "medium",
+              "suggested_action": "confirm_data_role"
+            }
+          ],
+          "mutates_data": false,
+          "recommendations": [
+            {
+              "action": "review_duplicate_rows",
+              "automatic": false,
+              "columns": [],
+              "issue_id": "quality-001",
+              "message": "\u786e\u8ba4\u91cd\u590d\u8bb0\u5f55\u7684\u4e1a\u52a1\u4e3b\u952e\u548c\u4fdd\u7559\u89c4\u5219\u540e\u518d\u53bb\u91cd\uff0c\u4e0d\u80fd\u76f4\u63a5\u9759\u9ed8\u5220\u9664\u3002"
+            },
+            {
+              "action": "exclude_constant_from_analysis",
+              "automatic": false,
+              "columns": [
+                "\u5730\u533a"
+              ],
+              "issue_id": "quality-002",
+              "message": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002"
+            },
+            {
+              "action": "confirm_data_role",
+              "automatic": false,
+              "columns": [
+                "\u5730\u533a"
+              ],
+              "issue_id": "quality-003",
+              "message": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002"
+            },
+            {
+              "action": "exclude_constant_from_analysis",
+              "automatic": false,
+              "columns": [
+                "\u6e20\u9053"
+              ],
+              "issue_id": "quality-004",
+              "message": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002"
+            },
+            {
+              "action": "confirm_data_role",
+              "automatic": false,
+              "columns": [
+                "\u6e20\u9053"
+              ],
+              "issue_id": "quality-005",
+              "message": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002"
+            },
+            {
+              "action": "exclude_constant_from_analysis",
+              "automatic": false,
+              "columns": [
+                "\u8ba2\u5355\u6570"
+              ],
+              "issue_id": "quality-006",
+              "message": "\u8be5\u5b57\u6bb5\u6ca1\u6709\u533a\u5206\u5ea6\uff1b\u7ecf\u7528\u6237\u786e\u8ba4\u540e\u53ef\u4ece\u5206\u7fa4\u3001\u76f8\u5173\u548c\u5efa\u6a21\u8f93\u5165\u4e2d\u6392\u9664\u3002"
+            },
+            {
+              "action": "confirm_data_role",
+              "automatic": false,
+              "columns": [
+                "\u8ba2\u5355\u6570"
+              ],
+              "issue_id": "quality-007",
+              "message": "\u5728\u805a\u5408\u3001\u5efa\u6a21\u6216 Join \u524d\u7531\u7528\u6237\u786e\u8ba4\u8be5\u5b57\u6bb5\u7684\u6570\u636e\u89d2\u8272\u3002"
+            }
+          ],
+          "schema": "chatbi-data-quality-v1",
+          "summary": {
+            "high": 1,
+            "issue_count": 7,
+            "low": 3,
+            "medium": 3,
+            "requires_confirmation": true
+          }
+        },
+        "roles": {
+          "ambiguous_columns": [
+            "\u5730\u533a",
+            "\u6e20\u9053",
+            "\u8ba2\u5355\u6570"
+          ],
+          "columns": [
+            {
+              "ambiguous": false,
+              "candidates": [
+                {
+                  "evidence": [
+                    "name:time_hint",
+                    "dtype:str"
+                  ],
+                  "role": "time",
+                  "score": 0.9
+                },
+                {
+                  "evidence": [
+                    "dtype:str"
+                  ],
+                  "role": "dimension",
+                  "score": 0.52
+                }
+              ],
+              "column": "\u6708\u4efd",
+              "confidence": 0.9,
+              "primary_role": "time",
+              "profile_evidence": {
+                "distinct_count": 6,
+                "dtype": "str",
+                "non_null_count": 30,
+                "null_ratio": 0,
+                "unique_ratio": 0.2
+              }
+            },
+            {
+              "ambiguous": true,
+              "candidates": [
+                {
+                  "evidence": [
+                    "cardinality:constant"
+                  ],
+                  "role": "unknown",
+                  "score": 0.9
+                },
+                {
+                  "evidence": [
+                    "cardinality:constant_category"
+                  ],
+                  "role": "dimension",
+                  "score": 0.45
+                }
+              ],
+              "column": "\u5730\u533a",
+              "confidence": 0.9,
+              "primary_role": "unknown",
+              "profile_evidence": {
+                "distinct_count": 1,
+                "dtype": "str",
+                "non_null_count": 30,
+                "null_ratio": 0,
+                "unique_ratio": 0.0333
+              }
+            },
+            {
+              "ambiguous": true,
+              "candidates": [
+                {
+                  "evidence": [
+                    "cardinality:constant"
+                  ],
+                  "role": "unknown",
+                  "score": 0.9
+                },
+                {
+                  "evidence": [
+                    "cardinality:constant_category"
+                  ],
+                  "role": "dimension",
+                  "score": 0.45
+                }
+              ],
+              "column": "\u6e20\u9053",
+              "confidence": 0.9,
+              "primary_role": "unknown",
+              "profile_evidence": {
+                "distinct_count": 1,
+                "dtype": "str",
+                "non_null_count": 30,
+                "null_ratio": 0,
+                "unique_ratio": 0.0333
+              }
+            },
+            {
+              "ambiguous": false,
+              "candidates": [
+                {
+                  "evidence": [
+                    "dtype:int",
+                    "name:metric_hint"
+                  ],
+                  "role": "metric",
+                  "score": 0.95
+                },
+                {
+                  "evidence": [
+                    "cardinality:low_numeric"
+                  ],
+                  "role": "dimension",
+                  "score": 0.76
+                }
+              ],
+              "column": "\u9500\u552e\u989d",
+              "confidence": 0.95,
+              "primary_role": "metric",
+              "profile_evidence": {
+                "distinct_count": 6,
+                "dtype": "int",
+                "non_null_count": 30,
+                "null_ratio": 0,
+                "unique_ratio": 0.2
+              }
+            },
+            {
+              "ambiguous": true,
+              "candidates": [
+                {
+                  "evidence": [
+                    "cardinality:constant"
+                  ],
+                  "role": "unknown",
+                  "score": 0.9
+                },
+                {
+                  "evidence": [
+                    "cardinality:constant_category"
+                  ],
+                  "role": "dimension",
+                  "score": 0.45
+                }
+              ],
+              "column": "\u8ba2\u5355\u6570",
+              "confidence": 0.9,
+              "primary_role": "unknown",
+              "profile_evidence": {
+                "distinct_count": 1,
+                "dtype": "int",
+                "non_null_count": 30,
+                "null_ratio": 0,
+                "unique_ratio": 0.0333
+              }
+            }
+          ],
+          "method": "deterministic-profile-heuristics-v1",
+          "requires_confirmation": true,
+          "schema": "chatbi-data-roles-v1",
+          "summary": {
+            "ambiguous": 3,
+            "dimension": 0,
+            "identifier": 0,
+            "metric": 1,
+            "time": 1,
+            "unknown": 3
+          }
+        }
+      },
+      "params": {
+        "analysis_id": "c81f33604c4a",
+        "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d"
+      }
+    },
+    {
+      "id": "cf9c6de565204b849213cf20ca3de36a",
+      "conversation_id": "3c62dffd390b4ff1ba775834073520fe",
+      "message_id": "bb14697746d64d2ab987f9a7c5e455ad",
+      "type": "table",
+      "file_ref": null,
+      "source_tool": "aggregate_preview",
+      "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+      "created_at": "2026-10-12T19:00:57.480181Z",
+      "payload": {
+        "agg": "sum",
+        "group_col": "\u6708\u4efd",
+        "group_total": 6,
+        "rows": [
+          {
+            "count": 5,
+            "group": "2026-06",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 270
+          },
+          {
+            "count": 5,
+            "group": "2026-05",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 240
+          },
+          {
+            "count": 5,
+            "group": "2026-04",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 210
+          },
+          {
+            "count": 5,
+            "group": "2026-03",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 180
+          },
+          {
+            "count": 5,
+            "group": "2026-02",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 150
+          },
+          {
+            "count": 5,
+            "group": "2026-01",
+            "row_count": 5,
+            "valid_value_count": 5,
+            "value": 120
+          }
+        ],
+        "total_value": 1170,
+        "truncated": false,
+        "value_col": "\u9500\u552e\u989d"
+      },
+      "params": {
+        "agg": "sum",
+        "analysis_id": "8074b9f94bb2",
+        "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+        "group_col": "\u6708\u4efd",
+        "value_col": "\u9500\u552e\u989d"
+      }
+    },
+    {
+      "id": "29bf2576cd7b47e8ba0c542edba5dd79",
+      "conversation_id": "3c62dffd390b4ff1ba775834073520fe",
+      "message_id": "3f5b5ff2d21b4f57a8bc76e5ed706044",
+      "type": "chart",
+      "file_ref": null,
+      "source_tool": "gen_chart",
+      "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+      "created_at": "2026-10-12T19:08:38.681265Z",
+      "payload": {
+        "chart_id": "603d90cb800947deb8d77fbc2558ccf8",
+        "chart_type": "line",
+        "option": {
+          "grid": {
+            "bottom": 12,
+            "containLabel": true,
+            "left": 12,
+            "right": 20,
+            "top": 48
+          },
+          "series": [
+            {
+              "data": [
+                120,
+                150,
+                180,
+                210,
+                240,
+                270
+              ],
+              "name": "\u9500\u552e\u989d",
+              "type": "line"
+            }
+          ],
+          "title": {
+            "text": "\u9500\u552e\u989d by \u6708\u4efd"
+          },
+          "tooltip": {
+            "trigger": "axis"
+          },
+          "xAxis": {
+            "data": [
+              "2026-01",
+              "2026-02",
+              "2026-03",
+              "2026-04",
+              "2026-05",
+              "2026-06"
+            ],
+            "type": "category"
+          },
+          "yAxis": {
+            "type": "value"
+          }
+        }
+      },
+      "params": {
+        "analysis_id": "7e93661cc0b8",
+        "chart_type": "line",
+        "dataset_ref": "ac5845a0b6df45e0a803579dc56e3d5d",
+        "encoding": {
+          "agg": "sum",
+          "x": "\u6708\u4efd",
+          "y": "\u9500\u552e\u989d"
+        }
+      }
+    }
+  ]
+}

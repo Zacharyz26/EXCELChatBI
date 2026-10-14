@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 from packages.common.dataset_store import aggregate as pushdown_aggregate
 from packages.common.dataset_store import load_dataframe
+from packages.common.exact_numbers import MAX_SAFE_INTEGER
 from packages.governance.aggregation_guard import GroupAgg, guard_small_groups
 from packages.governance.data_boundary import (
     ColumnAccess,
@@ -121,7 +122,7 @@ def _aggregate(
     return cats, values
 
 
-def _aggregate_value_desc_key(group: GroupAgg) -> tuple[bool, float]:
+def _aggregate_value_desc_key(group: GroupAgg) -> tuple[bool, int | float | Decimal]:
     """聚合空值始终排在真实数值之后，且绝不伪装为 0。"""
     value = group.value
     return value is None, -(value if value is not None else 0.0)
@@ -246,6 +247,10 @@ def _coerce(value: Any) -> Any:
         return None
     if hasattr(value, "item"):  # numpy 标量
         value = value.item()
+    if isinstance(value, int) and abs(value) > MAX_SAFE_INTEGER:
+        raise ValueError("图表数值超出浏览器安全精度；请使用保留精确值的汇总表")
+    if isinstance(value, Decimal):
+        raise ValueError("图表不能隐式舍入 Decimal；请先明确精度或使用精确汇总表")
     if isinstance(value, pd.Timestamp | datetime | date):
         return str(value)
     return value

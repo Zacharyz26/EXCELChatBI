@@ -971,6 +971,10 @@ function numberValue(value: unknown): number | null {
 }
 
 function formatNumber(value: unknown): string {
+  if (isRecord(value) && typeof value.exact_number === "string"
+      && (value.number_type === "integer" || value.number_type === "decimal")) {
+    return value.exact_number;
+  }
   if (typeof value !== "number") return String(value ?? "—");
   if (Number.isInteger(value)) return value.toLocaleString("zh-CN");
   return value.toLocaleString("zh-CN", { maximumFractionDigits: 4 });

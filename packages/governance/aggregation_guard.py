@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 
 @dataclass
@@ -17,7 +18,7 @@ class GroupAgg:
     """一个聚合分组：类目键、聚合值、分组样本量（行数）。"""
 
     key: object
-    value: float | None
+    value: int | float | Decimal | None
     count: int
     row_count: int | None = None
 
@@ -29,12 +30,12 @@ class GroupAgg:
         return self.row_count
 
 
-def _combine(small: list[GroupAgg], agg: str, total: int) -> float:
+def _combine(small: list[GroupAgg], agg: str, total: int) -> int | float | Decimal:
     """按聚合方式合并多个小分组的值。"""
     if agg == "sum":
         return sum(g.value for g in small if g.value is not None)
     if agg == "count":
-        return float(total)
+        return total
     if agg == "mean":
         # 加权平均：Σ(mean_i · count_i) / Σ count_i
         return sum(g.value * g.count for g in small if g.value is not None) / total

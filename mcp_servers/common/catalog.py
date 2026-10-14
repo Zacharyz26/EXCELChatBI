@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.common.exact_numbers import EXACT_NUMBER_SCHEMA
+
 from mcp_servers.common.contracts import RiskLevel, ToolCapabilityMetadata
 
 JsonSchema = dict[str, Any]
@@ -156,15 +158,9 @@ _VIF_SCHEMA = _closed_object(
 )
 _REGRESSION_DIAGNOSTICS_SCHEMA = _closed_object(
     {
-        "residual_normality": {
-            "oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]
-        },
-        "heteroskedasticity": {
-            "oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]
-        },
-        "autocorrelation": {
-            "oneOf": [_AUTOCORRELATION_DIAGNOSTIC_SCHEMA, {"type": "null"}]
-        },
+        "residual_normality": {"oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]},
+        "heteroskedasticity": {"oneOf": [_DIAGNOSTIC_TEST_SCHEMA, {"type": "null"}]},
+        "autocorrelation": {"oneOf": [_AUTOCORRELATION_DIAGNOSTIC_SCHEMA, {"type": "null"}]},
         "multicollinearity": _closed_object(
             {
                 "condition_number": _NUMBER_OR_NULL,
@@ -398,10 +394,10 @@ _ROLE_COLUMN_SCHEMA = _closed_object(
         "profile_evidence": _closed_object(
             {
                 "dtype": _STRING,
-                "null_ratio": {"type": "number", "minimum": 0, "maximum": 1},
-                "distinct_count": _INTEGER,
-                "non_null_count": _INTEGER,
-                "unique_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                "null_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                "distinct_count": {"type": ["integer", "null"], "minimum": 0},
+                "non_null_count": {"type": ["integer", "null"], "minimum": 0},
+                "unique_ratio": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
             },
             "dtype",
             "null_ratio",
@@ -484,7 +480,7 @@ _QUALITY_OUTPUT_SCHEMA = _closed_object(
     {
         "schema": {"const": "chatbi-data-quality-v1"},
         "mutates_data": {"const": False},
-        "duplicate_rows": _INTEGER,
+        "duplicate_rows": {"type": ["integer", "null"], "minimum": 0},
         "high_null_columns": {
             "type": "array",
             "items": _closed_object(
@@ -739,6 +735,7 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
     ),
     "aggregate_preview": _object(
         {
+            "total_value": {"anyOf": [{"type": ["number", "null"]}, EXACT_NUMBER_SCHEMA]},
             "rows": _ARRAY,
             "group_total": _INTEGER,
             "truncated": {"type": "boolean"},
@@ -966,9 +963,7 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
         "roles",
         "quality",
     ),
-    "kb_search": _object(
-        {"is_empty": {"type": "boolean"}, "hits": _ARRAY}, "is_empty", "hits"
-    ),
+    "kb_search": _object({"is_empty": {"type": "boolean"}, "hits": _ARRAY}, "is_empty", "hits"),
     "domain_definition_lookup": _object(
         {
             "status": _STRING,

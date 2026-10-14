@@ -1114,7 +1114,11 @@ def _required_group_value(group: GroupAgg) -> float:
     """Narrow protected stats groups, which are never allowed to carry NULL values."""
     if group.value is None:
         raise ValueError("统计分组缺少有效聚合值")
-    return group.value
+    value = group.value
+    converted = float(value)
+    if isinstance(value, int) and int(converted) != value:
+        raise ValueError("统计输出无法无损表示该整数，请使用精确聚合表")
+    return converted
 
 
 

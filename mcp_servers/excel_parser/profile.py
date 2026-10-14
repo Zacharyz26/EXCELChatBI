@@ -16,8 +16,8 @@ class ColumnProfile:
 
     name: str
     dtype: str                      # 推断类型：int/float/str/datetime/bool/...
-    null_ratio: float               # 空值率
-    distinct_count: int             # 不同值数量
+    null_ratio: float | None        # None 表示策略禁止输出，不代表零
+    distinct_count: int | None
     # 数值列统计摘要（describe，非数值列为空）
     min: float | None = None
     max: float | None = None
@@ -31,7 +31,7 @@ class ColumnProfile:
         return {
             "name": self.name,
             "dtype": self.dtype,
-            "null_ratio": round(self.null_ratio, 4),
+            "null_ratio": round(self.null_ratio, 4) if self.null_ratio is not None else None,
             "distinct_count": self.distinct_count,
             "min": self.min,
             "max": self.max,

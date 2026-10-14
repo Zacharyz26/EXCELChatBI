@@ -83,4 +83,9 @@ def test_legacy_intent_and_contract_postcondition_shadow_are_equivalent(
     issue_codes = {item.code for item in result.issues}
     assert ("missing_chart_artifact" in issue_codes) is chart
     assert ("missing_report_artifact" in issue_codes) is report
-    assert result.passed == (not (chart or report))
+    total_required = text in {
+        "请基于工具 Evidence 报告总销售额和各地区销售额",
+        "Please report total sales by region",
+    }
+    assert ("missing_required_total_evidence" in issue_codes) is total_required
+    assert result.passed == (not (chart or report or total_required))

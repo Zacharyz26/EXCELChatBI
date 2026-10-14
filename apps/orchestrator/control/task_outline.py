@@ -145,6 +145,24 @@ def create_task_outline(
         require_available_capabilities=False,
         requested_capabilities=selected_capabilities,
     )
+    requirements = contract.analysis_requirements
+    if requirements is not None:
+        for step in cast(list[JsonObject], plan.get("steps", [])):
+            conditions = cast(list[str], step.get("completion_conditions", []))
+            if step.get("capability") == "dataset.transform" and requirements.filters:
+                conditions.append(
+                    "完整保留用户筛选条件："
+                    + json.dumps(
+                        list(requirements.filters),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            if (
+                step.get("capability") in {"data.aggregate", "stats.contribution"}
+                and requirements.total
+            ):
+                conditions.append("总计必须有当前数据集工具 Evidence，并在最终回答中交付。")
     validation = validate_task_plan(
         plan,
         capabilities=capabilities,

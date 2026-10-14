@@ -13,6 +13,7 @@ import unicodedata
 from html.parser import HTMLParser
 from typing import Any
 
+from packages.common.exact_numbers import decode_exact_number
 from packages.common.report_safety import escape_report_markup, sanitize_report_html
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import EvidenceRecord
@@ -24,12 +25,47 @@ class _VisibleText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+        self.header: list[str] = []
+        self.header_row = False
+        self.in_table = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self.header = []
+            self.in_table = True
+        elif tag == "tr":
+            self.row = []
+            self.header_row = False
+        elif tag in {"td", "th"}:
+            self.cell = []
+            self.header_row = self.header_row or tag == "th"
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if self.in_table and self.cell is None and not data.strip():
+            return
+        (self.cell if self.cell is not None else self.parts).append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"p", "li", "pre", "blockquote", "td", "th", "h1", "h2", "h3"}:
+        if tag == "table":
+            self.in_table = False
+        elif tag in {"td", "th"} and self.cell is not None and self.row is not None:
+            self.row.append("".join(self.cell).strip())
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if self.header_row:
+                self.header = self.row
+                self.parts.extend(
+                    [
+                        "\n| " + " | ".join(self.row) + " |\n",
+                        "| " + " | ".join("---" for _ in self.row) + " |\n",
+                    ]
+                )
+            else:
+                self.parts.append("| " + " | ".join(self.row) + " |\n")
+            self.row = None
+        elif tag in {"p", "li", "pre", "blockquote", "h1", "h2", "h3"}:
             self.parts.append("\n")
 
 
@@ -50,7 +86,10 @@ def _visible_text(text: str, *, heading: bool = False) -> str:
     )
     # Real Markdown list counters are absent from HTML text already. A numeric
     # heading such as "123. 收入" is data, not an enumeration marker to discard.
-    return "\n".join(f"报告内容：{line}" for line in visible.splitlines())
+    return "\n".join(
+        line if line.startswith("|") else f"报告内容：{line}"
+        for line in visible.splitlines()
+    )
 
 
 def _numeric_data(value: Any) -> Any:
@@ -60,6 +99,8 @@ def _numeric_data(value: Any) -> Any:
     if isinstance(value, int | float):
         return value
     if isinstance(value, dict):
+        if decode_exact_number(value) is not None:
+            return value
         return {key: _numeric_data(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_numeric_data(item) for item in value]
@@ -67,25 +108,66 @@ def _numeric_data(value: Any) -> Any:
 
 
 def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> JsonObject:
+    dataset_refs = {artifact.dataset_ref for artifact in artifacts if artifact.dataset_ref}
+    if len(dataset_refs) > 1:
+        raise ValueError("报告分析来自不同数据集版本/总体，请选择同一派生数据集的分析")
     evidence: list[EvidenceRecord] = []
-    sections = [("title", args["title"], True), ("insights", args.get("insights", ""), False)]
+    sections = [
+        ("title", args["title"], True),
+        ("insights", args.get("insights", ""), False),
+    ]
     source_hashes: dict[str, str] = {}
     for artifact in artifacts:
         payload = artifact.payload or {}
         if artifact.type == "profile":
-            data = payload.get("profile", payload)
+            quality = payload.get("quality") or {}
+            # Only deterministic quality measurements, never recommendations,
+            # role labels or model prose. Keep measurements before large samples
+            # so the bounded evidence index cannot drop the quality result.
+            data = {
+                "quality": {
+                    "duplicate_rows": quality.get("duplicate_rows"),
+                    "high_null_columns": quality.get("high_null_columns"),
+                    "summary": {
+                        key: (quality.get("summary") or {}).get(key)
+                        for key in ("issue_count", "high", "medium", "low")
+                    },
+                    "issues": [
+                        {"evidence": issue.get("evidence")}
+                        for issue in quality.get("issues", [])
+                        if isinstance(issue, dict)
+                    ],
+                },
+                "profile": payload.get("profile", payload),
+            }
+        elif artifact.type == "table" and artifact.source_tool == "aggregate_preview":
+            # Match the table types supported by report assembly. Index the
+            # tool's full-data total before bounded display rows; do not derive
+            # a replacement total from a possibly truncated preview.
+            data = {
+                "total_value": payload.get("total_value"),
+                "group_total": payload.get("group_total"),
+                "rows": [
+                    {
+                        key: row.get(key)
+                        for key in (
+                            "group",
+                            "value",
+                            "count",
+                            "row_count",
+                            "valid_value_count",
+                        )
+                    }
+                    for row in payload.get("rows", [])
+                    if isinstance(row, dict)
+                ],
+            }
         elif artifact.type == "stats":
             data = payload.get("result", payload)
         elif artifact.type == "chart":
             # ECharts style/layout numbers and model-authored labels are not data.
             option = payload.get("option") or {}
-            data = {
-                "series": [
-                    series.get("data", [])
-                    for series in option.get("series", [])
-                    if isinstance(series, dict)
-                ]
-            }
+            data = {"option": option}
             titles = option.get("title") or []
             if isinstance(titles, dict):
                 titles = [titles]
@@ -94,7 +176,11 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
                     for key in ("text", "subtext"):
                         if title.get(key):
                             sections.append(
-                                (f"{artifact.id}.title[{index}].{key}", str(title[key]), True)
+                                (
+                                    f"{artifact.id}.title[{index}].{key}",
+                                    str(title[key]),
+                                    True,
+                                )
                             )
         else:
             continue
@@ -107,8 +193,27 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
         # Bare legacy stats payloads may mix results with prose. Only typed
         # numbers survive; none of the captions/interpretations enter the index.
         numeric_data = _numeric_data(data)
+        numeric_summary = build_evidence_summary(
+            summary="",
+            result=data,
+            artifact_id=artifact.id,
+            arguments={**(artifact.params or {}), "dataset_ref": artifact.dataset_ref},
+        )
         result_hash = hashlib.sha256(
-            json.dumps(numeric_data, sort_keys=True, ensure_ascii=False).encode()
+            json.dumps(
+                {
+                    "numbers": numeric_data,
+                    "context": numeric_summary["numeric_context"],
+                    "analysis": numeric_summary["analysis_context"],
+                    "bindings": [
+                        item
+                        for item in numeric_summary["value_index"]
+                        if item.get("source_kind") == "number"
+                    ],
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode()
         ).hexdigest()
         source_hashes[artifact.id] = result_hash
         evidence.append(
@@ -118,12 +223,10 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
                 invocation_id="",
                 artifact_id=artifact.id,
                 kind=artifact.type,
-                source={"artifact_id": artifact.id},
+                source={"artifact_id": artifact.id, "tool": artifact.source_tool},
                 result_hash=result_hash,
                 created_at=artifact.created_at,
-                summary=build_evidence_summary(
-                    summary="", result=numeric_data, artifact_id=artifact.id
-                ),
+                summary=numeric_summary,
             )
         )
 
@@ -132,7 +235,10 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
         if not text:
             continue
         for claim in extract_numeric_claims(
-            final_text=_visible_text(text, heading=heading), goal="", evidence=evidence
+            final_text=_visible_text(text, heading=heading),
+            goal="",
+            evidence=evidence,
+            evidence_is_typed=True,
         ):
             unsupported = [ref["token"] for ref in claim.value_refs if not ref.get("supported")]
             if unsupported:
@@ -155,6 +261,7 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
     return {
         "status": "passed",
         "validator": "selected-artifact-numeric-v1",
+        "semantic_contract": "typed-measurement-binding-v1",
         "source_hashes": source_hashes,
         "claims": verified,
     }

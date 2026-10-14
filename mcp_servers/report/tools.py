@@ -16,6 +16,7 @@ from typing import Any
 
 from packages.common.analysis_kinds import canonical_analysis_kind
 from packages.common.config import get_settings
+from packages.common.exact_numbers import decode_exact_number
 from packages.common.identifiers import validate_report_id
 from packages.common.report_safety import (
     MAX_PNG_BYTES,
@@ -62,6 +63,7 @@ def gen_report_md(args: dict[str, Any]) -> dict[str, Any]:
     profile: dict[str, Any] = escape_report_markup(args["profile"])
     charts: list[dict[str, Any]] = args.get("charts", [])
     stats: list[dict[str, Any]] = escape_report_markup(args.get("stats", []))
+    tables: list[dict[str, Any]] = escape_report_markup(args.get("tables", []))
     insights: str | None = escape_report_markup(args.get("insights"))
 
     lines: list[str] = [f"# {title}", ""]
@@ -78,12 +80,58 @@ def gen_report_md(args: dict[str, Any]) -> dict[str, Any]:
         lines += ["## 统计分析", ""]
         for s in stats:
             lines += _stat_md(s)
+    if tables:
+        lines += ["## 分组汇总", ""]
+        for table in tables:
+            lines += _aggregate_table_md(table)
 
     markdown = "\n".join(lines)
     report_id = uuid.uuid4().hex
     md_path = _reports_dir() / f"{report_id}.md"
     _atomic_write_text(md_path, markdown)
     return {"report_id": report_id, "md_path": str(md_path), "markdown": markdown}
+
+
+def _aggregate_table_md(table: dict[str, Any]) -> list[str]:
+    """保留工具表格的全部返回行、空值与截断语义，不重新计算统计量。"""
+    value_col = table.get("value_col") or "记录"
+    lines = [
+        f"### {table['group_col']} · {value_col} ({table['agg']})",
+        "",
+        f"分析 ID：{table.get('analysis_id', '—')}",
+        "",
+    ]
+    if table.get("truncated"):
+        lines += [f"仅展示部分分组；完整分组数：{table.get('group_total', '—')}。", ""]
+    if "total_value" in table:
+        total = table["total_value"]
+        lines += [f"完整数据总计：{_exact_cell(total)}", ""]
+    lines += ["| 分组 | 值 | 行数 | 有效值数 |", "|---|---|---|---|"]
+    for row in table["rows"]:
+        # str preserves the deterministic tool's precision; _fmt is display-rounded.
+        cells = [
+            row.get(key) for key in ("group", "value", "row_count", "valid_value_count")
+        ]
+        lines.append(
+            "| "
+            + " | ".join(
+                _exact_cell(v).replace("|", "&#124;").replace("\n", "<br>")
+                for v in cells
+            )
+            + " |"
+        )
+    return [*lines, ""]
+
+
+def _exact_cell(value: Any) -> str:
+    """精确保留工具数值，不把类型包装写进报告或对普通数值另行舍入。"""
+    if value is None:
+        return "—"
+    if isinstance(value, dict):
+        if decode_exact_number(value) is None:
+            raise ValueError("报告单元格包含无效的精确数值包装")
+        return str(value["exact_number"])
+    return str(value)
 
 
 def insight_summary(args: dict[str, Any]) -> dict[str, Any]:
@@ -160,6 +208,8 @@ def _fmt(v: Any) -> str:
     """数值 → 展示字符串。"""
     if v is None:
         return "—"
+    if decode_exact_number(v) is not None:
+        return str(v["exact_number"])
     if isinstance(v, float):
         return f"{v:.4g}"
     return str(v)
