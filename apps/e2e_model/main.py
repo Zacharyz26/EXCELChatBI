@@ -235,8 +235,8 @@ async def _stream_turn(
         and "get_data_profile" in tool_names
         and not _report_analysis_ids(messages, artifact_type="profile")
     ):
-        dataset_refs = re.findall(r"最新数据集 ([0-9a-f]{32})", joined)
-        if not dataset_refs:
+        dataset_ref = _report_dataset_ref(messages)
+        if dataset_ref is None:
             raise HTTPException(status_code=422, detail="dataset_ref missing")
         yield _sse_chunk(
             model,
@@ -256,7 +256,7 @@ async def _stream_turn(
                         "function": {
                             "name": "get_data_profile",
                             "arguments": json.dumps(
-                                {"dataset_ref": dataset_refs[-1]},
+                                {"dataset_ref": dataset_ref},
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             ),
@@ -352,22 +352,50 @@ def _report_analysis_ids(
     *,
     artifact_type: str | None = None,
 ) -> list[str]:
-    """Select typed report inputs from the Host artifact registry, not recency alone."""
+    """只选当前数据集的一份最新画像，并保留同范围的其他已登记分析。"""
+    dataset_ref = _report_dataset_ref(messages)
+    if dataset_ref is None:
+        return []
     joined = "\n".join(
         str(message.get("content", ""))
         for message in messages
-        if isinstance(message, dict)
+        if isinstance(message, dict) and message.get("role") == "system"
     )
+    profile_id: str | None = None
     selected: list[str] = []
-    for analysis_id, current_type in re.findall(
-        r"\[analysis_id=([A-Za-z0-9_-]+)\][^\n]*?类型=(profile|stats|chart|table)",
+    for analysis_id, current_type, current_dataset in re.findall(
+        r"^- \[analysis_id=([A-Za-z0-9_-]+)\] 工具=\S+ "
+        r"类型=(profile|stats|chart|table) 数据集=(\S+)",
         joined,
+        re.MULTILINE,
     ):
+        if current_dataset != dataset_ref:
+            continue
+        if current_type == "profile":
+            profile_id = analysis_id
+            continue
         if artifact_type is not None and current_type != artifact_type:
             continue
         if analysis_id not in selected:
             selected.append(analysis_id)
-    return selected
+    # Host 按工件登记顺序提供条目；先限制不可变 dataset_ref，再选最后一份画像。
+    # 这里不合并画像，也不替代真实报告工具的数据范围、来源与数值校验。
+    if profile_id is None:
+        return []
+    return ([profile_id] if artifact_type in {None, "profile"} else []) + selected
+
+
+def _report_dataset_ref(messages: list[Any]) -> str | None:
+    """读取 Host 系统上下文中的当前数据集，忽略用户和工具正文中的伪登记表。"""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        refs: list[str] = re.findall(
+            r"最新数据集 ([0-9a-f]{32})", str(message.get("content", ""))
+        )
+        if refs:
+            return refs[-1]
+    return None
 
 
 def _tool_result_name(message: Any) -> str | None:
