@@ -14,7 +14,7 @@ _CHART_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CHART_NEGATION_PATTERN = re.compile(
-    r"(?:不要|无需|不需要|不用|别).{0,6}(?:图|图表|图像|可视化|chart|plot|graph)",
+    r"(?:不要|无需|不需要|不用|(?<![分特])别).{0,6}(?:图|图表|图像|可视化|chart|plot|graph)",
     re.IGNORECASE,
 )
 _ALL_DIMENSION_CHART_PATTERN = re.compile(
@@ -128,10 +128,40 @@ def required_chart_dimensions(
         and item.get("primary_role") == "dimension"
         and not bool(item.get("ambiguous"))
     )
-    explicitly_named = tuple(column for column in dimensions if column in user_text)
     if _ALL_DIMENSION_CHART_PATTERN.search(user_text) is not None:
         return dimensions
-    return explicitly_named
+    time_columns = tuple(
+        str(item["column"])
+        for item in columns
+        if isinstance(item.get("column"), str)
+        and item.get("primary_role") == "time"
+        and not bool(item.get("ambiguous"))
+    )
+    candidates = (*dimensions, *time_columns)
+    explicit_groups = re.findall(
+        r"(?:按(?:照)?|以|\bgroup\s+by\b)\s*([^，,。；;\n]+?)"
+        r"(?:汇总|分组|统计|绘制|生成|画|出图|对比|展示|为(?:横轴|x轴|X轴))",
+        user_text,
+        re.I,
+    )
+    explicit_groups.extend(
+        re.findall(r"(?:encoding\.x|x轴|横轴)\s*[=:：]\s*([^，,。；;\s]+)", user_text, re.I)
+    )
+    grouped = tuple(
+        column for column in candidates if any(column in text for text in explicit_groups)
+    )
+    if grouped:
+        return grouped
+    # A field mentioned only in an equality/filter is not a requested chart axis.
+    chart_clauses = [clause for clause in _request_clauses(user_text) if requests_chart(clause)]
+    chart_text = " ".join(chart_clauses)
+    for column in candidates:
+        chart_text = re.sub(
+            re.escape(column) + r"\s*(?:==|!=|>=|<=|=|>|<)\s*(?:\"[^\"]*\"|'[^']*'|[^，,。；;\s]+)",
+            "",
+            chart_text,
+        )
+    return tuple(column for column in candidates if column in chart_text)
 
 
 def requests_report(user_text: str) -> bool:

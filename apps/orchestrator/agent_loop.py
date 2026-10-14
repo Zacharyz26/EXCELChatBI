@@ -55,7 +55,10 @@ from packages.orchestration.contracts import (
     TaskContract,
     build_minimal_contract,
 )
-from packages.orchestration.dataset_scope import verified_analysis_scope
+from packages.orchestration.dataset_scope import (
+    is_filter_preserving_cleanup,
+    verified_analysis_scope,
+)
 from packages.session.compaction import (
     CompactionAccessDenied,
     CompactionStore,
@@ -2471,6 +2474,7 @@ async def _stream_agent_chat_inner(
                     plan_steps=verification_steps,
                     budget_exhausted=budget_exhausted,
                     dataset_bindings=dataset_bindings,
+                    source_artifacts=all_artifacts,
                 )
 
                 retry_instruction: str | None = None
@@ -2564,6 +2568,7 @@ async def _stream_agent_chat_inner(
                             plan_steps=verification_steps,
                             budget_exhausted=budget_exhausted,
                             dataset_bindings=dataset_bindings,
+                            source_artifacts=all_artifacts,
                         )
                         issue_codes = {item.code for item in verification.issues}
 
@@ -2865,6 +2870,22 @@ async def _stream_agent_chat_inner(
                         else []
                     )
                     current_run_artifact_ids: set[str] = set()
+                    verified_chart_dataset_refs: frozenset[str] = frozenset()
+                    if call.name == "gen_chart" and contract.analysis_requirements is not None:
+                        bindings = await run_in_threadpool(task_store.list_dataset_bindings, run_id)
+                        chart_scope = verified_analysis_scope(
+                            contract.analysis_requirements,
+                            run_id,
+                            await run_in_threadpool(task_store.list_invocations, run_id),
+                            await run_in_threadpool(task_store.list_evidence, run_id),
+                            bindings,
+                        )
+                        verified_chart_dataset_refs = frozenset(
+                            binding.dataset_ref
+                            for binding in bindings
+                            if binding.binding_kind == "derived"
+                            and binding.dataset_ref in chart_scope
+                        )
                     if call.name == "generate_report":
                         current_invocations = await run_in_threadpool(
                             task_store.list_invocations, run_id
@@ -2884,6 +2905,7 @@ async def _stream_agent_chat_inner(
                         memory_references=memory_reference_resolution,
                         request_text=effective_request_text,
                         run_artifact_ids=current_run_artifact_ids,
+                        verified_chart_dataset_refs=verified_chart_dataset_refs,
                     )
                 definition_execution: JsonObject | None = None
                 definition_execution_error: str | None = None
@@ -3064,15 +3086,6 @@ async def _stream_agent_chat_inner(
                 elif scope_error is not None:
                     feedback = f"未执行：{scope_error}"
                     failure_code = "required_dataset_scope_mismatch"
-                    failure_source = "policy"
-                elif (
-                    call.name == "transform_dataset"
-                    and contract.analysis_requirements is not None
-                    and contract.analysis_requirements.filters
-                    and not filter_arguments_match(contract.analysis_requirements, call_args)
-                ):
-                    feedback = "未执行：筛选参数与用户确认的完整条件或数据集不一致，不得增删条件。"
-                    failure_code = "required_filter_mismatch"
                     failure_source = "policy"
                 elif not policy_decision.allowed:
                     feedback = f"未执行：{policy_decision.reason}"
@@ -4294,6 +4307,7 @@ def _enrich_tool_arguments(
     memory_references: MemoryReferenceResolution | None = None,
     request_text: str | None = None,
     run_artifact_ids: set[str] | frozenset[str] = frozenset(),
+    verified_chart_dataset_refs: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """按 TaskContract 与 Host 已验证引用约束工具参数和交付血缘。"""
     enriched = dict(arguments)
@@ -4414,6 +4428,17 @@ def _enrich_tool_arguments(
     # call.  Older model responses sometimes copied that Host-only lineage ID
     # back into gen_chart, whose closed MCP schema correctly rejects it.
     enriched.pop("analysis_id", None)
+
+    if verified_chart_dataset_refs:
+        # The initial explicit reference names the source of a transformation,
+        # not necessarily the population to chart afterwards. Preserve supplied
+        # refs for the common scope guard to accept/reject, never silently repair
+        # an unrelated/stale ref into a successful chart.
+        if enriched.get("dataset_ref"):
+            return enriched
+        if len(verified_chart_dataset_refs) == 1:
+            enriched["dataset_ref"] = next(iter(verified_chart_dataset_refs))
+            return enriched
 
     valid_dataset_refs = {dataset.ref for dataset in datasets}
     referenced_dataset_refs = _referenced_dataset_refs(
@@ -4678,7 +4703,9 @@ def _analysis_scope_error(
         derived = scope
         scope = {requirements.dataset_ref} if requirements.dataset_ref else set()
         if tool_name == "transform_dataset":
-            if not filter_arguments_match(requirements, arguments):
+            if is_filter_preserving_cleanup(arguments) and refs.issubset(derived):
+                scope = derived
+            elif not filter_arguments_match(requirements, arguments):
                 return "筛选参数与用户确认的完整条件或数据集不一致，不得增删条件。"
         elif tool_name != "get_data_profile" or derived:
             scope = derived

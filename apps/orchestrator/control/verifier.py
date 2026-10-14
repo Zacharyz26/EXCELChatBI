@@ -60,6 +60,7 @@ def verify_completion(
     budget_exhausted: bool = False,
     semantic_checker: SemanticCoverageChecker | None = None,
     dataset_bindings: list[TaskDatasetBinding] | None = None,
+    source_artifacts: list[Artifact] | None = None,
 ) -> VerificationResult:
     """Verify hard postconditions before allowing any semantic judgement."""
     issues: list[VerificationIssue] = []
@@ -108,6 +109,8 @@ def verify_completion(
             evidence,
             claims or [],
             dataset_bindings or [],
+            artifacts,
+            source_artifacts or [],
         )
     )
     if not final_text.strip():
@@ -284,6 +287,8 @@ def _verify_analysis_requirements(
     evidence: list[EvidenceRecord],
     claims: list[ClaimDraft],
     bindings: list[TaskDatasetBinding],
+    artifacts: list[Artifact],
+    source_artifacts: list[Artifact],
 ) -> list[VerificationIssue]:
     requirements = contract.analysis_requirements
     if requirements is None:
@@ -346,6 +351,34 @@ def _verify_analysis_requirements(
         return issues
     total_paths: set[tuple[str, str]] = set()
     total_scopes: set[tuple[str, str]] = set()
+    report_delivered = False
+    if any(c.required and c.artifact_type == "report" for c in contract.success_criteria):
+        from apps.orchestrator.control.report_delivery import verified_report_totals
+
+        for record in evidence:
+            invocation = by_id.get(record.invocation_id)
+            report = next(
+                (a for a in artifacts if a.id == record.artifact_id and a.type == "report"), None
+            )
+            if invocation is None or report is None or record.run_id != contract.run_id:
+                continue
+            for index, delivery in enumerate(
+                verified_report_totals(report, invocation, record, source_artifacts)
+            ):
+                binding = delivery["semantic_binding"]
+                if (
+                    binding.get("dataset_ref") not in scope
+                    or binding.get("metric") != requirements.total_column
+                    or binding.get("aggregation") != "sum"
+                    or binding.get("statistic") != "total_value"
+                    or binding.get("unit") != "raw"
+                ):
+                    continue
+                total_paths.add(
+                    (record.evidence_id, f"$.validation.total_deliveries[{index}].value")
+                )
+                total_scopes.add((binding["dataset_ref"], binding["metric"]))
+                report_delivered = True
     for item in evidence:
         invocation = by_id.get(item.invocation_id)
         if (
@@ -382,6 +415,14 @@ def _verify_analysis_requirements(
                 "用户要求的总计缺少同一数据集和指标的确定性工具 Evidence。",
             )
         )
+        return issues
+    # A requested report is a delivery surface. An explicit request to answer
+    # the total in chat still requires a supported final-answer Claim below.
+    if report_delivered and not re.search(
+        r"(?:回答|答复|回复|告诉我|\banswer\b).{0,40}(?:总计|合计|总额|总量|\btotal\b)",
+        contract.goal,
+        re.I,
+    ):
         return issues
     for claim in claims:
         if claim.claim_kind != "numeric" or not TOTAL_LABEL.search(claim.statement):

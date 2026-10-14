@@ -1408,6 +1408,13 @@ def _generate_report(
     result["skipped_charts"] = skipped_charts
     result["analysis_ids"] = wanted
     validation["content_sha256"] = hashlib.sha256(result["markdown"].encode()).hexdigest()
+    from apps.orchestrator.control.report_delivery import report_total_deliveries
+
+    validation["total_deliveries"] = report_total_deliveries(
+        artifacts, validation, result["markdown"]
+    )
+    if result.get("pdf_path"):
+        validation["pdf_sha256"] = hashlib.sha256(Path(result["pdf_path"]).read_bytes()).hexdigest()
     result["validation"] = validation
     return result
 

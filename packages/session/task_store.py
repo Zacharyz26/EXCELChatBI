@@ -3089,6 +3089,13 @@ class TaskStore:
             if str(message_row["conversation_id"]) != current_run.conversation_id:
                 raise ValueError("工具 Artifact 消息不属于当前任务对话")
 
+            # Both projections inherit the immutable execution snapshot reserved
+            # for this invocation, never caller metadata or the later run scope.
+            branch = _complete_invocation_branch(
+                connection,
+                invocation.invocation_id,
+                now=now,
+            )
             artifact: Artifact | None = None
             if artifact_draft is not None:
                 artifact_type = _required_text(artifact_draft.type, "工件类型")
@@ -3115,7 +3122,14 @@ class TaskStore:
                     payload=artifact_draft.payload,
                     file_ref=artifact_draft.file_ref,
                     source_tool=artifact_draft.source_tool,
-                    params=artifact_draft.params,
+                    params=(
+                        {
+                            **(artifact_draft.params or {}),
+                            "data_version_hash": branch.data_version_hash,
+                        }
+                        if dataset_ref is not None
+                        else artifact_draft.params
+                    ),
                     dataset_ref=dataset_ref,
                     created_at=now,
                 )
@@ -3165,6 +3179,11 @@ class TaskStore:
 
             summary = dict(evidence_summary)
             summary["artifact_id"] = artifact.id if artifact is not None else None
+            if isinstance(summary.get("numeric_context"), dict):
+                summary["numeric_context"] = {
+                    **summary["numeric_context"],
+                    "data_version_hash": branch.data_version_hash,
+                }
             evidence = EvidenceRecord(
                 evidence_id=uuid.uuid4().hex,
                 run_id=current_run.run_id,
@@ -3184,11 +3203,6 @@ class TaskStore:
                 WHERE invocation_id = ? AND status = 'running'
                 """,
                 (result_hash, evidence.artifact_id, now, invocation.invocation_id),
-            )
-            branch = _complete_invocation_branch(
-                connection,
-                invocation.invocation_id,
-                now=now,
             )
             if invocation.step_id is not None:
                 connection.execute(

@@ -88,6 +88,24 @@ def build_evidence_summary(
     else:
         _collect_values(result, "$", values, depth=0)
     _collect_sources(result, "$", sources, depth=0)
+    report_validation = result.get("validation") if isinstance(result, dict) else None
+    report_proof: JsonObject = {}
+    if (
+        isinstance(report_validation, dict)
+        and report_validation.get("validator") == "selected-artifact-numeric-v1"
+    ):
+        from apps.orchestrator.control.report_delivery import validation_hash
+
+        values = []
+        for index, delivery in enumerate(report_validation.get("total_deliveries", [])):
+            items: list[JsonObject] = []
+            _collect_values(
+                delivery["value"], f"$.validation.total_deliveries[{index}].value", items, depth=0
+            )
+            for item in items:
+                item["report_binding"] = delivery["semantic_binding"]
+                values.append(item)
+        report_proof["report_validation_hash"] = validation_hash(report_validation)
     analysis_context = annotate_objects(values, result, arguments or {})
     return {
         "summary": summary,
@@ -99,6 +117,7 @@ def build_evidence_summary(
         "source_index": sources,
         "source_index_truncated": len(sources) >= _MAX_EVIDENCE_SOURCES,
         "knowledge_empty": _knowledge_result_is_empty(result),
+        **report_proof,
     }
 
 
@@ -612,7 +631,7 @@ def _collect_values(
         metric = str(value["name"]) if value.get("name") is not None else metric
         for key, child in value.items():
             if key == "group":
-                continue  # A typed numeric group is a dimension, never a measurement.
+                continue
             _collect_values(
                 child, f"{path}.{key}", output, depth=depth + 1, group_key=group_key, metric=metric
             )
@@ -701,6 +720,10 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
         (item for item in record.summary.get("value_index", []) if item.get("path") == path),
         {},
     )
+    if record.source.get("tool") == "generate_report" and isinstance(
+        item.get("report_binding"), dict
+    ):
+        return {**item["report_binding"], "evidence_path": path}
     role = item.get("statistic") or statistic_role(path)
     source_tool = record.source.get("tool")
     statistical = source_tool in TOOL_LABELS or record.kind == "stats"
@@ -847,7 +870,14 @@ def _semantic_candidate_matches(
     ):
         return False
     fields = {str(binding["metric"]) for _, binding in bindings if binding.get("metric")}
-    mentioned = {field for field in fields if field in local}
+    metric_text = local
+    if table_cells is not None:
+        # A labelled grouping cell is not the measurement column. Keep the
+        # original text/cells for identity, group, unit and statistic checks.
+        for dimension, group in table_cells:
+            if dimension in dimensions and group in dimensions[dimension]:
+                metric_text = metric_text.replace(f"{dimension}={group}", "")
+    mentioned = {field for field in fields if field in metric_text}
     # Prefer complete field names over their substrings, never a nearest-prefix guess.
     mentioned = {
         field
