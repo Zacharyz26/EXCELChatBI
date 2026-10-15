@@ -1947,17 +1947,50 @@ test("断线发现拒绝绑定其他 conversation 的 Run", async ({ page }) => 
 
   await send(page, "请暂停并修改计划（外部对话 Run）");
 
+  // Wait for recovery and workspace refresh to finish before checking the error.
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
   await expect(page.getByRole("alert")).toContainText(
     "TaskRun 不属于当前对话",
   );
   await expect(page.getByRole("button", { name: "任务协作" })).toBeDisabled();
-  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
   const remembered = await page.evaluate(() => (
     window.sessionStorage.getItem("chatbi.agentRun.conversation-1")
   ));
   expect(remembered).toBeNull();
   expect(state.chatRequests).toHaveLength(1);
 });
+
+for (const scenario of [
+  { name: "发现接口失败", status: 503, body: { detail: "Run 发现服务暂不可用" }, error: "Run 发现服务暂不可用" },
+  { name: "没有可恢复 Run", status: 200, body: { run: null }, error: "Failed to fetch" },
+]) {
+  test(`断线发现${scenario.name}保留最终错误且不重放 POST`, async ({ page }) => {
+    const state = await installMockApi(page);
+    await page.goto("/");
+    await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+
+    let discoveryRequests = 0;
+    await page.route("**/api/agent/runs/by-conversation/conversation-1/latest", async (route) => {
+      discoveryRequests += 1;
+      await json(route, scenario.body, scenario.status);
+    });
+    await page.route("**/api/chat/stream", async (route) => {
+      const body = route.request().postDataJSON() as { message: string };
+      state.chatRequests.push({ message: body.message, parent_run_id: null });
+      await route.abort("connectionfailed");
+    });
+
+    await send(page, `检查${scenario.name}`);
+    await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+    await expect(page.getByRole("alert")).toContainText(scenario.error);
+    await expect(page.getByRole("button", { name: "任务协作" })).toBeDisabled();
+    expect(await page.evaluate(() => (
+      window.sessionStorage.getItem("chatbi.agentRun.conversation-1")
+    ))).toBeNull();
+    expect(discoveryRequests).toBe(1);
+    expect(state.chatRequests).toHaveLength(1);
+  });
+}
 
 test("单一 Agent、反馈和分析分支形成可追踪闭环", async ({ page }) => {
   const state = await installMockApi(page);

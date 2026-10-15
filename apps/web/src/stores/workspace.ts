@@ -82,7 +82,7 @@ interface WorkspaceState {
     rating: "helpful" | "not_helpful",
     comment: string | null,
   ) => Promise<void>;
-  restoreLatestRun: (conversationId: string) => Promise<void>;
+  restoreLatestRun: (conversationId: string) => Promise<string | null>;
   refreshActiveRun: (runId?: string) => Promise<void>;
   pauseActiveRun: () => Promise<void>;
   resumeActiveRun: () => Promise<void>;
@@ -464,7 +464,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       ) {
         // POST 可能已被服务端接收并创建 run，但连接在响应头前中断。
         // 只按当前对话查询服务端事实源，避免重放 POST 或跨对话错绑。
-        await get().restoreLatestRun(conversationId);
+        // Keep a specific discovery failure through the workspace refresh below.
+        streamError = await get().restoreLatestRun(conversationId) ?? streamError;
       }
     }
 
@@ -545,7 +546,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       if (
         generation !== workspaceGeneration
         || get().activeConversationId !== conversationId
-      ) return;
+      ) return null;
       if (!response.run) {
         forgetRun(conversationId);
         set({
@@ -553,7 +554,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           activeRun: null,
           pendingClarification: null,
         });
-        return;
+        return null;
       }
       if (response.run.conversation_id !== conversationId) {
         throw new Error("服务端返回的 TaskRun 不属于当前对话。");
@@ -566,9 +567,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         generation === workspaceGeneration
         && get().activeConversationId === conversationId
       ) {
-        set({ error: errorMessage(error) });
+        const recoveryError = errorMessage(error);
+        set({ error: recoveryError });
+        return recoveryError;
       }
     }
+    return null;
   },
 
   refreshActiveRun: async (requestedRunId) => {
