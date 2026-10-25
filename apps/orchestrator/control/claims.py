@@ -12,14 +12,53 @@ from __future__ import annotations
 import json
 import math
 import re
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+import unicodedata
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
 from packages.session.models import JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord
 
-from apps.orchestrator.control.claim_structure import dimension_mentions, table_claim_fragments
+from apps.orchestrator.control.claim_structure import (
+    dimension_mentions,
+    inline_numeric_text,
+    split_claim_statements,
+    table_claim_fragments,
+)
+from apps.orchestrator.control.dataset_identity import (
+    IDENTITY_FIELDS,
+    identity_declarations,
+    identity_literal,
+)
+from apps.orchestrator.control.numeric_display import NUMBER_PATTERN as _NUMBER_PATTERN
+from apps.orchestrator.control.numeric_display import decimal_from_token as _normalize_number
+from apps.orchestrator.control.numeric_display import display_quantum as _display_quantum
+from apps.orchestrator.control.numeric_display import (
+    matches_display_value as _matches_display_value,
+)
+from apps.orchestrator.control.numeric_display import (
+    measurement_value_context,
+    numeric_quote_view,
+    parse_numeric_display,
+    unrecognized_numeric_spans,
+)
+from apps.orchestrator.control.profile_claims import (
+    annotate_profile_values,
+    has_column_profile,
+    profile_assignment_role,
+    profile_candidate_matches,
+    profile_fact,
+    profile_heading_sections,
+    profile_statement_context,
+    profile_statistic_labels,
+)
+from apps.orchestrator.control.profile_population import (
+    PopulationRequest,
+    mask_population,
+    population_matches,
+    population_request,
+)
 from apps.orchestrator.control.semantic_identity import (
     TOOL_LABELS,
     analysis_identity,
@@ -33,24 +72,16 @@ from apps.orchestrator.control.statistic_roles import (
     statistic_role,
     statistic_scope,
 )
-
-_NUMBER_PATTERN = re.compile(
-    # Treat only ASCII identifier characters as token boundaries. Chinese unit
-    # expressions commonly omit spaces (``10万元``/``366行``) and must still be
-    # auditable numeric claims.
-    r"(?<![A-Za-z0-9_.\-])"
-    r"[-+]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)"
-    r"(?:[eE][-+]?\d+)?%?(?![A-Za-z0-9_.\-])"
+from apps.orchestrator.control.statistic_statements import (
+    StatisticValueEvaluation,
+    statistic_value_owner,
+    statistic_value_slots,
 )
+
 _LEADING_LIST_MARKER = re.compile(r"^\s*(?:[-*]\s+|\d+[.)、]\s*)")
 _MAX_EVIDENCE_VALUES = 256
 _MAX_EVIDENCE_SOURCES = 64
 _MAX_VALUE_DEPTH = 8
-_DISPLAY_UNIT_FACTORS: dict[str, Decimal] = {
-    "千": Decimal("1000"),
-    "万": Decimal("10000"),
-    "亿": Decimal("100000000"),
-}
 _NO_KNOWLEDGE_RESULT_PATTERN = re.compile(
     r"(?:未找到|没有找到|没查到|未检索到|没有检索到|没能检索到|无相关|没有相关|检索无结果|"
     r"无法(?:依据|从).{0,12}(?:回答|确认)|"
@@ -60,6 +91,8 @@ _LIMITATION_PATTERN = re.compile(
     r"(?:局限|限制|注意|仅供参考|不能代表|不代表因果|样本不足|缺少|不确定)"
 )
 _PATH_ALIASES: dict[str, tuple[str, ...]] = {
+    "rate": ("转化率",),
+    "ratio": ("比例", "比率"),
     "row_count": ("总行数", "数据行", "记录数", "样本数", "行数"),
     "column_count": ("总列数", "字段数", "列数"),
     "duplicate_rows": ("重复记录", "重复行", "重复"),
@@ -107,6 +140,7 @@ def build_evidence_summary(
                 values.append(item)
         report_proof["report_validation_hash"] = validation_hash(report_validation)
     analysis_context = annotate_objects(values, result, arguments or {})
+    annotate_profile_values(values, result)
     return {
         "summary": summary,
         "numeric_context": dict(arguments or {}),
@@ -135,12 +169,70 @@ def extract_claims(
     return claims
 
 
+def _verified_identity_spans(
+    statement: str, evidence: list[EvidenceRecord], source_labels: set[str]
+) -> tuple[list[tuple[int, int]], list[JsonObject]]:
+    """Protect only explicit identity headers backed by one current source.
+
+    A header starts a clause. Its literal value alone is exempt, never the
+    surrounding prose or a repeated hash in a measurement's value position.
+    Invalid or unknown declarations remain explicit unsupported claims, even
+    if their spelling contains no decimal digit.
+    """
+    declarations: list[tuple[str, str, int, int]] = []
+    field_predicate = re.compile(
+        r"(?:的)?(?:" + "|".join(re.escape(label) for label in _measurement_labels()) + r"|是|为)"
+    )
+    for match in identity_declarations(statement, headers_only=True):
+        # An actual source field followed by its predicate is a field statement,
+        # even when its full name starts with an identity-header word.
+        if any(
+            statement.startswith(field, match.start())
+            and field_predicate.match(statement[match.start() + len(field) :])
+            for field in source_labels - _measurement_labels()
+        ):
+            continue
+        if measurement_value_context(statement, match.start(), match.end(), _measurement_labels()):
+            continue
+        key = IDENTITY_FIELDS[match["label"]]
+        # A conventional release label is not a dataset version hash.
+        if not (match["label"] == "版本" and re.fullmatch(r"v\d+(?:\.\d+)+", match["value"])):
+            declarations.append((key, match["value"], *match.span("value")))
+    if not declarations:
+        return [], []
+    contexts = [
+        record.summary.get("numeric_context") or {}
+        for record in evidence
+        if record.kind in {"tool_result", "profile", "stats", "chart", "table"}
+    ]
+    valid = all(identity_literal(value) for _, value, _, _ in declarations)
+    valid = valid and any(
+        all(
+            value
+            == (
+                context.get("dataset_ref")
+                if key == "dataset_ref"
+                else context.get("data_version_hash", context.get("dataset_ref"))
+            )
+            for key, value, _, _ in declarations
+        )
+        for context in contexts
+    )
+    if valid:
+        return [(start, end) for _, _, start, end in declarations], []
+    return [], [
+        {"token": value, "supported": False, "reason": "unverified_dataset_identity"}
+        for _, value, _, _ in declarations
+    ]
+
+
 def extract_numeric_claims(
     *,
     final_text: str,
     goal: str,
     evidence: list[EvidenceRecord],
     evidence_is_typed: bool = True,
+    strip_list_markers: bool = True,
 ) -> list[ClaimDraft]:
     """Extract numeric statements and link each number to current-run Evidence.
 
@@ -167,26 +259,122 @@ def extract_numeric_claims(
                 dimensions.setdefault("索引", set()).add(str(obj["index"]))
             if obj.get("time"):
                 dimensions.setdefault("时间", set()).add(str(obj["time"]))
+    bindings = [
+        _semantic_binding(record, str(item.get("path")))
+        for record in evidence
+        for item in record.summary.get("value_index", [])
+    ]
+    measurement_labels = _measurement_labels() | profile_statistic_labels(final_text)
+    source_labels = {
+        str(binding[key]) for binding in bindings for key in ("metric", "grain") if binding.get(key)
+    } | measurement_labels
     claims: list[ClaimDraft] = []
+    profile_fields = {
+        str(b["object"]["column"])
+        for b in bindings
+        if b.get("profile_fact") and b.get("object", {}).get("kind") == "profile_column"
+    }
     statements = [
-        (statement, fragment.cells, fragment.value_span)
-        for fragment in table_claim_fragments(final_text, set(dimensions))
+        (statement, fragment.cells, fragment.value_span, heading_context)
+        for section, heading_context in profile_heading_sections(final_text, profile_fields)
+        for fragment in table_claim_fragments(
+            inline_numeric_text(section), set(dimensions), measurement_labels=measurement_labels
+        )
+        for scope in (population_request(fragment.text, profile_fields),)
         for statement in (
-            [fragment.text] if fragment.cells is not None else _split_statements(fragment.text)
+            [fragment.text]
+            if fragment.cells is not None
+            else split_claim_statements(
+                fragment.text,
+                measurement_labels,
+                source_labels=source_labels,
+                protected_spans=(scope.span,) if scope else (),
+            )
         )
     ]
-    for raw_statement, table_cells, value_span in statements:
+    profile_context = ""
+    required_population = population_request(goal, profile_fields)
+    population_context = required_population
+    for raw_statement, table_cells, value_span, heading_context in statements:
+        # Only a semicolon in the same prose item can carry a profile subject.
+        # A table/list boundary precedes the statement, while a trailing raw
+        # newline closes its context only after this statement is evaluated.
+        # Keep the actual Claim statement unchanged; context is verification-only.
+        starts_profile_item = (
+            table_cells is not None or _LEADING_LIST_MARKER.match(raw_statement) is not None
+        )
+        if starts_profile_item:
+            profile_context = ""
+        inherited_profile_context = profile_context or heading_context
+        has_profile_line_break = any(char in raw_statement.lstrip(" \t\r\n") for char in "\r\n")
+        closes_profile_item = starts_profile_item or has_profile_line_break
         statement = (
             raw_statement
-            if table_cells is not None
+            if table_cells is not None or not strip_list_markers
             else _LEADING_LIST_MARKER.sub("", raw_statement)
         ).strip()
+        if (
+            table_cells is None
+            and not has_profile_line_break
+            and "\n" not in statement
+            and raw_statement.rstrip(" \t\r").endswith((";", "；"))
+        ):
+            profile_context = inherited_profile_context + statement
+        elif not closes_profile_item:
+            profile_context = profile_statement_context(statement, profile_fields)
+        else:
+            profile_context = ""
         if not statement:
             continue
+        local_population = population_request(statement, profile_fields)
+        if local_population is not None:
+            population_context = local_population
+        semantic_statement, quoted_labels = numeric_quote_view(statement, measurement_labels)
+        population_statement = mask_population(semantic_statement, local_population)
         refs: list[JsonObject] = []
+        slots = statistic_value_slots(statement, measurement_labels, source_labels)
+        evaluations: list[StatisticValueEvaluation] = []
         linked_ids: list[str] = []
         labels = dimension_mentions(statement, dimensions)
-        for match in _NUMBER_PATTERN.finditer(statement):
+        identity_spans, identity_errors = _verified_identity_spans(
+            statement, evidence, source_labels
+        )
+        if local_population is not None and local_population.valid:
+            identity_spans.append(local_population.span)
+        identity_spans.extend(quoted_labels)
+        refs.extend(identity_errors)
+        numeric_matches = [
+            match
+            for match in _NUMBER_PATTERN.finditer(statement)
+            if not any(a <= match.start() and match.end() <= b for a, b in identity_spans)
+        ]
+        covered = [*identity_spans, *[match.span() for match in numeric_matches]]
+        covered.extend((start, end) for start, end, _, _ in labels)
+        # Only entire known textual labels protect embedded numeric glyphs;
+        # a numeric-only label cannot exempt a same-value measurement elsewhere.
+        covered.extend(
+            match.span()
+            for label in source_labels
+            if any(
+                char.isalpha() and not unicodedata.category(char).startswith("N") for char in label
+            )
+            for match in re.finditer(re.escape(label), statement)
+        )
+        for start, end in unrecognized_numeric_spans(
+            statement, covered, measurement_labels=measurement_labels
+        ):
+            if value_span is None or value_span[0] <= start < end <= value_span[1]:
+                if owner := statistic_value_owner(statement, (start, end), slots):
+                    evaluations.append(StatisticValueEvaluation(owner.statement_span, (start, end)))
+                refs.append(
+                    {
+                        "token": statement[start:end],
+                        "supported": False,
+                        "reason": "unrecognized_numeric_expression",
+                        "statement_span": [start, end],
+                    }
+                )
+        for match in numeric_matches:
             if value_span is not None and not (
                 value_span[0] <= match.start() < match.end() <= value_span[1]
             ):
@@ -200,13 +388,51 @@ def extract_numeric_claims(
                 and _looks_like_time_scope(statement, match.start(), match.end())
             ):
                 continue
+            owner = statistic_value_owner(statement, match.span(), slots)
+            if owner is not None:
+                evaluations.append(StatisticValueEvaluation(owner.statement_span, match.span()))
             semantic_candidates = [
                 value
                 for value in evidence_values
                 if _semantic_candidate_matches(
-                    value, statement, match, evidence, dimensions, table_cells, value_span
+                    value,
+                    semantic_statement,
+                    match,
+                    evidence,
+                    dimensions,
+                    table_cells,
+                    value_span,
+                    inherited_profile_context,
+                    population_context,
+                    population_statement,
+                    required_population,
+                )
+                and (
+                    owner is None
+                    or not _semantic_binding(evidence_by_id[value[0]], value[1]).get("profile_fact")
+                    or profile_assignment_role(semantic_statement[: owner.value_span[0]])
+                    == _semantic_binding(evidence_by_id[value[0]], value[1]).get("statistic")
+                )
+                and (
+                    not parse_numeric_display(token, semantic_statement[match.end() :]).percent
+                    or _semantic_binding(evidence_by_id[value[0]], value[1]).get("unit") == "ratio"
                 )
             ]
+            profile_candidates = [
+                (value, _semantic_binding(evidence_by_id[value[0]], value[1]))
+                for value in semantic_candidates
+                if _semantic_binding(evidence_by_id[value[0]], value[1]).get("profile_fact")
+            ]
+            profile_identities = {
+                json.dumps(
+                    {k: v for k, v in binding.items() if k != "evidence_path"},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                for _, binding in profile_candidates
+            }
+            if len(profile_identities) > 1 or len({v[2] for v, _ in profile_candidates}) > 1:
+                semantic_candidates = []
             # Resolve statistical objects before looking at the claimed number.
             # Different numbers must not disambiguate different analyses/subjects.
             statistical_identities = {
@@ -232,7 +458,7 @@ def extract_numeric_claims(
             matched, candidates, match_kind, display_factor = _match_evidence_value(
                 normalized,
                 semantic_candidates,
-                statement=statement,
+                statement=semantic_statement,
                 token=token,
                 token_end=match.end(),
                 evidence_is_typed=evidence_is_typed,
@@ -257,6 +483,7 @@ def extract_numeric_claims(
                         "token": token,
                         "normalized": str(normalized),
                         "supported": False,
+                        "statement_span": [match.start(), match.end()],
                     }
                 )
                 continue
@@ -269,6 +496,14 @@ def extract_numeric_claims(
                 "path": path,
                 "evidence_value": evidence_value,
                 "match_kind": match_kind,
+                **(
+                    {
+                        "statistic_slot_span": list(owner.statement_span),
+                        "statement_span": [match.start(), match.end()],
+                    }
+                    if owner
+                    else {}
+                ),
                 "semantic_binding": _semantic_binding(evidence_by_id[evidence_id], path),
             }
             if display_factor != Decimal(1):
@@ -282,6 +517,27 @@ def extract_numeric_claims(
             for candidate_id, _candidate_path, _candidate_value in candidates:
                 if candidate_id not in linked_ids:
                     linked_ids.append(candidate_id)
+        # Explicit statistic assignments require an evaluated value even when
+        # their spelling contains no character recognized by the numeric lexer.
+        for slot in slots:
+            if slot.has_evaluation(evaluations):
+                continue
+            left, right = slot.value_span
+            if value_span is not None and not (value_span[0] <= left <= right <= value_span[1]):
+                continue
+            if left == right:
+                left, right = slot.statement_span
+            refs.append(
+                {
+                    "token": statement[left:right],
+                    "supported": False,
+                    "reason": "unparsed_statistic_value",
+                    "statement_type": slot.statement_type,
+                    "statistic": slot.label,
+                    "validation": "unparsed",
+                    "statement_span": [left, right],
+                }
+            )
         if refs:
             definition_refs, definition_evidence_ids = _definition_lineage_refs(
                 linked_ids,
@@ -522,9 +778,7 @@ def repair_candidate_with_evidence(
     return repaired, tuple(actions)
 
 
-def _collect_chart_values(
-    option: JsonObject, output: list[JsonObject], args: JsonObject
-) -> None:
+def _collect_chart_values(option: JsonObject, output: list[JsonObject], args: JsonObject) -> None:
     """只索引图表数据，并在原始 Evidence 路径保留类目/度量对应关系。"""
     context = {**args, **args.get("tool_args", {})}
     encoding = context.get("encoding") or {}
@@ -724,6 +978,23 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
         item.get("report_binding"), dict
     ):
         return {**item["report_binding"], "evidence_path": path}
+    if record.source.get("tool") == "get_data_profile" and (fact := profile_fact(item)):
+        return {
+            "dataset_ref": context.get("dataset_ref"),
+            "dataset_version": context.get("data_version_hash", context.get("dataset_ref")),
+            "analysis": {"tool": "get_data_profile"},
+            "aggregation": None,
+            "filters": context.get("filters", []),
+            **(
+                {"population": context["profile_population"]}
+                if "profile_population" in context
+                else {}
+            ),
+            "grain": None,
+            "group_key": None,
+            **fact,
+            "evidence_path": path,
+        }
     role = item.get("statistic") or statistic_role(path)
     source_tool = record.source.get("tool")
     statistical = source_tool in TOOL_LABELS or record.kind == "stats"
@@ -770,9 +1041,12 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
             "count"
             if role in counts
             else "ratio"
-            if statistical
-            and role
+            if role
             in {
+                "rate",
+                "ratio",
+                "null_ratio",
+                "duplicate_ratio",
                 "corr",
                 "p_value",
                 "adjusted_p_value",
@@ -798,8 +1072,40 @@ def _semantic_candidate_matches(
     dimensions: dict[str, set[str]],
     table_cells: tuple[tuple[str, str], ...] | None = None,
     value_span: tuple[int, int] | None = None,
+    profile_context: str = "",
+    population: PopulationRequest | None = None,
+    population_statement: str | None = None,
+    required_population: PopulationRequest | None = None,
 ) -> bool:
     """对完整数字子句绑定指标和分组；不按数字位置猜测或以同值证明关系。"""
+    profile_record = next(record for record in evidence if record.evidence_id == value[0])
+    if profile_record.source.get("tool") == "get_data_profile" and has_column_profile(
+        profile_record.summary
+    ):
+        profile_bindings = [
+            _semantic_binding(record, str(item.get("path")))
+            for record in evidence
+            for item in record.summary.get("value_index", [])
+            if item.get("source_kind") == "number"
+        ]
+        selected_profile = _semantic_binding(profile_record, value[1])
+        if not population_matches(selected_profile, population) or not population_matches(
+            selected_profile, required_population
+        ):
+            return False
+        profile_text = profile_context + (
+            population_statement if population_statement is not None else statement
+        )
+        return identity_matches(
+            selected_profile, profile_text, profile_bindings, table_cells
+        ) and profile_candidate_matches(
+            selected_profile,
+            profile_bindings,
+            profile_text,
+            len(profile_context) + match.start(),
+            len(profile_context) + match.end(),
+            value[2],
+        )
     for shape in re.finditer(
         r"(?P<row_count>\d+)\s*行\s*[×x*]\s*(?P<column_count>\d+)\s*列", statement
     ):
@@ -807,8 +1113,10 @@ def _semantic_candidate_matches(
             if match.span() == shape.span(dimension):
                 shape_record = next(record for record in evidence if record.evidence_id == value[0])
                 binding = _semantic_binding(shape_record, value[1])
-                return value[1].endswith("." + dimension) and identity_matches(
-                    binding, statement, [binding], table_cells
+                return (
+                    binding.get("group_key") is None
+                    and value[1].endswith("." + dimension)
+                    and identity_matches(binding, statement, [binding], table_cells)
                 )
     dimension_spans = dimension_mentions(statement, dimensions)
     numbers = [
@@ -877,7 +1185,14 @@ def _semantic_candidate_matches(
         for dimension, group in table_cells:
             if dimension in dimensions and group in dimensions[dimension]:
                 metric_text = metric_text.replace(f"{dimension}={group}", "")
-    mentioned = {field for field in fields if field in metric_text}
+    normalized_metric_text = unicodedata.normalize("NFKC", metric_text)
+    mentioned = {
+        field for field in fields if unicodedata.normalize("NFKC", field) in normalized_metric_text
+    }
+    # Match field display spelling locally without rewriting the value text or
+    # merging distinct source fields that happen to normalize to one spelling.
+    if len({unicodedata.normalize("NFKC", field) for field in mentioned}) < len(mentioned):
+        return False
     # Prefer complete field names over their substrings, never a nearest-prefix guess.
     mentioned = {
         field
@@ -984,9 +1299,13 @@ def _semantic_candidate_matches(
         and aggregations == {"sum"}
     ):
         return True
-    return role not in ROLE_LABELS and (
-        record is None
-        or (record.source.get("tool") not in STATISTICAL_TOOLS and record.kind != "stats")
+    return (
+        selected.get("unit") != "ratio"
+        and role not in ROLE_LABELS
+        and (
+            record is None
+            or (record.source.get("tool") not in STATISTICAL_TOOLS and record.kind != "stats")
+        )
     )
 
 
@@ -1086,41 +1405,7 @@ def _display_factor(token: str, *, statement: str, token_end: int) -> Decimal | 
     ``25.1%`` represents a raw ratio near ``0.251``. Combining percent with a
     large-number unit is rejected instead of guessed.
     """
-    suffix = statement[token_end : token_end + 4]
-    percent = token.endswith("%") or re.match(r"\s*%", suffix) is not None
-    unit_match = re.match(r"\s*([千万亿])", suffix)
-    if percent and unit_match is not None:
-        return None
-    if percent:
-        return Decimal("0.01")
-    if unit_match is not None:
-        return _DISPLAY_UNIT_FACTORS[unit_match.group(1)]
-    return Decimal(1)
-
-
-def _display_quantum(token: str) -> Decimal | None:
-    normalized = _normalize_number(token)
-    if normalized is None:
-        return None
-    exponent = normalized.as_tuple().exponent
-    if not isinstance(exponent, int):
-        return None
-    return Decimal(1).scaleb(exponent)
-
-
-def _matches_display_value(
-    evidence_value: Decimal,
-    claim_value: Decimal,
-    *,
-    display_factor: Decimal,
-    quantum: Decimal,
-) -> bool:
-    """Accept only values that deterministically render as the claim token."""
-    try:
-        displayed = evidence_value / display_factor
-        return displayed.quantize(quantum, rounding=ROUND_HALF_UP) == claim_value
-    except (InvalidOperation, ZeroDivisionError):
-        return False
+    return parse_numeric_display(token, statement[token_end:]).factor
 
 
 def _path_relevance(path: str, statement: str) -> int:
@@ -1148,31 +1433,33 @@ def _looks_like_time_scope(statement: str, start: int, end: int) -> bool:
     )
 
 
+def _measurement_labels() -> set[str]:
+    return {
+        label
+        for role, aliases in {**_PATH_ALIASES, **ROLE_LABELS}.items()
+        for label in (role, *aliases)
+    } | {
+        "最小",
+        "最大",
+        "空值数",
+        "缺失值数",
+        "总计",
+        "合计",
+        "数值",
+        "比例",
+        "精确空值数",
+        "非空数",
+        "缺失比例",
+    }
+
+
 def _split_statements(text: str) -> list[str]:
-    # findall with the deliberately simple boundary expression avoids an LLM
-    # sentence splitter while keeping the original statement for audit display.
-    statements: list[str] = []
-    start = 0
-    for match in re.finditer(r"[。！？!?；;\n]+", text):
-        end = match.end()
-        statements.append(text[start:end])
-        start = end
-    if start < len(text):
-        statements.append(text[start:])
-    return statements
+    # Limitation extraction and repair use the same complete assertion ranges.
+    return split_claim_statements(text, _measurement_labels())
 
 
 def _numeric_tokens(text: str) -> list[str]:
     return [match.group(0) for match in _NUMBER_PATTERN.finditer(text)]
-
-
-def _normalize_number(token: str) -> Decimal | None:
-    clean = token.rstrip("%").replace(",", "")
-    try:
-        value = Decimal(clean)
-    except InvalidOperation:
-        return None
-    return value if value.is_finite() else None
 
 
 def _decimal_from_value(value: int | float | Decimal) -> Decimal | None:

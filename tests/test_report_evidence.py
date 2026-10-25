@@ -85,7 +85,8 @@ def report_args(
         ("profile", "重复率 0.8。", "duplicate_ratio"),
         ("profile", "重复率 80%。", "duplicate_ratio"),
         ("profile", "重复率 80.0%。", "duplicate_ratio"),
-        ("profile", "重复行 24。", "duplicate_rows"),
+        ("profile", "整行重复多余记录数24。", "duplicate_rows"),
+        ("profile", "整行重复多余记录数24（重复率80%）。", "duplicate_rows"),
     ],
 )
 def test_selected_persisted_typed_values_support_report(
@@ -105,9 +106,7 @@ def test_selected_persisted_typed_values_support_report(
     selected = next(item for item in artifacts if item.type == kind)
     assert set(validation["source_hashes"]) == {selected.id}
     refs = [ref for claim in validation["claims"] for ref in claim["value_refs"]]
-    assert any(
-        path in ref["path"] and ref["artifact_id"] == selected.id for ref in refs
-    )
+    assert any(path in ref["path"] and ref["artifact_id"] == selected.id for ref in refs)
 
 
 @pytest.mark.parametrize(
@@ -115,6 +114,9 @@ def test_selected_persisted_typed_values_support_report(
     [
         ("table", "销售额总计 1171.0。"),
         ("table", "销售额总计 1170%。"),
+        # MANUAL-02: preserve the formerly accepted ambiguous phrase as a negative.
+        ("profile", "重复行 24。"),
+        ("profile", "整行重复多余记录数24（重复率81%）。"),
         ("profile", "重复率 0.81。"),
         ("profile", "重复率 81%。"),
         ("profile", "重复率 0.8%。"),
@@ -220,13 +222,25 @@ def test_table_total_survives_bounded_index_and_null_rows(persisted_report: Any)
     assert result["claims"][0]["value_refs"][0]["path"] == "$.total_value"
 
 
-def test_exact_r9b_generate_report_renders_numeric_prose_table_and_pdf(
+@pytest.mark.parametrize("explicit_basis", [False, True])
+def test_r9b_original_rejected_or_explicit_basis_renders_prose_table_and_pdf(
     persisted_report: Any,
     monkeypatch: pytest.MonkeyPatch,
+    explicit_basis: bool,
 ) -> None:
     import weasyprint
 
     _, context, args, artifacts = persisted_report
+    # The original r9b payload and response remain unchanged on disk. Its generic
+    # duplicate count is now rejected; an explicit-basis control exercises PDF.
+    if not explicit_basis:
+        with pytest.raises(AgentToolError, match="数值缺少"):
+            _registry(context).execute("generate_report", json.dumps(args))
+        assert not list(Path(get_settings().report_dir).glob("*"))
+        return
+    args = copy.deepcopy(args)
+    assert "存在 24 行重复记录" in args["insights"]
+    args["insights"] = args["insights"].replace("存在 24 行重复记录", "整行重复多余记录数为24")
     original_html = weasyprint.HTML
     rendered: list[str] = []
 

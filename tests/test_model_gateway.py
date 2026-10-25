@@ -527,7 +527,7 @@ async def test_stream_midway_failure_propagates() -> None:
         },
     )
     out: list[str] = []
-    with pytest.raises(APIConnectionError):
+    with pytest.raises(RuntimeError, match="模型流式响应中断: APIConnectionError"):
         async for p in gw.stream(Scenario.CORE_REASONING, _MSGS):
             out.append(p)
     assert out == ["一半"]  # 已产出的增量不回吞

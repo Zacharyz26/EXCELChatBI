@@ -7,6 +7,15 @@ from enum import Enum
 from typing import Any
 
 
+class ModelBudgetExceeded(RuntimeError):
+    """A request-admission budget guard rejected a model request before dispatch.
+
+    Guards must raise this type before contacting any provider. It is not an API
+    quota/rate-limit failure and must never trigger a fallback or an automatic
+    retry. Do not include credentials or private accounting details in messages.
+    """
+
+
 class Scenario(str, Enum):
     """模型路由场景（对应 config/models.yaml 的 routes）。"""
 

@@ -10,7 +10,10 @@ from typing import Literal, Protocol
 from packages.common.identifiers import dataset_reference_arguments
 from packages.orchestration.analysis_requirements import TOTAL_LABEL
 from packages.orchestration.contracts import TaskContract
-from packages.orchestration.dataset_scope import verified_analysis_scope
+from packages.orchestration.dataset_scope import (
+    selected_analysis_dataset_refs,
+    verified_analysis_scope,
+)
 from packages.session.models import Artifact
 from packages.session.task_models import (
     ClaimDraft,
@@ -90,12 +93,11 @@ def verify_completion(
         if claim.claim_kind == "numeric"
         for ref in claim.value_refs
     )
+    numeric_claims = extract_numeric_claims(
+        final_text=final_text, goal=contract.goal, evidence=bound_evidence
+    )
     if previously_supported and any(
-        ref.get("supported") is not True
-        for claim in extract_numeric_claims(
-            final_text=final_text, goal=contract.goal, evidence=bound_evidence
-        )
-        for ref in claim.value_refs
+        ref.get("supported") is not True for claim in numeric_claims for ref in claim.value_refs
     ):
         issues.append(
             VerificationIssue(
@@ -107,7 +109,7 @@ def verify_completion(
             contract,
             invocations,
             evidence,
-            claims or [],
+            numeric_claims,
             dataset_bindings or [],
             artifacts,
             source_artifacts or [],
@@ -295,19 +297,47 @@ def _verify_analysis_requirements(
         return []
     issues: list[VerificationIssue] = []
     if requirements.filter_error:
-        issues.append(
-            VerificationIssue(
-                "required_filter_not_satisfied", requirements.filter_error
+        issues.append(VerificationIssue("required_filter_not_satisfied", requirements.filter_error))
+    by_id = {item.invocation_id: item for item in invocations if item.run_id == contract.run_id}
+    scope = verified_analysis_scope(requirements, contract.run_id, invocations, evidence, bindings)
+    # An exploratory profile of the input may precede a valid transformation.
+    # Only profiles actually used as final facts must belong to the verified
+    # target population; matching filters on an unrelated root are insufficient.
+    if requirements.filters or requirements.dataset_ref:
+        referenced = {ref.get("evidence_id") for claim in claims for ref in claim.value_refs}
+        if any(
+            record.evidence_id in referenced
+            and record.source.get("tool") == "get_data_profile"
+            and record.summary.get("numeric_context", {}).get("dataset_ref") not in scope
+            for record in evidence
+        ):
+            issues.append(
+                VerificationIssue(
+                    "required_dataset_not_satisfied",
+                    "画像结论的 Evidence 不属于本次已验证筛选范围和数据版本。",
+                )
             )
-        )
-    by_id = {
-        item.invocation_id: item
-        for item in invocations
-        if item.run_id == contract.run_id
-    }
-    scope = verified_analysis_scope(
-        requirements, contract.run_id, invocations, evidence, bindings
-    )
+        for report_call in invocations:
+            if (
+                report_call.run_id != contract.run_id
+                or report_call.status != "succeeded"
+                or report_call.tool_name != "generate_report"
+            ):
+                continue
+            report = next((a for a in artifacts if a.id == report_call.artifact_id), None)
+            sources = [
+                a
+                for a in source_artifacts
+                if report is not None and a.conversation_id == report.conversation_id
+            ]
+            selected_refs = selected_analysis_dataset_refs(report_call.args, sources)
+            if selected_refs is None or not selected_refs.issubset(scope):
+                issues.append(
+                    VerificationIssue(
+                        "required_dataset_not_satisfied",
+                        "报告来源不属于本次已验证筛选范围和数据版本。",
+                    )
+                )
 
     def violates_scope(item: ToolInvocation) -> bool:
         refs = [ref for _, ref in dataset_reference_arguments(item.args)]
@@ -331,8 +361,7 @@ def _verify_analysis_requirements(
                 )
             )
         if any(
-            item.tool_name not in {"transform_dataset", "get_data_profile"}
-            and violates_scope(item)
+            item.tool_name not in {"transform_dataset", "get_data_profile"} and violates_scope(item)
             for item in invocations
         ):
             issues.append(
@@ -343,9 +372,7 @@ def _verify_analysis_requirements(
             )
     elif scope and any(violates_scope(item) for item in invocations):
         issues.append(
-            VerificationIssue(
-                "required_dataset_not_satisfied", "分析没有使用用户绑定的数据集。"
-            )
+            VerificationIssue("required_dataset_not_satisfied", "分析没有使用用户绑定的数据集。")
         )
     if not requirements.total:
         return issues
@@ -385,8 +412,7 @@ def _verify_analysis_requirements(
             item.run_id != contract.run_id
             or invocation is None
             or invocation.status != "succeeded"
-            or invocation.tool_name
-            not in {"dimension_contribution", "aggregate_preview"}
+            or invocation.tool_name not in {"dimension_contribution", "aggregate_preview"}
             or invocation.args.get("method", invocation.args.get("agg", "sum")) != "sum"
             or (scope and invocation.args.get("dataset_ref") not in scope)
             or (requirements.filters and not scope)
@@ -397,10 +423,7 @@ def _verify_analysis_requirements(
         ):
             continue
         for value in item.summary.get("value_index", []):
-            if (
-                value.get("path") == "$.total_value"
-                and value.get("source_kind") == "number"
-            ):
+            if value.get("path") == "$.total_value" and value.get("source_kind") == "number":
                 total_paths.add((item.evidence_id, "$.total_value"))
                 total_scopes.add(
                     (
@@ -427,9 +450,7 @@ def _verify_analysis_requirements(
     for claim in claims:
         if claim.claim_kind != "numeric" or not TOTAL_LABEL.search(claim.statement):
             continue
-        if re.search(
-            r"删除|缺少|无法|未提供|未返回|没有|不(?:是|为)|并非", claim.statement
-        ):
+        if re.search(r"删除|缺少|无法|未提供|未返回|没有|不(?:是|为)|并非", claim.statement):
             continue
         for ref in claim.value_refs:
             if ref.get("supported") is not True:

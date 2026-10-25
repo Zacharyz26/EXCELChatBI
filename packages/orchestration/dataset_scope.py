@@ -6,12 +6,43 @@ from packages.orchestration.analysis_requirements import (
     AnalysisRequirements,
     filter_arguments_match,
 )
-from packages.session.models import JsonObject
+from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import (
     EvidenceRecord,
     TaskDatasetBinding,
     ToolInvocation,
 )
+
+
+def selected_analysis_dataset_refs(
+    arguments: JsonObject, artifacts: list[Artifact]
+) -> set[str] | None:
+    """解析报告选择的持久化来源；缺失或无版本来源不能证明总体。"""
+    wanted = arguments.get("analysis_ids")
+    if (
+        not isinstance(wanted, list)
+        or not wanted
+        or any(not isinstance(item, str) or not item for item in wanted)
+    ):
+        return None
+    selected: dict[str, list[Artifact]] = {}
+    for artifact in artifacts:
+        analysis_id = next(
+            (
+                container["analysis_id"]
+                for container in (artifact.params or {}, artifact.payload or {})
+                if isinstance(container.get("analysis_id"), str) and container["analysis_id"]
+            ),
+            artifact.id,
+        )
+        if analysis_id in wanted:
+            selected.setdefault(analysis_id, []).append(artifact)
+    if set(selected) != set(wanted):
+        return None
+    sources = [artifact for group in selected.values() for artifact in group]
+    if any(not artifact.dataset_ref for artifact in sources):
+        return None
+    return {str(artifact.dataset_ref) for artifact in sources}
 
 
 def is_filter_preserving_cleanup(arguments: JsonObject) -> bool:
@@ -69,14 +100,10 @@ def verified_analysis_scope(
         edges = [
             binding
             for binding in edges
-            if is_filter_preserving_cleanup(
-                succeeded[binding.producing_invocation_id or ""].args
-            )
+            if is_filter_preserving_cleanup(succeeded[binding.producing_invocation_id or ""].args)
         ]
     while True:
-        additions = {
-            binding.dataset_ref for binding in edges if binding.parent_ref in scope
-        }
+        additions = {binding.dataset_ref for binding in edges if binding.parent_ref in scope}
         if additions.issubset(scope):
             return scope
         scope.update(additions)

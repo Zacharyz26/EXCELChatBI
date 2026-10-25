@@ -82,6 +82,25 @@ def tool_role_requirements(
         scalar("group_col", "dimension", "time")
         if arguments.get("agg") != "count":
             scalar("value_col", "metric")
+    elif tool_name == "gen_chart":
+        encoding = arguments.get("encoding")
+        if isinstance(encoding, dict):
+            scatter = arguments.get("chart_type") == "scatter"
+            # The scatter tool accepts numeric and datetime continuous axes.
+            # Parsing/type validation remains in the tool; role hints do not coerce data.
+            axes: tuple[tuple[str, tuple[DataRole, ...]], ...] = (
+                ("x", ("metric", "time") if scatter else ("dimension", "time")),
+                ("y", ("metric", "time") if scatter else ("metric",)),
+            )
+            for axis, roles in axes:
+                # count measures records; it never sums the identifier's values.
+                if axis == "y" and not scatter and encoding.get("agg") == "count":
+                    continue
+                value = encoding.get(axis)
+                if isinstance(value, str) and value.strip():
+                    requirements.append(
+                        (f"encoding.{axis}", value.strip(), frozenset(roles))
+                    )
     return tuple(requirements)
 
 

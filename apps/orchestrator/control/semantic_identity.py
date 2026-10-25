@@ -8,6 +8,11 @@ from typing import Any
 from packages.session.models import JsonObject
 
 from apps.orchestrator.control.claim_relations import SubjectRelation, parse_subject_relation
+from apps.orchestrator.control.dataset_identity import (
+    identity_declarations,
+    identity_literal,
+    identity_matches_binding,
+)
 from apps.orchestrator.control.statistic_roles import (
     ROLE_LABELS,
     label_pattern,
@@ -253,13 +258,8 @@ def identity_matches(
     named_tools = _named(text, TOOL_LABELS)
     if named_tools and named_tools != {tool}:
         return False
-    explicit_refs = re.findall(
-        r"(?:dataset_ref|数据集|版本)\s*[:：=]?\s*([a-f0-9]{32,64})(?![a-f0-9])", text
-    )
-    if explicit_refs and any(
-        ref not in {binding.get("dataset_ref"), binding.get("dataset_version")}
-        for ref in explicit_refs
-    ):
+    declarations = [m for m in identity_declarations(text) if identity_literal(m["value"])]
+    if any(not identity_matches_binding(m, binding) for m in declarations):
         return False
     if tool not in TOOL_LABELS:
         return not named_tools

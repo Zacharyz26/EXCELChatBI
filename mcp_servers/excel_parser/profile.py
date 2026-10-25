@@ -26,6 +26,8 @@ class ColumnProfile:
     median: float | None = None
     sample_values: list[str] = field(default_factory=list)  # 脱敏样本值
 
+    null_count: int | None = None  # 工具准确计数；旧画像缺少时保持未知。
+
     def to_dict(self) -> dict[str, Any]:
         """转可 JSON 序列化字典（用于喂给 LLM 的 payload）。"""
         return {
@@ -33,6 +35,7 @@ class ColumnProfile:
             "dtype": self.dtype,
             "null_ratio": round(self.null_ratio, 4) if self.null_ratio is not None else None,
             "distinct_count": self.distinct_count,
+            "null_count": self.null_count,
             "min": self.min,
             "max": self.max,
             "mean": self.mean,

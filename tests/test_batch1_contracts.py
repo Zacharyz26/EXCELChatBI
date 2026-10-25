@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 
 import pandas as pd
@@ -21,6 +22,8 @@ from packages.orchestration.contracts import build_minimal_contract
 from packages.session.models import Artifact
 from packages.session.task_hashing import business_invocation_key
 from packages.session.task_models import EvidenceRecord, TaskDatasetBinding, ToolInvocation
+
+from tests.test_agent_tools import _registry
 
 D, F = "d" * 32, "f" * 32
 
@@ -66,7 +69,8 @@ def evidence(result, args, ident="i"):
         ({"total_value": 10}, "销售额为10万元。", False),
         ({"total_value": 100000}, "销售额为10万元。", True),
         ({"total_value": 25}, "比例为25%。", False),
-        ({"total_value": 0.25}, "比例为25%。", True),
+        # A raw sales sum is not a ratio, even when its value equals .25.
+        ({"total_value": 0.25}, "比例为25%。", False),
         ({"total_value": 1.234}, "销售额为1.23元。", True),
         (
             {"rows": [{"group": "华东", "value": 100}, {"group": "华西", "value": 900}]},
@@ -287,3 +291,86 @@ def test_csv_decimal_and_scientific_forms_never_hide_large_integer_loss(tmp_path
     path.write_text("id\n" + "\n".join(values), encoding="utf-8")
     ref = parse_excel({"file_ref": str(path)})["dataset_ref"]
     assert load_dataframe(ref)["id"].tolist() == values
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sign", ["%", "％", " ％"])
+async def test_actual_profile_ratios_and_equal_raw_values_keep_typed_units(tmp_path, sign):
+    ref = save_dataframe(
+        pd.DataFrame(
+            {
+                "金额（元）": [0.25, 0.25, 0.25, None],
+                "时长（分钟）": [0.25, 0.25, 0.25, None],
+                "全空指标": pd.Series([None] * 4, dtype="float64"),
+            }
+        )
+    )
+    args = {"dataset_ref": ref}
+    registry = _registry()
+    try:
+        result = registry.execute("get_data_profile", json.dumps(args))
+    finally:
+        await registry.aclose()
+    columns = {column["name"]: column for column in result["profile"]["columns"]}
+    assert columns["金额（元）"]["max"] == columns["金额（元）"]["null_ratio"] == 0.25
+    assert columns["时长（分钟）"]["median"] == 0.25
+    assert columns["金额（元）"]["null_count"] == columns["全空指标"]["null_ratio"] == 1
+    item = replace(evidence(result, args), source={"tool": "get_data_profile"})
+    artifact = Artifact(
+        "profile", "c", "m", "profile", result, None, "get_data_profile", args, ref, "now"
+    )
+    contract = build_minimal_contract(
+        run_id="r",
+        user_text="复核画像单位",
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+        dataset_refs=(ref,),
+    )
+    cases = [
+        ("ratio_25", f"金额（元）空值率25{sign}。", True, "ratio"),
+        ("ratio_100", f"全空指标空值率100{sign}。", True, "ratio"),
+        ("raw_money", "金额（元）最大0.25。", True, "raw"),
+        ("raw_duration", "时长（分钟）中位数0.25。", True, "raw"),
+        ("raw_count", "金额（元）空值数1。", True, "count"),
+        ("wrong_money_percent", f"金额（元）最大25{sign}。", False, None),
+        ("wrong_duration_percent", f"时长（分钟）中位数25{sign}。", False, None),
+        ("wrong_count_percent", f"金额（元）空值数100{sign}。", False, None),
+    ]
+    witness = {"tool": "get_data_profile", "args": args, "result": result, "cases": []}
+    for label, text, accepted, unit in cases:
+        claims = extract_claims(final_text=text, goal=contract.goal, evidence=[item])
+        verdict = verify_completion(
+            contract=contract,
+            final_text=text,
+            artifacts=[],
+            invocations=[invocation("get_data_profile", args)],
+            evidence=[item],
+            claims=claims,
+        )
+        refs = [r for c in claims for r in c.value_refs]
+        try:
+            report = validate_report_narratives([artifact], {"title": "画像", "insights": text})
+        except ValueError as error:
+            report = {"status": "rejected", "error": str(error)}
+        witness["cases"].append(
+            {
+                "label": label,
+                "text": text,
+                "expected": accepted,
+                "verdict": verdict.verdict,
+                "refs": refs,
+                "report": report,
+            }
+        )
+        (tmp_path / "typed-ratio-witness.json").write_text(
+            json.dumps(witness, ensure_ascii=False, indent=2)
+        )
+        assert refs and verdict.passed is accepted, witness["cases"][-1]
+        assert (report["status"] == "passed") is accepted, witness["cases"][-1]
+        if accepted:
+            assert all(r["semantic_binding"]["unit"] == unit for r in refs)
+        if label == "ratio_25":
+            assert refs[0]["path"].endswith(".null_ratio")
+            assert refs[0]["display_factor"] == "0.01"
+            assert refs[0]["semantic_binding"]["analysis"]["tool"] == "get_data_profile"

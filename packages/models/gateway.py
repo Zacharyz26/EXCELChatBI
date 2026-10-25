@@ -139,14 +139,16 @@ class ModelGateway:
             # TypeError/KeyError 等编程错误不吞，正常抛出暴露 bug。
             except (OpenAIError, ValueError) as exc:
                 last_error = exc
-                _log.warning("model.fallback", model=name, error=str(exc))
+                _log.warning("model.fallback", model=name, error_type=type(exc).__name__)
 
         if last_error is None and tools is not None:
             raise RuntimeError(
                 f"场景 {scenario.value} 的候选模型（{candidates}）均不支持工具调用；"
                 "请在 config/models.yaml 为该场景配置 supports_tools 的模型（决策10）"
             )
-        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
+        raise RuntimeError(
+            f"所有候选模型均失败（{candidates}）: {type(last_error).__name__}"
+        ) from None
 
     async def stream_turn(
         self,
@@ -261,9 +263,13 @@ class ModelGateway:
                         yield response
             except (OpenAIError, ValueError) as exc:
                 if stream_started:
-                    raise
+                    raise RuntimeError(
+                        f"模型流式响应中断: {type(exc).__name__}"
+                    ) from None
                 last_error = exc
-                _log.warning("model.stream_turn.fallback", model=name, error=str(exc))
+                _log.warning(
+                    "model.stream_turn.fallback", model=name, error_type=type(exc).__name__
+                )
                 continue
             _log.info("model.stream_turn.done", model=spec.model)
             return
@@ -273,7 +279,9 @@ class ModelGateway:
                 f"场景 {scenario.value} 的候选模型（{candidates}）均不支持工具调用；"
                 "请在 config/models.yaml 为该场景配置 supports_tools 的模型（决策10）"
             )
-        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
+        raise RuntimeError(
+            f"所有候选模型均失败（{candidates}）: {type(last_error).__name__}"
+        ) from None
 
     async def stream(
         self,
@@ -329,14 +337,20 @@ class ModelGateway:
                             yield piece
             except (OpenAIError, ValueError) as exc:
                 if stream_started:
-                    raise
+                    raise RuntimeError(
+                        f"模型流式响应中断: {type(exc).__name__}"
+                    ) from None
                 last_error = exc
-                _log.warning("model.stream.fallback", model=name, error=str(exc))
+                _log.warning(
+                    "model.stream.fallback", model=name, error_type=type(exc).__name__
+                )
                 continue
             _log.info("model.stream.done", model=spec.model)
             return
 
-        raise RuntimeError(f"所有候选模型均失败（{candidates}）: {last_error}")
+        raise RuntimeError(
+            f"所有候选模型均失败（{candidates}）: {type(last_error).__name__}"
+        ) from None
 
 
 def _set_response_trace(span: TraceSpan, response: ModelResponse) -> None:

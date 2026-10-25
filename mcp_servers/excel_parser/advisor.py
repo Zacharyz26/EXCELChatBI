@@ -182,12 +182,20 @@ def infer_data_roles_from_mapping(
             distinct_count,
             f"columns[{index}].distinct_count",
         )
+        null_count = raw_column.get("null_count")
+        if null_count is not None:
+            null_count = _required_non_negative_int(null_count, f"columns[{index}].null_count")
+            if null_count > row_count or round(null_ratio, 4) != round(
+                null_count / row_count if row_count else 0.0, 4
+            ):
+                raise ValueError(f"数据画像列 {name} 的 null_count 与行数/空值率不一致")
         columns.append(
             ColumnProfile(
                 name=name.strip(),
                 dtype=dtype.strip(),
                 null_ratio=float(null_ratio),
                 distinct_count=clean_distinct_count,
+                null_count=null_count,
             )
         )
     raw_column_count = profile.get("column_count", len(columns))
@@ -516,6 +524,11 @@ def _missing_recommendation(role: str) -> str:
 def _non_null_count(column: ColumnProfile, row_count: int) -> int:
     if column.null_ratio is None:
         raise ValueError("受限列没有可用的非空计数")
+    if column.null_count is not None:
+        count = _required_non_negative_int(column.null_count, "null_count")
+        if count > row_count:
+            raise ValueError("空值数超过数据行数")
+        return row_count - count
     return max(0, min(row_count, round(row_count * (1.0 - column.null_ratio))))
 
 

@@ -1,0 +1,1656 @@
+{
+  "provenance": "Unchanged synthetic CLI answer and actual profile payload, manual-cli-20261016T200512Z",
+  "answer": "已复核完成，结论如下：\n\n行数：75 行。\n\n列名（共 5 列）：月份、频道、状态、播出时长（分钟）、记录ID。\n\n播出时长的单位：分钟（字段名即“播出时长（分钟）”，数值类型为浮点数）。\n\n补充几点画像观察，供后续分步处理时参考：\n\n- 播出时长（分钟）有 1 个空值（null_ratio 约 1.33%），非空 74 条；最小值 10，最大值 999，中位数 37.5，均值约 50.12。\n- 记录ID 有 1 条重复（75 行中 distinct 为 74），画像建议核实其是否真是业务主键或需与其他字段组成联合主键。\n- 存在 1 条完全重复的行记录。\n- 字段角色识别：月份为时间列，频道、状态为维度，播出时长（分钟）为指标，记录ID 为标识列。\n\n本轮仅做画像，未做任何清洗或计算。后续如需去重、处理空值或按频道/月份分析，请告诉我下一步。",
+  "goal": "请复核当前上传的节目播出数据画像，告诉我行数、列名和播出时长的单位。本轮仅做画像，后续分步处理。",
+  "tool_result": {
+    "profile": {
+      "column_count": 5,
+      "columns": [
+        {
+          "distinct_count": 6,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "月份",
+          "null_count": 0,
+          "null_ratio": 0.0,
+          "sample_values": [
+            "2026-01",
+            "2026-02",
+            "2026-03",
+            "2026-04",
+            "2026-05"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 3,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "频道",
+          "null_count": 0,
+          "null_ratio": 0.0,
+          "sample_values": [
+            "A",
+            "B",
+            "C"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 2,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "状态",
+          "null_count": 0,
+          "null_ratio": 0.0,
+          "sample_values": [
+            "已播出",
+            "停机"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 37,
+          "dtype": "float",
+          "max": 999.0,
+          "mean": 50.121622,
+          "median": 37.5,
+          "min": 10.0,
+          "name": "播出时长（分钟）",
+          "null_count": 1,
+          "null_ratio": 0.0133,
+          "sample_values": [
+            "10.0",
+            "11.0",
+            "12.0",
+            "13.0",
+            "14.0"
+          ],
+          "std": 113.152819
+        },
+        {
+          "distinct_count": 74,
+          "dtype": "int",
+          "max": 999002.0,
+          "mean": 124317.906667,
+          "median": 100400.0,
+          "min": 100100.0,
+          "name": "记录ID",
+          "null_count": 0,
+          "null_ratio": 0.0,
+          "sample_values": [
+            "100100",
+            "100101",
+            "100102",
+            "100103",
+            "100104"
+          ],
+          "std": 145753.710454
+        }
+      ],
+      "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+      "row_count": 75,
+      "sample_rows": [
+        {
+          "播出时长（分钟）": 10.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100100,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 11.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100101,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 12.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100102,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 13.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100103,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 14.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100104,
+          "频道": "A"
+        }
+      ]
+    },
+    "quality": {
+      "constant_columns": [],
+      "duplicate_rows": 1,
+      "high_null_columns": [],
+      "issues": [
+        {
+          "code": "duplicate_rows",
+          "columns": [],
+          "evidence": {
+            "duplicate_ratio": 0.0133,
+            "duplicate_rows": 1
+          },
+          "issue_id": "quality-001",
+          "recommendation": "确认重复记录的业务主键和保留规则后再去重，不能直接静默删除。",
+          "severity": "medium",
+          "suggested_action": "review_duplicate_rows"
+        },
+        {
+          "code": "missing_values",
+          "columns": [
+            "播出时长（分钟）"
+          ],
+          "evidence": {
+            "null_ratio": 0.0133,
+            "role": "metric"
+          },
+          "issue_id": "quality-002",
+          "recommendation": "先确认缺失机制，再选择删除或受治理填补；不得静默用 0 替代。",
+          "severity": "low",
+          "suggested_action": "review_missing_values"
+        },
+        {
+          "code": "non_unique_identifier",
+          "columns": [
+            "记录ID"
+          ],
+          "evidence": {
+            "distinct_count": 74,
+            "duplicate_values_at_least": 1,
+            "non_null_count": 75
+          },
+          "issue_id": "quality-003",
+          "recommendation": "核对该字段是否真是业务主键，或是否需要与其他字段组成联合主键。",
+          "severity": "high",
+          "suggested_action": "confirm_identifier_key"
+        }
+      ],
+      "mutates_data": false,
+      "recommendations": [
+        {
+          "action": "review_duplicate_rows",
+          "automatic": false,
+          "columns": [],
+          "issue_id": "quality-001",
+          "message": "确认重复记录的业务主键和保留规则后再去重，不能直接静默删除。"
+        },
+        {
+          "action": "review_missing_values",
+          "automatic": false,
+          "columns": [
+            "播出时长（分钟）"
+          ],
+          "issue_id": "quality-002",
+          "message": "先确认缺失机制，再选择删除或受治理填补；不得静默用 0 替代。"
+        },
+        {
+          "action": "confirm_identifier_key",
+          "automatic": false,
+          "columns": [
+            "记录ID"
+          ],
+          "issue_id": "quality-003",
+          "message": "核对该字段是否真是业务主键，或是否需要与其他字段组成联合主键。"
+        }
+      ],
+      "schema": "chatbi-data-quality-v1",
+      "summary": {
+        "high": 1,
+        "issue_count": 3,
+        "low": 1,
+        "medium": 1,
+        "requires_confirmation": true
+      }
+    },
+    "roles": {
+      "ambiguous_columns": [],
+      "columns": [
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:time_hint",
+                "dtype:str"
+              ],
+              "role": "time",
+              "score": 0.9
+            },
+            {
+              "evidence": [
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.52
+            }
+          ],
+          "column": "月份",
+          "confidence": 0.9,
+          "primary_role": "time",
+          "profile_evidence": {
+            "distinct_count": 6,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.08
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "cardinality:categorical",
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.9
+            }
+          ],
+          "column": "频道",
+          "confidence": 0.9,
+          "primary_role": "dimension",
+          "profile_evidence": {
+            "distinct_count": 3,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.04
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:dimension_hint",
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.96
+            }
+          ],
+          "column": "状态",
+          "confidence": 0.96,
+          "primary_role": "dimension",
+          "profile_evidence": {
+            "distinct_count": 2,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.0267
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "dtype:float",
+                "name:metric_hint"
+              ],
+              "role": "metric",
+              "score": 0.95
+            }
+          ],
+          "column": "播出时长（分钟）",
+          "confidence": 0.95,
+          "primary_role": "metric",
+          "profile_evidence": {
+            "distinct_count": 37,
+            "dtype": "float",
+            "non_null_count": 74,
+            "null_ratio": 0.0133,
+            "unique_ratio": 0.5
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:identifier_hint",
+                "cardinality:near_unique"
+              ],
+              "role": "identifier",
+              "score": 0.98
+            },
+            {
+              "evidence": [
+                "dtype:int"
+              ],
+              "role": "metric",
+              "score": 0.55
+            }
+          ],
+          "column": "记录ID",
+          "confidence": 0.98,
+          "primary_role": "identifier",
+          "profile_evidence": {
+            "distinct_count": 74,
+            "dtype": "int",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.9867
+          }
+        }
+      ],
+      "method": "deterministic-profile-heuristics-v1",
+      "requires_confirmation": false,
+      "schema": "chatbi-data-roles-v1",
+      "summary": {
+        "ambiguous": 0,
+        "dimension": 2,
+        "identifier": 1,
+        "metric": 1,
+        "time": 1,
+        "unknown": 0
+      }
+    }
+  },
+  "cases": [
+    {
+      "case": "original-full",
+      "text": "已复核完成，结论如下：\n\n行数：75 行。\n\n列名（共 5 列）：月份、频道、状态、播出时长（分钟）、记录ID。\n\n播出时长的单位：分钟（字段名即“播出时长（分钟）”，数值类型为浮点数）。\n\n补充几点画像观察，供后续分步处理时参考：\n\n- 播出时长（分钟）有 1 个空值（null_ratio 约 1.33%），非空 74 条；最小值 10，最大值 999，中位数 37.5，均值约 50.12。\n- 记录ID 有 1 条重复（75 行中 distinct 为 74），画像建议核实其是否真是业务主键或需与其他字段组成联合主键。\n- 存在 1 条完全重复的行记录。\n- 字段角色识别：月份为时间列，频道、状态为维度，播出时长（分钟）为指标，记录ID 为标识列。\n\n本轮仅做画像，未做任何清洗或计算。后续如需去重、处理空值或按频道/月份分析，请告诉我下一步。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1.33%, 74",
+          "criterion_id": null
+        },
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：10, 999, 37.5, 50.12",
+          "criterion_id": null
+        },
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1, 74",
+          "criterion_id": null
+        },
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "行数：75 行。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "75",
+              "normalized": "75",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.row_count",
+              "evidence_value": "75",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "row_count",
+                "statistic": "row_count",
+                "statistic_scope": "profile.dataset",
+                "object": {
+                  "kind": "profile_dataset"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.row_count"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "列名（共 5 列）：月份、频道、状态、播出时长（分钟）、记录ID。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "5",
+              "normalized": "5",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.column_count",
+              "evidence_value": "5",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "column_count",
+                "statistic": "column_count",
+                "statistic_scope": "profile.dataset",
+                "object": {
+                  "kind": "profile_dataset"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.column_count"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "播出时长（分钟）有 1 个空值（null_ratio 约 1.33%），非空 74 条；",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].null_count",
+              "evidence_value": "1",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "null_count",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].null_count"
+              }
+            },
+            {
+              "token": "1.33%",
+              "normalized": "1.33",
+              "supported": false
+            },
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "最小值 10，最大值 999，中位数 37.5，均值约 50.12。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "10",
+              "normalized": "10",
+              "supported": false
+            },
+            {
+              "token": "999",
+              "normalized": "999",
+              "supported": false
+            },
+            {
+              "token": "37.5",
+              "normalized": "37.5",
+              "supported": false
+            },
+            {
+              "token": "50.12",
+              "normalized": "50.12",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        },
+        {
+          "statement": "记录ID 有 1 条重复（75 行中 distinct 为 74），画像建议核实其是否真是业务主键或需与其他字段组成联合主键。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            },
+            {
+              "token": "75",
+              "normalized": "75",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.row_count",
+              "evidence_value": "75",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "row_count",
+                "statistic": "row_count",
+                "statistic_scope": "profile.dataset",
+                "object": {
+                  "kind": "profile_dataset"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.row_count"
+              }
+            },
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "存在 1 条完全重复的行记录。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "original-bullet-10",
+      "text": "- 播出时长（分钟）有 1 个空值（null_ratio 约 1.33%），非空 74 条；最小值 10，最大值 999，中位数 37.5，均值约 50.12。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1.33%, 74",
+          "criterion_id": null
+        },
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：10, 999, 37.5, 50.12",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）有 1 个空值（null_ratio 约 1.33%），非空 74 条；",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].null_count",
+              "evidence_value": "1",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "null_count",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].null_count"
+              }
+            },
+            {
+              "token": "1.33%",
+              "normalized": "1.33",
+              "supported": false
+            },
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "最小值 10，最大值 999，中位数 37.5，均值约 50.12。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "10",
+              "normalized": "10",
+              "supported": false
+            },
+            {
+              "token": "999",
+              "normalized": "999",
+              "supported": false
+            },
+            {
+              "token": "37.5",
+              "normalized": "37.5",
+              "supported": false
+            },
+            {
+              "token": "50.12",
+              "normalized": "50.12",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "original-bullet-11",
+      "text": "- 记录ID 有 1 条重复（75 行中 distinct 为 74），画像建议核实其是否真是业务主键或需与其他字段组成联合主键。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1, 74",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "记录ID 有 1 条重复（75 行中 distinct 为 74），画像建议核实其是否真是业务主键或需与其他字段组成联合主键。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            },
+            {
+              "token": "75",
+              "normalized": "75",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.row_count",
+              "evidence_value": "75",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "row_count",
+                "statistic": "row_count",
+                "statistic_scope": "profile.dataset",
+                "object": {
+                  "kind": "profile_dataset"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.row_count"
+              }
+            },
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "original-bullet-12",
+      "text": "- 存在 1 条完全重复的行记录。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "存在 1 条完全重复的行记录。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "original-bullet-13",
+      "text": "- 字段角色识别：月份为时间列，频道、状态为维度，播出时长（分钟）为指标，记录ID 为标识列。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": []
+    },
+    {
+      "case": "english-ratio",
+      "text": "播出时长（分钟） null_ratio 约 1.33%。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1.33%",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "播出时长（分钟） null_ratio 约 1.33%。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1.33%",
+              "normalized": "1.33",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "chinese-ratio",
+      "text": "播出时长（分钟）空值率约1.33%。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）空值率约1.33%。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1.33%",
+              "normalized": "1.33",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].null_ratio",
+              "evidence_value": "0.0133",
+              "match_kind": "unit_scaled",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "null_ratio",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "ratio",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].null_ratio"
+              },
+              "display_factor": "0.01"
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "non-null-count",
+      "text": "播出时长（分钟）非空74条。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：74",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）非空74条。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "distinct-not-non-null",
+      "text": "播出时长（分钟）有74个不同值。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：74",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）有74个不同值。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "combined-same-clause",
+      "text": "播出时长（分钟）最小值10，最大值999，中位数37.5，均值约50.12。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）最小值10，最大值999，中位数37.5，均值约50.12。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "10",
+              "normalized": "10",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].min",
+              "evidence_value": "10.0",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "min",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].min"
+              }
+            },
+            {
+              "token": "999",
+              "normalized": "999",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].max",
+              "evidence_value": "999.0",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "max",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].max"
+              }
+            },
+            {
+              "token": "37.5",
+              "normalized": "37.5",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].median",
+              "evidence_value": "37.5",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "median",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].median"
+              }
+            },
+            {
+              "token": "50.12",
+              "normalized": "50.12",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].mean",
+              "evidence_value": "50.121622",
+              "match_kind": "rounded",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "mean",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].mean"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "semicolon-subject-elision",
+      "text": "播出时长（分钟）有1个空值；最小值10，最大值999，中位数37.5，均值约50.12。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：10, 999, 37.5, 50.12",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）有1个空值；",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].null_count",
+              "evidence_value": "1",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "null_count",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].null_count"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "最小值10，最大值999，中位数37.5，均值约50.12。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "10",
+              "normalized": "10",
+              "supported": false
+            },
+            {
+              "token": "999",
+              "normalized": "999",
+              "supported": false
+            },
+            {
+              "token": "37.5",
+              "normalized": "37.5",
+              "supported": false
+            },
+            {
+              "token": "50.12",
+              "normalized": "50.12",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "semicolon-repeated-subject",
+      "text": "播出时长（分钟）有1个空值；播出时长（分钟）最小值10，最大值999，中位数37.5，均值约50.12。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": [
+        {
+          "statement": "播出时长（分钟）有1个空值；",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].null_count",
+              "evidence_value": "1",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "null_count",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].null_count"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        },
+        {
+          "statement": "播出时长（分钟）最小值10，最大值999，中位数37.5，均值约50.12。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "10",
+              "normalized": "10",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].min",
+              "evidence_value": "10.0",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "min",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].min"
+              }
+            },
+            {
+              "token": "999",
+              "normalized": "999",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].max",
+              "evidence_value": "999.0",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "max",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].max"
+              }
+            },
+            {
+              "token": "37.5",
+              "normalized": "37.5",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].median",
+              "evidence_value": "37.5",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "median",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].median"
+              }
+            },
+            {
+              "token": "50.12",
+              "normalized": "50.12",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[3].mean",
+              "evidence_value": "50.121622",
+              "match_kind": "rounded",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "播出时长（分钟）",
+                "statistic": "mean",
+                "statistic_scope": "profile.column:播出时长（分钟）",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "播出时长（分钟）"
+                },
+                "unit": "raw",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[3].mean"
+              }
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "identifier-original",
+      "text": "记录ID 有 1 条重复（75 行中 distinct 为 74）。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1, 74",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "记录ID 有 1 条重复（75 行中 distinct 为 74）。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            },
+            {
+              "token": "75",
+              "normalized": "75",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.row_count",
+              "evidence_value": "75",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "row_count",
+                "statistic": "row_count",
+                "statistic_scope": "profile.dataset",
+                "object": {
+                  "kind": "profile_dataset"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.row_count"
+              }
+            },
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "identifier-postfix",
+      "text": "记录ID 有 1 条重复。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "记录ID 有 1 条重复。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "identifier-prefix",
+      "text": "记录ID重复值至少1个。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "记录ID重复值至少1个。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "distinct-english",
+      "text": "记录ID distinct 为74。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": [
+        {
+          "statement": "记录ID distinct 为74。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[4].distinct_count",
+              "evidence_value": "74",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "记录ID",
+                "statistic": "distinct_count",
+                "statistic_scope": "profile.column:记录ID",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "记录ID"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[4].distinct_count"
+              },
+              "candidate_paths": [
+                {
+                  "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+                  "path": "$.profile.columns[4].distinct_count"
+                },
+                {
+                  "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+                  "path": "$.quality.issues[2].evidence.distinct_count"
+                }
+              ],
+              "ambiguous_value": true
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "distinct-chinese",
+      "text": "记录ID有74个不同值。",
+      "verdict": "PASS",
+      "issues": [],
+      "claims": [
+        {
+          "statement": "记录ID有74个不同值。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": true,
+              "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+              "path": "$.profile.columns[4].distinct_count",
+              "evidence_value": "74",
+              "match_kind": "exact",
+              "semantic_binding": {
+                "dataset_ref": "c938b2bf41b64e5f84447820cead3436",
+                "dataset_version": "12ff72f954e6a69eb82ed329a6bb32a83efbcaa80566ae54aef1eb4f1b370d2d",
+                "analysis": {
+                  "tool": "get_data_profile"
+                },
+                "aggregation": null,
+                "filters": [],
+                "grain": null,
+                "group_key": null,
+                "metric": "记录ID",
+                "statistic": "distinct_count",
+                "statistic_scope": "profile.column:记录ID",
+                "object": {
+                  "kind": "profile_column",
+                  "column": "记录ID"
+                },
+                "unit": "count",
+                "profile_fact": true,
+                "evidence_path": "$.profile.columns[4].distinct_count"
+              },
+              "candidate_paths": [
+                {
+                  "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+                  "path": "$.profile.columns[4].distinct_count"
+                },
+                {
+                  "evidence_id": "ebad0377b6a34663a639ed70cc7d8c40",
+                  "path": "$.quality.issues[2].evidence.distinct_count"
+                }
+              ],
+              "ambiguous_value": true
+            }
+          ],
+          "evidence_ids": [
+            "ebad0377b6a34663a639ed70cc7d8c40"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "whole-row-original",
+      "text": "存在 1 条完全重复的行记录。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "存在 1 条完全重复的行记录。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "whole-row-prefix",
+      "text": "整行重复1条。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：1",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "整行重复1条。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "1",
+              "normalized": "1",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "wrong-whole-row",
+      "text": "整行重复2条。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：2",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "整行重复2条。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "2",
+              "normalized": "2",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    },
+    {
+      "case": "wrong-field-non-null",
+      "text": "记录ID非空74条。",
+      "verdict": "NEEDS_ACTION",
+      "issues": [
+        {
+          "code": "unsupported_numeric_claim",
+          "message": "数值结论缺少当前任务 Evidence：74",
+          "criterion_id": null
+        }
+      ],
+      "claims": [
+        {
+          "statement": "记录ID非空74条。",
+          "claim_kind": "numeric",
+          "value_refs": [
+            {
+              "token": "74",
+              "normalized": "74",
+              "supported": false
+            }
+          ],
+          "evidence_ids": []
+        }
+      ]
+    }
+  ]
+}

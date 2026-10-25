@@ -1666,10 +1666,10 @@ async def test_ambiguous_metric_waits_for_user_without_calling_model(
             "row_count": 12,
             "column_count": 4,
             "columns": [
-                {"name": "日期"},
-                {"name": "地区"},
-                {"name": "销售额"},
-                {"name": "销量"},
+                {"name": "日期", "dtype": "datetime", "null_ratio": 0, "distinct_count": 12},
+                {"name": "地区", "dtype": "str", "null_ratio": 0, "distinct_count": 3},
+                {"name": "销售额", "dtype": "float", "null_ratio": 0, "distinct_count": 12},
+                {"name": "销量", "dtype": "int", "null_ratio": 0, "distinct_count": 12},
             ],
         },
     )

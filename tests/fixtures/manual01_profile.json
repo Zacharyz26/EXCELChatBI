@@ -1,0 +1,1372 @@
+{
+  "provenance": "manual-cli-20261016T015623Z, synthetic broadcast input, unchanged captured payload and answer",
+  "goal": "请复核当前上传的节目播出数据画像，告诉我行数、列名和播出时长的单位。本轮仅做画像，后续分步处理。",
+  "answer": "复核完成，结论如下：\n\n行数与列名：这份数据共 75 行、5 列，列名依次为「月份」「频道」「状态」「播出时长（分钟）」「记录ID」。\n\n播出时长的单位：字段名本身已标注为「分钟」，画像结果也印证了这一点——该列是浮点型数值（metric 角色），最小 10.0、最大 999.0、均值约 50.12、中位数 37.5，单位即分钟。\n\n字段角色识别：月份为时间列（6 个不同取值，如 2026-01 至 2026-05），频道（A/B/C）和状态（已播出/停机）为维度列，播出时长（分钟）为指标列，记录ID 为标识列。\n\n顺带提示三个数据质量点，供后续分步处理时参考：记录ID 存在 1 个重复值（75 行中 distinct 为 74），播出时长（分钟）有 1 个缺失值（空值率约 1.33%），另有 1 行疑似完全重复的记录。这些本轮不做处理，等后续步骤再定。",
+  "evidence": {
+    "evidence_id": "17aecdb7bc524b2dbced33dc2edca894",
+    "run_id": "d178c60cd6ca44978ddf9b4ef3c1fc1f",
+    "invocation_id": "2d032f91e9fa4e7d9eb020d7381a41ae",
+    "artifact_id": "3ab50113e6a84a28b7f6a9f088d5cf8c",
+    "kind": "tool_result",
+    "result_hash": "10191608684911a5d73dc4807a6446836fd77403bdcd3e6030e8cb07dc5a0b5d",
+    "created_at": "2026-10-16T03:37:15.031539Z",
+    "source": {
+      "dataset_ref": "12f67878eec14383923d1fde424f2594",
+      "mcp_contract_equivalent": true,
+      "mcp_contract_validation": "equivalent",
+      "mcp_degraded": false,
+      "mcp_execution": "canonical_gateway",
+      "mcp_gateway_generation": 1,
+      "mcp_gateway_health": "healthy",
+      "mcp_service": "agent-tools",
+      "tool": "get_data_profile",
+      "tool_call_id": "call_00_fRMU2KGupKXMtUr7zFDt5823",
+      "tool_contract": {
+        "artifact_types": [
+          "profile"
+        ],
+        "contract_hash": "40c0faaaf7df816827950dbb33e7726d6b9ac300abc9cce6328c83071bcacd2c",
+        "idempotent": true,
+        "read_only": true,
+        "required_permissions": [
+          "analysis:execute"
+        ],
+        "risk_level": "low",
+        "service_name": "agent-tools",
+        "tool_name": "get_data_profile",
+        "tool_version": "1.1.0"
+      },
+      "transport": "in_process"
+    },
+    "summary": {
+      "analysis_context": {
+        "kind": null,
+        "method": null,
+        "slope_unit": null
+      },
+      "artifact_id": "3ab50113e6a84a28b7f6a9f088d5cf8c",
+      "knowledge_empty": null,
+      "numeric_context": {
+        "data_version_hash": "29cb5059a4975fc4be9e112de941d9f74dedcf4d1bf3e4940843c346292373aa",
+        "dataset_ref": "12f67878eec14383923d1fde424f2594"
+      },
+      "source_index": [],
+      "source_index_truncated": false,
+      "summary": "75 行 × 5 列，指标 1 / 维度 2，质量问题 3 项",
+      "value_index": [
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile"
+          },
+          "path": "$.profile.row_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile"
+          },
+          "path": "$.profile.column_count",
+          "source_kind": "number",
+          "value": "5"
+        },
+        {
+          "group_key": null,
+          "metric": "月份",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[0]"
+          },
+          "path": "$.profile.columns[0].null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": "月份",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[0]"
+          },
+          "path": "$.profile.columns[0].distinct_count",
+          "source_kind": "number",
+          "value": "6"
+        },
+        {
+          "group_key": null,
+          "metric": "频道",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[1]"
+          },
+          "path": "$.profile.columns[1].null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": "频道",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[1]"
+          },
+          "path": "$.profile.columns[1].distinct_count",
+          "source_kind": "number",
+          "value": "3"
+        },
+        {
+          "group_key": null,
+          "metric": "状态",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[2]"
+          },
+          "path": "$.profile.columns[2].null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": "状态",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[2]"
+          },
+          "path": "$.profile.columns[2].distinct_count",
+          "source_kind": "number",
+          "value": "2"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].null_ratio",
+          "source_kind": "number",
+          "value": "0.0133"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].distinct_count",
+          "source_kind": "number",
+          "value": "37"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].min",
+          "source_kind": "number",
+          "value": "10.0"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].max",
+          "source_kind": "number",
+          "value": "999.0"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].mean",
+          "source_kind": "number",
+          "value": "50.121622"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].std",
+          "source_kind": "number",
+          "value": "113.152819"
+        },
+        {
+          "group_key": null,
+          "metric": "播出时长（分钟）",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[3]"
+          },
+          "path": "$.profile.columns[3].median",
+          "source_kind": "number",
+          "value": "37.5"
+        },
+        {
+          "path": "$.profile.columns[3].sample_values[0]#number[0]",
+          "source_kind": "text",
+          "value": "10.0"
+        },
+        {
+          "path": "$.profile.columns[3].sample_values[1]#number[0]",
+          "source_kind": "text",
+          "value": "11.0"
+        },
+        {
+          "path": "$.profile.columns[3].sample_values[2]#number[0]",
+          "source_kind": "text",
+          "value": "12.0"
+        },
+        {
+          "path": "$.profile.columns[3].sample_values[3]#number[0]",
+          "source_kind": "text",
+          "value": "13.0"
+        },
+        {
+          "path": "$.profile.columns[3].sample_values[4]#number[0]",
+          "source_kind": "text",
+          "value": "14.0"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].distinct_count",
+          "source_kind": "number",
+          "value": "74"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].min",
+          "source_kind": "number",
+          "value": "100100.0"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].max",
+          "source_kind": "number",
+          "value": "999002.0"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].mean",
+          "source_kind": "number",
+          "value": "124317.906667"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].std",
+          "source_kind": "number",
+          "value": "145753.710454"
+        },
+        {
+          "group_key": null,
+          "metric": "记录ID",
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.columns[4]"
+          },
+          "path": "$.profile.columns[4].median",
+          "source_kind": "number",
+          "value": "100400.0"
+        },
+        {
+          "path": "$.profile.columns[4].sample_values[0]#number[0]",
+          "source_kind": "text",
+          "value": "100100"
+        },
+        {
+          "path": "$.profile.columns[4].sample_values[1]#number[0]",
+          "source_kind": "text",
+          "value": "100101"
+        },
+        {
+          "path": "$.profile.columns[4].sample_values[2]#number[0]",
+          "source_kind": "text",
+          "value": "100102"
+        },
+        {
+          "path": "$.profile.columns[4].sample_values[3]#number[0]",
+          "source_kind": "text",
+          "value": "100103"
+        },
+        {
+          "path": "$.profile.columns[4].sample_values[4]#number[0]",
+          "source_kind": "text",
+          "value": "100104"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[0]"
+          },
+          "path": "$.profile.sample_rows[0].播出时长（分钟）",
+          "source_kind": "number",
+          "value": "10.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[0]"
+          },
+          "path": "$.profile.sample_rows[0].记录ID",
+          "source_kind": "number",
+          "value": "100100"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[1]"
+          },
+          "path": "$.profile.sample_rows[1].播出时长（分钟）",
+          "source_kind": "number",
+          "value": "11.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[1]"
+          },
+          "path": "$.profile.sample_rows[1].记录ID",
+          "source_kind": "number",
+          "value": "100101"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[2]"
+          },
+          "path": "$.profile.sample_rows[2].播出时长（分钟）",
+          "source_kind": "number",
+          "value": "12.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[2]"
+          },
+          "path": "$.profile.sample_rows[2].记录ID",
+          "source_kind": "number",
+          "value": "100102"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[3]"
+          },
+          "path": "$.profile.sample_rows[3].播出时长（分钟）",
+          "source_kind": "number",
+          "value": "13.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[3]"
+          },
+          "path": "$.profile.sample_rows[3].记录ID",
+          "source_kind": "number",
+          "value": "100103"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[4]"
+          },
+          "path": "$.profile.sample_rows[4].播出时长（分钟）",
+          "source_kind": "number",
+          "value": "14.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.profile.sample_rows[4]"
+          },
+          "path": "$.profile.sample_rows[4].记录ID",
+          "source_kind": "number",
+          "value": "100104"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0]"
+          },
+          "path": "$.roles.columns[0].confidence",
+          "source_kind": "number",
+          "value": "0.9"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].candidates[0]"
+          },
+          "path": "$.roles.columns[0].candidates[0].score",
+          "source_kind": "number",
+          "value": "0.9"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].candidates[1]"
+          },
+          "path": "$.roles.columns[0].candidates[1].score",
+          "source_kind": "number",
+          "value": "0.52"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].profile_evidence"
+          },
+          "path": "$.roles.columns[0].profile_evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].profile_evidence"
+          },
+          "path": "$.roles.columns[0].profile_evidence.distinct_count",
+          "source_kind": "number",
+          "value": "6"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].profile_evidence"
+          },
+          "path": "$.roles.columns[0].profile_evidence.non_null_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[0].profile_evidence"
+          },
+          "path": "$.roles.columns[0].profile_evidence.unique_ratio",
+          "source_kind": "number",
+          "value": "0.08"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1]"
+          },
+          "path": "$.roles.columns[1].confidence",
+          "source_kind": "number",
+          "value": "0.9"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1].candidates[0]"
+          },
+          "path": "$.roles.columns[1].candidates[0].score",
+          "source_kind": "number",
+          "value": "0.9"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1].profile_evidence"
+          },
+          "path": "$.roles.columns[1].profile_evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1].profile_evidence"
+          },
+          "path": "$.roles.columns[1].profile_evidence.distinct_count",
+          "source_kind": "number",
+          "value": "3"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1].profile_evidence"
+          },
+          "path": "$.roles.columns[1].profile_evidence.non_null_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[1].profile_evidence"
+          },
+          "path": "$.roles.columns[1].profile_evidence.unique_ratio",
+          "source_kind": "number",
+          "value": "0.04"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2]"
+          },
+          "path": "$.roles.columns[2].confidence",
+          "source_kind": "number",
+          "value": "0.96"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2].candidates[0]"
+          },
+          "path": "$.roles.columns[2].candidates[0].score",
+          "source_kind": "number",
+          "value": "0.96"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2].profile_evidence"
+          },
+          "path": "$.roles.columns[2].profile_evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2].profile_evidence"
+          },
+          "path": "$.roles.columns[2].profile_evidence.distinct_count",
+          "source_kind": "number",
+          "value": "2"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2].profile_evidence"
+          },
+          "path": "$.roles.columns[2].profile_evidence.non_null_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[2].profile_evidence"
+          },
+          "path": "$.roles.columns[2].profile_evidence.unique_ratio",
+          "source_kind": "number",
+          "value": "0.0267"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3]"
+          },
+          "path": "$.roles.columns[3].confidence",
+          "source_kind": "number",
+          "value": "0.95"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3].candidates[0]"
+          },
+          "path": "$.roles.columns[3].candidates[0].score",
+          "source_kind": "number",
+          "value": "0.95"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3].profile_evidence"
+          },
+          "path": "$.roles.columns[3].profile_evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0133"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3].profile_evidence"
+          },
+          "path": "$.roles.columns[3].profile_evidence.distinct_count",
+          "source_kind": "number",
+          "value": "37"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3].profile_evidence"
+          },
+          "path": "$.roles.columns[3].profile_evidence.non_null_count",
+          "source_kind": "number",
+          "value": "74"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[3].profile_evidence"
+          },
+          "path": "$.roles.columns[3].profile_evidence.unique_ratio",
+          "source_kind": "number",
+          "value": "0.5"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4]"
+          },
+          "path": "$.roles.columns[4].confidence",
+          "source_kind": "number",
+          "value": "0.98"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].candidates[0]"
+          },
+          "path": "$.roles.columns[4].candidates[0].score",
+          "source_kind": "number",
+          "value": "0.98"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].candidates[1]"
+          },
+          "path": "$.roles.columns[4].candidates[1].score",
+          "source_kind": "number",
+          "value": "0.55"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].profile_evidence"
+          },
+          "path": "$.roles.columns[4].profile_evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].profile_evidence"
+          },
+          "path": "$.roles.columns[4].profile_evidence.distinct_count",
+          "source_kind": "number",
+          "value": "74"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].profile_evidence"
+          },
+          "path": "$.roles.columns[4].profile_evidence.non_null_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.columns[4].profile_evidence"
+          },
+          "path": "$.roles.columns[4].profile_evidence.unique_ratio",
+          "source_kind": "number",
+          "value": "0.9867"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.time",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.metric",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.dimension",
+          "source_kind": "number",
+          "value": "2"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.identifier",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.unknown",
+          "source_kind": "number",
+          "value": "0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.roles.summary"
+          },
+          "path": "$.roles.summary.ambiguous",
+          "source_kind": "number",
+          "value": "0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality"
+          },
+          "path": "$.quality.duplicate_rows",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[0].evidence"
+          },
+          "path": "$.quality.issues[0].evidence.duplicate_rows",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[0].evidence"
+          },
+          "path": "$.quality.issues[0].evidence.duplicate_ratio",
+          "source_kind": "number",
+          "value": "0.0133"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[1].evidence"
+          },
+          "path": "$.quality.issues[1].evidence.null_ratio",
+          "source_kind": "number",
+          "value": "0.0133"
+        },
+        {
+          "path": "$.quality.issues[1].recommendation#number[0]",
+          "source_kind": "text",
+          "value": "0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[2].evidence"
+          },
+          "path": "$.quality.issues[2].evidence.non_null_count",
+          "source_kind": "number",
+          "value": "75"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[2].evidence"
+          },
+          "path": "$.quality.issues[2].evidence.distinct_count",
+          "source_kind": "number",
+          "value": "74"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.issues[2].evidence"
+          },
+          "path": "$.quality.issues[2].evidence.duplicate_values_at_least",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "path": "$.quality.recommendations[1].message#number[0]",
+          "source_kind": "text",
+          "value": "0"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.summary"
+          },
+          "path": "$.quality.summary.issue_count",
+          "source_kind": "number",
+          "value": "3"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.summary"
+          },
+          "path": "$.quality.summary.high",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.summary"
+          },
+          "path": "$.quality.summary.medium",
+          "source_kind": "number",
+          "value": "1"
+        },
+        {
+          "group_key": null,
+          "metric": null,
+          "object": {
+            "kind": "unresolved",
+            "path": "$.quality.summary"
+          },
+          "path": "$.quality.summary.low",
+          "source_kind": "number",
+          "value": "1"
+        }
+      ],
+      "value_index_truncated": false
+    }
+  },
+  "tool_result": {
+    "profile": {
+      "column_count": 5,
+      "columns": [
+        {
+          "distinct_count": 6,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "月份",
+          "null_ratio": 0.0,
+          "sample_values": [
+            "2026-01",
+            "2026-02",
+            "2026-03",
+            "2026-04",
+            "2026-05"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 3,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "频道",
+          "null_ratio": 0.0,
+          "sample_values": [
+            "A",
+            "B",
+            "C"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 2,
+          "dtype": "str",
+          "max": null,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "name": "状态",
+          "null_ratio": 0.0,
+          "sample_values": [
+            "已播出",
+            "停机"
+          ],
+          "std": null
+        },
+        {
+          "distinct_count": 37,
+          "dtype": "float",
+          "max": 999.0,
+          "mean": 50.121622,
+          "median": 37.5,
+          "min": 10.0,
+          "name": "播出时长（分钟）",
+          "null_ratio": 0.0133,
+          "sample_values": [
+            "10.0",
+            "11.0",
+            "12.0",
+            "13.0",
+            "14.0"
+          ],
+          "std": 113.152819
+        },
+        {
+          "distinct_count": 74,
+          "dtype": "int",
+          "max": 999002.0,
+          "mean": 124317.906667,
+          "median": 100400.0,
+          "min": 100100.0,
+          "name": "记录ID",
+          "null_ratio": 0.0,
+          "sample_values": [
+            "100100",
+            "100101",
+            "100102",
+            "100103",
+            "100104"
+          ],
+          "std": 145753.710454
+        }
+      ],
+      "dataset_ref": "12f67878eec14383923d1fde424f2594",
+      "row_count": 75,
+      "sample_rows": [
+        {
+          "播出时长（分钟）": 10.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100100,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 11.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100101,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 12.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100102,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 13.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100103,
+          "频道": "A"
+        },
+        {
+          "播出时长（分钟）": 14.0,
+          "月份": "2026-01",
+          "状态": "已播出",
+          "记录ID": 100104,
+          "频道": "A"
+        }
+      ]
+    },
+    "quality": {
+      "constant_columns": [],
+      "duplicate_rows": 1,
+      "high_null_columns": [],
+      "issues": [
+        {
+          "code": "duplicate_rows",
+          "columns": [],
+          "evidence": {
+            "duplicate_ratio": 0.0133,
+            "duplicate_rows": 1
+          },
+          "issue_id": "quality-001",
+          "recommendation": "确认重复记录的业务主键和保留规则后再去重，不能直接静默删除。",
+          "severity": "medium",
+          "suggested_action": "review_duplicate_rows"
+        },
+        {
+          "code": "missing_values",
+          "columns": [
+            "播出时长（分钟）"
+          ],
+          "evidence": {
+            "null_ratio": 0.0133,
+            "role": "metric"
+          },
+          "issue_id": "quality-002",
+          "recommendation": "先确认缺失机制，再选择删除或受治理填补；不得静默用 0 替代。",
+          "severity": "low",
+          "suggested_action": "review_missing_values"
+        },
+        {
+          "code": "non_unique_identifier",
+          "columns": [
+            "记录ID"
+          ],
+          "evidence": {
+            "distinct_count": 74,
+            "duplicate_values_at_least": 1,
+            "non_null_count": 75
+          },
+          "issue_id": "quality-003",
+          "recommendation": "核对该字段是否真是业务主键，或是否需要与其他字段组成联合主键。",
+          "severity": "high",
+          "suggested_action": "confirm_identifier_key"
+        }
+      ],
+      "mutates_data": false,
+      "recommendations": [
+        {
+          "action": "review_duplicate_rows",
+          "automatic": false,
+          "columns": [],
+          "issue_id": "quality-001",
+          "message": "确认重复记录的业务主键和保留规则后再去重，不能直接静默删除。"
+        },
+        {
+          "action": "review_missing_values",
+          "automatic": false,
+          "columns": [
+            "播出时长（分钟）"
+          ],
+          "issue_id": "quality-002",
+          "message": "先确认缺失机制，再选择删除或受治理填补；不得静默用 0 替代。"
+        },
+        {
+          "action": "confirm_identifier_key",
+          "automatic": false,
+          "columns": [
+            "记录ID"
+          ],
+          "issue_id": "quality-003",
+          "message": "核对该字段是否真是业务主键，或是否需要与其他字段组成联合主键。"
+        }
+      ],
+      "schema": "chatbi-data-quality-v1",
+      "summary": {
+        "high": 1,
+        "issue_count": 3,
+        "low": 1,
+        "medium": 1,
+        "requires_confirmation": true
+      }
+    },
+    "roles": {
+      "ambiguous_columns": [],
+      "columns": [
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:time_hint",
+                "dtype:str"
+              ],
+              "role": "time",
+              "score": 0.9
+            },
+            {
+              "evidence": [
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.52
+            }
+          ],
+          "column": "月份",
+          "confidence": 0.9,
+          "primary_role": "time",
+          "profile_evidence": {
+            "distinct_count": 6,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.08
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "cardinality:categorical",
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.9
+            }
+          ],
+          "column": "频道",
+          "confidence": 0.9,
+          "primary_role": "dimension",
+          "profile_evidence": {
+            "distinct_count": 3,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.04
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:dimension_hint",
+                "dtype:str"
+              ],
+              "role": "dimension",
+              "score": 0.96
+            }
+          ],
+          "column": "状态",
+          "confidence": 0.96,
+          "primary_role": "dimension",
+          "profile_evidence": {
+            "distinct_count": 2,
+            "dtype": "str",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.0267
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "dtype:float",
+                "name:metric_hint"
+              ],
+              "role": "metric",
+              "score": 0.95
+            }
+          ],
+          "column": "播出时长（分钟）",
+          "confidence": 0.95,
+          "primary_role": "metric",
+          "profile_evidence": {
+            "distinct_count": 37,
+            "dtype": "float",
+            "non_null_count": 74,
+            "null_ratio": 0.0133,
+            "unique_ratio": 0.5
+          }
+        },
+        {
+          "ambiguous": false,
+          "candidates": [
+            {
+              "evidence": [
+                "name:identifier_hint",
+                "cardinality:near_unique"
+              ],
+              "role": "identifier",
+              "score": 0.98
+            },
+            {
+              "evidence": [
+                "dtype:int"
+              ],
+              "role": "metric",
+              "score": 0.55
+            }
+          ],
+          "column": "记录ID",
+          "confidence": 0.98,
+          "primary_role": "identifier",
+          "profile_evidence": {
+            "distinct_count": 74,
+            "dtype": "int",
+            "non_null_count": 75,
+            "null_ratio": 0.0,
+            "unique_ratio": 0.9867
+          }
+        }
+      ],
+      "method": "deterministic-profile-heuristics-v1",
+      "requires_confirmation": false,
+      "schema": "chatbi-data-roles-v1",
+      "summary": {
+        "ambiguous": 0,
+        "dimension": 2,
+        "identifier": 1,
+        "metric": 1,
+        "time": 1,
+        "unknown": 0
+      }
+    }
+  }
+}

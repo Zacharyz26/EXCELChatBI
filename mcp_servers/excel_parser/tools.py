@@ -448,6 +448,7 @@ def _profile_column(series: pd.Series) -> ColumnProfile:
         name=str(series.name),
         dtype=dtype,
         null_ratio=null_ratio,
+        null_count=int(series.isna().sum()),
         distinct_count=distinct_count,
         sample_values=sample_values,
     )

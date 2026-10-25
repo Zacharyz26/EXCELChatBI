@@ -1,0 +1,114 @@
+{
+  "broadcast": {
+    "source_file": "broadcast.csv",
+    "sha256": "aaaeacde19ba301c75f6657cfed349f4046c46a2af2dabc24859da6ae96788aa",
+    "rows": 75,
+    "row_counts": [
+      75,
+      38,
+      37,
+      36
+    ],
+    "total": 1350,
+    "monthly": [
+      75,
+      135,
+      195,
+      255,
+      315,
+      375
+    ],
+    "columns": [
+      "月份",
+      "频道",
+      "状态",
+      "播出时长（分钟）",
+      "记录ID"
+    ],
+    "units": "分钟"
+  },
+  "device": {
+    "source_file": "device.csv",
+    "sha256": "c461a369d7b6eed4418ae7bb408602c193d676b2a922f04d96e1e16b8b923cc6",
+    "rows": 75,
+    "row_counts": [
+      75,
+      38,
+      37,
+      36
+    ],
+    "total": 1350,
+    "monthly": [
+      75,
+      135,
+      195,
+      255,
+      315,
+      375
+    ],
+    "columns": [
+      "月份",
+      "设备",
+      "状态",
+      "停机时长（分钟）",
+      "记录ID"
+    ],
+    "units": "分钟"
+  },
+  "activity": {
+    "source_file": "activity.csv",
+    "sha256": "baf0fec8ff0cef2ac7f721ea2365181e4ed3ea101f0fb9c5c8de73bdc2911169",
+    "rows": 75,
+    "row_counts": [
+      75,
+      38,
+      37,
+      36
+    ],
+    "total": 1350,
+    "monthly": [
+      75,
+      135,
+      195,
+      255,
+      315,
+      375
+    ],
+    "columns": [
+      "月份",
+      "活动类型",
+      "状态",
+      "活动时长（分钟）",
+      "记录ID"
+    ],
+    "units": "分钟"
+  },
+  "sales": {
+    "source_file": "sales.csv",
+    "sha256": "b2453dd5754d0e1804a03211e9e951d96f826180c3831d972584cd12754587f1",
+    "rows": 75,
+    "row_counts": [
+      75,
+      38,
+      37,
+      36
+    ],
+    "total": 1350,
+    "monthly": [
+      75,
+      135,
+      195,
+      255,
+      315,
+      375
+    ],
+    "columns": [
+      "月份",
+      "渠道",
+      "状态",
+      "销售额（元）",
+      "记录ID"
+    ],
+    "units": "元"
+  }
+}

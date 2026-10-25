@@ -778,9 +778,7 @@ class AgentToolRegistry:
             self._context.store.delete_dataset(ownership.dataset_ref)
         delete_dataset(ownership.dataset_ref)
 
-    def _cleanup_abandoned_mcp_result(
-        self, name: str, call_result: MCPCallResult
-    ) -> None:
+    def _cleanup_abandoned_mcp_result(self, name: str, call_result: MCPCallResult) -> None:
         result = call_result.structured_content
         if not isinstance(result, dict):
             return
@@ -1113,7 +1111,8 @@ def _profile_with_quality(excel: MCPServer, args: dict[str, Any]) -> dict[str, A
         data_profile,
         roles,
         duplicate_rows=(
-            None if any(c.null_ratio is None for c in data_profile.columns)
+            None
+            if any(c.null_ratio is None for c in data_profile.columns)
             else duplicate_row_count(args["dataset_ref"])
         ),
     )
@@ -1370,8 +1369,24 @@ def _generate_report(
         raise AgentToolError(f"分析不存在于本对话: {', '.join(missing[:5])}")
     artifacts = [artifact for analysis_id in wanted for artifact in by_analysis_id[analysis_id]]
 
+    from packages.session.task_store import TaskStore
+
+    from apps.orchestrator.control.duplicate_repair import restored_duplicate_obligations
+
+    task_store = TaskStore(context.store.db_path)
+    latest_run = task_store.get_latest_run_for_conversation(context.conversation_id)
+    obligations = []
+    if latest_run is not None and latest_run.project_id == context.project_id:
+        obligations = restored_duplicate_obligations(
+            task_store.list_events_by_type(latest_run.run_id, "verification")
+        )
+        obligations = [
+            item
+            for item in obligations
+            if item.get("status") not in {"resolved", "withdrawn_optional"}
+        ]
     try:
-        validation = validate_report_narratives(artifacts, args)
+        validation = validate_report_narratives(artifacts, args, repair_obligations=obligations)
     except ValueError as exc:
         raise AgentToolError(str(exc)) from exc
     md_args, skipped_charts = _assemble_report_args(chart, artifacts)

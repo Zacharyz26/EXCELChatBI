@@ -43,7 +43,7 @@ from packages.governance.permissions import Principal
 from packages.governance.policy import PolicyDecision, ToolPolicyGateway, ToolPolicyRequest
 from packages.governance.schema_validator import SchemaValidationError
 from packages.models.types import Message as ModelMessage
-from packages.models.types import ModelResponse, Scenario, ToolCall
+from packages.models.types import ModelBudgetExceeded, ModelResponse, Scenario, ToolCall
 from packages.orchestration.analysis_requirements import (
     AnalysisRequirements,
     explicit_analysis_requirements,
@@ -57,6 +57,7 @@ from packages.orchestration.contracts import (
 )
 from packages.orchestration.dataset_scope import (
     is_filter_preserving_cleanup,
+    selected_analysis_dataset_refs,
     verified_analysis_scope,
 )
 from packages.session.compaction import (
@@ -124,6 +125,14 @@ from apps.orchestrator.control.data_role_guard import (
     tool_role_requirements,
     validate_data_role_preconditions,
 )
+from apps.orchestrator.control.duplicate_repair import (
+    capture_duplicate_obligations,
+    duplicate_obligation_instruction,
+    enforce_duplicate_obligations,
+    resolve_duplicate_obligations,
+    restored_duplicate_obligations,
+    unresolved_duplicate_obligations,
+)
 from apps.orchestrator.control.hypotheses import (
     requests_open_exploration,
     screen_candidate_hypotheses,
@@ -141,6 +150,11 @@ from apps.orchestrator.control.plan_executor import (
     schedule_payload,
     schedule_plan_steps,
 )
+from apps.orchestrator.control.profile_claims import (
+    DUPLICATE_COUNT_INCOMPLETE,
+    duplicate_count_feedback,
+)
+from apps.orchestrator.control.profile_population import profile_population_arguments
 from apps.orchestrator.control.task_outline import create_task_outline
 from apps.orchestrator.control.verifier import VerificationResult, verify_completion
 from apps.orchestrator.request_intent import (
@@ -209,7 +223,10 @@ reliability=limited 或 beats_baseline=false 时不得表述为可靠预测。
 14. 若多个数据集、指标、时间列或知识口径的选择会改变结论，先提出一个明确的阻塞问题，\
 不要静默替用户选择，也不要在澄清前调用分析工具。
 15. 最终答复不得自行计算比例、百分比或派生统计量；工具没有直接返回的数字应省略。
-16. 知识回答必须逐字包含知识工具返回的 source 标签，例如“来源：指标口径.md”。"""
+16. 知识回答必须逐字包含知识工具返回的 source 标签，例如“来源：指标口径.md”。
+17. 业务场景由用户目标和实际字段决定。指标、单位、图表标题和报告措辞必须与本次数据一致；\
+没有依据时不要假定销售额、订单、客户或利润。真实销售数据仍按其实际销售口径分析。\
+记录行数不等于去重对象数；比率、均值的分母或权重不明确时先澄清，不直接加总或平均。"""
 
 _MISSING_CHART_RETRY_LIMIT = 1
 _MISSING_CHART_INSTRUCTION = (
@@ -245,10 +262,6 @@ _AGGREGATE_PATTERN = re.compile(
     r"(?:汇总|合计|平均|各地区|各产品|分组|group\s*by)",
     re.IGNORECASE,
 )
-_METRIC_HINT_PATTERN = re.compile(
-    r"(?:销售额|销量|利润|收入|金额|订单量|订单数|转化率|复购率|用户数|访问量|成本)"
-)
-_TIME_COLUMN_PATTERN = re.compile(r"(?:时间|日期|月份|月|年|周|季度)")
 _CONFLICT_HISTORY_PATTERN = re.compile(r"(?:存在冲突口径|口径冲突|冲突定义)")
 _JOIN_REQUEST_PATTERN = re.compile(
     r"(?:\bjoin\b|关联数据集|数据集关联|跨表关联|表连接|连接两表|合并两表|"
@@ -688,17 +701,13 @@ def _role_selection_clarification(
                 candidates.append(column)
                 ambiguous_by_column[column] = bool(item.get("ambiguous"))
     except ValueError:
-        pattern = (
-            _TIME_COLUMN_PATTERN
-            if role == "time"
-            else _METRIC_HINT_PATTERN
-            if role == "metric"
-            else None
-        )
-        candidates = (
-            [name for name in columns if pattern.search(name)] if pattern is not None else []
-        )
-        ambiguous_by_column = dict.fromkeys(candidates, False)
+        # Missing metadata cannot establish roles in any business domain.
+        return {
+            "question_id": "data_profile",
+            "about": "data_profile",
+            "question": "当前数据画像缺少字段类型或分布信息，请先更新画像或重新上传数据。",
+            "reason": "画像不完整，无法可靠区分标识、维度、时间和指标；不会按业务词猜测。",
+        }
 
     explicitly_named = [name for name in columns if name in user_text]
     explicit_candidate = next(
@@ -2247,6 +2256,10 @@ async def _stream_agent_chat_inner(
         missing_chart_retries = 0
         missing_report_retries = 0
         unsupported_claim_retries = 0
+        duplicate_obligations = restored_duplicate_obligations(
+            await run_in_threadpool(task_store.list_events_by_type, run_id, "verification")
+        )
+        pending_duplicate_repair = unresolved_duplicate_obligations(duplicate_obligations)
         required_analysis_retries = 0
         incomplete_plan_retries = 0
         budget_exhausted = attempts_used >= config.max_tool_calls
@@ -2326,6 +2339,37 @@ async def _stream_agent_chat_inner(
                                 cost=(response.cost if response.cost != 0 else "unavailable"),
                                 tool_call_count=len(response.tool_calls),
                             )
+            except ModelBudgetExceeded:
+                # This explicit admission contract guarantees no provider request
+                # was dispatched. Never guess budget failure from error strings.
+                message = (
+                    "模型请求预算守卫已阻止本轮请求，未向供应商发送该请求，任务未完成。"
+                    "请先核对可用额度和限制，再决定是否继续。"
+                )
+                if pending_duplicate_repair:
+                    message += DUPLICATE_COUNT_INCOMPLETE
+                run, blocked_event = await run_in_threadpool(
+                    task_store.transition,
+                    run_id,
+                    expected_version=run.state_version,
+                    status="blocked",
+                    event_type="run.blocked",
+                    terminal_reason="model_budget_exhausted",
+                    payload={"reason": "model_budget_exhausted", "message": message},
+                    usage=_tool_usage(calls_used, attempts_used, invalid_attempts_used),
+                )
+                yield _task_event(blocked_event, conversation_id)
+                yield _event(
+                    "error",
+                    {
+                        "code": "model_budget_exhausted",
+                        "message": message,
+                        "retryable": False,
+                        "run_id": run_id,
+                        "run_status": run.status,
+                    },
+                )
+                return
             except TimeoutError:
                 if (
                     control is not None
@@ -2369,7 +2413,8 @@ async def _stream_agent_chat_inner(
                     "error",
                     {
                         "code": "model_unavailable",
-                        "message": "模型暂时不可用，请稍后重试。",
+                        "message": "模型暂时不可用，请稍后重试。"
+                        + (DUPLICATE_COUNT_INCOMPLETE if pending_duplicate_repair else ""),
                         "retryable": True,
                     },
                 )
@@ -2477,6 +2522,20 @@ async def _stream_agent_chat_inner(
                     source_artifacts=all_artifacts,
                 )
 
+                duplicate_obligations = capture_duplicate_obligations(
+                    duplicate_obligations, claims, evidence, contract
+                )
+                duplicate_obligations = resolve_duplicate_obligations(
+                    duplicate_obligations, claims, turn_text
+                )
+                verification = enforce_duplicate_obligations(verification, duplicate_obligations)
+                pending_duplicate_repair = unresolved_duplicate_obligations(duplicate_obligations)
+                duplicate_feedback = duplicate_count_feedback(claims, evidence)
+                if pending_duplicate_repair:
+                    duplicate_feedback = duplicate_feedback or _UNSUPPORTED_CLAIM_INSTRUCTION
+                    duplicate_feedback += "\n" + duplicate_obligation_instruction(
+                        duplicate_obligations
+                    )
                 retry_instruction: str | None = None
                 issue_codes = {item.code for item in verification.issues}
                 chart_retry_limit = min(
@@ -2521,7 +2580,7 @@ async def _stream_agent_chat_inner(
                 elif "unsupported_numeric_claim" in issue_codes:
                     if tools_enabled and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT:
                         unsupported_claim_retries += 1
-                        retry_instruction = _UNSUPPORTED_CLAIM_INSTRUCTION
+                        retry_instruction = duplicate_feedback or _UNSUPPORTED_CLAIM_INSTRUCTION
                 elif "unsupported_knowledge_claim" in issue_codes:
                     if tools_enabled and unsupported_claim_retries < _UNSUPPORTED_CLAIM_RETRY_LIMIT:
                         unsupported_claim_retries += 1
@@ -2537,6 +2596,7 @@ async def _stream_agent_chat_inner(
                 if (
                     not verification.passed
                     and retry_instruction is None
+                    and duplicate_feedback is None
                     and issue_codes.intersection(
                         {"unsupported_numeric_claim", "unsupported_knowledge_claim"}
                     )
@@ -2570,9 +2630,25 @@ async def _stream_agent_chat_inner(
                             dataset_bindings=dataset_bindings,
                             source_artifacts=all_artifacts,
                         )
+                        duplicate_obligations = resolve_duplicate_obligations(
+                            duplicate_obligations, claims, turn_text
+                        )
+                        verification = enforce_duplicate_obligations(
+                            verification, duplicate_obligations
+                        )
+                        pending_duplicate_repair = unresolved_duplicate_obligations(
+                            duplicate_obligations
+                        )
                         issue_codes = {item.code for item in verification.issues}
 
                 verification_payload = _verification_payload(verification)
+                if duplicate_obligations:
+                    verification_payload["duplicate_obligations"] = duplicate_obligations
+                if duplicate_feedback is not None:
+                    verification_payload["numeric_repair"] = {
+                        "kind": "duplicate_count_basis",
+                        "instruction": duplicate_feedback,
+                    }
                 if auto_repair_actions:
                     verification_payload["deterministic_repairs"] = list(auto_repair_actions)
                 if retry_instruction is not None:
@@ -2650,6 +2726,8 @@ async def _stream_agent_chat_inner(
                         )
                         return
                     error_code, error_message = _verification_error(verification)
+                    if pending_duplicate_repair:
+                        error_message += DUPLICATE_COUNT_INCOMPLETE
                     yield _event(
                         "error",
                         {
@@ -2962,7 +3040,13 @@ async def _stream_agent_chat_inner(
                     else None
                 )
                 scope_error = await run_in_threadpool(
-                    _analysis_scope_error, task_store, run_id, contract, call.name, call_args
+                    _analysis_scope_error,
+                    task_store,
+                    run_id,
+                    contract,
+                    call.name,
+                    call_args,
+                    current_artifacts if call.name == "generate_report" else [],
                 )
                 business_plan_record = await run_in_threadpool(task_store.get_active_plan, run_id)
                 effect_scope = run_id
@@ -3469,10 +3553,17 @@ async def _stream_agent_chat_inner(
                         return
                     continue
 
+                evidence_arguments = (
+                    profile_population_arguments(
+                        store, call_args, cancellation_branch.data_version_hash
+                    )
+                    if call.name == "get_data_profile"
+                    else {**call_args, "data_version_hash": cancellation_branch.data_version_hash}
+                )
                 artifact_draft = _prepare_artifact(
                     call,
                     result,
-                    arguments=call_args,
+                    arguments=evidence_arguments if call.name == "get_data_profile" else call_args,
                     artifact_type=_artifact_type_for(registry, call.name),
                 )
                 shadow_comparison = _compare_mcp_success(
@@ -3585,10 +3676,7 @@ async def _stream_agent_chat_inner(
                             summary=summary,
                             result=result,
                             artifact_id=None,
-                            arguments={
-                                **call_args,
-                                "data_version_hash": cancellation_branch.data_version_hash,
-                            },
+                            arguments=evidence_arguments,
                         ),
                         artifact_draft=artifact_draft,
                     )
@@ -3693,7 +3781,8 @@ async def _stream_agent_chat_inner(
                 {
                     "code": "model_round_limit_exhausted",
                     "message": (
-                        f"模型执行轮次已达上限（{config.max_model_rounds} 轮），" "任务已安全停止。"
+                        f"模型执行轮次已达上限（{config.max_model_rounds} 轮），任务已安全停止。"
+                        + (DUPLICATE_COUNT_INCOMPLETE if pending_duplicate_repair else "")
                     ),
                     "retryable": True,
                 },
@@ -3739,7 +3828,14 @@ async def _stream_agent_chat_inner(
             expected_version=run.state_version,
             status="completed",
             event_type="verification",
-            payload=_verification_payload(passed_verification),
+            payload={
+                **_verification_payload(passed_verification),
+                **(
+                    {"duplicate_obligations": duplicate_obligations}
+                    if duplicate_obligations
+                    else {}
+                ),
+            },
             usage=_tool_usage(calls_used, attempts_used, invalid_attempts_used),
         )
         yield _task_event(verification_event, conversation_id)
@@ -4680,6 +4776,7 @@ def _analysis_scope_error(
     contract: TaskContract,
     tool_name: str,
     arguments: JsonObject,
+    source_artifacts: list[Artifact] | None = None,
 ) -> str | None:
     """串行/并行共用执行前范围检查，所有 dataset 参数受同一派生约束。"""
     requirements = contract.analysis_requirements
@@ -4687,9 +4784,12 @@ def _analysis_scope_error(
         return None
     if requirements.filter_error:
         return requirements.filter_error
-    refs = {
-        ref for _, ref in dataset_reference_arguments(arguments) if isinstance(ref, str)
-    }
+    refs = {ref for _, ref in dataset_reference_arguments(arguments) if isinstance(ref, str)}
+    if tool_name == "generate_report" and (requirements.filters or requirements.dataset_ref):
+        selected_refs = selected_analysis_dataset_refs(arguments, source_artifacts or [])
+        if selected_refs is None:
+            return "报告所选分析缺少可验证的数据集版本，不能证明本次范围。"
+        refs.update(selected_refs)
     if not refs:
         return None
     scope = verified_analysis_scope(
@@ -4717,10 +4817,7 @@ def _analysis_scope_error(
         "aggregate_preview",
         "dimension_contribution",
     }:
-        if (
-            requirements.total_column
-            and arguments.get("value_col") != requirements.total_column
-        ):
+        if requirements.total_column and arguments.get("value_col") != requirements.total_column:
             return "总计指标与用户要求的字段不一致。"
     return None
 
@@ -4852,7 +4949,15 @@ async def _try_execute_parallel_frontier(
         if not decision.allowed:
             return None
         if await run_in_threadpool(
-            _analysis_scope_error, task_store, run_id, contract, call.name, arguments
+            _analysis_scope_error,
+            task_store,
+            run_id,
+            contract,
+            call.name,
+            arguments,
+            (await run_in_threadpool(store.list_artifacts, conversation_id))
+            if call.name == "generate_report"
+            else [],
         ):
             return None
         signature = business_invocation_key(run_id, call.name, arguments)
@@ -5059,10 +5164,15 @@ async def _try_execute_parallel_frontier(
             continue
 
         result = execution.result
+        evidence_arguments = (
+            profile_population_arguments(store, item.arguments, branch.data_version_hash)
+            if item.call.name == "get_data_profile"
+            else item.arguments
+        )
         artifact_draft = _prepare_artifact(
             item.call,
             result,
-            arguments=item.arguments,
+            arguments=evidence_arguments,
             artifact_type=_artifact_type_for(registry, item.call.name),
         )
         shadow_comparison = _compare_mcp_success(
@@ -5122,7 +5232,7 @@ async def _try_execute_parallel_frontier(
                 summary=summary,
                 result=result,
                 artifact_id=None,
-                arguments=item.arguments,
+                arguments=evidence_arguments,
             ),
             artifact_draft=artifact_draft,
         )

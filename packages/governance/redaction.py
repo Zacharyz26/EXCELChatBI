@@ -84,6 +84,7 @@ def apply_policy(
         elif action is SampleAction.EXCLUDE:
             col.sample_values = []
             col.null_ratio = col.distinct_count = None
+            col.null_count = None
             col.min = col.max = col.mean = col.std = col.median = None
 
     for row in profile.sample_rows:

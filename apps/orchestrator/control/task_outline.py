@@ -21,6 +21,7 @@ from packages.orchestration.task_plan_contract import (
 from packages.session.models import Artifact, Dataset, JsonObject
 
 from apps.orchestrator.agent_tools import AgentToolRegistry
+from apps.orchestrator.control.knowledge_intent import knowledge_search_requested
 from apps.orchestrator.request_intent import requests_report
 
 OutlineRoute = Literal["fast", "template"]
@@ -491,7 +492,7 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("data.quality")
     elif profile_requested:
         add("data.profile")
-    if any(token in request for token in ("定义", "口径", "公司规定")):
+    if knowledge_search_requested(user_text):
         add("knowledge.search")
     if "异常" in request:
         add("stats.anomaly")

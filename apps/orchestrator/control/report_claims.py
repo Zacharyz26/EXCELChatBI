@@ -9,20 +9,21 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import unicodedata
+import re
+from html import unescape
 from html.parser import HTMLParser
 from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
 from packages.common.report_safety import escape_report_markup, sanitize_report_html
 from packages.session.models import Artifact, JsonObject
-from packages.session.task_models import EvidenceRecord
+from packages.session.task_models import ClaimDraft, EvidenceRecord
 
 from apps.orchestrator.control.claims import build_evidence_summary, extract_numeric_claims
 
 
 class _VisibleText(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, quote_fence: str, inline_sources: dict[str, str]) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.row: list[str] | None = None
@@ -30,8 +31,23 @@ class _VisibleText(HTMLParser):
         self.header: list[str] = []
         self.header_row = False
         self.in_table = False
+        self.quoted_depth = 0
+        self.quote_fence = quote_fence
+        self.inline_sources = inline_sources
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # Reconstruct structural boundaries for the same bounded heading binder
+        # used by chat. Rendered quotations/code must not become author headings.
+        if tag in {"pre", "blockquote"}:
+            if self.quoted_depth == 0:
+                self.parts.append("\n\n" + self.quote_fence + "\n")
+            self.quoted_depth += 1
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.parts.append("\n\n" + "#" * int(tag[1]) + " ")
+        elif tag == "strong":
+            (self.cell if self.cell is not None else self.parts).append("**")
+        elif tag == "p":
+            self.parts.append("\n\n")
         if tag == "table":
             self.header = []
             self.in_table = True
@@ -43,11 +59,18 @@ class _VisibleText(HTMLParser):
             self.header_row = self.header_row or tag == "th"
 
     def handle_data(self, data: str) -> None:
+        data = self.inline_sources.get(data, data)
         if self.in_table and self.cell is None and not data.strip():
             return
         (self.cell if self.cell is not None else self.parts).append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in {"pre", "blockquote"}:
+            self.quoted_depth -= 1
+            if self.quoted_depth == 0:
+                self.parts.append("\n" + self.quote_fence + "\n\n")
+        elif tag == "strong":
+            (self.cell if self.cell is not None else self.parts).append("**")
         if tag == "table":
             self.in_table = False
         elif tag in {"td", "th"} and self.cell is not None and self.row is not None:
@@ -65,31 +88,54 @@ class _VisibleText(HTMLParser):
             else:
                 self.parts.append("| " + " | ".join(self.row) + " |\n")
             self.row = None
-        elif tag in {"p", "li", "pre", "blockquote", "h1", "h2", "h3"}:
+        elif tag in {"p", "h1", "h2", "h3", "h4", "h5", "h6"}:
+            self.parts.append("\n\n")
+        elif tag == "li":
             self.parts.append("\n")
 
 
 def _visible_text(text: str, *, heading: bool = False) -> str:
     # Lazy: core API startup must not require the optional report dependencies.
     markdown = importlib.import_module("markdown")
-    parser = _VisibleText()
     source = escape_report_markup(text)
     if heading:
         source = "### " + source  # Same heading context used by the report formatter.
-    rendered = markdown.markdown(source, extensions=["tables", "fenced_code"])
-    parser.feed(sanitize_report_html(rendered))
+    converter = markdown.Markdown(extensions=["tables", "fenced_code"])
+    inline_sources: dict[str, str] = {}
+    processor = converter.inlinePatterns["backtick"]
+    original_match = processor.handleMatch
+
+    def source_match(match: re.Match[str], data: str) -> Any:
+        element, left, right = original_match(match, data)
+        if not isinstance(element, str):
+            # Capture the actual Markdown processor's matched source, including
+            # delimiter width and internal backticks. Do not invent quotations
+            # from rendered code, or exempt code content from numeric checking.
+            token = "CHATBI_INLINE_SOURCE_" + str(len(inline_sources))
+            while token in source or token in inline_sources:
+                token += "_"
+            inline_sources[token] = unescape(data[left:right])
+            element.text = token
+        return element, left, right
+
+    processor.handleMatch = source_match
+    rendered = converter.convert(source)
+    visible_html = sanitize_report_html(rendered)
+    # Text inside quotations/code cannot forge our structural closing marker,
+    # even when backticks were written as HTML character references.
+    longest = max((len(m[0]) for m in re.finditer(r"`+", unescape(visible_html))), default=0)
+    parser = _VisibleText("`" * max(3, longest + 1), inline_sources)
+    parser.feed(visible_html)
     parser.close()
-    visible = "".join(
-        char
-        for char in unicodedata.normalize("NFKC", "".join(parser.parts))
-        if unicodedata.category(char) != "Cf"
-    )
+    # Preserve Unicode value/identifier spelling. Numeric tokenization and
+    # percentage scale are shared with chat; whole-text NFKC or removal of
+    # format characters could silently change a value or merge field names.
+    visible = "".join(parser.parts)
     # Real Markdown list counters are absent from HTML text already. A numeric
     # heading such as "123. 收入" is data, not an enumeration marker to discard.
-    return "\n".join(
-        line if line.startswith("|") else f"报告内容：{line}"
-        for line in visible.splitlines()
-    )
+    # Do not inject a marker between lines of one statistical assertion.
+    # The extraction call keeps literal numeric heading counters instead.
+    return visible
 
 
 def _numeric_data(value: Any) -> Any:
@@ -107,7 +153,12 @@ def _numeric_data(value: Any) -> Any:
     return None
 
 
-def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> JsonObject:
+def validate_report_narratives(
+    artifacts: list[Artifact],
+    args: JsonObject,
+    *,
+    repair_obligations: list[JsonObject] | None = None,
+) -> JsonObject:
     dataset_refs = {artifact.dataset_ref for artifact in artifacts if artifact.dataset_ref}
     if len(dataset_refs) > 1:
         raise ValueError("报告分析来自不同数据集版本/总体，请选择同一派生数据集的分析")
@@ -133,10 +184,31 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
                         for key in ("issue_count", "high", "medium", "low")
                     },
                     "issues": [
-                        {"evidence": issue.get("evidence")}
+                        {
+                            "code": issue.get("code"),
+                            "columns": issue.get("columns", []),
+                            "evidence": issue.get("evidence"),
+                        }
                         for issue in quality.get("issues", [])
                         if isinstance(issue, dict)
                     ],
+                },
+                # Exact counts only, not role confidence, suggestions or prose.
+                # The shared profile binder checks these against named columns'
+                # exact null_count and row_count before admitting a fact.
+                "roles": {
+                    "columns": [
+                        {
+                            "column": role.get("column"),
+                            "profile_evidence": {
+                                "non_null_count": (role.get("profile_evidence") or {}).get(
+                                    "non_null_count"
+                                )
+                            },
+                        }
+                        for role in (payload.get("roles") or {}).get("columns", [])
+                        if isinstance(role, dict)
+                    ]
                 },
                 "profile": payload.get("profile", payload),
             }
@@ -231,14 +303,19 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
         )
 
     verified: list[JsonObject] = []
+    delivered_claims: list[ClaimDraft] = []
+    delivered_text: list[str] = []
     for name, text, heading in sections:
         if not text:
             continue
+        visible = _visible_text(text, heading=heading)
+        delivered_text.append(visible)
         for claim in extract_numeric_claims(
-            final_text=_visible_text(text, heading=heading),
-            goal="",
+            final_text=visible,
+            goal=_visible_text(str(args["title"])),
             evidence=evidence,
             evidence_is_typed=True,
+            strip_list_markers=False,
         ):
             unsupported = [ref["token"] for ref in claim.value_refs if not ref.get("supported")]
             if unsupported:
@@ -246,6 +323,7 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
                     f"报告正文数值缺少所选分析的证据（{name}: {', '.join(unsupported[:5])}）；"
                     "请使用工具计算并选择对应分析，或删除无法核实的数字后重试"
                 )
+            delivered_claims.append(claim)
             verified.append(
                 {
                     "section": name,
@@ -257,6 +335,19 @@ def validate_report_narratives(artifacts: list[Artifact], args: JsonObject) -> J
                         for ref in claim.value_refs
                     ],
                 }
+            )
+    if repair_obligations:
+        from apps.orchestrator.control.duplicate_repair import (
+            resolve_duplicate_obligations,
+            unresolved_duplicate_obligations,
+        )
+
+        disposition = resolve_duplicate_obligations(
+            repair_obligations, delivered_claims, "\n".join(delivered_text)
+        )
+        if unresolved_duplicate_obligations(disposition):
+            raise ValueError(
+                "报告仍有未解决的重复计数：必交付内容须核验，非必需结论须明确撤回；不能静默删文。"
             )
     return {
         "status": "passed",
