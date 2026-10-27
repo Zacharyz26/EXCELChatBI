@@ -4,14 +4,39 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
+import httpx
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from packages.models.adapters.base import ModelAdapter
 from packages.models.registry import ModelSpec
 from packages.models.types import Message, ModelResponse, ToolCall
+from packages.models.usage import ParsedUsage, parse_usage
+
+_ResponseT = TypeVar("_ResponseT")
+
+
+class _UsagePreservingClient(AsyncOpenAI):
+    """在 SDK 宽松类型转换前保存用量判定，不改变内容解析或重试策略。"""
+
+    def _process_response_data(
+        self, *, data: object, cast_to: type[_ResponseT], response: httpx.Response
+    ) -> _ResponseT:
+        parsed = super()._process_response_data(data=data, cast_to=cast_to, response=response)
+        if isinstance(data, dict) and hasattr(parsed, "usage"):
+            # SDK 的 Optional[CompletionUsage] 可将字符串/bool/浮点数强制转 int。
+            # 只保留经检查的计数与原因；不保存完整原始响应或凭据。
+            object.__setattr__(parsed, "_chatbi_usage", parse_usage(data.get("usage")))
+        return parsed
+
+
+def _response_usage(response: object) -> ParsedUsage:
+    preserved = getattr(response, "_chatbi_usage", None)
+    if isinstance(preserved, ParsedUsage):
+        return preserved
+    return parse_usage(getattr(response, "usage", None))
 
 
 def _to_wire(messages: list[Message]) -> list[dict[str, Any]]:
@@ -73,7 +98,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             raise ValueError(
                 f"模型 {spec.name} 缺少 API key，请在 .env 配置对应变量后重试"
             )
-        self._client = AsyncOpenAI(
+        self._client = _UsagePreservingClient(
             base_url=spec.api_base or None,
             api_key=spec.api_key,
             timeout=timeout_seconds,
@@ -99,14 +124,15 @@ class OpenAICompatibleAdapter(ModelAdapter):
             **kwargs,
         )
         latency_ms = (time.perf_counter() - started) * 1000
-        usage = resp.usage
+        usage = _response_usage(resp)
         message = resp.choices[0].message
         return ModelResponse(
             content=message.content or "",
             model=self._spec.model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            usage_available=usage is not None,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            usage_available=usage.available,
+            usage_issues=usage.issues,
             latency_ms=latency_ms,
             raw={},
             tool_calls=_parse_tool_calls(message),
@@ -138,15 +164,18 @@ class OpenAICompatibleAdapter(ModelAdapter):
         )
         parts: list[str] = []
         calls: dict[int, dict[str, Any]] = {}
-        prompt_tokens = 0
-        completion_tokens = 0
-        usage_available = False
+        usage_result = ParsedUsage()
+        usage_seen = False
         async for chunk in stream:
             usage = getattr(chunk, "usage", None)
             if usage is not None:
-                usage_available = True
-                prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
-                completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                current_usage = _response_usage(chunk)
+                if usage_seen and current_usage != usage_result:
+                    # 只接受一致快照；不可将不同chunk的部分计数拼成完整账单。
+                    usage_result = ParsedUsage(issues=("conflicting_usage_chunks",))
+                else:
+                    usage_result = current_usage
+                usage_seen = True
             if not chunk.choices:
                 continue  # 部分供应商的末尾 usage chunk 无 choices
             delta = chunk.choices[0].delta
@@ -168,9 +197,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
         yield ModelResponse(
             content="".join(parts),
             model=self._spec.model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            usage_available=usage_available,
+            prompt_tokens=usage_result.prompt_tokens,
+            completion_tokens=usage_result.completion_tokens,
+            usage_available=usage_result.available,
+            usage_issues=usage_result.issues,
             latency_ms=(time.perf_counter() - started) * 1000,
             tool_calls=[
                 ToolCall(

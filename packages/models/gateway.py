@@ -23,6 +23,7 @@ from packages.models.dsml import (
 )
 from packages.models.registry import ModelRegistry, ModelSpec
 from packages.models.types import Message, ModelResponse, Scenario
+from packages.models.usage import is_token_count
 
 _log = get_logger("models.gateway")
 
@@ -370,11 +371,20 @@ def _set_response_trace(span: TraceSpan, response: ModelResponse) -> None:
 
 def _apply_pricing(response: ModelResponse, spec: ModelSpec) -> None:
     """Estimate response cost from trusted registry pricing and returned usage."""
-    response.usage_available = response.usage_available or bool(
-        response.prompt_tokens or response.completion_tokens
-    )
     pricing = spec.pricing
-    if pricing is None or not response.usage_available:
+    if (
+        response.usage_available is not True
+        or response.usage_issues
+        or not is_token_count(response.prompt_tokens)
+        or not is_token_count(response.completion_tokens)
+    ):
+        # 已知其中一项不代表完整用量，不能把适配器的未知标志重新提升为真。
+        response.usage_available = False
+        response.cost = None
+        response.cost_currency = None
+        response.pricing_effective_date = None
+        return
+    if pricing is None:
         response.cost = None
         response.cost_currency = None
         response.pricing_effective_date = None

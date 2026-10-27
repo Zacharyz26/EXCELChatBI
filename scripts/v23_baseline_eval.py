@@ -32,6 +32,7 @@ from apps.orchestrator.agent_loop import (  # noqa: E402
 from packages.models.gateway import ModelGateway  # noqa: E402
 from packages.models.registry import ModelRegistry  # noqa: E402
 from packages.models.types import Message, ModelResponse, Scenario  # noqa: E402
+from packages.models.usage import sum_token_counts  # noqa: E402
 from packages.session.models import Conversation, JsonObject  # noqa: E402
 from packages.session.store import SessionStore  # noqa: E402
 from packages.session.task_store import TaskStore  # noqa: E402
@@ -835,13 +836,19 @@ def _observable_row(
         "plan_steps_total": len(plan_steps),
         "plan_steps_completed": sum(step.status in {"completed", "skipped"} for step in plan_steps),
         "outline_revisions": sum(event.event_type == "plan.revised" for event in task_events),
-        "prompt_tokens": sum(response.prompt_tokens for response in responses),
-        "completion_tokens": sum(response.completion_tokens for response in responses),
+        "prompt_tokens": sum_token_counts(response.prompt_tokens for response in responses),
+        "completion_tokens": sum_token_counts(
+            response.completion_tokens for response in responses
+        ),
         "usage_available": all(response.usage_available for response in responses)
         if responses
         else False,
         "latency_ms": round(sum(response.latency_ms for response in responses), 3),
-        "cost": round(sum(costs), 9) if costs else None,
+        "cost": (
+            round(sum(costs), 9)
+            if responses and len(costs) == len(responses) and len(currencies) == 1
+            else None
+        ),
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
         "cost_availability": (
             "available"
@@ -857,7 +864,9 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     costs = [float(row["cost"]) for row in rows if row.get("cost") is not None]
     cost_complete = all(
-        int(row.get("model_calls", 0)) == 0 or row.get("cost") is not None for row in rows
+        int(row.get("model_calls", 0)) == 0
+        or (row.get("cost") is not None and row.get("cost_availability") != "unavailable")
+        for row in rows
     )
     currencies = {str(row["cost_currency"]) for row in rows if row.get("cost_currency") is not None}
     return {
@@ -896,8 +905,8 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "runs_with_outline_revisions": sum(
             int(row.get("outline_revisions", 0)) > 0 for row in rows
         ),
-        "prompt_tokens": sum(int(row["prompt_tokens"]) for row in rows),
-        "completion_tokens": sum(int(row["completion_tokens"]) for row in rows),
+        "prompt_tokens": sum_token_counts(row["prompt_tokens"] for row in rows),
+        "completion_tokens": sum_token_counts(row["completion_tokens"] for row in rows),
         "latency_ms": round(sum(float(row["latency_ms"]) for row in rows), 3),
         "cost": (round(sum(costs), 9) if cost_complete and (costs or rows) else None),
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,

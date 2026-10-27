@@ -38,6 +38,7 @@ from apps.orchestrator.control.verifier import VerificationResult  # noqa: E402
 from packages.models.gateway import ModelGateway  # noqa: E402
 from packages.models.registry import ModelRegistry  # noqa: E402
 from packages.models.types import Scenario  # noqa: E402
+from packages.models.usage import sum_token_counts  # noqa: E402
 
 DEFAULT_CASES = Path(__file__).parent / "semantic_verifier_v3_eval_set.jsonl"
 LEGACY_V2_CASES = Path(__file__).parent / "semantic_verifier_eval_set.jsonl"
@@ -315,18 +316,22 @@ def _score_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "protocol_errors": sum(row["error_type"] == "protocol_error" for row in rows),
         "model_errors": sum(row["error_type"] == "model_error" for row in rows),
-        "prompt_tokens": sum(int(row.get("prompt_tokens", 0)) for row in rows),
-        "completion_tokens": sum(
-            int(row.get("completion_tokens", 0)) for row in rows
+        "prompt_tokens": sum_token_counts(row.get("prompt_tokens") for row in rows),
+        "completion_tokens": sum_token_counts(
+            row.get("completion_tokens") for row in rows
         ),
         "latency_ms": round(
             sum(float(row.get("latency_ms", 0.0)) for row in rows), 3
         ),
-        "cost": round(sum(available_costs), 9) if available_costs else None,
+        "cost": (
+            round(sum(available_costs), 9)
+            if available_costs and len(available_costs) == total and len(currencies) == 1
+            else None
+        ),
         "cost_currency": next(iter(currencies)) if len(currencies) == 1 else None,
         "cost_availability": (
             "available"
-            if available_costs and len(available_costs) == total
+            if available_costs and len(available_costs) == total and len(currencies) == 1
             else "unavailable"
         ),
     }

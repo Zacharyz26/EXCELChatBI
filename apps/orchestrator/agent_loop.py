@@ -2332,11 +2332,11 @@ async def _stream_agent_chat_inner(
                                 actual_model=response.model,
                                 prompt_tokens=response.prompt_tokens,
                                 completion_tokens=response.completion_tokens,
-                                token_usage_available=bool(
-                                    response.prompt_tokens or response.completion_tokens
-                                ),
+                                token_usage_available=response.usage_available,
                                 model_latency_ms=round(response.latency_ms, 3),
-                                cost=(response.cost if response.cost != 0 else "unavailable"),
+                                cost=(
+                                    response.cost if response.cost is not None else "unavailable"
+                                ),
                                 tool_call_count=len(response.tool_calls),
                             )
             except ModelBudgetExceeded:

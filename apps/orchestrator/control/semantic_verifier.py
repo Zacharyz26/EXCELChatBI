@@ -197,8 +197,8 @@ class SemanticEvaluation:
     response_hash: str | None
     model_called: bool
     model: str | None
-    prompt_tokens: int
-    completion_tokens: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
     latency_ms: float
     cost: float | None
     cost_currency: str | None
@@ -214,8 +214,8 @@ class SemanticVerifierProtocolError(RuntimeError):
         *,
         response_hash: str | None = None,
         model: str | None = None,
-        prompt_tokens: int = 0,
-        completion_tokens: int = 0,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
         latency_ms: float = 0.0,
         cost: float | None = None,
         cost_currency: str | None = None,
@@ -305,7 +305,7 @@ class SemanticVerifier:
                 prompt_tokens=response.prompt_tokens,
                 completion_tokens=response.completion_tokens,
                 latency_ms=response.latency_ms,
-                cost=response.cost if response.cost != 0 else None,
+                cost=response.cost,
                 cost_currency=response.cost_currency,
                 pricing_effective_date=response.pricing_effective_date,
             ) from exc
@@ -322,7 +322,7 @@ class SemanticVerifier:
             prompt_tokens=response.prompt_tokens,
             completion_tokens=response.completion_tokens,
             latency_ms=response.latency_ms,
-            cost=response.cost if response.cost != 0 else None,
+            cost=response.cost,
             cost_currency=response.cost_currency,
             pricing_effective_date=response.pricing_effective_date,
         )

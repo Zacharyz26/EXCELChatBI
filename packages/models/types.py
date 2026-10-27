@@ -60,8 +60,9 @@ class ModelResponse:
 
     content: str
     model: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    # None 表示未知；0 仅表示供应商明确返回的合法零计数。
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     usage_available: bool = False
     latency_ms: float = 0.0
     cost: float | None = None
@@ -69,3 +70,4 @@ class ModelResponse:
     pricing_effective_date: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[ToolCall] = field(default_factory=list)  # 模型要求调用的工具
+    usage_issues: tuple[str, ...] = ()
