@@ -22,6 +22,7 @@ from apps.orchestrator.control.numeric_display import (
     matches_display_value,
     parse_numeric_display,
 )
+from apps.orchestrator.control.profile_population import mask_population, stated_population
 
 _COLUMN_STATS = {
     "min",
@@ -51,7 +52,7 @@ _PREFIX = {
     "std": r"标准差",
     "null_ratio": r"空值率|缺失率|缺失比例|null_ratio",
     "distinct_count": r"不同取值数|不同值数量|唯一值数|distinct(?:_count)?",
-    "null_count": r"精确空值数|空值数|缺失值数",
+    "null_count": r"精确空值数|空值数|空值|缺失值数",
     "non_null_count": r"非空值数|非空记录数|非空数|非空",
     "row_count": r"总行数|行数|记录数",
     "column_count": r"列数|字段数",
@@ -315,7 +316,7 @@ def _fields_in(text: str, fields: set[str], *, context: str | None = None) -> se
                 # statistic label or punctuation after the complete identity.
                 if tail and not re.match(
                     r"(?:[^\w]|(?:字段|列)(?=\s*[:：])|的|为|是|有|存在|"
-                    r"最小|最大|均值|平均|中位数|标准差|"
+                    r"描述统计|统计|最小|最大|均值|平均|中位数|标准差|"
                     r"空值率|缺失率|缺失比例|null_ratio|非空|重复多余记录数|精确空值数|空值数|缺失值数|"
                     r"不同取值数|不同值数量|唯一值数|distinct)",
                     tail,
@@ -544,6 +545,23 @@ def _profile_header_metadata_valid(metadata: str, field: str) -> bool:
     return len(kinds) == len(set(kinds))
 
 
+def _profile_scope_metadata_valid(metadata: str, fields: set[str]) -> bool:
+    """接受带严格 population 证明的统计口径头，不吞掉任意括号说明。"""
+    request = stated_population(metadata, fields)
+    if request is None or not request.valid:
+        return False
+    prefix = metadata[: request.span[0]].strip()
+    suffix = metadata[request.span[1] :].strip()
+    if suffix:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:口径\s*[:：]\s*)?(?:基于\s*)?(?:全部|当前)?\s*" r"(?:\d+\s*行)?\s*(?:[、,，]\s*)?",
+            prefix,
+        )
+    )
+
+
 def parse_profile_stat_header(
     text: str, fields: set[str], *, context: str | None = None
 ) -> ProfileStatHeader | None:
@@ -558,7 +576,7 @@ def parse_profile_stat_header(
             if not normalized.startswith(spelling, start):
                 continue
             cursor = start + len(spelling)
-            kind = re.match(r"\s*的统计", normalized[cursor:])
+            kind = re.match(r"\s*(?:的)?(?:描述)?统计", normalized[cursor:])
             if kind is None:
                 continue
             cursor += kind.end()
@@ -570,7 +588,10 @@ def parse_profile_stat_header(
                 if closing < 0:
                     continue
                 metadata = normalized[cursor + 1 : closing]
-                if not _profile_header_metadata_valid(metadata, field):
+                if not (
+                    _profile_header_metadata_valid(metadata, field)
+                    or _profile_scope_metadata_valid(metadata, fields)
+                ):
                     continue
                 cursor = closing + 1
             header_end = cursor
@@ -659,6 +680,24 @@ def profile_statement_context(statement: str, fields: set[str]) -> str:
     """Return one bounded field context from a complete field-description sentence."""
     text = _normal(statement).strip()
     text = re.sub(r"[。.!！?？]\s*$", "", text)
+    header = parse_profile_stat_header(text, fields, context=text)
+    header_text = text[slice(*header.span)] if header is not None else ""
+    opening = header_text.rfind("(")
+    population_header = bool(
+        opening >= 0
+        and header_text.endswith(")")
+        and _profile_scope_metadata_valid(header_text[opening + 1 : -1], fields)
+    )
+    if (
+        header is not None
+        and population_header
+        and re.search(
+            _STAT_LABEL,
+            text[header.separator_end :],
+            re.I,
+        )
+    ):
+        return header.field + "："
     label = re.fullmatch(r"(?P<subject>.+?)\s*(?P<tag>字段|列)\s*[:：]\s*(?P<metadata>.+)", text)
     if label is None:
         return ""
@@ -707,7 +746,9 @@ def _complete_clause_subject(clause: str, fields: set[str], context: str) -> set
 
 def _inherited_field(text: str, left: int, fields: set[str]) -> set[str]:
     """Carry one field only through uninterrupted complete statistic clauses."""
-    if len(_fields_in(text, fields)) != 1:
+    population = stated_population(text, fields)
+    subject_view = mask_population(text, population) if population and population.valid else text
+    if len(_fields_in(subject_view, fields)) != 1:
         return set()
     boundaries = [-1, *[i for i in _clause_boundaries(text, fields) if i < left]]
     current: set[str] = set()
@@ -750,7 +791,11 @@ def _subject_fields(subject: str, fields: set[str], context: str) -> set[str]:
     for field in fields:
         for spelling in _field_spellings(field, context):
             pattern = (
-                r"[\s(「『\"'`]*" + re.escape(spelling) + r"[」』\"'`]*\s*" + tail + r"\s*[(]?\s*"
+                r"(?:另外|此外)?[\s(「『\"'`]*"
+                + re.escape(spelling)
+                + r"[」』\"'`]*\s*"
+                + tail
+                + r"\s*[(]?\s*"
             )
             if re.fullmatch(pattern, text):
                 result.add(field)
@@ -858,6 +903,50 @@ def profile_assignment_role(prefix: str) -> str | None:
     return next(iter(roles)) if len(roles) == 1 else None
 
 
+def _role_aside_distinct_matches(
+    binding: JsonObject,
+    text: str,
+    start: int,
+    end: int,
+    fields: set[str],
+) -> bool:
+    """绑定“字段（角色，N 个不同值）”中的受限 distinct 声明。"""
+    if binding.get("statistic") != "distinct_count":
+        return False
+    normalized = _normal(text)
+    for aside in re.finditer(r"\((?P<body>[^()]*)\)", normalized):
+        body_start, body_end = aside.span("body")
+        if not (body_start <= start and end <= body_end):
+            continue
+        prefix = normalized[body_start:start].strip()
+        suffix = normalized[end:body_end].strip()
+        if re.fullmatch(r"(?:时间|维度|指标|标识|数值型)(?:列|角色)?\s*[,，、]\s*", prefix) is None:
+            continue
+        if re.fullmatch(r"个不同值(?:\s*[:：][^()]*)?", suffix) is None:
+            continue
+        before = normalized[: aside.start()].rstrip()
+        candidates = {
+            field
+            for field in fields
+            for spelling in _field_spellings(field, text)
+            if before.endswith(_normal(spelling))
+            and (
+                not (leading := before[: -len(_normal(spelling))]).strip()
+                or re.search(
+                    r"(?:(?:字段|列)(?:包括|含有|为)|[、,，;；:：])\s*$",
+                    leading,
+                )
+            )
+        }
+        candidates = {
+            field
+            for field in candidates
+            if not any(field != other and _normal(field) in _normal(other) for other in candidates)
+        }
+        return len(candidates) == 1 and binding.get("object", {}).get("column") in candidates
+    return False
+
+
 def profile_candidate_matches(
     binding: JsonObject,
     universe: list[JsonObject],
@@ -884,6 +973,8 @@ def profile_candidate_matches(
         unit = re.fullmatch(r".+\(([^()]+)\)", _normal(str(binding["metric"])))
         if unit is None or displayed_unit[1].lstrip("千万亿") != unit[1]:
             return False
+    if _role_aside_distinct_matches(binding, text, start, end, fields):
+        return True
     restatement = parse_ratio_restatement(text, left, right)
     restatement_owns_token = bool(restatement and restatement.owns(start, end))
     restatement_matches = bool(

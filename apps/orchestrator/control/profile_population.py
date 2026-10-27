@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 from packages.orchestration.analysis_requirements import explicit_analysis_requirements
 from packages.session.models import JsonObject
 
+from apps.orchestrator.control.operation_intent import (
+    OperationMention,
+    operation_mentions,
+)
+
 if TYPE_CHECKING:
     from packages.session.store import SessionStore
 
@@ -117,7 +122,7 @@ class PopulationRequest:
     span: tuple[int, int]
 
 
-def population_request(text: str, fields: set[str]) -> PopulationRequest | None:
+def _explicit_population_request(text: str, fields: set[str]) -> PopulationRequest | None:
     """识别已有 AND 比较式或字段紧邻值的筛选说明，不猜 OR/未知条件。"""
     names = "|".join(re.escape(f) for f in sorted(fields, key=len, reverse=True))
     markers = list(_SCOPE.finditer(text))
@@ -192,6 +197,70 @@ def population_request(text: str, fields: set[str]) -> PopulationRequest | None:
             valid = False
         break
     return PopulationRequest(tuple(filters), valid and bool(filters), (start, end))
+
+
+def _last_filter_mention(text: str) -> OperationMention | None:
+    mentions = operation_mentions(text, actions=("筛选", "过滤"))
+    return mentions[-1] if mentions else None
+
+
+def _whole_population_wins(whole: re.Match[str] | None, mention: OperationMention | None) -> bool:
+    """后置或完整包住动作词的全表声明优先；较早全表不覆盖后续筛选。"""
+    if whole is None or mention is None:
+        return whole is not None
+    return whole.start() > mention.span[0] or (
+        whole.start() <= mention.span[0] and mention.span[1] <= whole.end()
+    )
+
+
+def requested_population(text: str, fields: set[str]) -> PopulationRequest | None:
+    """解析用户本轮要求的范围；禁止/暂缓筛选不覆盖当前 Host 范围。
+
+    明确的肯定筛选仍沿用严格语法并失败关闭。显式全表要求仍要求空过滤
+    血缘；只有“本轮不新增筛选”返回 ``None``，让当前 Evidence 自证范围。
+    """
+
+    parsed = _explicit_population_request(text, fields)
+    mention = _last_filter_mention(text)
+    whole = list(_WHOLE.finditer(text))
+    latest_whole = whole[-1] if whole else None
+    if _whole_population_wins(latest_whole, mention):
+        assert latest_whole is not None
+        return PopulationRequest((), True, latest_whole.span())
+    if mention is None:
+        return parsed
+    if mention.disposition != "current":
+        return None
+    return parsed
+
+
+def stated_population(text: str, fields: set[str]) -> PopulationRequest | None:
+    """解析回答对事实范围的声明，并与请求意图保持分离。
+
+    “未筛选”是可核验的空过滤事实；“不要筛选”只是命令，不作为回答
+    的范围证明。肯定筛选与全表声明继续使用相同严格语法。
+    """
+
+    parsed = _explicit_population_request(text, fields)
+    mention = _last_filter_mention(text)
+    whole = list(_WHOLE.finditer(text))
+    latest_whole = whole[-1] if whole else None
+    if _whole_population_wins(latest_whole, mention):
+        assert latest_whole is not None
+        return PopulationRequest((), True, latest_whole.span())
+    if mention is None:
+        return parsed
+    if mention.disposition == "absent":
+        return PopulationRequest((), True, mention.context_span)
+    if mention.disposition in {"prohibited", "deferred", "described"}:
+        return None
+    return parsed
+
+
+def population_request(text: str, fields: set[str]) -> PopulationRequest | None:
+    """向后兼容：回答文本范围解析使用事实声明语义。"""
+
+    return stated_population(text, fields)
 
 
 def population_matches(binding: JsonObject, request: PopulationRequest | None) -> bool:

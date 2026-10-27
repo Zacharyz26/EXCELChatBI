@@ -46,6 +46,7 @@ from apps.orchestrator.control.numeric_display import (
 from apps.orchestrator.control.profile_claims import (
     annotate_profile_values,
     has_column_profile,
+    parse_profile_stat_header,
     profile_assignment_role,
     profile_candidate_matches,
     profile_fact,
@@ -57,7 +58,8 @@ from apps.orchestrator.control.profile_population import (
     PopulationRequest,
     mask_population,
     population_matches,
-    population_request,
+    requested_population,
+    stated_population,
 )
 from apps.orchestrator.control.semantic_identity import (
     TOOL_LABELS,
@@ -280,7 +282,7 @@ def extract_numeric_claims(
         for fragment in table_claim_fragments(
             inline_numeric_text(section), set(dimensions), measurement_labels=measurement_labels
         )
-        for scope in (population_request(fragment.text, profile_fields),)
+        for scope in (stated_population(fragment.text, profile_fields),)
         for statement in (
             [fragment.text]
             if fragment.cells is not None
@@ -293,7 +295,7 @@ def extract_numeric_claims(
         )
     ]
     profile_context = ""
-    required_population = population_request(goal, profile_fields)
+    required_population = requested_population(goal, profile_fields)
     population_context = required_population
     for raw_statement, table_cells, value_span, heading_context in statements:
         # Only a semicolon in the same prose item can carry a profile subject.
@@ -326,11 +328,24 @@ def extract_numeric_claims(
             profile_context = ""
         if not statement:
             continue
-        local_population = population_request(statement, profile_fields)
+        local_population = stated_population(statement, profile_fields)
         if local_population is not None:
             population_context = local_population
         semantic_statement, quoted_labels = numeric_quote_view(statement, measurement_labels)
-        population_statement = mask_population(semantic_statement, local_population)
+        profile_header = parse_profile_stat_header(
+            semantic_statement, profile_fields, context=semantic_statement
+        )
+        population_in_header = bool(
+            local_population
+            and profile_header
+            and profile_header.span[0] <= local_population.span[0]
+            and local_population.span[1] <= profile_header.span[1]
+        )
+        population_statement = (
+            semantic_statement
+            if population_in_header
+            else mask_population(semantic_statement, local_population)
+        )
         refs: list[JsonObject] = []
         slots = statistic_value_slots(statement, measurement_labels, source_labels)
         evaluations: list[StatisticValueEvaluation] = []

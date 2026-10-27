@@ -427,6 +427,45 @@ def test_explicit_cleaning_execution_keeps_transform_capability() -> None:
     assert "dataset.transform" in result.capabilities
 
 
+@pytest.mark.parametrize(
+    ("user_text", "expects_transform"),
+    [
+        ("请先做数据画像，暂不筛选或清洗", False),
+        ("请先画像，以后再清洗", False),
+        ("只给清洗建议，不执行处理", False),
+        ("检查清洗结果是否正确", False),
+        ("不筛选，先不清洗", False),
+        ("不要应用清洗规则", False),
+        ("无需采用清洗方案", False),
+        ("不要清洗，但筛选状态=已播出", True),
+        ("筛选状态不等于停机", True),
+        ("按确认规则清洗数据", True),
+        ("执行清洗方案", True),
+        ("应用清洗规则", True),
+    ],
+)
+def test_transform_capability_respects_operation_disposition(
+    user_text: str, expects_transform: bool
+) -> None:
+    contract = build_minimal_contract(
+        run_id="operation-disposition",
+        user_text=user_text,
+        chart_required=False,
+        report_required=False,
+        pdf_required=False,
+    )
+    result = create_task_outline(
+        user_text=contract.goal,
+        contract=contract,
+        datasets=[_dataset()],
+        artifacts=[],
+        registry=_registry(),
+        blocking_clarification=None,
+    )
+
+    assert ("dataset.transform" in result.capabilities) is expects_transform
+
+
 def test_outline_omits_a_capability_missing_from_the_frozen_catalog() -> None:
     contract = build_minimal_contract(
         run_id="missing-capability",
@@ -870,8 +909,7 @@ def test_join_execution_remains_a_trend_dependency_with_resolved_source_roles() 
 
     plan = build_deterministic_outline(
         user_text=(
-            "把 sales.xlsx 和 customers.xlsx 按客户ID关联并执行，"
-            "然后按月份分析销售额趋势"
+            "把 sales.xlsx 和 customers.xlsx 按客户ID关联并执行，" "然后按月份分析销售额趋势"
         ),
         context=context,
         route="template",

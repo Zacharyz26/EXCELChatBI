@@ -22,6 +22,7 @@ from packages.session.models import Artifact, Dataset, JsonObject
 
 from apps.orchestrator.agent_tools import AgentToolRegistry
 from apps.orchestrator.control.knowledge_intent import knowledge_search_requested
+from apps.orchestrator.control.operation_intent import current_operation_requested
 from apps.orchestrator.request_intent import requests_report
 
 OutlineRoute = Literal["fast", "template"]
@@ -496,8 +497,8 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("knowledge.search")
     if "异常" in request:
         add("stats.anomaly")
-    requests_transform = (
-        "排除" in request or "过滤" in request or ("清洗" in request and "清洗建议" not in request)
+    requests_transform = current_operation_requested(
+        user_text, actions=("排除", "过滤", "筛选", "清洗")
     )
     if requests_transform:
         add("dataset.transform")

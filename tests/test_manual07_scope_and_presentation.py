@@ -152,6 +152,86 @@ def test_answer_cannot_replace_requested_population(populations, source, text):
         )
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "继续画像当前数据，暂不新增筛选或清洗",
+        "继续画像当前数据，不筛选",
+        "继续画像当前数据，先不筛选",
+    ],
+)
+def test_negative_filter_request_preserves_current_host_population(populations, goal):
+    _, records, _ = populations
+    claims = extract_numeric_claims(
+        final_text="耗时（秒）最大值30。",
+        goal=goal,
+        evidence=[records["A"]],
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert refs and all(ref["supported"] for ref in refs)
+
+
+def test_profile_stat_header_accepts_verified_population_metadata(populations):
+    _, records, _ = populations
+    text = "耗时（秒）描述统计（口径：基于全部 4 行、筛选设备=A后）：" "最小值10，最大值30。"
+    claims = extract_numeric_claims(
+        final_text=text, goal="筛选设备=A后画像", evidence=[records["A"]]
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert [ref["token"] for ref in refs] == ["4", "10", "30"]
+    assert all(ref["supported"] for ref in refs), refs
+
+
+def test_role_aside_rejects_unknown_field_with_known_suffix(populations):
+    _, records, _ = populations
+    claims = extract_numeric_claims(
+        final_text="字段包括假设备（维度，2 个不同值）。",
+        goal="画像",
+        evidence=[records["A"]],
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert refs and all(not ref["supported"] for ref in refs)
+
+
+def test_unfiltered_answer_statement_is_checked_against_filtered_lineage(populations):
+    _, records, _ = populations
+    claims = extract_numeric_claims(
+        final_text="基于未做任何筛选的数据，耗时（秒）最大值30。",
+        goal="继续画像当前数据，暂不新增筛选或清洗",
+        evidence=[records["A"]],
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert refs and all(not ref["supported"] for ref in refs)
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "筛选状态不等于停机后画像",
+        "筛选未知字段=运行后画像",
+        "筛选设备=A或设备=B后画像",
+    ],
+)
+def test_unparsed_affirmative_filter_request_fails_closed(populations, goal):
+    _, records, _ = populations
+    claims = extract_numeric_claims(
+        final_text="耗时（秒）最大值30。", goal=goal, evidence=[records["A"]]
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert refs and all(not ref["supported"] for ref in refs)
+
+
+def test_explicit_unfiltered_whole_table_request_does_not_reuse_filtered_version(populations):
+    _, records, _ = populations
+    claims = extract_numeric_claims(
+        final_text="耗时（秒）最大值30。",
+        goal="请用未筛选全表画像",
+        evidence=[records["A"]],
+    )
+    refs = [ref for claim in claims for ref in claim.value_refs]
+    assert refs and all(not ref["supported"] for ref in refs)
+
+
 def test_filter_switch_does_not_reuse_old_source(populations):
     _, records, _ = populations
     for source, value in [("A", "A"), ("B", "B"), ("A", "A")]:
