@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from packages.common.identifiers import dataset_reference_arguments, validate_report_id
-from packages.orchestration.contracts import TaskContract
+from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
 from packages.orchestration.hypothesis_followup import (
     decide_hypothesis_followup,
     validate_hypothesis_followup,
@@ -25,7 +25,11 @@ from packages.orchestration.hypothesis_lifecycle import (
     hypothesis_invocation_failed,
     hypothesis_invocation_started,
 )
-from packages.orchestration.state import AgentState, ensure_transition
+from packages.orchestration.state import (
+    AgentState,
+    ensure_quantity_contract_rejection,
+    ensure_transition,
+)
 from packages.orchestration.task_plan_contract import validate_task_plan
 from packages.session.models import Artifact, ArtifactDraft, Conversation, JsonObject, Message
 from packages.session.task_hashing import (
@@ -320,10 +324,7 @@ class TaskStore:
                 run_id,
                 cast(JsonObject, raw),
             )
-            if (
-                data_version_hash is None
-                or confirmation.data_version_hash == data_version_hash
-            ):
+            if data_version_hash is None or confirmation.data_version_hash == data_version_hash:
                 confirmations.append(confirmation)
         return confirmations
 
@@ -475,7 +476,33 @@ class TaskStore:
                     f"TaskRun {run_id} 版本冲突: 期望 {expected_version}，"
                     f"实际 {current.state_version}"
                 )
-            ensure_transition(current.status, status)
+            if clean_reason == "quantity_contract_unavailable":
+                # The public reason string is not authority. Recheck the exact
+                # persisted contract inside this transaction before allowing the
+                # narrow migration stop from any active state.
+                contract_row = connection.execute(
+                    "SELECT contract_json, contract_hash FROM task_contracts WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                unavailable = contract_row is None
+                if contract_row is not None:
+                    try:
+                        payload = _load_object(str(contract_row[0]))
+                        encoded = json.dumps(
+                            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                        )
+                        unavailable = (
+                            payload.get("quantity_contract_version") != QUANTITY_CONTRACT_VERSION
+                            or payload.get("run_id") != run_id
+                            or hashlib.sha256(encoded.encode()).hexdigest() != str(contract_row[1])
+                        )
+                    except (TypeError, ValueError):
+                        unavailable = True
+                ensure_quantity_contract_rejection(
+                    current.status, status, contract_unavailable=unavailable
+                )
+            else:
+                ensure_transition(current.status, status)
             running_invocations = connection.execute(
                 """
                 SELECT invocation_id, step_id FROM tool_invocations
@@ -635,6 +662,51 @@ class TaskStore:
             ).fetchone()
         return _load_object(str(row[0])) if row is not None else None
 
+    def get_verified_contract(self, run_id: str) -> JsonObject | None:
+        """读取确切 run 的冻结契约并核验原 hash；不升级或重写历史契约。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT contract_json, contract_hash FROM task_contracts WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        contract = _load_object(str(row[0]))
+        encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if hashlib.sha256(encoded.encode()).hexdigest() != str(row[1]):
+            raise ValueError("冻结数量契约 hash 不一致，不能恢复或发布")
+        if contract.get("run_id") != run_id:
+            raise ValueError("冻结数量契约不属于指定 run")
+        return contract
+
+    def record_quantity_candidate(self, run_id: str, payload: JsonObject) -> TaskEvent:
+        """追加未赋权候选审计，不写消息/Evidence，不改变状态或预算。"""
+        now = _utc_now()
+        with self._connection() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("候选审计缺少所属任务")
+            run = _run_from_row(row)
+            event = TaskEvent(
+                event_id=uuid.uuid4().hex,
+                run_id=run_id,
+                sequence=_next_sequence(connection, run_id),
+                event_type="quantity.candidate",
+                payload=payload,
+                occurred_at=now,
+            )
+            _insert_event(connection, event)
+            snapshot = _merged_snapshot(connection, run)
+            snapshot["last_sequence"] = event.sequence
+            connection.execute(
+                "UPDATE task_snapshots SET state_json = ?, updated_at = ? WHERE run_id = ?",
+                (_dump_json(snapshot), now, run_id),
+            )
+        return event
+
     def get_snapshot(self, run_id: str) -> JsonObject | None:
         with self._connection() as connection:
             row = connection.execute(
@@ -733,8 +805,7 @@ class TaskStore:
                 unfinished = _unfinished_active_plan_steps(connection, run_id)
                 if unfinished:
                     raise ControlConflict(
-                        "TaskRun 不能在提纲步骤未收敛时完成: "
-                        + "、".join(unfinished)
+                        "TaskRun 不能在提纲步骤未收敛时完成: " + "、".join(unfinished)
                     )
 
             unknown_invocations = 0
@@ -1058,9 +1129,7 @@ class TaskStore:
                 list(raw_confirmations) if isinstance(raw_confirmations, list) else []
             )
             if role_confirmation is not None:
-                role_confirmations.append(
-                    _data_role_confirmation_payload(role_confirmation)
-                )
+                role_confirmations.append(_data_role_confirmation_payload(role_confirmation))
             snapshot_update: JsonObject = {
                 "last_sequence": event.sequence,
                 "clarification_answers": answer_map,
@@ -1627,9 +1696,7 @@ class TaskStore:
                 (run_id,),
             ).fetchone()
             prior_snapshot = (
-                _load_object(str(snapshot_row["state_json"]))
-                if snapshot_row is not None
-                else {}
+                _load_object(str(snapshot_row["state_json"])) if snapshot_row is not None else {}
             )
             selected_hypothesis = prior_snapshot.get("selected_hypothesis")
             prior_hypothesis_execution = prior_snapshot.get("hypothesis_execution")
@@ -2310,9 +2377,7 @@ class TaskStore:
                 updated_at=now,
             )
             hypothesis_projection = (
-                _hypothesis_event_projection(hypothesis_execution)
-                if matches_hypothesis
-                else None
+                _hypothesis_event_projection(hypothesis_execution) if matches_hypothesis else None
             )
             next_version = current_run.state_version + 1
             connection.execute(
@@ -2526,8 +2591,7 @@ class TaskStore:
                     "policy": policy_decision,
                     **(
                         {"hypothesis": hypothesis_projection}
-                        if hypothesis_projection is not None
-                        and matches_hypothesis
+                        if hypothesis_projection is not None and matches_hypothesis
                         else {}
                     ),
                 },
@@ -2930,8 +2994,7 @@ class TaskStore:
             )
             matches_hypothesis = (
                 prior_hypothesis_execution is not None
-                and invocation.step_id
-                == prior_hypothesis_execution.get("persisted_step_id")
+                and invocation.step_id == prior_hypothesis_execution.get("persisted_step_id")
             )
             hypothesis_execution = hypothesis_invocation_failed(
                 prior_hypothesis_execution,
@@ -2941,9 +3004,7 @@ class TaskStore:
                 updated_at=now,
             )
             hypothesis_projection = (
-                _hypothesis_event_projection(hypothesis_execution)
-                if matches_hypothesis
-                else None
+                _hypothesis_event_projection(hypothesis_execution) if matches_hypothesis else None
             )
             next_version = current_run.state_version + 1
             connection.execute(
@@ -3178,12 +3239,37 @@ class TaskStore:
                 )
 
             summary = dict(evidence_summary)
+            if invocation.tool_name == "get_data_profile":
+                from packages.orchestration.quality_facts import seal_quality_facts
+
+                # The actual successful result supplies quality identities and
+                # measurements; caller-provided indexes/proofs are not authority.
+                context = {
+                    **invocation.args,
+                    "data_version_hash": branch.data_version_hash,
+                }
+                population = evidence_summary.get("numeric_context", {}).get("profile_population")
+                if isinstance(population, dict):
+                    context["profile_population"] = population
+                summary = seal_quality_facts(summary, result, context)
             summary["artifact_id"] = artifact.id if artifact is not None else None
             if isinstance(summary.get("numeric_context"), dict):
                 summary["numeric_context"] = {
                     **summary["numeric_context"],
                     "data_version_hash": branch.data_version_hash,
                 }
+            from packages.orchestration.evidence_facts import seal_count_facts
+
+            summary = seal_count_facts(
+                summary=summary,
+                result=result,
+                tool=invocation.tool_name,
+                arguments=invocation.args,
+                run_id=current_run.run_id,
+                invocation_id=invocation.invocation_id,
+                result_hash=result_hash,
+                branch_hash=branch.data_version_hash,
+            )
             evidence = EvidenceRecord(
                 evidence_id=uuid.uuid4().hex,
                 run_id=current_run.run_id,
@@ -3271,8 +3357,7 @@ class TaskStore:
             )
             matches_hypothesis = (
                 prior_hypothesis_execution is not None
-                and invocation.step_id
-                == prior_hypothesis_execution.get("persisted_step_id")
+                and invocation.step_id == prior_hypothesis_execution.get("persisted_step_id")
             )
             hypothesis_execution = hypothesis_evidence_collected(
                 prior_hypothesis_execution,
@@ -3284,9 +3369,7 @@ class TaskStore:
                 updated_at=now,
             )
             hypothesis_projection = (
-                _hypothesis_event_projection(hypothesis_execution)
-                if matches_hypothesis
-                else None
+                _hypothesis_event_projection(hypothesis_execution) if matches_hypothesis else None
             )
 
             next_version = current_run.state_version + 1
@@ -3959,9 +4042,7 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
             run_status=run.status,
             verification_payload=verification_payload,
             verification_sequence=(
-                int(verification_row["sequence"])
-                if verification_row is not None
-                else None
+                int(verification_row["sequence"]) if verification_row is not None else None
             ),
             terminal_reason=run.terminal_reason,
             updated_at=run.updated_at,
@@ -3972,19 +4053,14 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
             if (
                 isinstance(raw_followup, dict)
                 and raw_followup.get("hypothesis_id") == finalized.get("hypothesis_id")
-                and raw_followup.get("data_version_hash")
-                == finalized.get("data_version_hash")
+                and raw_followup.get("data_version_hash") == finalized.get("data_version_hash")
             ):
                 snapshot["hypothesis_followup"] = validate_hypothesis_followup(
                     cast(JsonObject, raw_followup)
                 )
                 return snapshot
             raw_screening = snapshot.get("hypothesis_screening")
-            screening = (
-                cast(JsonObject, raw_screening)
-                if isinstance(raw_screening, dict)
-                else None
-            )
+            screening = cast(JsonObject, raw_screening) if isinstance(raw_screening, dict) else None
             scope_row = connection.execute(
                 "SELECT max_tool_calls FROM task_execution_scopes WHERE run_id = ?",
                 (run.run_id,),
@@ -4001,9 +4077,7 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
                 """,
                 (run.run_id,),
             ).fetchone()
-            execution_plan_version = _safe_nonnegative_int(
-                finalized.get("execution_plan_version")
-            )
+            execution_plan_version = _safe_nonnegative_int(finalized.get("execution_plan_version"))
             followup = decide_hypothesis_followup(
                 screening=screening,
                 execution=finalized,
@@ -4012,15 +4086,11 @@ def _merged_snapshot(connection: sqlite3.Connection, run: TaskRun) -> JsonObject
                     _safe_nonnegative_int(run.usage.get("tool_attempts")),
                     int(invocation_row["attempts"]) if invocation_row is not None else 0,
                 ),
-                max_tool_calls=(
-                    int(scope_row["max_tool_calls"]) if scope_row is not None else 0
-                ),
+                max_tool_calls=(int(scope_row["max_tool_calls"]) if scope_row is not None else 0),
                 replans_used=max(0, run.plan_version - execution_plan_version),
                 max_replans=_safe_nonnegative_int(run.budget.get("max_replans")),
                 cancellation_root_status=(
-                    str(cancellation_row["status"])
-                    if cancellation_row is not None
-                    else None
+                    str(cancellation_row["status"]) if cancellation_row is not None else None
                 ),
                 latest_observation=_latest_hypothesis_observation(
                     connection,
@@ -4170,9 +4240,7 @@ def _skip_satisfied_plan_prerequisites(
     """
     steps = _active_plan_steps(connection, run_id, plan_version=plan_version)
     by_logical_id = {step.logical_id: step for step in steps}
-    frontier = [
-        step.logical_id for step in steps if step.status in {"completed", "skipped"}
-    ]
+    frontier = [step.logical_id for step in steps if step.status in {"completed", "skipped"}]
     reconciled: list[str] = []
     seen = set(frontier)
     while frontier:
@@ -4612,14 +4680,16 @@ def _data_version_hash(connection: sqlite3.Connection, run_id: str) -> str:
             """,
             (run_id, str(row["dataset_ref"])),
         ).fetchall()
-        payload.append({
-            "dataset_ref": str(row["dataset_ref"]),
-            "binding_kind": str(row["binding_kind"]),
-            "parent_ref": _optional_text(row["parent_ref"]),
-            "parent_refs": [str(parent["parent_ref"]) for parent in parent_rows],
-            "producing_invocation_id": _optional_text(row["producing_invocation_id"]),
-            "dataset_created_at": str(row["dataset_created_at"]),
-        })
+        payload.append(
+            {
+                "dataset_ref": str(row["dataset_ref"]),
+                "binding_kind": str(row["binding_kind"]),
+                "parent_ref": _optional_text(row["parent_ref"]),
+                "parent_refs": [str(parent["parent_ref"]) for parent in parent_rows],
+                "producing_invocation_id": _optional_text(row["producing_invocation_id"]),
+                "dataset_created_at": str(row["dataset_created_at"]),
+            }
+        )
     return _hash_text(_dump_json({"schema": "task-data-version-v2", "datasets": payload}))
 
 
@@ -5120,9 +5190,7 @@ def _validated_data_role_confirmation(
     )
 
 
-_HYPOTHESIS_KINDS = frozenset(
-    {"trend", "anomaly", "segment_comparison", "correlation"}
-)
+_HYPOTHESIS_KINDS = frozenset({"trend", "anomaly", "segment_comparison", "correlation"})
 
 
 def _validated_hypothesis_selection(

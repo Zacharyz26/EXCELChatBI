@@ -952,6 +952,7 @@ def _start_recovered_run(
             project_id=run.project_id,
             conversation_id=run.conversation_id,
             subject_id=principal.user_id,
+            run_id=run.run_id,
         ),
         mcp_config=mcp_client_config_from_settings(execution.settings),
         enabled_capability_profiles=enabled_capability_profiles_from_settings(execution.settings),

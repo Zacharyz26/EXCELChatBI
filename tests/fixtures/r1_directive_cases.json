@@ -1,0 +1,107 @@
+[
+  {
+    "name": "original_request_correct_total",
+    "title": "请将播出时长（分钟）按月份求和，画一张展示月度变化的折线图，标明月份和时长单位。",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "neutral_title_correct_total",
+    "title": "月度分析",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "original_request_correct_six",
+    "title": "请将播出时长（分钟）按月份求和，画一张展示月度变化的折线图，标明月份和时长单位。",
+    "insights": "本表共有六个月份，播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "original_request_wrong_eight",
+    "title": "请将播出时长（分钟）按月份求和，画一张展示月度变化的折线图，标明月份和时长单位。",
+    "insights": "本表共有八个月份，播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "neutral_title_wrong_eight",
+    "title": "月度分析",
+    "insights": "本表共有八个月份，播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "actual_wrong_title",
+    "title": "本表共有八个月份",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "simple_request",
+    "title": "请画一张折线图",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "request_eight_charts",
+    "title": "请生成八张折线图",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "completed_eight_charts",
+    "title": "已生成八张折线图",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "attention_does_not_suppress_fact",
+    "title": "请注意，本表共有八个月份。",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "confirm_does_not_suppress_fact",
+    "title": "请确认本表共有八个月份。",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "request_then_wrong_fact",
+    "title": "请画一张折线图，本表共有八个月份。",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "request_then_correct_fact",
+    "title": "请画一张折线图，本表共有六个月份。",
+    "insights": "播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  },
+  {
+    "name": "body_request_then_wrong_fact",
+    "title": "月度分析",
+    "insights": "请画一张折线图，本表共有八个月份。播出时长（分钟）的总计为1350。",
+    "expected": false,
+    "rejected_token": "八"
+  },
+  {
+    "name": "body_request_then_correct_fact",
+    "title": "月度分析",
+    "insights": "请画一张折线图，本表共有六个月份。播出时长（分钟）的总计为1350。",
+    "expected": true,
+    "rejected_token": null
+  }
+]

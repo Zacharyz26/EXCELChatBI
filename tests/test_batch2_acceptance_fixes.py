@@ -19,6 +19,7 @@ from packages.orchestration.dataset_scope import verified_analysis_scope
 from packages.session.models import Artifact
 from packages.session.store import SessionStore
 from packages.session.task_models import TaskDatasetBinding
+from packages.session.task_store import TaskStore
 
 from tests.test_agent_tools import _registry
 from tests.test_batch1_contracts import D, F, evidence, invocation
@@ -221,9 +222,30 @@ def test_report_total_requires_source_evidence_and_actual_delivery(
         },
     )
     args = {"analysis_ids": ["monthly"], "title": "报告", "include_pdf": False}
-    result = _registry(AgentContext(store, project, conversation)).execute(
-        "generate_report", json.dumps(args)
+    # A real current TaskRun is required by the report entry contract. These
+    # fixtures exercise source mutations below; they must reach that gate.
+    _, user_message = store.start_user_turn(
+        conversation_id=conversation,
+        content="生成报告",
+        suggested_title="报告来源验证",
     )
+    report_contract = build_minimal_contract(
+        run_id="r",
+        user_text="生成报告",
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+    report_run, _ = TaskStore(store.db_path).create_run(
+        project_id=project,
+        conversation_id=conversation,
+        user_message_id=user_message.id,
+        contract=report_contract,
+        budget={"max_tool_calls": 3},
+    )
+    result = _registry(
+        AgentContext(store, project, conversation, run_id=report_run.run_id)
+    ).execute("generate_report", json.dumps(args))
     report = Artifact(
         "report",
         conversation,

@@ -7,9 +7,7 @@ from dataclasses import dataclass
 from packages.session.models import JsonObject
 from packages.session.task_models import RunStatus, TaskRun
 
-TERMINAL_STATUSES: frozenset[RunStatus] = frozenset(
-    {"completed", "blocked", "failed", "cancelled"}
-)
+TERMINAL_STATUSES: frozenset[RunStatus] = frozenset({"completed", "blocked", "failed", "cancelled"})
 
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     "planning": frozenset({"running", "waiting_user", "paused", "failed", "cancelled"}),
@@ -88,3 +86,14 @@ class AgentState:
 def ensure_transition(current: RunStatus, target: RunStatus) -> None:
     if target not in _TRANSITIONS[current]:
         raise InvalidStateTransition(f"不允许 Agent 状态从 {current} 转为 {target}")
+
+
+def ensure_quantity_contract_rejection(
+    current: RunStatus, target: RunStatus, *, contract_unavailable: bool
+) -> None:
+    """仅允许已核实不兼容的活动数量契约收敛为阻塞，不扩大全局转移。"""
+    active: frozenset[RunStatus] = frozenset(
+        {"planning", "waiting_user", "running", "verifying", "paused"}
+    )
+    if not contract_unavailable or current not in active or target != "blocked":
+        raise InvalidStateTransition("数量契约阻塞必须依据确切的不可用契约和活动任务。")

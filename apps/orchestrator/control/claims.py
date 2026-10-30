@@ -13,18 +13,30 @@ import json
 import math
 import re
 import unicodedata
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
-from packages.session.models import JsonObject
-from packages.session.task_models import ClaimDraft, EvidenceRecord
+from packages.orchestration.artifact_counts import verified_chart_deliveries
+from packages.orchestration.evidence_facts import OPERATIONS, valid_count_projection
+from packages.orchestration.quality_facts import quality_projection
+from packages.session.models import Artifact, JsonObject
+from packages.session.task_models import ClaimDraft, EvidenceRecord, ToolInvocation
 
 from apps.orchestrator.control.claim_structure import (
     dimension_mentions,
-    inline_numeric_text,
+    inline_numeric_projection,
     split_claim_statements,
     table_claim_fragments,
+)
+from apps.orchestrator.control.count_claims import (
+    CHINESE_COUNT,
+    chart_delivery_role,
+    count_noun,
+    operation_quantity,
+    operation_scope_matches,
+    parse_chinese_count,
 )
 from apps.orchestrator.control.dataset_identity import (
     IDENTITY_FIELDS,
@@ -50,6 +62,7 @@ from apps.orchestrator.control.profile_claims import (
     profile_assignment_role,
     profile_candidate_matches,
     profile_fact,
+    profile_field_identity_spans,
     profile_heading_sections,
     profile_statement_context,
     profile_statistic_labels,
@@ -76,6 +89,7 @@ from apps.orchestrator.control.statistic_roles import (
 )
 from apps.orchestrator.control.statistic_statements import (
     StatisticValueEvaluation,
+    count_expressions,
     statistic_value_owner,
     statistic_value_slots,
 )
@@ -127,7 +141,7 @@ def build_evidence_summary(
     report_proof: JsonObject = {}
     if (
         isinstance(report_validation, dict)
-        and report_validation.get("validator") == "selected-artifact-numeric-v1"
+        and report_validation.get("validator") == "selected-artifact-quantity-v2"
     ):
         from apps.orchestrator.control.report_delivery import validation_hash
 
@@ -143,6 +157,7 @@ def build_evidence_summary(
         report_proof["report_validation_hash"] = validation_hash(report_validation)
     analysis_context = annotate_objects(values, result, arguments or {})
     annotate_profile_values(values, result)
+    quality = quality_projection(result, dict(arguments or {}))
     return {
         "summary": summary,
         "numeric_context": dict(arguments or {}),
@@ -154,17 +169,27 @@ def build_evidence_summary(
         "source_index_truncated": len(sources) >= _MAX_EVIDENCE_SOURCES,
         "knowledge_empty": _knowledge_result_is_empty(result),
         **report_proof,
+        **({"quality_projection": quality} if quality is not None else {}),
     }
 
 
 def extract_claims(
-    *, final_text: str, goal: str, evidence: list[EvidenceRecord]
+    *,
+    final_text: str,
+    goal: str,
+    evidence: list[EvidenceRecord],
+    run_id: str | None = None,
+    invocations: list[ToolInvocation] | None = None,
+    artifacts: list[Artifact] | None = None,
 ) -> list[ClaimDraft]:
     """Extract every deterministic Stage-1 Claim type from a candidate answer."""
     claims = extract_numeric_claims(
         final_text=final_text,
         goal=goal,
         evidence=evidence,
+        run_id=run_id,
+        invocations=invocations,
+        artifacts=artifacts,
     )
     claims.extend(extract_knowledge_claims(final_text=final_text, evidence=evidence))
     claims.extend(extract_limitation_claims(final_text=final_text))
@@ -207,6 +232,22 @@ def _verified_identity_spans(
         for record in evidence
         if record.kind in {"tool_result", "profile", "stats", "chart", "table"}
     ]
+    for record in evidence:
+        projection = record.summary.get("fact_projection")
+        if isinstance(projection, dict) and valid_count_projection(
+            record.summary,
+            tool=str(record.source.get("tool")),
+            run_id=record.run_id,
+            invocation_id=record.invocation_id,
+            result_hash=record.result_hash,
+        ):
+            contexts.extend(
+                {
+                    "dataset_ref": projection.get(side),
+                    "data_version_hash": projection.get("branch_hash"),
+                }
+                for side in ("input_ref", "output_ref")
+            )
     valid = all(identity_literal(value) for _, value, _, _ in declarations)
     valid = valid and any(
         all(
@@ -235,6 +276,138 @@ def extract_numeric_claims(
     evidence: list[EvidenceRecord],
     evidence_is_typed: bool = True,
     strip_list_markers: bool = True,
+    run_id: str | None = None,
+    invocations: list[ToolInvocation] | None = None,
+    artifacts: list[Artifact] | None = None,
+    chart_source_evidence: list[EvidenceRecord] | None = None,
+) -> list[ClaimDraft]:
+    """先核对文档所有者/完成义务，再绑定残余业务事实，保留两种审计。"""
+    from apps.orchestrator.control.quantity_presentation import is_draft_candidate, parse_draft
+    from apps.orchestrator.control.quantity_surface import analyze_surface
+
+    if is_draft_candidate(final_text):
+        try:
+            final_text = parse_draft(final_text, evidence, goal=goal)
+        except (ValueError, TypeError, RecursionError):
+            return [
+                ClaimDraft(
+                    statement=final_text,
+                    claim_kind="numeric",
+                    value_refs=(
+                        {
+                            "token": "[draft]",
+                            "supported": False,
+                            "reason": "invalid_quantity_protocol",
+                        },
+                    ),
+                    evidence_ids=(),
+                )
+            ]
+
+    options: dict[str, Any] = dict(
+        goal=goal,
+        evidence=evidence,
+        evidence_is_typed=evidence_is_typed,
+        # SurfacePlan has consumed the actual source markers once. A remaining
+        # numeric fragment (e.g. the body of "1. 1.") is not a second marker.
+        strip_list_markers=False,
+        run_id=run_id,
+        invocations=invocations,
+        artifacts=artifacts,
+        chart_source_evidence=chart_source_evidence,
+    )
+
+    def fact_member(text: str) -> bool:
+        claims = _extract_numeric_claims(final_text=text, **options)
+        refs = [ref for claim in claims for ref in claim.value_refs]
+        return bool(refs) and all(ref.get("supported") is True for ref in refs)
+
+    surface = analyze_surface(final_text, evidence, fact_validator=fact_member, goal=goal)
+    # Prebound quantities keep their source spelling for neighboring field/scope
+    # grammar. Only their exact source spans are excluded from rebinding; no
+    # surrounding heading or statistical sentence is erased with them.
+    numeric_view = list(surface.numeric_text)
+    prebound_spans = []
+    for ref in surface.refs:
+        span = ref.get("statement_span")
+        if isinstance(span, list | tuple) and len(span) == 2:
+            left, right = span
+            numeric_view[left:right] = final_text[left:right]
+            prebound_spans.append((left, right))
+    claims = _extract_numeric_claims(
+        final_text="".join(numeric_view), prebound_spans=tuple(prebound_spans), **options
+    )
+    refs = [
+        *surface.refs,
+        *(
+            {
+                "token": "[" + issue + "]",
+                "supported": False,
+                "reason": issue,
+                "ref_kind": "quantity_audit_issue",
+                "quantity_purpose": "unknown",
+            }
+            for issue in surface.issues
+        ),
+    ]
+    if refs:
+        claims.append(
+            ClaimDraft(
+                statement=final_text,
+                claim_kind="numeric",
+                value_refs=tuple(refs),
+                evidence_ids=tuple(
+                    dict.fromkeys(
+                        ref["evidence_id"]
+                        for ref in refs
+                        if ref.get("supported") and ref.get("evidence_id")
+                    )
+                ),
+            )
+        )
+    from apps.orchestrator.control.quantity_presentation import quantity_audit
+
+    quantities, uncovered = quantity_audit(final_text, evidence, claims, goal=goal)
+    audits = {tuple(q["source_span"]): q for q in quantities}
+    for claim in claims:
+        for ref in claim.value_refs:
+            span = ref.get("source_span")
+            if span is None and claim.statement == final_text:
+                span = ref.get("statement_span")
+            if isinstance(span, list | tuple) and (audit := audits.get(tuple(span))):
+                ref["quantity_audit"] = audit
+    if uncovered:
+        claims.append(
+            ClaimDraft(
+                statement=final_text,
+                claim_kind="numeric",
+                value_refs=tuple(
+                    {
+                        "token": "[coverage]",
+                        "supported": False,
+                        "reason": issue,
+                        "ref_kind": "quantity_audit_issue",
+                    }
+                    for issue in uncovered
+                ),
+                evidence_ids=(),
+            )
+        )
+    return claims
+
+
+def _extract_numeric_claims(
+    *,
+    final_text: str,
+    goal: str,
+    evidence: list[EvidenceRecord],
+    evidence_is_typed: bool = True,
+    strip_list_markers: bool = True,
+    run_id: str | None = None,
+    invocations: list[ToolInvocation] | None = None,
+    artifacts: list[Artifact] | None = None,
+    chart_source_evidence: list[EvidenceRecord] | None = None,
+    prebound_spans: tuple[tuple[int, int], ...] = (),
 ) -> list[ClaimDraft]:
     """Extract numeric statements and link each number to current-run Evidence.
 
@@ -246,6 +419,27 @@ def extract_numeric_claims(
         for token in _numeric_tokens(goal)
         if (normalized := _normalize_number(token)) is not None
     }
+    chart_deliveries = verified_chart_deliveries(
+        run_id=run_id,
+        # Legacy measurement binding may enrich args; delivery identity must
+        # cross-check the original persisted context, never that merged view.
+        evidence=evidence if chart_source_evidence is None else chart_source_evidence,
+        invocations=invocations or [],
+        artifacts=artifacts or [],
+    )
+    evidence = [
+        replace(record, summary={**record.summary, "value_index": [], "numeric_context": {}})
+        if "fact_projection" in record.summary
+        and not valid_count_projection(
+            record.summary,
+            tool=str(record.source.get("tool")),
+            run_id=record.run_id,
+            invocation_id=record.invocation_id,
+            result_hash=record.result_hash,
+        )
+        else record
+        for record in evidence
+    ]
     evidence_values = _evidence_values(evidence)
     evidence_by_id = {item.evidence_id: item for item in evidence}
     dimensions: dict[str, set[str]] = {}
@@ -276,28 +470,42 @@ def extract_numeric_claims(
         for b in bindings
         if b.get("profile_fact") and b.get("object", {}).get("kind") == "profile_column"
     }
-    statements = [
-        (statement, fragment.cells, fragment.value_span, heading_context)
-        for section, heading_context in profile_heading_sections(final_text, profile_fields)
+    statements = []
+    section_offset = 0
+    for section, heading_context in profile_heading_sections(final_text, profile_fields):
+        normalized_section, inline_map = inline_numeric_projection(section)
         for fragment in table_claim_fragments(
-            inline_numeric_text(section), set(dimensions), measurement_labels=measurement_labels
-        )
-        for scope in (stated_population(fragment.text, profile_fields),)
-        for statement in (
-            [fragment.text]
-            if fragment.cells is not None
-            else split_claim_statements(
-                fragment.text,
-                measurement_labels,
-                source_labels=source_labels,
-                protected_spans=(scope.span,) if scope else (),
+            normalized_section, set(dimensions), measurement_labels=measurement_labels
+        ):
+            scope = stated_population(fragment.text, profile_fields)
+            parts = (
+                [fragment.text]
+                if fragment.cells is not None
+                else split_claim_statements(
+                    fragment.text,
+                    measurement_labels,
+                    source_labels=source_labels,
+                    protected_spans=(scope.span,) if scope else (),
+                )
             )
-        )
-    ]
+            cursor = 0
+            for statement in parts:
+                start = fragment.text.find(statement, cursor)
+                if start < 0:
+                    raise ValueError("statement_source_projection_lost")
+                cursor = start + len(statement)
+                source_map = tuple(
+                    section_offset + inline_map[position] if position is not None else None
+                    for position in fragment.source_map[start:cursor]
+                )
+                statements.append(
+                    (statement, fragment.cells, fragment.value_span, heading_context, source_map)
+                )
+        section_offset += len(section)
     profile_context = ""
     required_population = requested_population(goal, profile_fields)
     population_context = required_population
-    for raw_statement, table_cells, value_span, heading_context in statements:
+    for raw_statement, table_cells, value_span, heading_context, source_map in statements:
         # Only a semicolon in the same prose item can carry a profile subject.
         # A table/list boundary precedes the statement, while a trailing raw
         # newline closes its context only after this statement is evaluated.
@@ -328,6 +536,14 @@ def extract_numeric_claims(
             profile_context = ""
         if not statement:
             continue
+        marker = (
+            _LEADING_LIST_MARKER.match(raw_statement)
+            if table_cells is None and strip_list_markers
+            else None
+        )
+        trim_start = marker.end() if marker else 0
+        trim_start += len(raw_statement[trim_start:]) - len(raw_statement[trim_start:].lstrip())
+        statement_source_map = source_map[trim_start : trim_start + len(statement)]
         local_population = stated_population(statement, profile_fields)
         if local_population is not None:
             population_context = local_population
@@ -347,6 +563,7 @@ def extract_numeric_claims(
             else mask_population(semantic_statement, local_population)
         )
         refs: list[JsonObject] = []
+        reference_positions: dict[int, int] = {}
         slots = statistic_value_slots(statement, measurement_labels, source_labels)
         evaluations: list[StatisticValueEvaluation] = []
         linked_ids: list[str] = []
@@ -357,13 +574,91 @@ def extract_numeric_claims(
         if local_population is not None and local_population.valid:
             identity_spans.append(local_population.span)
         identity_spans.extend(quoted_labels)
+        for source_left, source_right in prebound_spans:
+            prebound_positions = [
+                i
+                for i, position in enumerate(statement_source_map)
+                if position is not None and source_left <= position < source_right
+            ]
+            if prebound_positions and len(prebound_positions) == source_right - source_left:
+                identity_spans.append((prebound_positions[0], prebound_positions[-1] + 1))
+        # Literal field identity comes from the current source, including units
+        # embedded in its actual name. Those glyphs are not measured values.
+        identity_spans.extend(profile_field_identity_spans(statement, profile_fields))
+        counts = count_expressions(
+            statement, measurement_labels=measurement_labels, owner_fields=source_labels
+        )
+        identity_spans.extend(item.value_span for item in counts if item.requested_output)
+        # A calendar month attached directly to a named measurement is a time
+        # label. It is distinct from an explicit cardinal such as 七个月份.
+        for item in counts:
+            left, right = item.value_span
+            month = parse_chinese_count(statement[left:right])
+            if (
+                month is not None
+                and 1 <= month <= 12
+                and statement.startswith("月", right)
+                and re.search(r'(?:^|[，,。；;：:\n])\s*[（("“]*$', statement[:left])
+            ):
+                identity_spans.append(item.value_span)
         refs.extend(identity_errors)
+
+        def supported_count_role(span: tuple[int, int], text: str = statement) -> bool:
+            quantity = operation_quantity(text, *span)
+            return (
+                (quantity is not None and quantity.role in {"before", "after", "removed"})
+                or count_noun(text, *span) in {"分组", *dimensions}
+                or chart_delivery_role(text, *span) is not None
+            )
+
+        unresolved_counts = [
+            item.value_span
+            for item in counts
+            if not any(a <= item.value_span[0] < item.value_span[1] <= b for a, b in identity_spans)
+            and (
+                (
+                    _normalize_number(statement[slice(*item.value_span)]) is None
+                    and parse_chinese_count(statement[slice(*item.value_span)]) is None
+                )
+                or (
+                    CHINESE_COUNT.fullmatch(statement[slice(*item.value_span)])
+                    and not supported_count_role(item.value_span)
+                )
+            )
+        ]
+        for left, right in unresolved_counts:
+            if owner := statistic_value_owner(statement, (left, right), slots):
+                evaluations.append(StatisticValueEvaluation(owner.statement_span, (left, right)))
+            refs.append(
+                {
+                    "token": statement[left:right],
+                    "supported": False,
+                    "reason": "unrecognized_numeric_expression",
+                    "statement_span": [left, right],
+                }
+            )
         numeric_matches = [
             match
             for match in _NUMBER_PATTERN.finditer(statement)
             if not any(a <= match.start() and match.end() <= b for a, b in identity_spans)
+            and not any(a <= match.start() and match.end() <= b for a, b in unresolved_counts)
         ]
-        covered = [*identity_spans, *[match.span() for match in numeric_matches]]
+        # Promote only typed integer counts. Other Chinese quantities keep the
+        # existing unknown classification and original token/span below.
+        numeric_matches.extend(
+            match
+            for match in CHINESE_COUNT.finditer(statement)
+            if parse_chinese_count(match.group()) is not None
+            and not any(a <= match.start() and match.end() <= b for a, b in identity_spans)
+            and supported_count_role(match.span())
+            and not any(a <= match.start() and match.end() <= b for a, b in unresolved_counts)
+        )
+        numeric_matches.sort(key=lambda match: match.start())
+        covered = [
+            *identity_spans,
+            *unresolved_counts,
+            *[match.span() for match in numeric_matches],
+        ]
         covered.extend((start, end) for start, end, _, _ in labels)
         # Only entire known textual labels protect embedded numeric glyphs;
         # a numeric-only label cannot exempt a same-value measurement elsewhere.
@@ -398,10 +693,59 @@ def extract_numeric_claims(
                 continue
             token = match.group(0)
             normalized = _normalize_number(token)
+            chinese_count = parse_chinese_count(token) if normalized is None else None
+            if chinese_count is not None:
+                normalized = Decimal(chinese_count)
             if normalized is None or (
                 normalized in goal_numbers
                 and _looks_like_time_scope(statement, match.start(), match.end())
             ):
+                continue
+            delivery_role = chart_delivery_role(statement, *match.span())
+            if delivery_role is not None:
+                ref: JsonObject = {
+                    "kind": "delivery_count",
+                    "token": token,
+                    "normalized": str(normalized),
+                    "supported": False,
+                    "count_basis": delivery_role,
+                    "statement_span": list(match.span()),
+                }
+                if (
+                    delivery_role in {"chart_dimensions", "chart_artifacts"}
+                    and chart_deliveries
+                    and not any(
+                        item.qualified and item.value_span == match.span() for item in counts
+                    )
+                ):
+                    expected = len(
+                        {item["dimension"] for item in chart_deliveries}
+                        if delivery_role == "chart_dimensions"
+                        else {item["artifact_id"] for item in chart_deliveries}
+                    )
+                    binding = {
+                        "dataset_ref": chart_deliveries[0]["dataset_ref"],
+                        "dataset_version": chart_deliveries[0]["dataset_version"],
+                        "statistic": delivery_role,
+                        "unit": "count",
+                        "filters": [],
+                    }
+                    if normalized == expected and identity_matches(
+                        binding, statement, [binding], table_cells
+                    ):
+                        ref.update(
+                            supported=True,
+                            evidence_id=chart_deliveries[0]["evidence_id"],
+                            sources=chart_deliveries,
+                            semantic_binding=binding,
+                            evidence_value=str(expected),
+                        )
+                        linked_ids.extend(
+                            item["evidence_id"]
+                            for item in chart_deliveries
+                            if item["evidence_id"] not in linked_ids
+                        )
+                refs.append(ref)
                 continue
             owner = statistic_value_owner(statement, match.span(), slots)
             if owner is not None:
@@ -474,7 +818,7 @@ def extract_numeric_claims(
                 normalized,
                 semantic_candidates,
                 statement=semantic_statement,
-                token=token,
+                token=str(normalized) if chinese_count is not None else token,
                 token_end=match.end(),
                 evidence_is_typed=evidence_is_typed,
             )
@@ -499,6 +843,11 @@ def extract_numeric_claims(
                         "normalized": str(normalized),
                         "supported": False,
                         "statement_span": [match.start(), match.end()],
+                        **(
+                            {"reason": "unrecognized_numeric_expression"}
+                            if chinese_count is not None and not semantic_candidates
+                            else {}
+                        ),
                     }
                 )
                 continue
@@ -511,10 +860,10 @@ def extract_numeric_claims(
                 "path": path,
                 "evidence_value": evidence_value,
                 "match_kind": match_kind,
+                "statement_span": [match.start(), match.end()],
                 **(
                     {
                         "statistic_slot_span": list(owner.statement_span),
-                        "statement_span": [match.start(), match.end()],
                     }
                     if owner
                     else {}
@@ -529,6 +878,7 @@ def extract_numeric_claims(
                 ]
                 value_ref["ambiguous_value"] = True
             refs.append(value_ref)
+            reference_positions[id(value_ref)] = match.start()
             for candidate_id, _candidate_path, _candidate_value in candidates:
                 if candidate_id not in linked_ids:
                     linked_ids.append(candidate_id)
@@ -554,6 +904,19 @@ def extract_numeric_claims(
                 }
             )
         if refs:
+            for ref in refs:
+                span = ref.get("statement_span")
+                if not isinstance(span, list | tuple) or len(span) != 2:
+                    continue
+                positions = statement_source_map[span[0] : span[1]]
+                if positions and all(position is not None for position in positions):
+                    a, b = positions[0], positions[-1]
+                    assert a is not None and b is not None
+                    ref["source_span"] = [a, b + 1]
+                    ref["source_token"] = final_text[a : b + 1]
+            refs.sort(
+                key=lambda ref: reference_positions.get(id(ref), ref.get("statement_span", [-1])[0])
+            )
             definition_refs, definition_evidence_ids = _definition_lineage_refs(
                 linked_ids,
                 evidence_by_id,
@@ -985,10 +1348,63 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
     context = record.summary.get("numeric_context") or {}
     context = {**context, **context.get("tool_args", {})}
     context = {**context, **context.get("encoding", {})}
+    projection = record.summary.get("fact_projection")
+    if isinstance(projection, dict) and valid_count_projection(
+        record.summary,
+        tool=str(record.source.get("tool")),
+        run_id=record.run_id,
+        invocation_id=record.invocation_id,
+        result_hash=record.result_hash,
+    ):
+        context = {**projection["arguments"], "data_version_hash": projection["branch_hash"]}
     item: JsonObject = next(
         (item for item in record.summary.get("value_index", []) if item.get("path") == path),
         {},
     )
+    if record.source.get("tool") == "transform_dataset":
+        projection = record.summary.get("fact_projection")
+        if "fact_projection" in record.summary and not isinstance(projection, dict):
+            return {"statistic": "invalid", "evidence_path": path}
+        fact = (
+            item.get("fact", {})
+            if projection
+            else {
+                "role": {"$.rows_before": "before", "$.rows_after": "after"}.get(path),
+            }
+        )
+        operations = {key: context[key] for key in OPERATIONS if key in context}
+        operation = fact.get("operation") or (
+            next(iter(operations)) if len(operations) == 1 else "transform"
+        )
+        input_ref = projection.get("input_ref") if projection else context.get("dataset_ref")
+        output_ref = projection.get("output_ref") if projection else None
+        step = fact.get("step")
+        dataset_ref = output_ref if fact.get("role") == "after" and output_ref else input_ref
+        if step is not None and not (
+            (step == 0 and fact.get("role") == "before")
+            or (step == (projection or {}).get("step_count", 0) - 1 and fact.get("role") == "after")
+        ):
+            dataset_ref = None  # Intermediate operation states are not materialized datasets.
+        return {
+            "dataset_ref": dataset_ref,
+            "dataset_version": context.get("data_version_hash", input_ref),
+            "input_ref": input_ref,
+            "output_ref": output_ref,
+            "metric": "row_count",
+            "statistic": fact.get("role"),
+            "unit": "count",
+            "operation": operation,
+            "operation_parameters": operations,
+            "count_basis": fact.get("basis", "rows"),
+            "columns": fact.get("columns"),
+            "step": step,
+            "invocation_id": record.invocation_id,
+            "result_hash": record.result_hash,
+            "filters": context.get("filters", []),
+            "grain": None,
+            "group_key": None,
+            "evidence_path": path,
+        }
     if record.source.get("tool") == "generate_report" and isinstance(
         item.get("report_binding"), dict
     ):
@@ -1012,6 +1428,29 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
         }
     role = item.get("statistic") or statistic_role(path)
     source_tool = record.source.get("tool")
+    if (
+        source_tool == "aggregate_preview"
+        and role == "group_total"
+        and (
+            path != "$.group_total"
+            or (
+                "fact_projection" in record.summary
+                and (
+                    not isinstance(projection, dict)
+                    or path not in projection.get("paths", [])
+                    or item.get("fact", {}).get("role") != "group_total"
+                    or not valid_count_projection(
+                        record.summary,
+                        tool=str(source_tool),
+                        run_id=record.run_id,
+                        invocation_id=record.invocation_id,
+                        result_hash=record.result_hash,
+                    )
+                )
+            )
+        )
+    ):
+        return {"statistic": "invalid", "evidence_path": path}
     statistical = source_tool in TOOL_LABELS or record.kind == "stats"
     obj = item.get("object") if statistical else None
     analysis = analysis_identity(context, source_tool, record.summary) if statistical else None
@@ -1093,7 +1532,71 @@ def _semantic_candidate_matches(
     required_population: PopulationRequest | None = None,
 ) -> bool:
     """对完整数字子句绑定指标和分组；不按数字位置猜测或以同值证明关系。"""
+    if any(
+        item.qualified and item.value_span == match.span() for item in count_expressions(statement)
+    ):
+        return False  # Exact counts do not prove a bound or approximate quantity.
     profile_record = next(record for record in evidence if record.evidence_id == value[0])
+    if _semantic_binding(profile_record, value[1]).get("statistic") == "invalid":
+        return False
+    requested_operation = operation_quantity(statement, *match.span())
+    if requested_operation is not None or profile_record.source.get("tool") == "transform_dataset":
+        if requested_operation is None or profile_record.source.get("tool") != "transform_dataset":
+            return False
+        selected_operation = _semantic_binding(profile_record, value[1])
+        if selected_operation.get("statistic") != requested_operation.role:
+            return False
+        if requested_operation.operation not in {
+            None,
+            "transform",
+            selected_operation.get("operation"),
+        }:
+            return False
+        if (
+            requested_operation.duplicate
+            and selected_operation.get("count_basis") != "duplicate_excess"
+        ):
+            return False
+        projection = profile_record.summary.get("fact_projection") or {}
+        if (
+            requested_operation.operation in {None, "transform"}
+            and selected_operation.get("step") is not None
+        ):
+            return False
+        if (
+            requested_operation.operation in {None, "transform"}
+            and requested_operation.role == "after"
+            and selected_operation.get("output_ref")
+            and any(
+                other.source.get("tool") == "transform_dataset"
+                and isinstance(other.summary.get("fact_projection"), dict)
+                and valid_count_projection(
+                    other.summary,
+                    tool="transform_dataset",
+                    run_id=other.run_id,
+                    invocation_id=other.invocation_id,
+                    result_hash=other.result_hash,
+                )
+                and other.summary["fact_projection"].get("input_ref")
+                == selected_operation["output_ref"]
+                for other in evidence
+                if other.evidence_id != profile_record.evidence_id
+            )
+        ):
+            return False  # A materialized descendant supersedes a generic final-state claim.
+        if not operation_scope_matches(
+            statement, selected_operation["operation_parameters"], projection.get("columns", [])
+        ):
+            return False
+        return identity_matches(selected_operation, statement, [selected_operation], table_cells)
+    noun = count_noun(statement, *match.span())
+    if noun is not None and profile_record.source.get("tool") == "aggregate_preview":
+        selected_count = _semantic_binding(profile_record, value[1])
+        return (
+            selected_count.get("statistic") == "group_total"
+            and noun in {"分组", selected_count.get("grain")}
+            and identity_matches(selected_count, statement, [selected_count], table_cells)
+        )
     if profile_record.source.get("tool") == "get_data_profile" and has_column_profile(
         profile_record.summary
     ):
@@ -1329,6 +1832,14 @@ def _evidence_values(
 ) -> list[tuple[str, str, Decimal, str]]:
     indexed: list[tuple[str, str, Decimal, str]] = []
     for record in evidence:
+        if "fact_projection" in record.summary and not valid_count_projection(
+            record.summary,
+            tool=str(record.source.get("tool")),
+            run_id=record.run_id,
+            invocation_id=record.invocation_id,
+            result_hash=record.result_hash,
+        ):
+            continue
         raw_index = record.summary.get("value_index")
         if not isinstance(raw_index, list):
             continue

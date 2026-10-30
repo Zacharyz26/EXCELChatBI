@@ -85,7 +85,13 @@ def test_supported_and_wrong_ratios_keep_their_meaning(profile, value, expected,
 )
 def test_prose_dates_lists_and_typed_counts_remain_valid(profile, text):
     result = checks.evaluate(profile, text)
-    assert result["verification"]["passed"] and result["report"]["status"] == "passed", result
+    # A03: soft wrapping does not supply the missing three outline members.
+    pending = text == "以下\n三个提示\n供参考。"
+    assert result["verification"]["passed"] is (not pending), result
+    assert (result["report"]["status"] == "passed") is (not pending), result
+    if pending:
+        assert result["verification"]["verdict"] == "NEEDS_ACTION", result
+        assert any(r["token"] == "三" and r.get("supported") is False for r in result["refs"])
 
 
 @pytest.mark.parametrize(

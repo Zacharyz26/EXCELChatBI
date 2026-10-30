@@ -1,0 +1,128 @@
+{
+  "evidence": [
+    {
+      "evidence_id": "bf6b1987d4034b2590839adcc6f27ba6",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "invocation_id": "b5fc6a9a448e4c4699b8c435b5f778ed",
+      "artifact_id": "2a56bdcee1a94ffb99b8dc58cce1c921",
+      "kind": "tool_result",
+      "source_json": "{\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"mcp_contract_validation\":\"unavailable\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":0,\"mcp_gateway_health\":\"compatibility\",\"mcp_service\":null,\"tool\":\"gen_chart\",\"tool_call_id\":\"chart-region\",\"tool_contract\":{},\"transport\":\"in_process\"}",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"2a56bdcee1a94ffb99b8dc58cce1c921\",\"knowledge_empty\":null,\"numeric_context\":{\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"地区\",\"y\":\"销售额\"}},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"已生成 bar 图\",\"value_index\":[{\"group_key\":\"A\",\"metric\":\"销售额\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[0]\",\"source_kind\":\"number\",\"value\":\"10\"}],\"value_index_truncated\":false}",
+      "created_at": "2026-10-27T21:48:38.325929Z"
+    },
+    {
+      "evidence_id": "c64ea23d7f5c4a75bedfde7c7435fb73",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "invocation_id": "3656676d964d413d8e43ac7296efae1e",
+      "artifact_id": "d83169fb30144d51a89e995cdeda14a5",
+      "kind": "tool_result",
+      "source_json": "{\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"mcp_contract_validation\":\"unavailable\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":0,\"mcp_gateway_health\":\"compatibility\",\"mcp_service\":null,\"tool\":\"gen_chart\",\"tool_call_id\":\"chart-product\",\"tool_contract\":{},\"transport\":\"in_process\"}",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"d83169fb30144d51a89e995cdeda14a5\",\"knowledge_empty\":null,\"numeric_context\":{\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"产品\",\"y\":\"销售额\"}},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"已生成 bar 图\",\"value_index\":[{\"group_key\":\"A\",\"metric\":\"销售额\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[0]\",\"source_kind\":\"number\",\"value\":\"10\"}],\"value_index_truncated\":false}",
+      "created_at": "2026-10-27T21:48:38.491837Z"
+    },
+    {
+      "evidence_id": "becdb6e90d2141da8ff07598600cec34",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "invocation_id": "c70339981fd94fa287adf2e068fd7f06",
+      "artifact_id": "3ebf51ca6c804ced9f119c38eba6a71e",
+      "kind": "tool_result",
+      "source_json": "{\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"mcp_contract_validation\":\"unavailable\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":0,\"mcp_gateway_health\":\"compatibility\",\"mcp_service\":null,\"tool\":\"gen_chart\",\"tool_call_id\":\"chart-channel\",\"tool_contract\":{},\"transport\":\"in_process\"}",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"3ebf51ca6c804ced9f119c38eba6a71e\",\"knowledge_empty\":null,\"numeric_context\":{\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"渠道\",\"y\":\"销售额\"}},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"已生成 bar 图\",\"value_index\":[{\"group_key\":\"A\",\"metric\":\"销售额\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[0]\",\"source_kind\":\"number\",\"value\":\"10\"}],\"value_index_truncated\":false}",
+      "created_at": "2026-10-27T21:48:38.527900Z"
+    }
+  ],
+  "tool_invocations": [
+    {
+      "invocation_id": "b5fc6a9a448e4c4699b8c435b5f778ed",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "step_id": "33aa898c9baa468ab0d9d9497155d66f",
+      "tool_call_id": "chart-region",
+      "tool_name": "gen_chart",
+      "idempotency_key": "7f93db885006ece87acaf0ded7d6a28b48f99dae511baace15e82a7c05d69c9f",
+      "args_hash": "4c50da0f8ea73ab25110a0f0cc1b7f9279a9e4e383b5459754da83acaaf527f6",
+      "args_json": "{\"chart_type\":\"bar\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"地区\",\"y\":\"销售额\"}}",
+      "status": "succeeded",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "error_text": null,
+      "artifact_id": "2a56bdcee1a94ffb99b8dc58cce1c921",
+      "started_at": "2026-10-27T21:48:38.316364Z",
+      "completed_at": "2026-10-27T21:48:38.325929Z"
+    },
+    {
+      "invocation_id": "3656676d964d413d8e43ac7296efae1e",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "step_id": null,
+      "tool_call_id": "chart-product",
+      "tool_name": "gen_chart",
+      "idempotency_key": "d1a940b6fca9932f5b21d3371cf92fda2df43101d76758fcab5abaa75c786a89",
+      "args_hash": "4231c1de3d88106292de4ea6a0343f812c2cec572b79740b9ee8bd3c5b2aadf6",
+      "args_json": "{\"chart_type\":\"bar\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"产品\",\"y\":\"销售额\"}}",
+      "status": "succeeded",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "error_text": null,
+      "artifact_id": "d83169fb30144d51a89e995cdeda14a5",
+      "started_at": "2026-10-27T21:48:38.481987Z",
+      "completed_at": "2026-10-27T21:48:38.491837Z"
+    },
+    {
+      "invocation_id": "c70339981fd94fa287adf2e068fd7f06",
+      "run_id": "a522d52372384b488b1d9429eae88a7d",
+      "step_id": null,
+      "tool_call_id": "chart-channel",
+      "tool_name": "gen_chart",
+      "idempotency_key": "970a7ed3a52c5725f6ee393493d33523c6c29e0d57339a0b2e86d15e52532df5",
+      "args_hash": "6eaecc0062641e3480a9952c933941689a1cc9c15af9dfdc4ddf458034f12ab7",
+      "args_json": "{\"chart_type\":\"bar\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"渠道\",\"y\":\"销售额\"}}",
+      "status": "succeeded",
+      "result_hash": "caebcdb9273d161ec48957006824095857b0fcdf255ff9cf33246222c9c4d9c6",
+      "error_text": null,
+      "artifact_id": "3ebf51ca6c804ced9f119c38eba6a71e",
+      "started_at": "2026-10-27T21:48:38.518969Z",
+      "completed_at": "2026-10-27T21:48:38.527900Z"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "2a56bdcee1a94ffb99b8dc58cce1c921",
+      "conversation_id": "50d37b6645df4a32844417d12c3c2f71",
+      "message_id": "defd86476ac347958c65d4cf023e5217",
+      "type": "chart",
+      "payload_json": "{\"chart_id\":\"chart\",\"chart_type\":\"bar\",\"option\":{\"series\":[{\"data\":[10]}],\"xAxis\":{\"data\":[\"A\"]}}}",
+      "file_ref": null,
+      "source_tool": "gen_chart",
+      "params_json": "{\"analysis_id\":\"7a57d5dcfdf9\",\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"地区\",\"y\":\"销售额\"}}",
+      "dataset_ref": "dddddddddddddddddddddddddddddddd",
+      "created_at": "2026-10-27T21:48:38.325929Z",
+      "lineage_dataset_ref": "dddddddddddddddddddddddddddddddd"
+    },
+    {
+      "id": "d83169fb30144d51a89e995cdeda14a5",
+      "conversation_id": "50d37b6645df4a32844417d12c3c2f71",
+      "message_id": "7bae6efc7b224116bb674bb7baff0175",
+      "type": "chart",
+      "payload_json": "{\"chart_id\":\"chart\",\"chart_type\":\"bar\",\"option\":{\"series\":[{\"data\":[10]}],\"xAxis\":{\"data\":[\"A\"]}}}",
+      "file_ref": null,
+      "source_tool": "gen_chart",
+      "params_json": "{\"analysis_id\":\"e3e195cfbdd1\",\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"产品\",\"y\":\"销售额\"}}",
+      "dataset_ref": "dddddddddddddddddddddddddddddddd",
+      "created_at": "2026-10-27T21:48:38.491837Z",
+      "lineage_dataset_ref": "dddddddddddddddddddddddddddddddd"
+    },
+    {
+      "id": "3ebf51ca6c804ced9f119c38eba6a71e",
+      "conversation_id": "50d37b6645df4a32844417d12c3c2f71",
+      "message_id": "7bae6efc7b224116bb674bb7baff0175",
+      "type": "chart",
+      "payload_json": "{\"chart_id\":\"chart\",\"chart_type\":\"bar\",\"option\":{\"series\":[{\"data\":[10]}],\"xAxis\":{\"data\":[\"A\"]}}}",
+      "file_ref": null,
+      "source_tool": "gen_chart",
+      "params_json": "{\"analysis_id\":\"97e04cc47192\",\"chart_type\":\"bar\",\"data_version_hash\":\"04174b66bebb471b802e5678b0dedcb8406ce05e0838257464ad5c5894580248\",\"dataset_ref\":\"dddddddddddddddddddddddddddddddd\",\"encoding\":{\"agg\":\"sum\",\"x\":\"渠道\",\"y\":\"销售额\"}}",
+      "dataset_ref": "dddddddddddddddddddddddddddddddd",
+      "created_at": "2026-10-27T21:48:38.527900Z",
+      "lineage_dataset_ref": "dddddddddddddddddddddddddddddddd"
+    }
+  ]
+}

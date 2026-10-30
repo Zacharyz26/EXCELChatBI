@@ -229,7 +229,16 @@ def test_complete_subset_scope_even_for_coincident_values(same_value, prefix):
 def test_whole_dataset_scope_controls(heading):
     result = tool_profile(device_frame())
     text = heading + "整行重复多余记录数为4。"
-    assert check(text, [record(result)])["verification"]["passed"]
+    outcome = check(text, [record(result)])
+    # A06: this device source has five diagnoses; one correct duplicate fact
+    # does not deliver the announced three items or prove that diagnostic count.
+    pending = heading == "顺带提示三个数据质量点，供后续分步处理时参考："
+    assert outcome["verification"]["passed"] is (not pending), outcome
+    if pending:
+        assert outcome["verification"]["verdict"] == "NEEDS_ACTION", outcome
+        assert any(r["token"] == "三" and r.get("supported") is False for r in outcome["refs"])
+        duplicate = [r for r in outcome["refs"] if r["token"] == "4"]
+        assert duplicate and all(r.get("supported") is True for r in duplicate), outcome
 
 
 @pytest.mark.parametrize(

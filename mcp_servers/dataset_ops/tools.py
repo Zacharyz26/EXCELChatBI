@@ -73,17 +73,46 @@ def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
     derived_policy = policy_metadata(source_policy, dataframe=df)
     rows_before = len(df)
 
+    row_steps: list[dict[str, Any]] = []
+
+    def record_step(operation: str, before: int) -> None:
+        row_steps.append(
+            {
+                "operation": operation,
+                "rows_before": before,
+                "rows_after": len(df),
+                "removed_count": before - len(df),
+                "count_basis": "duplicate_excess"
+                if operation == "drop_duplicates"
+                else "removed_rows",
+                "columns": (
+                    operations[operation]
+                    if operation in {"drop_duplicates", "drop_nulls"}
+                    else None
+                ),
+            }
+        )
+
     if "exclude_row_indices" in operations:
         df = _exclude_rows(df, operations["exclude_row_indices"], rows_before)
+        record_step("exclude_row_indices", rows_before)
     if "filters" in operations:
+        before = len(df)
         for cond in operations["filters"]:
             df = _apply_filter(df, cond)
+        record_step("filters", before)
     if "drop_nulls" in operations:
+        before = len(df)
         df = _drop_nulls(df, operations["drop_nulls"])
+        record_step("drop_nulls", before)
     if "drop_duplicates" in operations:
+        before = len(df)
         df = _drop_duplicates(df, operations["drop_duplicates"])
+        record_step("drop_duplicates", before)
     if "sort" in operations:
+        before = len(df)
         df = _sort(df, operations["sort"])
+        record_step("sort", before)
 
     if df.empty:
         raise ValueError("变换后数据集为空：请放宽过滤条件后重试")
@@ -101,6 +130,11 @@ def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
         "rows_after": len(df),
         "columns": [str(c) for c in df.columns],
         "transform": operations,
+        "row_changes": {
+            "schema_version": 1,
+            "removed_count": rows_before - len(df),
+            "steps": row_steps,
+        },
     }
 
 

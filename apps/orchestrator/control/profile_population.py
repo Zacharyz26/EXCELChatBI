@@ -125,6 +125,26 @@ class PopulationRequest:
 def _explicit_population_request(text: str, fields: set[str]) -> PopulationRequest | None:
     """识别已有 AND 比较式或字段紧邻值的筛选说明，不猜 OR/未知条件。"""
     names = "|".join(re.escape(f) for f in sorted(fields, key=len, reverse=True))
+    conditional = re.search(
+        r"(?:^|[。；;\n])\s*(?P<condition>[^。；;\n，,]+?(?:==|>=|<=|!=|=|>|<|为)"
+        r"[^。；;\n，,]+?)\s*时[，,：:]",
+        text,
+    )
+    if conditional is None:
+        conditional = re.search(
+            r"(?:仅(?:核对|统计|分析)?|只看)\s*(?P<condition>[^。；;\n，,]+?"
+            r"(?:==|>=|<=|!=|=|>|<|为)[^。；;\n，,]+?)的记录",
+            text,
+        )
+    if conditional:
+        parsed = explicit_analysis_requirements("筛选 " + conditional["condition"])
+        return PopulationRequest(
+            parsed.filters,
+            bool(parsed.filters)
+            and not parsed.filter_error
+            and all(item["column"] in fields for item in parsed.filters),
+            (conditional.start("condition"), conditional.end()),
+        )
     markers = list(_SCOPE.finditer(text))
     if names:
         markers.extend(re.finditer(r"仅(?=\s*(?:" + names + r"))", text))

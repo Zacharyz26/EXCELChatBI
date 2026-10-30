@@ -199,6 +199,7 @@ class AgentServiceRuntime:
                 project_id=request_context.project_id,
                 conversation_id=request_context.conversation_id,
                 subject_id=request_context.subject_id,
+                run_id=request_context.run_id,
             )
             if self.service_name in {"report-tools", "knowledge-tools"}
             else None

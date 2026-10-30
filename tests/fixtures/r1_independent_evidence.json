@@ -1,0 +1,285 @@
+{
+  "s1-filter": {
+    "run": {
+      "goal": "请筛选频道为A的记录，并把筛选结果作为后续分析使用的数据。"
+    },
+    "evidence": [
+      {
+        "evidence_id": "b093d83238d3420c8876d5ae7de7214f",
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "invocation_id": "146146e6330e4792924fbdcf6c75594d",
+        "artifact_id": null,
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"transform_dataset\",\"tool_call_id\":\"call_00_DqNzOEu2tcLGFxK0mNVQ4378\",\"tool_contract\":{\"artifact_types\":[],\"contract_hash\":\"5590273da287b014c34485e663bc9e47e8f88a2f5c987fbf2689d873e2498435\",\"idempotent\":false,\"read_only\":false,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"medium\",\"service_name\":\"agent-tools\",\"tool_name\":\"transform_dataset\",\"tool_version\":\"1.0.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "696fb4b78b16fd9084f89cf51d767def26a0c154390c44f1160c9960fe4ece68",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":null,\"knowledge_empty\":null,\"numeric_context\":{\"data_version_hash\":\"9e09f7fbe36d9674cc6a0a39ebb0c98c91883d6d660f41c1501a5b8560790403\",\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\",\"filters\":[{\"column\":\"频道\",\"op\":\"==\",\"value\":\"A\"}]},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"75 → 38 行，新数据集 eed979e1cdca\",\"value_index\":[{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_before\",\"source_kind\":\"number\",\"value\":\"75\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_after\",\"source_kind\":\"number\",\"value\":\"38\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:27:59.080499Z"
+      }
+    ],
+    "contracts": [
+      {
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "contract_json": "{\"analysis_requirements\":{\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\",\"filter_error\":null,\"filters\":[],\"total\":false,\"total_column\":null},\"assumptions\":[],\"constraints\":[\"任务只有在 Verifier 通过后才能完成\",\"成功工具调用必须形成可追溯 Evidence\",\"模型文字不能替代用户要求的 Artifact\"],\"goal\":\"请筛选频道为A的记录，并把筛选结果作为后续分析使用的数据。\",\"run_id\":\"9d6294892f7947e1b4285924799e014b\",\"success_criteria\":[{\"artifact_dimensions\":[],\"artifact_format\":null,\"artifact_type\":null,\"criterion_id\":\"response.non_empty\",\"description\":\"交付非空的最终答复\",\"kind\":\"response\",\"required\":true}]}",
+        "contract_hash": "11005086c48e3bf477c88014ab06fff0aa730d5123e05d6e5c2a976334c9d99d",
+        "created_at": "2026-10-27T05:27:56.388499Z"
+      }
+    ],
+    "invocations": [
+      {
+        "invocation_id": "146146e6330e4792924fbdcf6c75594d",
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "step_id": "079cd7a70e4a419d911482f72a3ba258",
+        "tool_call_id": "call_00_DqNzOEu2tcLGFxK0mNVQ4378",
+        "tool_name": "transform_dataset",
+        "idempotency_key": "e00dd735616e03808cee4214f8760ff872b45583cd48633b2facad3a0d27dfbb",
+        "args_hash": "077f3fbfb6ee5cefb2d406fed591d9cff2f8df13615782eef09e1106b289077a",
+        "args_json": "{\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\",\"filters\":[{\"column\":\"频道\",\"op\":\"==\",\"value\":\"A\"}]}",
+        "status": "succeeded",
+        "result_hash": "696fb4b78b16fd9084f89cf51d767def26a0c154390c44f1160c9960fe4ece68",
+        "error_text": null,
+        "artifact_id": null,
+        "started_at": "2026-10-27T05:27:59.015589Z",
+        "completed_at": "2026-10-27T05:27:59.080499Z"
+      }
+    ],
+    "steps": [
+      {
+        "step_id": "079cd7a70e4a419d911482f72a3ba258",
+        "plan_id": "bc0ed97f71d241f2b58feccda92c74ce",
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "position": 0,
+        "status": "completed",
+        "step_json": "{\"capability\":\"dataset.transform\",\"completion_conditions\":[\"衍生 dataset_ref 已登记血缘且属于当前项目\"],\"dependencies\":[],\"expected_evidence\":[\"绑定当前 run 与数据集版本的 dataset.transform Evidence\"],\"fallback\":[{\"action\":\"retry\",\"when\":\"能力调用失败或后置条件不成立\"}],\"purpose\":\"依据已有 Evidence 创建衍生数据集\",\"step_id\":\"dataset_transform_1\"}",
+        "started_at": "2026-10-27T05:27:59.015589Z",
+        "completed_at": "2026-10-27T05:27:59.080499Z"
+      }
+    ],
+    "bindings": [
+      {
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "dataset_ref": "e7f0d215da7646c58adfb5ed8bcb931b",
+        "binding_kind": "initial",
+        "parent_ref": null,
+        "producing_invocation_id": null,
+        "dataset_created_at": "2026-10-27T05:27:50.215596Z",
+        "bound_at": "2026-10-27T05:27:56.388499Z"
+      },
+      {
+        "run_id": "9d6294892f7947e1b4285924799e014b",
+        "dataset_ref": "eed979e1cdca46f89c05d38278bbfd3a",
+        "binding_kind": "derived",
+        "parent_ref": "e7f0d215da7646c58adfb5ed8bcb931b",
+        "producing_invocation_id": "146146e6330e4792924fbdcf6c75594d",
+        "dataset_created_at": "2026-10-27T05:27:59.071225Z",
+        "bound_at": "2026-10-27T05:27:59.080499Z"
+      }
+    ],
+    "artifacts": [
+      {
+        "id": "9c941680387f4672b170ddd7c07b0509",
+        "conversation_id": "b2cdcffa4c3646c0888242f6ea626aab",
+        "message_id": "89a84ed8f8324d9fb16cb0fb39f6b9cb",
+        "type": "profile",
+        "payload_json": "{\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\",\"row_count\":75,\"column_count\":5,\"columns\":[{\"name\":\"月份\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":6,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"2026-01\",\"2026-02\",\"2026-03\",\"2026-04\",\"2026-05\"]},{\"name\":\"频道\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":3,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"A\",\"B\",\"C\"]},{\"name\":\"状态\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":2,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"已播出\",\"停机\"]},{\"name\":\"播出时长（分钟）\",\"dtype\":\"float\",\"null_ratio\":0.0133,\"distinct_count\":37,\"null_count\":1,\"min\":10.0,\"max\":999.0,\"mean\":50.121622,\"std\":113.152819,\"median\":37.5,\"sample_values\":[\"10.0\",\"11.0\",\"12.0\",\"13.0\",\"14.0\"]},{\"name\":\"记录ID\",\"dtype\":\"int\",\"null_ratio\":0.0,\"distinct_count\":74,\"null_count\":0,\"min\":100100.0,\"max\":999002.0,\"mean\":124317.906667,\"std\":145753.710454,\"median\":100400.0,\"sample_values\":[\"100100\",\"100101\",\"100102\",\"100103\",\"100104\"]}],\"sample_rows\":[{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":10.0,\"记录ID\":100100},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":11.0,\"记录ID\":100101},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":12.0,\"记录ID\":100102},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":13.0,\"记录ID\":100103},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":14.0,\"记录ID\":100104}]}",
+        "file_ref": null,
+        "source_tool": "infer_schema",
+        "params_json": "{\"dataset_ref\":\"e7f0d215da7646c58adfb5ed8bcb931b\"}",
+        "dataset_ref": "e7f0d215da7646c58adfb5ed8bcb931b",
+        "created_at": "2026-10-27T05:27:50.215647Z",
+        "lineage_dataset_ref": "e7f0d215da7646c58adfb5ed8bcb931b"
+      }
+    ]
+  },
+  "s2-clean": {
+    "run": {
+      "goal": "请删除播出时长（分钟）为空的记录，将清理后的数据用于后续分析。"
+    },
+    "evidence": [
+      {
+        "evidence_id": "568cb01264634347897c5b72f1a7a083",
+        "run_id": "b3952007ca924a2ca088e5122d44c7f3",
+        "invocation_id": "2421342aa6aa41c7a7b6dc09ada8d669",
+        "artifact_id": null,
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"564197986e064d348d31a3040f897e34\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"transform_dataset\",\"tool_call_id\":\"call_00_cHU1k4H5fWqOPGt786ec6139\",\"tool_contract\":{\"artifact_types\":[],\"contract_hash\":\"5590273da287b014c34485e663bc9e47e8f88a2f5c987fbf2689d873e2498435\",\"idempotent\":false,\"read_only\":false,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"medium\",\"service_name\":\"agent-tools\",\"tool_name\":\"transform_dataset\",\"tool_version\":\"1.0.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "3ed32e555629452d19ce22940e227a326285abab647df72701e5ad02f10bd640",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":null,\"knowledge_empty\":null,\"numeric_context\":{\"data_version_hash\":\"ce25075c4df5a5f60b100ef52372818856307063000500993bc70ad57de8e9fa\",\"dataset_ref\":\"564197986e064d348d31a3040f897e34\",\"drop_nulls\":[\"播出时长（分钟）\"]},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"38 → 37 行，新数据集 6b2910140ee9\",\"value_index\":[{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_before\",\"source_kind\":\"number\",\"value\":\"38\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_after\",\"source_kind\":\"number\",\"value\":\"37\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:28:32.677592Z"
+      }
+    ]
+  },
+  "s3-dedup": {
+    "run": {
+      "goal": "请按所有列完全一致的整行口径去除重复记录，每组保留一条，并将去重后的结果用于后续分析。"
+    },
+    "evidence": [
+      {
+        "evidence_id": "9f891c9677b64da0a277d5d329929113",
+        "run_id": "fbffeb548d834cfd999962550c4b5c65",
+        "invocation_id": "a17deb5e9c71419987b09ef5f2891f80",
+        "artifact_id": null,
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"6c39c8a729c64077b7a0fb79ab75288a\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"transform_dataset\",\"tool_call_id\":\"call_00_VVmu3emLWOiQeWONoQoN6501\",\"tool_contract\":{\"artifact_types\":[],\"contract_hash\":\"5590273da287b014c34485e663bc9e47e8f88a2f5c987fbf2689d873e2498435\",\"idempotent\":false,\"read_only\":false,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"medium\",\"service_name\":\"agent-tools\",\"tool_name\":\"transform_dataset\",\"tool_version\":\"1.0.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "de95ae454ce4fecf2b3e0da3d8bed583989f5deec941379e6409ec2b79601725",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":null,\"knowledge_empty\":null,\"numeric_context\":{\"data_version_hash\":\"079e3fb6b78fb2fb47fbb404f5a9f4664072368d0f07a5dcd8cfc2aea0fa0e9e\",\"dataset_ref\":\"6c39c8a729c64077b7a0fb79ab75288a\",\"drop_duplicates\":[]},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"37 → 36 行，新数据集 1fc0e70e3ce7\",\"value_index\":[{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_before\",\"source_kind\":\"number\",\"value\":\"37\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.rows_after\",\"source_kind\":\"number\",\"value\":\"36\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:29:01.149049Z"
+      },
+      {
+        "evidence_id": "195472a8d6674812b1b0b15b9c6991b1",
+        "run_id": "fbffeb548d834cfd999962550c4b5c65",
+        "invocation_id": "649ef19753584e008c33a0a11870b39d",
+        "artifact_id": "2bffa0227ae441e7887ef1109946dd5b",
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"1fc0e70e3ce744428dbf0257542c318a\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"get_data_profile\",\"tool_call_id\":\"call_00_1vjxs4GT8KaIjBRnBuVK5633\",\"tool_contract\":{\"artifact_types\":[\"profile\"],\"contract_hash\":\"40c0faaaf7df816827950dbb33e7726d6b9ac300abc9cce6328c83071bcacd2c\",\"idempotent\":true,\"read_only\":true,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"low\",\"service_name\":\"agent-tools\",\"tool_name\":\"get_data_profile\",\"tool_version\":\"1.1.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "ec4ae5b90559132d5b6a5f6766520372dd021e891e52f297ee50473ece2651e4",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"2bffa0227ae441e7887ef1109946dd5b\",\"knowledge_empty\":null,\"numeric_context\":{\"data_version_hash\":\"95f340bd48ee6a5b3c506a89af8cbbff47d0e01982d4cd3002e212df70bfeece\",\"dataset_ref\":\"1fc0e70e3ce744428dbf0257542c318a\",\"profile_population\":{\"dataset_ref\":\"1fc0e70e3ce744428dbf0257542c318a\",\"dataset_version\":\"95f340bd48ee6a5b3c506a89af8cbbff47d0e01982d4cd3002e212df70bfeece\",\"root_ref\":\"6c39c8a729c64077b7a0fb79ab75288a\",\"schema\":\"host-profile-population-v1\",\"steps\":[{\"dataset_ref\":\"1fc0e70e3ce744428dbf0257542c318a\",\"parent_ref\":\"6c39c8a729c64077b7a0fb79ab75288a\",\"transform\":{\"drop_duplicates\":[]}}]}},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"36 行 × 5 列，指标 1 / 维度 0，质量问题 4 项\",\"value_index\":[{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile\"},\"path\":\"$.profile.row_count\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile\"},\"path\":\"$.profile.column_count\",\"source_kind\":\"number\",\"value\":\"5\"},{\"group_key\":null,\"metric\":\"月份\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[0]\"},\"path\":\"$.profile.columns[0].null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":\"月份\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[0]\"},\"path\":\"$.profile.columns[0].distinct_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":null,\"metric\":\"月份\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[0]\"},\"path\":\"$.profile.columns[0].null_count\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":\"频道\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[1]\"},\"path\":\"$.profile.columns[1].null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":\"频道\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[1]\"},\"path\":\"$.profile.columns[1].distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":\"频道\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[1]\"},\"path\":\"$.profile.columns[1].null_count\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":\"状态\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[2]\"},\"path\":\"$.profile.columns[2].null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":\"状态\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[2]\"},\"path\":\"$.profile.columns[2].distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":\"状态\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[2]\"},\"path\":\"$.profile.columns[2].null_count\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].distinct_count\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].null_count\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].min\",\"source_kind\":\"number\",\"value\":\"10.0\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].max\",\"source_kind\":\"number\",\"value\":\"65.0\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].mean\",\"source_kind\":\"number\",\"value\":\"37.5\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].std\",\"source_kind\":\"number\",\"value\":\"17.406895\"},{\"group_key\":null,\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[3]\"},\"path\":\"$.profile.columns[3].median\",\"source_kind\":\"number\",\"value\":\"37.5\"},{\"path\":\"$.profile.columns[3].sample_values[0]#number[0]\",\"source_kind\":\"text\",\"value\":\"10.0\"},{\"path\":\"$.profile.columns[3].sample_values[1]#number[0]\",\"source_kind\":\"text\",\"value\":\"11.0\"},{\"path\":\"$.profile.columns[3].sample_values[2]#number[0]\",\"source_kind\":\"text\",\"value\":\"12.0\"},{\"path\":\"$.profile.columns[3].sample_values[3]#number[0]\",\"source_kind\":\"text\",\"value\":\"13.0\"},{\"path\":\"$.profile.columns[3].sample_values[4]#number[0]\",\"source_kind\":\"text\",\"value\":\"14.0\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].distinct_count\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].null_count\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].min\",\"source_kind\":\"number\",\"value\":\"100100.0\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].max\",\"source_kind\":\"number\",\"value\":\"100605.0\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].mean\",\"source_kind\":\"number\",\"value\":\"100352.5\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].std\",\"source_kind\":\"number\",\"value\":\"173.213741\"},{\"group_key\":null,\"metric\":\"记录ID\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.columns[4]\"},\"path\":\"$.profile.columns[4].median\",\"source_kind\":\"number\",\"value\":\"100352.5\"},{\"path\":\"$.profile.columns[4].sample_values[0]#number[0]\",\"source_kind\":\"text\",\"value\":\"100100\"},{\"path\":\"$.profile.columns[4].sample_values[1]#number[0]\",\"source_kind\":\"text\",\"value\":\"100101\"},{\"path\":\"$.profile.columns[4].sample_values[2]#number[0]\",\"source_kind\":\"text\",\"value\":\"100102\"},{\"path\":\"$.profile.columns[4].sample_values[3]#number[0]\",\"source_kind\":\"text\",\"value\":\"100103\"},{\"path\":\"$.profile.columns[4].sample_values[4]#number[0]\",\"source_kind\":\"text\",\"value\":\"100104\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[0]\"},\"path\":\"$.profile.sample_rows[0].播出时长（分钟）\",\"source_kind\":\"number\",\"value\":\"10.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[0]\"},\"path\":\"$.profile.sample_rows[0].记录ID\",\"source_kind\":\"number\",\"value\":\"100100\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[1]\"},\"path\":\"$.profile.sample_rows[1].播出时长（分钟）\",\"source_kind\":\"number\",\"value\":\"11.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[1]\"},\"path\":\"$.profile.sample_rows[1].记录ID\",\"source_kind\":\"number\",\"value\":\"100101\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[2]\"},\"path\":\"$.profile.sample_rows[2].播出时长（分钟）\",\"source_kind\":\"number\",\"value\":\"12.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[2]\"},\"path\":\"$.profile.sample_rows[2].记录ID\",\"source_kind\":\"number\",\"value\":\"100102\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[3]\"},\"path\":\"$.profile.sample_rows[3].播出时长（分钟）\",\"source_kind\":\"number\",\"value\":\"13.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[3]\"},\"path\":\"$.profile.sample_rows[3].记录ID\",\"source_kind\":\"number\",\"value\":\"100103\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[4]\"},\"path\":\"$.profile.sample_rows[4].播出时长（分钟）\",\"source_kind\":\"number\",\"value\":\"14.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.profile.sample_rows[4]\"},\"path\":\"$.profile.sample_rows[4].记录ID\",\"source_kind\":\"number\",\"value\":\"100104\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0]\"},\"path\":\"$.roles.columns[0].confidence\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].candidates[0]\"},\"path\":\"$.roles.columns[0].candidates[0].score\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].candidates[1]\"},\"path\":\"$.roles.columns[0].candidates[1].score\",\"source_kind\":\"number\",\"value\":\"0.52\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].profile_evidence\"},\"path\":\"$.roles.columns[0].profile_evidence.null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].profile_evidence\"},\"path\":\"$.roles.columns[0].profile_evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].profile_evidence\"},\"path\":\"$.roles.columns[0].profile_evidence.non_null_count\",\"profile_column\":\"月份\",\"profile_count_basis\":\"non_null_rows\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[0].profile_evidence\"},\"path\":\"$.roles.columns[0].profile_evidence.unique_ratio\",\"source_kind\":\"number\",\"value\":\"0.1667\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1]\"},\"path\":\"$.roles.columns[1].confidence\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].candidates[0]\"},\"path\":\"$.roles.columns[1].candidates[0].score\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].candidates[1]\"},\"path\":\"$.roles.columns[1].candidates[1].score\",\"source_kind\":\"number\",\"value\":\"0.45\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].profile_evidence\"},\"path\":\"$.roles.columns[1].profile_evidence.null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].profile_evidence\"},\"path\":\"$.roles.columns[1].profile_evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].profile_evidence\"},\"path\":\"$.roles.columns[1].profile_evidence.non_null_count\",\"profile_column\":\"频道\",\"profile_count_basis\":\"non_null_rows\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[1].profile_evidence\"},\"path\":\"$.roles.columns[1].profile_evidence.unique_ratio\",\"source_kind\":\"number\",\"value\":\"0.0278\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2]\"},\"path\":\"$.roles.columns[2].confidence\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].candidates[0]\"},\"path\":\"$.roles.columns[2].candidates[0].score\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].candidates[1]\"},\"path\":\"$.roles.columns[2].candidates[1].score\",\"source_kind\":\"number\",\"value\":\"0.45\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].profile_evidence\"},\"path\":\"$.roles.columns[2].profile_evidence.null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].profile_evidence\"},\"path\":\"$.roles.columns[2].profile_evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].profile_evidence\"},\"path\":\"$.roles.columns[2].profile_evidence.non_null_count\",\"profile_column\":\"状态\",\"profile_count_basis\":\"non_null_rows\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[2].profile_evidence\"},\"path\":\"$.roles.columns[2].profile_evidence.unique_ratio\",\"source_kind\":\"number\",\"value\":\"0.0278\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3]\"},\"path\":\"$.roles.columns[3].confidence\",\"source_kind\":\"number\",\"value\":\"0.95\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3].candidates[0]\"},\"path\":\"$.roles.columns[3].candidates[0].score\",\"source_kind\":\"number\",\"value\":\"0.95\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3].profile_evidence\"},\"path\":\"$.roles.columns[3].profile_evidence.null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3].profile_evidence\"},\"path\":\"$.roles.columns[3].profile_evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3].profile_evidence\"},\"path\":\"$.roles.columns[3].profile_evidence.non_null_count\",\"profile_column\":\"播出时长（分钟）\",\"profile_count_basis\":\"non_null_rows\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[3].profile_evidence\"},\"path\":\"$.roles.columns[3].profile_evidence.unique_ratio\",\"source_kind\":\"number\",\"value\":\"1.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4]\"},\"path\":\"$.roles.columns[4].confidence\",\"source_kind\":\"number\",\"value\":\"0.98\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].candidates[0]\"},\"path\":\"$.roles.columns[4].candidates[0].score\",\"source_kind\":\"number\",\"value\":\"0.98\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].candidates[1]\"},\"path\":\"$.roles.columns[4].candidates[1].score\",\"source_kind\":\"number\",\"value\":\"0.55\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].profile_evidence\"},\"path\":\"$.roles.columns[4].profile_evidence.null_ratio\",\"source_kind\":\"number\",\"value\":\"0.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].profile_evidence\"},\"path\":\"$.roles.columns[4].profile_evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].profile_evidence\"},\"path\":\"$.roles.columns[4].profile_evidence.non_null_count\",\"profile_column\":\"记录ID\",\"profile_count_basis\":\"non_null_rows\",\"source_kind\":\"number\",\"value\":\"36\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.columns[4].profile_evidence\"},\"path\":\"$.roles.columns[4].profile_evidence.unique_ratio\",\"source_kind\":\"number\",\"value\":\"1.0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.time\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.metric\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.dimension\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.identifier\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.unknown\",\"source_kind\":\"number\",\"value\":\"2\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.roles.summary\"},\"path\":\"$.roles.summary.ambiguous\",\"source_kind\":\"number\",\"value\":\"2\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality\"},\"path\":\"$.quality.duplicate_rows\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.issues[0].evidence\"},\"path\":\"$.quality.issues[0].evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.issues[1].evidence\"},\"path\":\"$.quality.issues[1].evidence.confidence\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.issues[2].evidence\"},\"path\":\"$.quality.issues[2].evidence.distinct_count\",\"source_kind\":\"number\",\"value\":\"1\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.issues[3].evidence\"},\"path\":\"$.quality.issues[3].evidence.confidence\",\"source_kind\":\"number\",\"value\":\"0.9\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.summary\"},\"path\":\"$.quality.summary.issue_count\",\"source_kind\":\"number\",\"value\":\"4\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.summary\"},\"path\":\"$.quality.summary.high\",\"source_kind\":\"number\",\"value\":\"0\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.summary\"},\"path\":\"$.quality.summary.medium\",\"source_kind\":\"number\",\"value\":\"2\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"unresolved\",\"path\":\"$.quality.summary\"},\"path\":\"$.quality.summary.low\",\"source_kind\":\"number\",\"value\":\"2\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:29:02.902722Z"
+      }
+    ]
+  },
+  "s5-chart": {
+    "run": {
+      "goal": "请将播出时长（分钟）按月份求和，画一张展示月度变化的折线图，标明月份和时长单位。"
+    },
+    "evidence": [
+      {
+        "evidence_id": "b7f8a539e6c441b0b86e2d8a33468501",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "invocation_id": "b75fd74c4d664055adf9d621e8624e0f",
+        "artifact_id": "17fc894fdf614a48a45eaeecb912232c",
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"aggregate_preview\",\"tool_call_id\":\"call_00_HwZdRlZzSPDMWkWkDHBi3051\",\"tool_contract\":{\"artifact_types\":[\"table\"],\"contract_hash\":\"6495db49a85868684f02f18d9e9e649b602f0654510ee91a4b4717d8c41bce91\",\"idempotent\":true,\"read_only\":true,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"low\",\"service_name\":\"agent-tools\",\"tool_name\":\"aggregate_preview\",\"tool_version\":\"1.0.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"17fc894fdf614a48a45eaeecb912232c\",\"knowledge_empty\":null,\"numeric_context\":{\"agg\":\"sum\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"group_col\":\"月份\",\"sort\":\"group\",\"value_col\":\"播出时长（分钟）\"},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"6 组，返回前 6 组\",\"value_index\":[{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.total_value\",\"source_kind\":\"number\",\"value\":\"1350.0\"},{\"group_key\":\"2026-01\",\"metric\":null,\"object\":{\"group\":\"2026-01\",\"kind\":\"group\"},\"path\":\"$.rows[0].value\",\"source_kind\":\"number\",\"value\":\"75.0\"},{\"group_key\":\"2026-01\",\"metric\":null,\"object\":{\"group\":\"2026-01\",\"kind\":\"group\"},\"path\":\"$.rows[0].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-01\",\"metric\":null,\"object\":{\"group\":\"2026-01\",\"kind\":\"group\"},\"path\":\"$.rows[0].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-01\",\"metric\":null,\"object\":{\"group\":\"2026-01\",\"kind\":\"group\"},\"path\":\"$.rows[0].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-02\",\"metric\":null,\"object\":{\"group\":\"2026-02\",\"kind\":\"group\"},\"path\":\"$.rows[1].value\",\"source_kind\":\"number\",\"value\":\"135.0\"},{\"group_key\":\"2026-02\",\"metric\":null,\"object\":{\"group\":\"2026-02\",\"kind\":\"group\"},\"path\":\"$.rows[1].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-02\",\"metric\":null,\"object\":{\"group\":\"2026-02\",\"kind\":\"group\"},\"path\":\"$.rows[1].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-02\",\"metric\":null,\"object\":{\"group\":\"2026-02\",\"kind\":\"group\"},\"path\":\"$.rows[1].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-03\",\"metric\":null,\"object\":{\"group\":\"2026-03\",\"kind\":\"group\"},\"path\":\"$.rows[2].value\",\"source_kind\":\"number\",\"value\":\"195.0\"},{\"group_key\":\"2026-03\",\"metric\":null,\"object\":{\"group\":\"2026-03\",\"kind\":\"group\"},\"path\":\"$.rows[2].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-03\",\"metric\":null,\"object\":{\"group\":\"2026-03\",\"kind\":\"group\"},\"path\":\"$.rows[2].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-03\",\"metric\":null,\"object\":{\"group\":\"2026-03\",\"kind\":\"group\"},\"path\":\"$.rows[2].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-04\",\"metric\":null,\"object\":{\"group\":\"2026-04\",\"kind\":\"group\"},\"path\":\"$.rows[3].value\",\"source_kind\":\"number\",\"value\":\"255.0\"},{\"group_key\":\"2026-04\",\"metric\":null,\"object\":{\"group\":\"2026-04\",\"kind\":\"group\"},\"path\":\"$.rows[3].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-04\",\"metric\":null,\"object\":{\"group\":\"2026-04\",\"kind\":\"group\"},\"path\":\"$.rows[3].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-04\",\"metric\":null,\"object\":{\"group\":\"2026-04\",\"kind\":\"group\"},\"path\":\"$.rows[3].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-05\",\"metric\":null,\"object\":{\"group\":\"2026-05\",\"kind\":\"group\"},\"path\":\"$.rows[4].value\",\"source_kind\":\"number\",\"value\":\"315.0\"},{\"group_key\":\"2026-05\",\"metric\":null,\"object\":{\"group\":\"2026-05\",\"kind\":\"group\"},\"path\":\"$.rows[4].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-05\",\"metric\":null,\"object\":{\"group\":\"2026-05\",\"kind\":\"group\"},\"path\":\"$.rows[4].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-05\",\"metric\":null,\"object\":{\"group\":\"2026-05\",\"kind\":\"group\"},\"path\":\"$.rows[4].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-06\",\"metric\":null,\"object\":{\"group\":\"2026-06\",\"kind\":\"group\"},\"path\":\"$.rows[5].value\",\"source_kind\":\"number\",\"value\":\"375.0\"},{\"group_key\":\"2026-06\",\"metric\":null,\"object\":{\"group\":\"2026-06\",\"kind\":\"group\"},\"path\":\"$.rows[5].count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-06\",\"metric\":null,\"object\":{\"group\":\"2026-06\",\"kind\":\"group\"},\"path\":\"$.rows[5].row_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":\"2026-06\",\"metric\":null,\"object\":{\"group\":\"2026-06\",\"kind\":\"group\"},\"path\":\"$.rows[5].valid_value_count\",\"source_kind\":\"number\",\"value\":\"6\"},{\"group_key\":null,\"metric\":null,\"object\":{\"kind\":\"analysis\"},\"path\":\"$.group_total\",\"source_kind\":\"number\",\"value\":\"6\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:32:57.374450Z"
+      },
+      {
+        "evidence_id": "1121febee8eb4443837dd0adf5ba9be6",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "invocation_id": "fcee03b872ad4a64a44cd6042b4ac262",
+        "artifact_id": "8474f5c6f4194f15a2edeb81300ea15a",
+        "kind": "tool_result",
+        "source_json": "{\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"mcp_contract_equivalent\":true,\"mcp_contract_validation\":\"equivalent\",\"mcp_degraded\":false,\"mcp_execution\":\"canonical_gateway\",\"mcp_gateway_generation\":1,\"mcp_gateway_health\":\"healthy\",\"mcp_service\":\"agent-tools\",\"tool\":\"gen_chart\",\"tool_call_id\":\"call_01_6d5dlnb0nNcudSGeKjD40476\",\"tool_contract\":{\"artifact_types\":[\"chart\"],\"contract_hash\":\"4222c76db9b2c147d7bfd916ae632a3eda3a6c43a87bf23fbdd18c7d26216540\",\"idempotent\":true,\"read_only\":true,\"required_permissions\":[\"analysis:execute\"],\"risk_level\":\"low\",\"service_name\":\"agent-tools\",\"tool_name\":\"gen_chart\",\"tool_version\":\"1.0.0\"},\"transport\":\"in_process\"}",
+        "result_hash": "20700dccd05e46361390744ad6d5e9e38dc5aa5ec4a42ef1af412d5e5b27c924",
+        "summary_json": "{\"analysis_context\":{\"kind\":null,\"method\":null,\"slope_unit\":null},\"artifact_id\":\"8474f5c6f4194f15a2edeb81300ea15a\",\"knowledge_empty\":null,\"numeric_context\":{\"chart_type\":\"line\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"encoding\":{\"agg\":\"sum\",\"x\":\"月份\",\"y\":\"播出时长（分钟）\"}},\"source_index\":[],\"source_index_truncated\":false,\"summary\":\"已生成 line 图\",\"value_index\":[{\"group_key\":\"2026-01\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[0]\",\"source_kind\":\"number\",\"value\":\"75.0\"},{\"group_key\":\"2026-02\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[1]\",\"source_kind\":\"number\",\"value\":\"135.0\"},{\"group_key\":\"2026-03\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[2]\",\"source_kind\":\"number\",\"value\":\"195.0\"},{\"group_key\":\"2026-04\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[3]\",\"source_kind\":\"number\",\"value\":\"255.0\"},{\"group_key\":\"2026-05\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[4]\",\"source_kind\":\"number\",\"value\":\"315.0\"},{\"group_key\":\"2026-06\",\"metric\":\"播出时长（分钟）\",\"object\":{\"kind\":\"unresolved\",\"path\":\"$.option.series[0]\"},\"path\":\"$.option.series[0].data[5]\",\"source_kind\":\"number\",\"value\":\"375.0\"}],\"value_index_truncated\":false}",
+        "created_at": "2026-10-27T05:32:57.460097Z"
+      }
+    ],
+    "contracts": [
+      {
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "contract_json": "{\"analysis_requirements\":{\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"filter_error\":null,\"filters\":[],\"total\":false,\"total_column\":null},\"assumptions\":[],\"constraints\":[\"任务只有在 Verifier 通过后才能完成\",\"成功工具调用必须形成可追溯 Evidence\",\"模型文字不能替代用户要求的 Artifact\"],\"goal\":\"请将播出时长（分钟）按月份求和，画一张展示月度变化的折线图，标明月份和时长单位。\",\"run_id\":\"73d0696fbd24465eb01dd90bab22536a\",\"success_criteria\":[{\"artifact_dimensions\":[],\"artifact_format\":null,\"artifact_type\":null,\"criterion_id\":\"response.non_empty\",\"description\":\"交付非空的最终答复\",\"kind\":\"response\",\"required\":true},{\"artifact_dimensions\":[],\"artifact_format\":null,\"artifact_type\":\"chart\",\"criterion_id\":\"artifact.chart\",\"description\":\"生成真实的 chart 工件\",\"kind\":\"artifact\",\"required\":true}]}",
+        "contract_hash": "4879f7fdf9b057602e5f353b0c4136dfe4cea2a18945711dc8308dffd1e2c3c4",
+        "created_at": "2026-10-27T05:32:54.054329Z"
+      }
+    ],
+    "invocations": [
+      {
+        "invocation_id": "b75fd74c4d664055adf9d621e8624e0f",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "step_id": null,
+        "tool_call_id": "call_00_HwZdRlZzSPDMWkWkDHBi3051",
+        "tool_name": "aggregate_preview",
+        "idempotency_key": "d83ee944bc33f73bb704b0b669ab33e03fc0bd639ba0a387d038be3d67532e2f",
+        "args_hash": "d24d16483609669a35900650413949f65ab6cd0d80cb9c1f5a1c9339e16d5303",
+        "args_json": "{\"agg\":\"sum\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"group_col\":\"月份\",\"sort\":\"group\",\"value_col\":\"播出时长（分钟）\"}",
+        "status": "succeeded",
+        "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+        "error_text": null,
+        "artifact_id": "17fc894fdf614a48a45eaeecb912232c",
+        "started_at": "2026-10-27T05:32:57.325739Z",
+        "completed_at": "2026-10-27T05:32:57.374450Z"
+      },
+      {
+        "invocation_id": "fcee03b872ad4a64a44cd6042b4ac262",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "step_id": "7aa49e187a8b4092a701424e74f76c5b",
+        "tool_call_id": "call_01_6d5dlnb0nNcudSGeKjD40476",
+        "tool_name": "gen_chart",
+        "idempotency_key": "04b516320616f1efc293965512b606b3fbdb2a0b32802f000374ec091f914df7",
+        "args_hash": "985943995b11dfc71291eeedfa3f107b148d60bae9296def18951924119788ff",
+        "args_json": "{\"chart_type\":\"line\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"encoding\":{\"agg\":\"sum\",\"x\":\"月份\",\"y\":\"播出时长（分钟）\"}}",
+        "status": "succeeded",
+        "result_hash": "20700dccd05e46361390744ad6d5e9e38dc5aa5ec4a42ef1af412d5e5b27c924",
+        "error_text": null,
+        "artifact_id": "8474f5c6f4194f15a2edeb81300ea15a",
+        "started_at": "2026-10-27T05:32:57.412922Z",
+        "completed_at": "2026-10-27T05:32:57.460097Z"
+      }
+    ],
+    "steps": [
+      {
+        "step_id": "3eed501e98f7409fab9f1c0cd03b5d41",
+        "plan_id": "7261e70286a645d581ba339547a03bab",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "position": 0,
+        "status": "skipped",
+        "step_json": "{\"capability\":\"stats.trend\",\"completion_conditions\":[\"stats.trend 调用成功并生成可追溯 Evidence\"],\"dependencies\":[],\"expected_evidence\":[\"绑定当前 run 与数据集版本的 stats.trend Evidence\"],\"fallback\":[{\"action\":\"correct_parameters\",\"when\":\"能力调用失败或后置条件不成立\"}],\"purpose\":\"计算指定范围和粒度的趋势\",\"step_id\":\"stats_trend_1\"}",
+        "started_at": null,
+        "completed_at": "2026-10-27T05:33:00.339688Z"
+      },
+      {
+        "step_id": "7aa49e187a8b4092a701424e74f76c5b",
+        "plan_id": "7261e70286a645d581ba339547a03bab",
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "position": 1,
+        "status": "completed",
+        "step_json": "{\"capability\":\"visualization.chart\",\"completion_conditions\":[\"图表 Artifact 已持久化且可发送到前端\"],\"dependencies\":[\"stats_trend_1\"],\"expected_evidence\":[\"绑定当前 run 与数据集版本的 visualization.chart Evidence\"],\"fallback\":[{\"action\":\"retry\",\"when\":\"能力调用失败或后置条件不成立\"}],\"purpose\":\"生成用户要求的真实图表工件\",\"step_id\":\"visualization_chart_2\"}",
+        "started_at": "2026-10-27T05:32:57.412922Z",
+        "completed_at": "2026-10-27T05:32:57.460097Z"
+      }
+    ],
+    "bindings": [
+      {
+        "run_id": "73d0696fbd24465eb01dd90bab22536a",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "binding_kind": "initial",
+        "parent_ref": null,
+        "producing_invocation_id": null,
+        "dataset_created_at": "2026-10-27T05:32:48.404800Z",
+        "bound_at": "2026-10-27T05:32:54.054329Z"
+      }
+    ],
+    "artifacts": [
+      {
+        "id": "2e31553d9e8f44b1bee2d79d6d0d4daf",
+        "conversation_id": "4f183765edbc47fd91baf2087098edbf",
+        "message_id": "739e0dbaf91b4b568d082a125aed3b07",
+        "type": "profile",
+        "payload_json": "{\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"row_count\":36,\"column_count\":5,\"columns\":[{\"name\":\"月份\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":6,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"2026-01\",\"2026-02\",\"2026-03\",\"2026-04\",\"2026-05\"]},{\"name\":\"频道\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":1,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"A\"]},{\"name\":\"状态\",\"dtype\":\"str\",\"null_ratio\":0.0,\"distinct_count\":1,\"null_count\":0,\"min\":null,\"max\":null,\"mean\":null,\"std\":null,\"median\":null,\"sample_values\":[\"已播出\"]},{\"name\":\"播出时长（分钟）\",\"dtype\":\"float\",\"null_ratio\":0.0,\"distinct_count\":36,\"null_count\":0,\"min\":10.0,\"max\":65.0,\"mean\":37.5,\"std\":17.406895,\"median\":37.5,\"sample_values\":[\"10.0\",\"11.0\",\"12.0\",\"13.0\",\"14.0\"]},{\"name\":\"记录ID\",\"dtype\":\"int\",\"null_ratio\":0.0,\"distinct_count\":36,\"null_count\":0,\"min\":100100.0,\"max\":100605.0,\"mean\":100352.5,\"std\":173.213741,\"median\":100352.5,\"sample_values\":[\"100100\",\"100101\",\"100102\",\"100103\",\"100104\"]}],\"sample_rows\":[{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":10.0,\"记录ID\":100100},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":11.0,\"记录ID\":100101},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":12.0,\"记录ID\":100102},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":13.0,\"记录ID\":100103},{\"月份\":\"2026-01\",\"频道\":\"A\",\"状态\":\"已播出\",\"播出时长（分钟）\":14.0,\"记录ID\":100104}]}",
+        "file_ref": null,
+        "source_tool": "infer_schema",
+        "params_json": "{\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\"}",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "created_at": "2026-10-27T05:32:48.404877Z",
+        "lineage_dataset_ref": "3e3cb77825f746f5a45afc342d741d3d"
+      },
+      {
+        "id": "17fc894fdf614a48a45eaeecb912232c",
+        "conversation_id": "4f183765edbc47fd91baf2087098edbf",
+        "message_id": "b465643aadac4abba464da21ca3321eb",
+        "type": "table",
+        "payload_json": "{\"agg\":\"sum\",\"group_col\":\"月份\",\"group_total\":6,\"rows\":[{\"count\":6,\"group\":\"2026-01\",\"row_count\":6,\"valid_value_count\":6,\"value\":75.0},{\"count\":6,\"group\":\"2026-02\",\"row_count\":6,\"valid_value_count\":6,\"value\":135.0},{\"count\":6,\"group\":\"2026-03\",\"row_count\":6,\"valid_value_count\":6,\"value\":195.0},{\"count\":6,\"group\":\"2026-04\",\"row_count\":6,\"valid_value_count\":6,\"value\":255.0},{\"count\":6,\"group\":\"2026-05\",\"row_count\":6,\"valid_value_count\":6,\"value\":315.0},{\"count\":6,\"group\":\"2026-06\",\"row_count\":6,\"valid_value_count\":6,\"value\":375.0}],\"total_value\":1350.0,\"truncated\":false,\"value_col\":\"播出时长（分钟）\"}",
+        "file_ref": null,
+        "source_tool": "aggregate_preview",
+        "params_json": "{\"agg\":\"sum\",\"analysis_id\":\"bd9fae39a4d5\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"group_col\":\"月份\",\"sort\":\"group\",\"value_col\":\"播出时长（分钟）\"}",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "created_at": "2026-10-27T05:32:57.374450Z",
+        "lineage_dataset_ref": "3e3cb77825f746f5a45afc342d741d3d"
+      },
+      {
+        "id": "8474f5c6f4194f15a2edeb81300ea15a",
+        "conversation_id": "4f183765edbc47fd91baf2087098edbf",
+        "message_id": "b465643aadac4abba464da21ca3321eb",
+        "type": "chart",
+        "payload_json": "{\"chart_id\":\"6097053ac4ec4c6a8db440de62789c46\",\"chart_type\":\"line\",\"option\":{\"grid\":{\"bottom\":12,\"containLabel\":true,\"left\":12,\"right\":20,\"top\":48},\"series\":[{\"data\":[75.0,135.0,195.0,255.0,315.0,375.0],\"name\":\"播出时长（分钟）\",\"type\":\"line\"}],\"title\":{\"text\":\"播出时长（分钟） by 月份\"},\"tooltip\":{\"trigger\":\"axis\"},\"xAxis\":{\"data\":[\"2026-01\",\"2026-02\",\"2026-03\",\"2026-04\",\"2026-05\",\"2026-06\"],\"type\":\"category\"},\"yAxis\":{\"type\":\"value\"}}}",
+        "file_ref": null,
+        "source_tool": "gen_chart",
+        "params_json": "{\"analysis_id\":\"8b4e4f162763\",\"chart_type\":\"line\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"encoding\":{\"agg\":\"sum\",\"x\":\"月份\",\"y\":\"播出时长（分钟）\"}}",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "created_at": "2026-10-27T05:32:57.460097Z",
+        "lineage_dataset_ref": "3e3cb77825f746f5a45afc342d741d3d"
+      }
+    ]
+  }
+}

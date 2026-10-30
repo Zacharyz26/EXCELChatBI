@@ -9,11 +9,13 @@ from typing import Literal, Protocol
 
 from packages.common.identifiers import dataset_reference_arguments
 from packages.orchestration.analysis_requirements import TOTAL_LABEL
-from packages.orchestration.contracts import TaskContract
+from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
 from packages.orchestration.dataset_scope import (
     selected_analysis_dataset_refs,
     verified_analysis_scope,
 )
+from packages.orchestration.evidence_facts import valid_count_projection
+from packages.orchestration.quality_facts import valid_quality_projection
 from packages.session.models import Artifact
 from packages.session.task_models import (
     ClaimDraft,
@@ -24,6 +26,7 @@ from packages.session.task_models import (
 )
 
 from apps.orchestrator.control.claims import extract_numeric_claims
+from apps.orchestrator.control.quantity_presentation import quantity_audit
 
 VerificationVerdict = Literal["PASS", "NEEDS_ACTION", "WAITING_USER", "BLOCKED", "FAILED"]
 
@@ -67,11 +70,80 @@ def verify_completion(
 ) -> VerificationResult:
     """Verify hard postconditions before allowing any semantic judgement."""
     issues: list[VerificationIssue] = []
+    if contract.quantity_contract_version != QUANTITY_CONTRACT_VERSION:
+        return VerificationResult(
+            "BLOCKED",
+            (
+                VerificationIssue(
+                    "quantity_contract_unavailable", "数量契约版本不受支持，不能完成或恢复。"
+                ),
+            ),
+        )
     invocation_by_id = {
         item.invocation_id: item
         for item in invocations
         if item.run_id == contract.run_id and item.status == "succeeded"
     }
+    for item in evidence:
+        if item.run_id != contract.run_id:
+            issues.append(VerificationIssue("foreign_run_evidence", "聊天证据不属于当前任务。"))
+            continue
+        if "numeric_context" in item.summary and not isinstance(
+            item.summary["numeric_context"], dict
+        ):
+            issues.append(VerificationIssue("invalid_evidence_context", "数值证据上下文结构无效。"))
+            continue
+        if "quality_projection" in item.summary:
+            quality = item.summary["quality_projection"]
+            invocation = invocation_by_id.get(item.invocation_id)
+            if not valid_quality_projection(item.summary) or (
+                invocation is not None
+                and (
+                    item.run_id != contract.run_id
+                    or item.result_hash != invocation.result_hash
+                    or not isinstance(quality, dict)
+                    or quality.get("source_hash") != invocation.result_hash
+                    or item.source.get("tool") != invocation.tool_name
+                )
+            ):
+                # An unavailable optional quality set certifies no new quality
+                # count; it must not erase otherwise valid column statistics.
+                if isinstance(quality, dict) and quality.get("state") == "unavailable":
+                    pass
+                else:
+                    issues.append(
+                        VerificationIssue("invalid_quality_projection", "诊断集合来源无效。")
+                    )
+        projection = item.summary.get("fact_projection")
+        if "fact_projection" not in item.summary:
+            continue  # Immutable legacy records are not retroactively certified.
+        invocation = invocation_by_id.get(item.invocation_id)
+        if (
+            invocation is None
+            or not isinstance(projection, dict)
+            or item.run_id != contract.run_id
+            or item.source.get("tool") != invocation.tool_name
+            or item.result_hash != invocation.result_hash
+            or not valid_count_projection(
+                item.summary,
+                tool=invocation.tool_name,
+                run_id=contract.run_id,
+                invocation_id=invocation.invocation_id,
+                result_hash=item.result_hash,
+            )
+            or projection.get("arguments") != invocation.args
+            or projection.get("branch_hash")
+            != item.summary.get("numeric_context", {}).get("data_version_hash")
+            or item.summary.get("numeric_context")
+            != {**invocation.args, "data_version_hash": projection.get("branch_hash")}
+        ):
+            issues.append(
+                VerificationIssue(
+                    "invalid_fact_projection", "计数事实投影与当前成功调用、版本或原始来源不一致。"
+                )
+            )
+    if issues:
+        return VerificationResult("NEEDS_ACTION", tuple(issues))
     bound_evidence = [
         replace(
             item,
@@ -94,8 +166,26 @@ def verify_completion(
         for ref in claim.value_refs
     )
     numeric_claims = extract_numeric_claims(
-        final_text=final_text, goal=contract.goal, evidence=bound_evidence
+        final_text=final_text,
+        goal=contract.goal,
+        evidence=bound_evidence,
+        run_id=contract.run_id,
+        invocations=invocations,
+        artifacts=artifacts,
+        chart_source_evidence=evidence,
     )
+    # Recompute source coverage even when the binder returns no claims. A
+    # blocked quantity is an obligation, not an optional numeric Claim row.
+    _, quantity_issues = quantity_audit(
+        final_text, bound_evidence, numeric_claims, goal=contract.goal
+    )
+    if quantity_issues:
+        issues.append(
+            VerificationIssue(
+                "unresolved_quantity_obligation",
+                "数量来源、覆盖或交付义务尚未通过：" + "；".join(quantity_issues),
+            )
+        )
     if previously_supported and any(
         ref.get("supported") is not True for claim in numeric_claims for ref in claim.value_refs
     ):
@@ -390,7 +480,13 @@ def _verify_analysis_requirements(
             if invocation is None or report is None or record.run_id != contract.run_id:
                 continue
             for index, delivery in enumerate(
-                verified_report_totals(report, invocation, record, source_artifacts)
+                verified_report_totals(
+                    report,
+                    invocation,
+                    record,
+                    source_artifacts,
+                    quantity_contract_version=contract.quantity_contract_version,
+                )
             ):
                 binding = delivery["semantic_binding"]
                 if (

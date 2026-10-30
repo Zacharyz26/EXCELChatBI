@@ -65,6 +65,7 @@ from packages.common.identifiers import DATASET_REF_PATTERN
 from packages.common.logging import get_logger
 from packages.knowledge.domain_store import DomainDefinitionStore
 from packages.knowledge.formula import FormulaMappingMissing
+from packages.orchestration.contracts import require_quantity_contract_version
 from packages.rag.retriever import HybridRetriever
 from packages.session.file_lifecycle import delete_chart_file, delete_report_files
 from packages.session.models import Artifact, ArtifactDraft, JsonObject
@@ -147,6 +148,7 @@ class AgentContext:
     project_id: str
     conversation_id: str
     subject_id: str = "local-user"
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1374,25 +1376,52 @@ def _generate_report(
     from apps.orchestrator.control.duplicate_repair import restored_duplicate_obligations
 
     task_store = TaskStore(context.store.db_path)
-    latest_run = task_store.get_latest_run_for_conversation(context.conversation_id)
-    obligations = []
-    if latest_run is not None and latest_run.project_id == context.project_id:
-        obligations = restored_duplicate_obligations(
-            task_store.list_events_by_type(latest_run.run_id, "verification")
-        )
-        obligations = [
-            item
-            for item in obligations
-            if item.get("status") not in {"resolved", "withdrawn_optional"}
-        ]
+    if not context.run_id:
+        raise AgentToolError("报告缺少精确 TaskRun，不能推测本会话最新任务。")
+    report_run = task_store.get_run(context.run_id)
+    if (
+        report_run is None
+        or report_run.project_id != context.project_id
+        or report_run.conversation_id != context.conversation_id
+    ):
+        raise AgentToolError("报告 TaskRun 与当前项目或会话不一致。")
     try:
-        validation = validate_report_narratives(artifacts, args, repair_obligations=obligations)
+        report_contract = task_store.get_verified_contract(context.run_id)
+        version = require_quantity_contract_version(
+            (report_contract or {}).get("quantity_contract_version")
+        )
+    except ValueError as exc:
+        raise AgentToolError(str(exc)) from exc
+    obligations = restored_duplicate_obligations(
+        task_store.list_events_by_type(context.run_id, "verification")
+    )
+    obligations = [
+        item for item in obligations if item.get("status") not in {"resolved", "withdrawn_optional"}
+    ]
+    try:
+        validation = validate_report_narratives(
+            artifacts,
+            args,
+            repair_obligations=obligations,
+            quantity_contract_version=version,
+            run_id=context.run_id,
+        )
     except ValueError as exc:
         raise AgentToolError(str(exc)) from exc
     md_args, skipped_charts = _assemble_report_args(chart, artifacts)
-    md_args["title"] = args["title"]
-    if args.get("insights"):
-        md_args["insights"] = args["insights"]
+    # The original invocation remains the audit source. A closed, verified
+    # presentation draft must publish its Host-rendered text, not the JSON wire
+    # object; delivery revalidation recomputes this same projection.
+    prepared_sections = validation.get("prepared_sections", {})
+    if not isinstance(prepared_sections, dict):
+        raise AgentToolError("报告的数量呈现投影结构无效。")
+    title = prepared_sections.get("title", args["title"])
+    insights = prepared_sections.get("insights", args.get("insights"))
+    if not isinstance(title, str) or not (insights is None or isinstance(insights, str)):
+        raise AgentToolError("报告的数量呈现投影必须是已验证文字。")
+    md_args["title"] = title
+    if insights:
+        md_args["insights"] = insights
 
     try:
         result: dict[str, Any] = report._tools["gen_report_md"].invoke(md_args)

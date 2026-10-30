@@ -26,6 +26,7 @@ class ClaimFragment:
     text: str
     cells: tuple[tuple[str, str], ...] | None = None
     value_span: tuple[int, int] | None = None
+    source_map: tuple[int | None, ...] = ()
 
 
 # Delimiters describe assertion scope, never regions to skip numeric checks.
@@ -141,15 +142,17 @@ def table_claim_fragments(
     text: str, dimensions: set[str] | None = None, *, measurement_labels: set[str] | None = None
 ) -> list[ClaimFragment]:
     """保留单元格结构供身份校验；展开文本仅用于数字提取及可读审计。"""
-    lines = text.splitlines()
+    raw_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip("\r\n") for line in raw_lines]
     output: list[ClaimFragment] = []
     prose: list[str] = []
-    spans = delimited_spans("\n".join(lines))
+    prose_map: list[int | None] = []
+    spans = delimited_spans(text)
     offsets: list[int] = []
     offset = 0
-    for line in lines:
+    for line in raw_lines:
         offsets.append(offset)
-        offset += len(line) + 1
+        offset += len(line)
     index = 0
     while index < len(lines):
         header = [_plain(cell) for cell in _cells(lines[index])]
@@ -160,20 +163,32 @@ def table_claim_fragments(
             or len(header) != len(divider)
             or not all(re.fullmatch(r":?-+:?", cell.replace(" ", "")) for cell in divider)
         ):
+            if prose:
+                prose_map.append(offsets[index] - 1)
             prose.append(lines[index])
+            prose_map.extend(range(offsets[index], offsets[index] + len(lines[index])))
             index += 1
             continue
         if prose:
-            output.append(ClaimFragment("\n".join(prose)))
+            output.append(ClaimFragment("\n".join(prose), source_map=tuple(prose_map)))
             prose.clear()
+            prose_map.clear()
         index += 2
         while index < len(lines) and (row := _cells(lines[index])):
             if len(row) != len(header):
-                output.append(ClaimFragment(lines[index], ()))
+                output.append(
+                    ClaimFragment(
+                        lines[index],
+                        (),
+                        source_map=tuple(range(offsets[index], offsets[index] + len(lines[index]))),
+                    )
+                )
             else:
                 dimension_columns = {
                     i for i, title in enumerate(header) if title in (dimensions or set())
                 }
+                # Cells are located by ordered delimiters, never by numeric value.
+                cell_offsets = [offsets[index] + start for _, start in _cell_parts(lines[index])]
                 for column, cell in enumerate(row):
                     # Do not consume labels as measurements. Dates/identifiers remain labels.
                     statistic_cell = measurement_labels is not None and bool(
@@ -198,21 +213,43 @@ def table_claim_fragments(
                                 if i != column
                             ),
                             (len(prefix), len(prefix) + len(cell)),
+                            tuple(
+                                [None] * len(prefix)
+                                + list(
+                                    range(cell_offsets[column], cell_offsets[column] + len(cell))
+                                )
+                            ),
                         )
                     )
             index += 1
     if prose:
-        output.append(ClaimFragment("\n".join(prose)))
+        output.append(ClaimFragment("\n".join(prose), source_map=tuple(prose_map)))
     return output
 
 
 def _cells(line: str) -> list[str]:
+    return [cell for cell, _ in _cell_parts(line)]
+
+
+def _cell_parts(line: str) -> list[tuple[str, int]]:
+    """表格单元格内容与同一 delimiter 解析的原文起点。"""
     if "|" not in line:
         return []
-    return [
-        cell.strip()
-        for cell in re.split(r"(?<!\\)\|", line.strip().removeprefix("|").removesuffix("|"))
-    ]
+    start = len(line) - len(line.lstrip())
+    end = len(line.rstrip())
+    if line[start:end].startswith("|"):
+        start += 1
+    if line[start:end].endswith("|"):
+        end -= 1
+    parts = []
+    cursor = start
+    for boundary in [*re.finditer(r"(?<!\\)\|", line[start:end]), None]:
+        stop = start + boundary.start() if boundary else end
+        raw = line[cursor:stop]
+        left = cursor + len(raw) - len(raw.lstrip())
+        parts.append((raw.strip(), left))
+        cursor = stop + 1
+    return parts
 
 
 def _plain(cell: str) -> str:
@@ -264,8 +301,24 @@ def inline_numeric_text(text: str) -> str:
     literal. Removing delimiters before numeric extraction keeps all offsets
     consistent and cannot turn a field-name suffix into a separate subject.
     """
-    text = re.sub(r"(?<![\\*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\*)", r"\1", text)
-    return re.sub(r"(?<![\\\w])__(?=\S)(.+?)(?<=\S)__(?!\w)", r"\1", text)
+    return inline_numeric_projection(text)[0]
+
+
+def inline_numeric_projection(text: str) -> tuple[str, tuple[int, ...]]:
+    """配对内联包装的文本与原文位置同源产生，表格/统计不靠同值定位。"""
+    offsets = list(range(len(text)))
+    for pattern in (
+        r"(?<![\\*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?!\*)",
+        r"(?<![\\\w])__(?=\S)(.+?)(?<=\S)__(?!\w)",
+    ):
+        chars = list(text)
+        removed: set[int] = set()
+        for match in re.finditer(pattern, text):
+            removed.update(range(match.start(), match.start(1)))
+            removed.update(range(match.end(1), match.end()))
+        text = "".join(char for index, char in enumerate(chars) if index not in removed)
+        offsets = [offset for index, offset in enumerate(offsets) if index not in removed]
+    return text, tuple(offsets)
 
 
 def mask_fenced_code(text: str) -> str:

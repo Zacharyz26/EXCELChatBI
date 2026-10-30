@@ -7,6 +7,10 @@ import json
 from pathlib import Path
 
 from packages.common.report_safety import escape_report_markup
+from packages.orchestration.contracts import (
+    QUANTITY_CONTRACT_VERSION,
+    REPORT_QUANTITY_VALIDATOR,
+)
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import EvidenceRecord, ToolInvocation
 
@@ -96,6 +100,8 @@ def verified_report_totals(
     invocation: ToolInvocation,
     evidence: EvidenceRecord,
     sources: list[Artifact],
+    *,
+    quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
 ) -> list[JsonObject]:
     """重验当前报告与原来源、实际 Markdown/PDF 字节，失配时不给出总计证明。"""
     validation = (report.payload or {}).get("validation")
@@ -111,6 +117,9 @@ def verified_report_totals(
         or invocation.artifact_id != report.id
         or not isinstance(validation, dict)
         or validation.get("status") != "passed"
+        or quantity_contract_version != QUANTITY_CONTRACT_VERSION
+        or validation.get("validator") != REPORT_QUANTITY_VALIDATOR
+        or validation.get("quantity_contract_version") != quantity_contract_version
         or evidence.summary.get("report_validation_hash") != validation_hash(validation)
         or not report.file_ref
     ):
@@ -138,7 +147,12 @@ def verified_report_totals(
             or hashlib.sha256(path.read_bytes()).hexdigest() != validation.get("pdf_sha256")
         ):
             return []
-        checked = validate_report_narratives(selected, invocation.args)
+        checked = validate_report_narratives(
+            selected,
+            invocation.args,
+            quantity_contract_version=quantity_contract_version,
+            run_id=invocation.run_id,
+        )
         if any(validation.get(key) != value for key, value in checked.items()):
             return []
         totals = report_total_deliveries(selected, checked, markdown)

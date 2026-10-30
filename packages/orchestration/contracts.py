@@ -12,6 +12,19 @@ from packages.session.models import JsonObject
 from .analysis_requirements import AnalysisRequirements, explicit_analysis_requirements
 
 CriterionKind = Literal["response", "artifact", "evidence", "semantic", "constraint"]
+QUANTITY_CONTRACT_VERSION = "quantity-contract-v1"
+REPORT_QUANTITY_VALIDATOR = "selected-artifact-quantity-v2"
+
+
+class QuantityContractUnavailable(ValueError):
+    """数量契约缺失或版本不兼容，执行入口不得猜测或自动升级。"""
+
+
+def require_quantity_contract_version(value: object) -> str:
+    """核对冻结的数量契约版本，历史缺省值不会被补成当前版本。"""
+    if value != QUANTITY_CONTRACT_VERSION:
+        raise QuantityContractUnavailable("数量契约缺失或不兼容，请新建受治理任务。")
+    return QUANTITY_CONTRACT_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +57,7 @@ class TaskContract:
     constraints: tuple[str, ...]
     assumptions: tuple[str, ...] = ()
     analysis_requirements: AnalysisRequirements | None = None
+    quantity_contract_version: str = QUANTITY_CONTRACT_VERSION
 
     def to_dict(self) -> JsonObject:
         return {
@@ -52,6 +66,7 @@ class TaskContract:
             "success_criteria": [item.to_dict() for item in self.success_criteria],
             "constraints": list(self.constraints),
             "assumptions": list(self.assumptions),
+            "quantity_contract_version": self.quantity_contract_version,
             **(
                 {"analysis_requirements": self.analysis_requirements.to_dict()}
                 if self.analysis_requirements is not None

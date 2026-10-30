@@ -16,10 +16,12 @@ from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
 from packages.common.report_safety import escape_report_markup, sanitize_report_html
+from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, REPORT_QUANTITY_VALIDATOR
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord
 
 from apps.orchestrator.control.claims import build_evidence_summary, extract_numeric_claims
+from apps.orchestrator.control.quantity_presentation import is_draft_candidate, prepare_candidate
 
 
 class _VisibleText(HTMLParser):
@@ -34,8 +36,13 @@ class _VisibleText(HTMLParser):
         self.quoted_depth = 0
         self.quote_fence = quote_fence
         self.inline_sources = inline_sources
+        self.list_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"ul", "ol"}:
+            self.list_depth += 1
+        elif tag == "li":
+            self.parts.append("\n" + "  " * max(0, self.list_depth - 1) + "- ")
         # Reconstruct structural boundaries for the same bounded heading binder
         # used by chat. Rendered quotations/code must not become author headings.
         if tag in {"pre", "blockquote"}:
@@ -47,7 +54,8 @@ class _VisibleText(HTMLParser):
         elif tag == "strong":
             (self.cell if self.cell is not None else self.parts).append("**")
         elif tag == "p":
-            self.parts.append("\n\n")
+            if not self.list_depth:
+                self.parts.append("\n\n")
         if tag == "table":
             self.header = []
             self.in_table = True
@@ -65,6 +73,8 @@ class _VisibleText(HTMLParser):
         (self.cell if self.cell is not None else self.parts).append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in {"ul", "ol"}:
+            self.list_depth -= 1
         if tag in {"pre", "blockquote"}:
             self.quoted_depth -= 1
             if self.quoted_depth == 0:
@@ -158,7 +168,11 @@ def validate_report_narratives(
     args: JsonObject,
     *,
     repair_obligations: list[JsonObject] | None = None,
+    quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
+    run_id: str | None = None,
 ) -> JsonObject:
+    if quantity_contract_version != QUANTITY_CONTRACT_VERSION:
+        raise ValueError("报告数量契约版本缺失或不受支持")
     dataset_refs = {artifact.dataset_ref for artifact in artifacts if artifact.dataset_ref}
     if len(dataset_refs) > 1:
         raise ValueError("报告分析来自不同数据集版本/总体，请选择同一派生数据集的分析")
@@ -177,17 +191,22 @@ def validate_report_narratives(
             # so the bounded evidence index cannot drop the quality result.
             data = {
                 "quality": {
+                    "schema": quality.get("schema"),
+                    "mutates_data": quality.get("mutates_data"),
+                    "recommendations": quality.get("recommendations"),
                     "duplicate_rows": quality.get("duplicate_rows"),
                     "high_null_columns": quality.get("high_null_columns"),
                     "summary": {
                         key: (quality.get("summary") or {}).get(key)
-                        for key in ("issue_count", "high", "medium", "low")
+                        for key in ("issue_count", "high", "medium", "low", "requires_confirmation")
                     },
                     "issues": [
                         {
+                            "issue_id": issue.get("issue_id"),
                             "code": issue.get("code"),
                             "columns": issue.get("columns", []),
                             "evidence": issue.get("evidence"),
+                            "suggested_action": issue.get("suggested_action"),
                         }
                         for issue in quality.get("issues", [])
                         if isinstance(issue, dict)
@@ -282,6 +301,7 @@ def validate_report_narratives(
                         for item in numeric_summary["value_index"]
                         if item.get("source_kind") == "number"
                     ],
+                    "quality_projection": numeric_summary.get("quality_projection"),
                 },
                 sort_keys=True,
                 ensure_ascii=False,
@@ -305,11 +325,25 @@ def validate_report_narratives(
     verified: list[JsonObject] = []
     delivered_claims: list[ClaimDraft] = []
     delivered_text: list[str] = []
+    prepared_sections: JsonObject = {}
     for name, text, heading in sections:
         if not text:
             continue
+        draft = is_draft_candidate(text)
+        # Raw text and closed drafts share the same completion gate. Checking
+        # only extracted Claim rows loses unresolved quantities with no rows.
+        prepared = prepare_candidate(text, evidence, goal=str(args["title"]), run_id=run_id)
+        if not prepared.valid or (draft and name not in {"title", "insights"}):
+            raise ValueError(
+                f"报告源文本数量或交付结构未通过核验（{name}）：" + "；".join(prepared.issues)
+            )
+        text = prepared.text
+        if draft:
+            prepared_sections[name] = text
         visible = _visible_text(text, heading=heading)
         delivered_text.append(visible)
+        # Rendering is not authority: independently check the visible projection
+        # against the same selected artifacts after source completeness passed.
         for claim in extract_numeric_claims(
             final_text=visible,
             goal=_visible_text(str(args["title"])),
@@ -351,7 +385,10 @@ def validate_report_narratives(
             )
     return {
         "status": "passed",
-        "validator": "selected-artifact-numeric-v1",
+        "validator": REPORT_QUANTITY_VALIDATOR,
+        "quantity_contract_version": quantity_contract_version,
+        "run_id": run_id,
+        "prepared_sections": prepared_sections,
         "semantic_contract": "typed-measurement-binding-v1",
         "source_hashes": source_hashes,
         "claims": verified,

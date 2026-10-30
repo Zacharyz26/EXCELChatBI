@@ -1,0 +1,40 @@
+{
+  "s5-chart": {
+    "evidence": [
+      {
+        "artifact_id": "17fc894fdf614a48a45eaeecb912232c"
+      },
+      {
+        "artifact_id": "8474f5c6f4194f15a2edeb81300ea15a"
+      }
+    ],
+    "artifacts": [
+      {
+        "id": "17fc894fdf614a48a45eaeecb912232c",
+        "conversation_id": "4f183765edbc47fd91baf2087098edbf",
+        "message_id": "b465643aadac4abba464da21ca3321eb",
+        "type": "table",
+        "payload_json": "{\"agg\":\"sum\",\"group_col\":\"月份\",\"group_total\":6,\"rows\":[{\"count\":6,\"group\":\"2026-01\",\"row_count\":6,\"valid_value_count\":6,\"value\":75.0},{\"count\":6,\"group\":\"2026-02\",\"row_count\":6,\"valid_value_count\":6,\"value\":135.0},{\"count\":6,\"group\":\"2026-03\",\"row_count\":6,\"valid_value_count\":6,\"value\":195.0},{\"count\":6,\"group\":\"2026-04\",\"row_count\":6,\"valid_value_count\":6,\"value\":255.0},{\"count\":6,\"group\":\"2026-05\",\"row_count\":6,\"valid_value_count\":6,\"value\":315.0},{\"count\":6,\"group\":\"2026-06\",\"row_count\":6,\"valid_value_count\":6,\"value\":375.0}],\"total_value\":1350.0,\"truncated\":false,\"value_col\":\"播出时长（分钟）\"}",
+        "file_ref": null,
+        "source_tool": "aggregate_preview",
+        "params_json": "{\"agg\":\"sum\",\"analysis_id\":\"bd9fae39a4d5\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"group_col\":\"月份\",\"sort\":\"group\",\"value_col\":\"播出时长（分钟）\"}",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "created_at": "2026-10-27T05:32:57.374450Z",
+        "lineage_dataset_ref": "3e3cb77825f746f5a45afc342d741d3d"
+      },
+      {
+        "id": "8474f5c6f4194f15a2edeb81300ea15a",
+        "conversation_id": "4f183765edbc47fd91baf2087098edbf",
+        "message_id": "b465643aadac4abba464da21ca3321eb",
+        "type": "chart",
+        "payload_json": "{\"chart_id\":\"6097053ac4ec4c6a8db440de62789c46\",\"chart_type\":\"line\",\"option\":{\"grid\":{\"bottom\":12,\"containLabel\":true,\"left\":12,\"right\":20,\"top\":48},\"series\":[{\"data\":[75.0,135.0,195.0,255.0,315.0,375.0],\"name\":\"播出时长（分钟）\",\"type\":\"line\"}],\"title\":{\"text\":\"播出时长（分钟） by 月份\"},\"tooltip\":{\"trigger\":\"axis\"},\"xAxis\":{\"data\":[\"2026-01\",\"2026-02\",\"2026-03\",\"2026-04\",\"2026-05\",\"2026-06\"],\"type\":\"category\"},\"yAxis\":{\"type\":\"value\"}}}",
+        "file_ref": null,
+        "source_tool": "gen_chart",
+        "params_json": "{\"analysis_id\":\"8b4e4f162763\",\"chart_type\":\"line\",\"data_version_hash\":\"3e1381c2f805223c025c153e48bce8f2360669c087cb5d59e4a262a33e0e9a09\",\"dataset_ref\":\"3e3cb77825f746f5a45afc342d741d3d\",\"encoding\":{\"agg\":\"sum\",\"x\":\"月份\",\"y\":\"播出时长（分钟）\"}}",
+        "dataset_ref": "3e3cb77825f746f5a45afc342d741d3d",
+        "created_at": "2026-10-27T05:32:57.460097Z",
+        "lineage_dataset_ref": "3e3cb77825f746f5a45afc342d741d3d"
+      }
+    ]
+  }
+}

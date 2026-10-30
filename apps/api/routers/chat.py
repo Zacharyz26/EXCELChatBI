@@ -98,6 +98,7 @@ async def chat_stream(
         if parent.status not in {"completed", "blocked", "failed", "cancelled"}:
             raise HTTPException(status_code=409, detail="只能从终态任务创建分析分支")
 
+    run_id = uuid.uuid4().hex
     registry = build_registry(
         excel=excel,
         stats=stats,
@@ -110,6 +111,7 @@ async def chat_stream(
             project_id=conversation.project_id,
             conversation_id=conversation.id,
             subject_id=principal.user_id,
+            run_id=run_id,
         ),
         mcp_config=mcp_client_config_from_settings(settings),
         enabled_capability_profiles=enabled_capability_profiles_from_settings(settings),
@@ -129,7 +131,6 @@ async def chat_stream(
         tool_timeout_seconds=settings.agent_tool_timeout_seconds,
         max_parallel_tools=settings.agent_max_parallel_tools,
     )
-    run_id = uuid.uuid4().hex
     try:
         subscription = agent_run_manager.start(
             run_id,

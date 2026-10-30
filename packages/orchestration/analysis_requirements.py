@@ -18,6 +18,61 @@ _CONDITION = re.compile(
     r"(?=\s*(?:并且|而且|且|\bAND\b|&&|[,，、。；;]|$))",
     re.IGNORECASE,
 )
+
+
+def comparison_matches(
+    text: str,
+    *,
+    natural_equal: bool = False,
+    following_boundary: str = "",
+    columns: tuple[str, ...] = (),
+) -> list[re.Match[str]]:
+    """共享 AND 比较式词法；调用方负责范围及剩余未消费文本，绝不求值。"""
+    if not natural_equal and not following_boundary:
+        return list(_CONDITION.finditer(text))
+    # Presentation permits natural equality and a following operation label.
+    # User task requirements keep their existing symbolic grammar unchanged.
+    known = "|".join(re.escape(field) for field in sorted(columns, key=len, reverse=True))
+    field = (
+        r"\"[^\"]+\"|'[^']+'|“[^”]+”|`[^`]+`|" + (known + "|" if known else "") + r"[\w（）()]+?"
+    )
+    operator = r"==|>=|<=|!=|=|>|<" + ("|为|是" if natural_equal else "")
+    pattern = (
+        r"(?:^|并且|而且|且|\bAND\b|&&|[,，、])\s*"
+        + "("
+        + field
+        + r")\s*("
+        + operator
+        + r")\s*"
+        + r"(\"[^\"]*\"|'[^']*'|“[^”]*”|[^,，、。；;\s]+?)"
+        + r"(?=\s*(?:并且|而且|且|\bAND\b|&&|[,，、。；;]|$))"
+    )
+    if following_boundary:
+        pattern = pattern.replace("|$))", "|" + following_boundary + "|$))")
+    return list(re.finditer(pattern, text, re.IGNORECASE))
+
+
+def comparison_value(match: re.Match[str]) -> dict[str, Any]:
+    """同一字段、操作符和字面值契约供任务约束与事实范围核对复用。"""
+    column, operator, raw = match.groups()
+    if column[0] in "\"'“`":
+        column = column[1:-1]
+    if raw[0] in "\"'“":
+        value: Any = raw[1:-1]
+    else:
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = raw
+        if value is None or isinstance(value, list | dict):
+            value = raw
+    return {
+        "column": column,
+        "op": "==" if operator in {"=", "为", "是"} else operator,
+        "value": value,
+    }
+
+
 TOTAL_LABEL = re.compile(r"总计|合计|总额|总量|总[\w\u4e00-\u9fff]{1,12}额|\btotal\b", re.I)
 
 
@@ -80,24 +135,14 @@ def explicit_analysis_requirements(
             if re.search(r"[=<>!]", expression):
                 filter_error = "当前比较式筛选只支持完整的 AND 条件，请澄清 OR 条件。"
             continue
-        matches = list(_CONDITION.finditer(expression))
+        matches = comparison_matches(expression)
         remainder = expression
         for match in reversed(matches):
             remainder = remainder[: match.start()] + remainder[match.end() :]
         if re.search(r"[=<>!]", remainder):
             filter_error = "部分比较式筛选无法解析，请重述完整条件。"
         for match in matches:
-            column, operator, raw = match.groups()
-            if raw[0] in "\"'“":
-                value: Any = raw[1:-1]
-            else:
-                try:
-                    value = json.loads(raw)
-                except ValueError:
-                    value = raw
-                if value is None or isinstance(value, list | dict):
-                    value = raw
-            item = {"column": column, "op": "==" if operator == "=" else operator, "value": value}
+            item = comparison_value(match)
             if item not in filters:
                 filters.append(item)
     total = any(

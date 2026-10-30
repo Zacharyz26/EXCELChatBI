@@ -28,6 +28,170 @@ _VALUE_OPEN = r"[\s(（\[［{｛【「『〈《\"'`“‘]*"
 _VALUE_CLOSE = r"[\s)）\]］}｝】」』〉》\"'`”’]*"
 _COUNT_OBJECT = r"(?:缺失值|空值|不同取值|重复值|重复记录|重复行|记录|重复)"
 _COUNT_PREFIX = re.compile(r"(?:共有|总共(?:有)?|另有|存在|有)\s*(?:约|大约)?" + _VALUE_OPEN + r"$")
+COUNT_PREDICATE = (
+    r"(?:一共(?:有)?|共有|共计|总共(?:有)?|另有|存在|包含|包括|覆盖|生成|输出|剩余|保留|有)"
+)
+_COUNT_COUNTERS = {"条", "行", "列", "组", "项", "笔"}
+# One assignment operator grammar is consumed by statistic slots and quantity
+# ownership. Operators do not certify a value; an unknown right-hand side stays
+# an obligation even when its surface form resembles a deictic reference.
+ASSIGNMENT_OPERATOR = r"(?:等于|为|是(?!否)|[:：=])"
+
+
+@dataclass(frozen=True)
+class CountExpression:
+    """完整数量表达及其宾语；未知表达也保留原始位置。"""
+
+    value_span: tuple[int, int]
+    owner_span: tuple[int, int]
+    noun: str
+    qualified: bool = False
+    document_reference: bool = False
+    requested_output: bool = False
+    referenced_items: int | None = None
+
+
+def _quantity_context(
+    text: str, left: int, noun: str, tail: str
+) -> tuple[int, bool, bool, int | None]:
+    """局部数量的所有权：数据、直接交付请求、文字结构及明确引用。
+
+    只分类当前数量；同句的其他数字仍须验证。未识别的上下文默认
+    是数据义务，不能因整句有“请”、否定词或引号而免除。
+    """
+    boundary = list(re.finditer(r"[。；;!?！？]|\n[ \t]*\n", text[:left]))
+    start = boundary[-1].end() if boundary else 0
+    prefix = text[start:left]
+    prefix = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]+", lambda m: " " * len(m[0]), prefix)
+    clause = re.split(r"[，,]", prefix)[-1]
+    output_verb = r"(?:画|绘制|生成|创建|导出|提供|输出)"
+    direct = re.fullmatch(r"\s*请\s*(?:先|再)?\s*" + output_verb + r"\s*", clause)
+    inherited = re.match(r"\s*请\s*(?:先|再)?\s*(?:将|把|" + output_verb + ")", prefix)
+    requested = bool(direct or (inherited and re.fullmatch(r"\s*" + output_verb + r"\s*", clause)))
+    # Document objects belong to the response itself only when a local
+    # reference/container or an announcement owns them. A data subject such
+    # as 本表有三个指标 is not a document reference.
+    document_nouns = {"提示", "说明", "建议", "步骤", "要点", "段落", "章节", "示例"}
+    document = noun in document_nouns and bool(
+        re.search(r"(?:以下|下列|如下|上述)\s*$", prefix)
+        or re.match(r"\s*(?:本|该)?(?:报告|回答|说明)(?:中)?", clause)
+    )
+    announcement = re.fullmatch(r"\s*(?:顺便|顺带)?(?:提示|说明|列出)\s*", clause)
+    # The head of an announced nominal phrase can follow several nominal
+    # modifiers. Stop at punctuation or a new number, never search into a
+    # subsequent assertion for a convenient document noun.
+    nominal = re.split(r"[，,。；;:：!?！？\n\d零〇一二两三四五六七八九十百千万亿]", tail.strip())[
+        0
+    ]
+    # A compound ending in 点 may name observed data points. Neither an
+    # introductory verb nor a future-reference colon proves a document list.
+    # Keep such ambiguous counts unknown until a structural owner is available.
+    if announcement and nominal in document_nouns:
+        document = True
+    # Deictic references to an immediately preceding, explicitly delimited
+    # enumeration count the named labels, not dataset rows. Preserve the
+    # cardinality for the consumer to check instead of ignoring any number.
+    referenced_items = None
+    if re.search(r"(?:这|上述)\s*$", clause) and re.match(
+        r"(?:细分)?(?:指标|标签|字段|术语)", tail.strip()
+    ):
+        stop = re.search(r"(?:这|上述)\s*$", prefix)
+        assert stop is not None
+        cursor = start + stop.start()
+        quotes = {end: begin for begin, _, _, end in paired_quote_spans(text[:cursor])}
+        count = 0
+        while True:
+            while cursor > start and text[cursor - 1].isspace():
+                cursor -= 1
+            if cursor not in quotes:
+                break
+            cursor = quotes[cursor]
+            count += 1
+        if count:
+            referenced_items = count
+    return start, document, requested, referenced_items
+
+
+def count_expressions(
+    text: str,
+    *,
+    measurement_labels: set[str] | None = None,
+    owner_fields: set[str] | None = None,
+) -> list[CountExpression]:
+    """数量—量词—宾语先于谓词发现；不靠业务动词或同值 Evidence 发现数量。"""
+    quantity = (
+        r"(?:[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|"
+        r"[零〇一二两三四五六七八九十百千万亿点半几多余]+|若干|许多|少许|很多)"
+    )
+    pattern = re.compile(
+        r"(?P<qualifier>不超过|不低于|至少|至多|超过|不足|大约|约)?"
+        r"\s*(?P<amount>" + quantity + r"(?:(?:分之|到|至|/|-)" + quantity + r")?)"
+        r"[\s*`\"'“”‘’「」『』)）\]］}｝】〉》]*(?P<counter>[\u3400-\u9fff])"
+    )
+    expressions = []
+    for match in pattern.finditer(text):
+        if re.search(r"\n[ \t]*\n", match[0]):
+            continue  # Hard paragraphs cannot join an owner to a distant count.
+        counter_atoms = _lexical_atoms(match["counter"])
+        if match["counter"].isnumeric() or match["counter"] == "两":
+            continue  # A numeric suffix is part of an amount, never its classifier.
+        if match["counter"] == "号":
+            continue  # Ordinal/identifier marker, not a counted business noun.
+        if match["counter"] not in _COUNT_COUNTERS and not any(
+            tag == "q" for _, tag in counter_atoms
+        ):
+            compound = _lexical_atoms(match["amount"] + match["counter"])
+            if compound != (
+                (match["amount"] + match["counter"], "m"),
+            ) or _ordinary_numeric_subword(text, *match.span("amount")):
+                continue
+        left, right = match.span("amount")
+        if _deictic_member_reference(text, left, right, measurement_labels, owner_fields):
+            continue
+        if re.search(r"(?:第|每|同|任|某)$", text[:left]):
+            continue
+        if _relative_ordinal(text, left, right):
+            continue
+        amount = text[left:right]
+        if not amount or not (
+            any(c.isnumeric() for c in amount) or re.search(r"两|半|几|若干|许多|少许|很多", amount)
+        ):
+            continue
+        tail = re.split(r"[，,。;；!?！？]|\n[ \t]*\n", text[match.end() :], maxsplit=1)[0]
+        # Quotation/bracket wrappers belong to the counted noun, including
+        # soft line breaks. They cannot truncate the owner before that noun.
+        noun_prefix = re.match(_VALUE_OPEN, tail)
+        assert noun_prefix is not None
+        noun_tail = tail[noun_prefix.end() :]
+        noun_atoms = _lexical_atoms(noun_tail)
+        noun = (
+            noun_atoms[0][0]
+            if noun_atoms and noun_atoms[0][1] not in {"c", "x"}
+            else match["counter"]
+        )
+        owner_end = match.end() + (noun_prefix.end() + len(noun) if noun != match["counter"] else 0)
+        # Explicit document deixis counts the response's own structure. This
+        # does not exempt data objects or an arbitrary unknown business noun.
+        context_start, document_reference, requested_output, referenced_items = _quantity_context(
+            text, left, noun, tail
+        )
+        expressions.append(
+            CountExpression(
+                (left, right),
+                (
+                    context_start
+                    if document_reference or requested_output or referenced_items is not None
+                    else match.start(),
+                    owner_end,
+                ),
+                noun,
+                bool(match["qualifier"]),
+                document_reference,
+                requested_output,
+                referenced_items,
+            )
+        )
+    return expressions
 
 
 @lru_cache(maxsize=1)
@@ -54,6 +218,54 @@ def lexical_quantity_word_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _relative_ordinal(text: str, left: int, right: int) -> bool:
+    """上/下 + 一 指定相邻序位，不声明集合基数；其后的其他数值仍核验。"""
+    if text[left:right] != "一":
+        return False
+    prefix = re.split(r"[，,。；;!?！？\n]", text[:left])[-1]
+    atoms = _lexical_atoms(prefix)
+    # A localizer is a complete word. The final character of a result verb
+    # such as 剩下/留下 cannot take ownership of the following cardinal.
+    return bool(atoms and atoms[-1] in {("上", "f"), ("下", "f")})
+
+
+def _deictic_member_reference(
+    text: str,
+    left: int,
+    right: int,
+    measurement_labels: set[str] | None,
+    owner_fields: set[str] | None = None,
+) -> bool:
+    """指示词加单一成员回指，不是集合基数；必须在名词后立即闭合。
+
+    这/那 + 一 + 单量词/融合量词后接句界才属于回指。“这一个异常”仍有
+    被计数对象，不能套用此规则，更不能让相邻的真实业务数量消失。
+    """
+    if text[left:right] != "一" or not re.search(r"[这那]$", text[:left]):
+        return False
+    if measurement_labels is None:
+        return False  # Without the current statistic grammar, ownership is unknown.
+    prefix = re.split(r"[，,。；;!?！？]|\n[ \t]*\n", text[:left])[-1]
+    if (
+        any(label and label in prefix for label in measurement_labels)
+        or any(field and field in prefix for field in owner_fields or set())
+        or re.search(COUNT_PREDICATE + "|" + ASSIGNMENT_OPERATOR, prefix)
+    ):
+        # Known field ownership is only a reason to retain an unknown business
+        # quantity, never a new statistic role or proof of its value. This also
+        # covers unknown predicates without growing a verb exception list.
+        return False
+    tail = re.match(r"([\u3400-\u9fff])(?=[，,。；;:：!?！？—]|$)", text[right:])
+    if tail is None:
+        return False
+    # The reference must itself be one lexical demonstrative, not an arbitrary
+    # unit following 一. For example a currency unit remains a measurement even
+    # when no known field or predicate could be resolved in its prefix.
+    reference = text[left - 1] + tail[1]
+    atoms = _lexical_atoms(reference)
+    return len(atoms) == 1 and atoms[0][0] == reference and atoms[0][1] in {"r", "mq"}
+
+
 def _ordinary_numeric_subword(text: str, left: int, right: int) -> bool:
     """只用局部真实词边界识别普通词内的数值字形，不推断未知词。"""
     if not text[left:right] or not all(char.isnumeric() for char in text[left:right]):
@@ -70,7 +282,9 @@ def _ordinary_numeric_subword(text: str, left: int, right: int) -> bool:
     offset = start
     for word, role in _lexical_atoms(text[start:end]):
         word_end = offset + len(word)
-        if offset == left and right < word_end and role != "m":
+        if (offset == left and right < word_end and role != "m") or (
+            offset < left < right < word_end and role == "d"
+        ):
             return True
         offset = word_end
     return False
@@ -127,7 +341,8 @@ def _assignment_pattern(labels: str) -> re.Pattern[str]:
         + quoted
         + "|(?:"
         + labels
-        + r")(?P<label_close>[」』”’\"'`])?)\s*(?:约|大约)?\s*(?:等于|为|是(?!否)|[:：=])",
+        + r")(?P<label_close>[」』”’\"'`])?)\s*(?:约|大约)?\s*"
+        + ASSIGNMENT_OPERATOR,
         re.I,
     )
 
@@ -184,7 +399,12 @@ def numeric_value_owner(
     # Generic/ordinal determiners are lexical structure, not the count one.
     # Do this locally: an earlier question or disclaimer cannot exempt a later
     # affirmative count. Nor can a predicate turn 参与/参考 into a number.
-    if ordinary_word or re.search(r"(?:同|第|任|每|某)$", prefix):
+    if (
+        ordinary_word
+        or _deictic_member_reference(text, left, right, measurement_labels)
+        or re.search(r"(?:同|第|任|每|某)$", prefix)
+        or _relative_ordinal(text, left, right)
+    ):
         return None
 
     relative = re.search(
@@ -242,7 +462,72 @@ def numeric_value_owner(
             or before in "约为是有共计达近超"
         ):
             return NumericValueOwner("count", (left, right + postfix.end()), (left, right))
+    counted = count_object_at(text, left, right, measurement_labels=measurement_labels)
+    if counted is not None:
+        return NumericValueOwner("count", (left, counted[1]), (left, right))
     return None
+
+
+def count_object_at(
+    text: str, left: int, right: int, *, measurement_labels: set[str] | None = None
+) -> tuple[str, int] | None:
+    """发现有界数量宾语；不以业务对象白名单或 Evidence 同值发现数量。"""
+    expression = next(
+        (
+            item
+            for item in count_expressions(text, measurement_labels=measurement_labels)
+            if item.value_span == (left, right)
+        ),
+        None,
+    )
+    if expression is not None:
+        return (
+            None
+            if expression.document_reference or expression.requested_output
+            else (expression.noun, expression.owner_span[1])
+        )
+    prefix, suffix = text[:left], text[right:]
+    if (
+        _ordinary_numeric_subword(text, left, right)
+        or _deictic_member_reference(text, left, right, measurement_labels)
+        or re.search(r"(?:同|第|任|每|某)$", prefix)
+        or _relative_ordinal(text, left, right)
+    ):
+        return None
+    predicate = re.search(
+        r"(?:共有|共计|总共(?:有)?|另有|存在|包含|包括|覆盖|生成|输出|剩余|保留|有)"
+        + _VALUE_OPEN
+        + r"$",
+        prefix,
+    )
+    if predicate is None or _crosses_quote_close(text, predicate.start(), left):
+        return None
+    close = re.match(_VALUE_CLOSE, suffix)
+    assert close is not None
+    tail = suffix[close.end() :]
+    atoms = _lexical_atoms(tail[:48])
+    if not atoms:
+        return None
+    counter, tag = atoms[0]
+    if tag != "q" and counter not in _COUNT_COUNTERS:
+        # The bundled lexer can emit a quantity and classifier together (半个,
+        # 几个). Preserve that entire unknown value rather than losing its noun.
+        quantity_atoms = _lexical_atoms(text[left:right])
+        if (
+            len(quantity_atoms) == 1
+            and quantity_atoms[0][1] == "m"
+            and re.search(r"[个条行列组项份名次笔]$", text[left:right])
+        ):
+            return counter, right + close.end() + len(counter)
+        return None
+    rest = tail[len(counter) :].lstrip()
+    nouns = _lexical_atoms(rest[:32])
+    if not nouns or nouns[0][0] in "，,。;；!?！？":
+        return (
+            (counter, right + close.end() + len(counter)) if counter in {"行", "列", "组"} else None
+        )
+    noun = nouns[0][0]
+    return noun, right + close.end() + len(tail) - len(rest) + len(noun)
 
 
 def quantity_expression_spans(text: str, measurement_labels: set[str]) -> list[tuple[int, int]]:
@@ -258,7 +543,9 @@ def quantity_expression_spans(text: str, measurement_labels: set[str]) -> list[t
             end += 1
         candidates.append((start, end))
         start = end
-    spans = []
+    spans = [
+        item.owner_span for item in count_expressions(text, measurement_labels=measurement_labels)
+    ]
     for left, right in candidates:
         owner = numeric_value_owner(text, left, right, measurement_labels)
         if owner is not None and owner.origin in {"count", "relative_quantity"}:

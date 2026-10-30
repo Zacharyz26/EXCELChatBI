@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import sqlite3
@@ -51,9 +52,11 @@ from packages.orchestration.analysis_requirements import (
 )
 from packages.orchestration.contracts import (
     CriterionKind,
+    QuantityContractUnavailable,
     SuccessCriterion,
     TaskContract,
     build_minimal_contract,
+    require_quantity_contract_version,
 )
 from packages.orchestration.dataset_scope import (
     is_filter_preserving_cleanup,
@@ -155,8 +158,17 @@ from apps.orchestrator.control.profile_claims import (
     duplicate_count_feedback,
 )
 from apps.orchestrator.control.profile_population import profile_population_arguments
+from apps.orchestrator.control.quantity_presentation import (
+    PreparedCandidate,
+    generation_context,
+    prepare_candidate,
+)
 from apps.orchestrator.control.task_outline import create_task_outline
-from apps.orchestrator.control.verifier import VerificationResult, verify_completion
+from apps.orchestrator.control.verifier import (
+    VerificationIssue,
+    VerificationResult,
+    verify_completion,
+)
 from apps.orchestrator.request_intent import (
     requests_chart as _requests_chart,
 )
@@ -1155,9 +1167,14 @@ async def _stream_agent_chat_inner(
                     principal=active_principal,
                 )
             if resume_existing:
-                stored_contract = await run_in_threadpool(task_store.get_contract, run_id)
+                try:
+                    stored_contract = await run_in_threadpool(
+                        task_store.get_verified_contract, run_id
+                    )
+                except ValueError as exc:
+                    raise QuantityContractUnavailable(str(exc)) from exc
                 if stored_contract is None:
-                    raise ValueError("恢复 TaskRun 缺少 TaskContract")
+                    raise QuantityContractUnavailable("恢复 TaskRun 缺少 TaskContract")
                 contract = _restore_task_contract(stored_contract, run_id)
                 contract_assumption = find_reference_assumption(contract.assumptions)
                 if contract_assumption is not None:
@@ -1211,6 +1228,28 @@ async def _stream_agent_chat_inner(
                             reference_assumption,
                         ),
                     )
+        except QuantityContractUnavailable:
+            terminated = await run_in_threadpool(
+                task_store.terminate_active_run,
+                run_id,
+                status="blocked",
+                reason="quantity_contract_unavailable",
+                event_type="run.blocked",
+            )
+            if terminated is not None:
+                _blocked_run, blocked_event = terminated
+                yield _task_event(blocked_event, conversation_id)
+            yield _event(
+                "error",
+                {
+                    "code": "quantity_contract_unavailable",
+                    "message": "原任务数量契约缺失或不兼容，请新建任务；本次未调用模型。",
+                    "retryable": False,
+                    "run_id": run_id,
+                    "run_status": "blocked",
+                },
+            )
+            return
         except (ReferenceAccessDenied, RuntimeError, ValueError) as exc:
             _log.warning(
                 "agent.reference_resolution_failed",
@@ -2295,6 +2334,7 @@ async def _stream_agent_chat_inner(
             )
             offered_step_ids = {step.step_id for step in schedule.ready} if tools_enabled else set()
             offered_plan_version = run.plan_version
+            round_evidence = await run_in_threadpool(task_store.list_evidence, run_id)
             working[0] = ModelMessage(
                 role="system",
                 content=_plan_system_content(
@@ -2302,7 +2342,8 @@ async def _stream_agent_chat_inner(
                     active_plan,
                     planned_steps,
                     contract,
-                ),
+                )
+                + generation_context(round_evidence),
             )
             turn_parts: list[str] = []
             response: ModelResponse | None = None
@@ -2471,10 +2512,33 @@ async def _stream_agent_chat_inner(
                     task_store.list_plan_steps,
                     run_id,
                 )
+                all_artifacts = await run_in_threadpool(store.list_artifacts, conversation_id)
+                run_artifact_ids = {
+                    item.artifact_id for item in invocations if item.artifact_id is not None
+                }
+                run_artifacts = [item for item in all_artifacts if item.id in run_artifact_ids]
+                prepared_candidate = prepare_candidate(
+                    original_turn_text,
+                    evidence,
+                    goal=contract.goal,
+                    run_id=run_id,
+                    invocations=invocations,
+                    artifacts=run_artifacts,
+                )
+                candidate_audit = _quantity_candidate_audit(prepared_candidate, phase="final")
+                await run_in_threadpool(
+                    task_store.record_quantity_candidate, run_id, candidate_audit
+                )
+                # An invalid envelope remains its original candidate. It is never
+                # silently reinterpreted as permissive legacy prose.
+                turn_text = prepared_candidate.text
                 claims = extract_claims(
                     final_text=turn_text,
                     goal=contract.goal,
                     evidence=evidence,
+                    run_id=run_id,
+                    invocations=invocations,
+                    artifacts=run_artifacts,
                 )
                 try:
                     await run_in_threadpool(task_store.replace_claims, run_id, claims)
@@ -2503,11 +2567,6 @@ async def _stream_agent_chat_inner(
                         },
                     )
                     return
-                all_artifacts = await run_in_threadpool(store.list_artifacts, conversation_id)
-                run_artifact_ids = {
-                    item.artifact_id for item in invocations if item.artifact_id is not None
-                }
-                run_artifacts = [item for item in all_artifacts if item.id in run_artifact_ids]
                 dataset_bindings = await run_in_threadpool(task_store.list_dataset_bindings, run_id)
                 verification = verify_completion(
                     contract=contract,
@@ -2521,6 +2580,7 @@ async def _stream_agent_chat_inner(
                     dataset_bindings=dataset_bindings,
                     source_artifacts=all_artifacts,
                 )
+                verification = _enforce_prepared_candidate(verification, prepared_candidate)
 
                 duplicate_obligations = capture_duplicate_obligations(
                     duplicate_obligations, claims, evidence, contract
@@ -2595,6 +2655,7 @@ async def _stream_agent_chat_inner(
                 auto_repair_actions: tuple[str, ...] = ()
                 if (
                     not verification.passed
+                    and prepared_candidate.valid
                     and retry_instruction is None
                     and duplicate_feedback is None
                     and issue_codes.intersection(
@@ -2607,11 +2668,27 @@ async def _stream_agent_chat_inner(
                         evidence=evidence,
                     )
                     if auto_repair_actions and repaired_text != turn_text:
-                        turn_text = repaired_text
+                        prepared_candidate = prepare_candidate(
+                            repaired_text,
+                            evidence,
+                            goal=contract.goal,
+                            run_id=run_id,
+                            invocations=invocations,
+                            artifacts=run_artifacts,
+                        )
+                        await run_in_threadpool(
+                            task_store.record_quantity_candidate,
+                            run_id,
+                            _quantity_candidate_audit(prepared_candidate, phase="repair"),
+                        )
+                        turn_text = prepared_candidate.text
                         claims = extract_claims(
                             final_text=turn_text,
                             goal=contract.goal,
                             evidence=evidence,
+                            run_id=run_id,
+                            invocations=invocations,
+                            artifacts=run_artifacts,
                         )
                         await run_in_threadpool(
                             task_store.replace_claims,
@@ -2630,6 +2707,7 @@ async def _stream_agent_chat_inner(
                             dataset_bindings=dataset_bindings,
                             source_artifacts=all_artifacts,
                         )
+                        verification = _enforce_prepared_candidate(verification, prepared_candidate)
                         duplicate_obligations = resolve_duplicate_obligations(
                             duplicate_obligations, claims, turn_text
                         )
@@ -2642,6 +2720,7 @@ async def _stream_agent_chat_inner(
                         issue_codes = {item.code for item in verification.issues}
 
                 verification_payload = _verification_payload(verification)
+                verification_payload["quantity_candidate"] = candidate_audit
                 if duplicate_obligations:
                     verification_payload["duplicate_obligations"] = duplicate_obligations
                 if duplicate_feedback is not None:
@@ -2747,18 +2826,39 @@ async def _stream_agent_chat_inner(
                 passed_verification = verification
                 break
 
-            # ── 工具轮：开场白成“理解卡”，随后逐个执行 ──
-            for part in turn_parts:
-                characters_streamed += len(part)
-                yield _event("text.delta", {"delta": part})
-            if turn_text.strip():
-                yield _event("understanding", {"text": turn_text.strip()})
+            # Tool preambles are also user-visible candidates, never evidence.
+            # Keep rejected raw text in the append-only audit, not in a visible
+            # assistant message or the next turn's authoritative context.
+            preamble = prepare_candidate(
+                turn_text,
+                round_evidence,
+                goal=contract.goal,
+                run_id=run_id,
+                invocations=await run_in_threadpool(task_store.list_invocations, run_id),
+                artifacts=await run_in_threadpool(store.list_artifacts, conversation_id),
+            )
+            await run_in_threadpool(
+                task_store.record_quantity_candidate,
+                run_id,
+                _quantity_candidate_audit(preamble, phase="tool_preamble"),
+            )
+            # Even prose with no numeric claims can assert a false completion.
+            # Progress therefore comes exclusively from actual requested tool
+            # identities; all model-authored preambles stay audit-only.
+            intent_labels = list(
+                dict.fromkeys(_TOOL_LABELS.get(call.name, "受治理工具") for call in tool_calls)
+            )
+            visible_preamble = "正在准备校验并执行：" + "、".join(intent_labels) + "。"
+            if visible_preamble.strip():
+                characters_streamed += len(visible_preamble)
+                yield _event("text.delta", {"delta": visible_preamble})
+                yield _event("understanding", {"text": visible_preamble.strip()})
             try:
                 assistant_message = await run_in_threadpool(
                     store.append_message,
                     conversation_id=conversation_id,
                     role="assistant",
-                    content=turn_text,
+                    content=visible_preamble,
                     tool_calls=[
                         {"id": c.id, "name": c.name, "arguments": c.arguments} for c in tool_calls
                     ],
@@ -2802,7 +2902,9 @@ async def _stream_agent_chat_inner(
                     ],
                 },
             )
-            working.append(ModelMessage(role="assistant", content=turn_text, tool_calls=tool_calls))
+            working.append(
+                ModelMessage(role="assistant", content=visible_preamble, tool_calls=tool_calls)
+            )
 
             parallel_event_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
             parallel_task = asyncio.create_task(
@@ -3949,8 +4051,41 @@ def _branch_feedback_context(events: list[TaskEvent]) -> str:
     )[:4000]
 
 
+def _quantity_candidate_audit(candidate: PreparedCandidate, *, phase: str) -> JsonObject:
+    """保留每个原始候选和验证结果，不把审计记录转为数值 Evidence。"""
+    return {
+        "phase": phase,
+        "source_text": candidate.source_text,
+        "source_sha256": hashlib.sha256(candidate.source_text.encode()).hexdigest(),
+        "rendered_text": candidate.text,
+        "rendered_sha256": hashlib.sha256(candidate.text.encode()).hexdigest(),
+        "valid": candidate.valid,
+        "issues": list(candidate.issues),
+        "source_refs": list(candidate.source_refs),
+    }
+
+
+def _enforce_prepared_candidate(
+    verification: VerificationResult, candidate: PreparedCandidate
+) -> VerificationResult:
+    """候选协议或结构失败不能被其他工具或旧文本验证的成功掩盖。"""
+    if candidate.valid:
+        return verification
+    return VerificationResult(
+        "NEEDS_ACTION",
+        (
+            *verification.issues,
+            VerificationIssue(
+                "invalid_quantity_presentation",
+                "数量表达或交付结构尚未通过验证：" + "；".join(candidate.issues),
+            ),
+        ),
+    )
+
+
 def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
     """从受信 SQLite 记录恢复 TaskContract，并拒绝损坏或跨 run 载荷。"""
+    quantity_version = require_quantity_contract_version(payload.get("quantity_contract_version"))
     stored_run_id = payload.get("run_id")
     goal = payload.get("goal")
     raw_criteria = payload.get("success_criteria")
@@ -4015,6 +4150,7 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
         success_criteria=tuple(criteria),
         constraints=tuple(cast(list[str], raw_constraints)),
         assumptions=tuple(cast(list[str], raw_assumptions)),
+        quantity_contract_version=quantity_version,
         analysis_requirements=(
             AnalysisRequirements.from_dict(payload["analysis_requirements"])
             if "analysis_requirements" in payload

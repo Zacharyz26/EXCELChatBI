@@ -802,6 +802,21 @@ def _subject_fields(subject: str, fields: set[str], context: str) -> set[str]:
     return result
 
 
+def profile_field_identity_spans(text: str, fields: set[str]) -> list[tuple[int, int]]:
+    """仅完整统计主语可证明字段文字身份；同名数字或行数不是字段引用。"""
+    spans = []
+    for field in fields:
+        for match in re.finditer(re.escape(field), text):
+            left, _ = _clause_span(text, match.start(), match.end(), fields)
+            subject = text[left : match.end()]
+            tail = _normal(text[match.end() :])
+            if _subject_fields(subject, fields, text) == {field} and re.match(
+                r"\s*(?:的)?\s*" + _STAT_LABEL, tail, re.I
+            ):
+                spans.append(match.span())
+    return spans
+
+
 def _dataset_subject(text: str, binding: JsonObject) -> bool:
     subject = _normal(text).strip().removesuffix("的").rstrip()
     if subject in {
@@ -947,6 +962,34 @@ def _role_aside_distinct_matches(
     return False
 
 
+def _postfix_count_view(text: str, start: int, end: int) -> str:
+    """已闭合数值/统计名包装的等长视图；不去掉字段或未知单位括号。"""
+    from apps.orchestrator.control.claim_structure import delimited_spans
+    from apps.orchestrator.control.statistic_statements import paired_quote_spans
+
+    nouns = {"不同取值", "不同值", "唯一值", "缺失值", "空值"}
+    view = list(text)
+    for opening, left, right, close in paired_quote_spans(text):
+        if (
+            opening >= end
+            and text[left:right] in nouns
+            and re.fullmatch(r"[\s)）]*个?\s*", text[end:opening])
+        ):
+            view[opening:left] = " " * (left - opening)
+            view[right:close] = " " * (close - right)
+    for left, right in delimited_spans(text):
+        if (
+            text[left] in "(（"
+            and text[right - 1] in ")）"
+            and left < start < end < right
+            and not text[left + 1 : start].strip()
+            and not text[end : right - 1].strip()
+            and re.match(r"\s*个?\s*(?:不同取值|不同值|唯一值|缺失值|空值)", "".join(view[right:]))
+        ):
+            view[left] = view[right - 1] = " "
+    return "".join(view)
+
+
 def profile_candidate_matches(
     binding: JsonObject,
     universe: list[JsonObject],
@@ -958,6 +1001,7 @@ def profile_candidate_matches(
     """先定位字段和统计角色，再由通用数值匹配核对显示精度；不按同值选来源。"""
     if not binding.get("profile_fact"):
         return False
+    text = _postfix_count_view(text, start, end)
     fields = {
         str(b["object"]["column"])
         for b in universe
@@ -1023,8 +1067,8 @@ def profile_candidate_matches(
             role_start = restatement.label_span[0] - left
     if role is None:
         postfix = [
-            (r"\s*个?(?:不同取值|不同值|唯一值)", "distinct_count"),
-            (r"\s*个?(?:缺失值|空值)", "null_count"),
+            (r"\s*个?\s*(?:不同取值|不同值|唯一值)", "distinct_count"),
+            (r"\s*个?\s*(?:缺失值|空值)", "null_count"),
             (r"\s*行", "row_count"),
             (r"\s*列", "column_count"),
         ]

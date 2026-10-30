@@ -191,6 +191,14 @@ def _unresolved_assertions(
             continue
         boundaries = _clause_boundaries(claim.statement, fields)
         for ref in claim.value_refs:
+            # Host-generated coverage/structure findings block the common
+            # completion gate, but are not another business count. Treating
+            # their whole-document statement as a legacy positionless count
+            # creates a spurious, unresolvable duplicate-repair obligation.
+            # Actual unsupported references (including legacy ones without
+            # spans) still follow the conservative binding path below.
+            if ref.get("ref_kind") == "quantity_audit_issue":
+                continue
             if ref.get("supported") is True or ref.get("reason") == "unverified_dataset_identity":
                 continue
             span = ref.get("statement_span")

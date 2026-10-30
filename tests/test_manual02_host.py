@@ -60,7 +60,7 @@ async def test_actual_host_and_report_tool(tmp_path, monkeypatch, label, text, e
     profile = next(
         a for a in store.list_artifacts(run.conversation_id) if a.source_tool == "get_data_profile"
     )
-    context = AgentContext(store, run.project_id, run.conversation_id)
+    context = AgentContext(store, run.project_id, run.conversation_id, run_id=run.run_id)
     registry = _registry(context)
     args = {
         "title": "节目画像报告",

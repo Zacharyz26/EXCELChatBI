@@ -141,9 +141,9 @@ def test_report_and_analysis_only_share_matching_provenance(tmp_path, monkeypatc
         source_analysis(tmp_path)
     )
     args = {"analysis_ids": ["monthly"], "title": "分析报告", "include_pdf": False}
-    result = _registry(AgentContext(session, run.project_id, run.conversation_id)).execute(
-        "generate_report", json.dumps(args)
-    )
+    result = _registry(
+        AgentContext(session, run.project_id, run.conversation_id, run_id=run.run_id)
+    ).execute("generate_report", json.dumps(args))
     run, call, _, _ = tasks.start_invocation_with_event(
         run_id=run.run_id,
         expected_version=run.state_version,

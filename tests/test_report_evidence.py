@@ -13,8 +13,10 @@ import pytest
 from apps.orchestrator.agent_tools import AgentContext, AgentToolError
 from apps.orchestrator.control.report_claims import validate_report_narratives
 from packages.common.config import get_settings
+from packages.orchestration.contracts import build_minimal_contract
 from packages.session.models import Artifact
 from packages.session.store import SessionStore
+from packages.session.task_store import TaskStore
 
 from tests.test_agent_tools import _registry
 
@@ -32,7 +34,6 @@ def persisted_report(
     store = SessionStore(str(tmp_path / "report.db"))
     project = store.create_project("合成报告回归")
     conversation = store.create_conversation(project.id, title="r9b")
-    context = AgentContext(store=store, project_id=project.id, conversation_id=conversation.id)
     message = store.append_message(
         conversation_id=conversation.id,
         role="assistant",
@@ -50,9 +51,35 @@ def persisted_report(
             params=item["params"],
             dataset_ref=item["dataset_ref"],
         )
+    # Preserve the archived Artifact fixtures; create only the missing real
+    # TaskRun binding needed to enter current report validation.
+    _, user_message = store.start_user_turn(
+        conversation_id=conversation.id,
+        content="生成报告",
+        suggested_title="报告来源验证",
+    )
+    report_contract = build_minimal_contract(
+        run_id="report-fixture-current",
+        user_text="生成报告",
+        chart_required=False,
+        report_required=True,
+        pdf_required=False,
+    )
+    run, _ = TaskStore(store.db_path).create_run(
+        project_id=project.id,
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        contract=report_contract,
+        budget={"max_tool_calls": 3},
+    )
     # Reopen SQLite so validation exercises persisted JSON rather than an in-memory stub.
     store = SessionStore(store.db_path)
-    context = AgentContext(store=store, project_id=project.id, conversation_id=conversation.id)
+    context = AgentContext(
+        store=store,
+        project_id=project.id,
+        conversation_id=conversation.id,
+        run_id=run.run_id,
+    )
     try:
         yield store, context, saved["args"], store.list_artifacts(conversation.id)
     finally:

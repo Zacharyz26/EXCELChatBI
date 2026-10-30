@@ -113,7 +113,16 @@ def test_postfix_count_slots(profile, value, template, tmp_path):
 )
 def test_labels_units_dates_and_supported_claims(profile, text):
     result = evaluate(profile, text)
-    assert result["verification"]["passed"] and result["report"]["status"] == "passed", result
+    # A02/A03: preserve identifiers and numbers, but require the promised members.
+    pending = text in {
+        "以下（三）个提示供参考。",
+        "报告（a25）附日期「2024-02-29」和三个提示。",
+    }
+    assert result["verification"]["passed"] is (not pending), result
+    assert (result["report"]["status"] == "passed") is (not pending), result
+    if pending:
+        assert result["verification"]["verdict"] == "NEEDS_ACTION", result
+        assert any(r["token"] == "三" and r.get("supported") is False for r in result["refs"])
 
 
 @pytest.mark.parametrize(

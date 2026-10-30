@@ -725,6 +725,47 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
             "rows_after": _INTEGER,
             "columns": _ARRAY,
             "transform": _OBJECT,
+            "row_changes": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["schema_version", "removed_count", "steps"],
+                "properties": {
+                    "schema_version": {"const": 1},
+                    "removed_count": {"type": "integer", "minimum": 0},
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "operation",
+                                "rows_before",
+                                "rows_after",
+                                "removed_count",
+                                "count_basis",
+                                "columns",
+                            ],
+                            "properties": {
+                                "operation": {
+                                    "enum": [
+                                        "exclude_row_indices",
+                                        "filters",
+                                        "drop_nulls",
+                                        "drop_duplicates",
+                                        "sort",
+                                    ]
+                                },
+                                "rows_before": {"type": "integer", "minimum": 0},
+                                "rows_after": {"type": "integer", "minimum": 0},
+                                "removed_count": {"type": "integer", "minimum": 0},
+                                "count_basis": {"enum": ["removed_rows", "duplicate_excess"]},
+                                "columns": {"type": ["array", "null"], "items": {"type": "string"}},
+                            },
+                        },
+                    },
+                },
+            },
         },
         "dataset_ref",
         "parent_ref",
