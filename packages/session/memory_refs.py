@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from packages.common.identifiers import MEMORY_REFERENCE_PATTERN as _MEMORY_ID_PATTERN
 from packages.governance.audit import AuditEvent, AuditOutcome
 from packages.governance.audit import record as record_audit
 from packages.governance.permissions import Principal
@@ -31,10 +32,6 @@ _SUPPORTED_KINDS = frozenset({"entity_mapping", "field_alias", "confirmed_decisi
 _MAX_BINDINGS = 5
 _MAX_ALIAS_CHARS = 80
 _MAX_CANONICAL_FIELD_CHARS = 200
-_MEMORY_ID_PATTERN = re.compile(
-    r"memory[_ ]?id\s*[:=]\s*([0-9a-f]{32})(?![0-9a-f])",
-    re.I,
-)
 
 MemoryReferenceStatus = Literal[
     "no_reference",

@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Literal, cast
 
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
+from packages.orchestration.analysis_requirements import AnalysisRequirements
 from packages.orchestration.contracts import TaskContract
+from packages.orchestration.knowledge_intent import KnowledgeQuery, knowledge_query_step_id
 from packages.orchestration.task_plan_contract import (
     PlanValidation,
     validate_task_plan,
@@ -116,6 +118,9 @@ def create_task_outline(
     capabilities = {
         str(item["name"]) for item in effective_catalog if item.get("allowed") is not False
     }
+    requirements = contract.analysis_requirements
+    if requirements is not None:
+        requirements.validate_source(contract.goal)
     required_capabilities = criterion_capabilities(contract, artifacts=artifacts)
 
     if blocking_clarification is not None:
@@ -146,6 +151,8 @@ def create_task_outline(
         available_capabilities=capabilities,
         require_available_capabilities=False,
         requested_capabilities=selected_capabilities,
+        analysis_requirements=requirements,
+        max_steps=max_steps,
     )
     requirements = contract.analysis_requirements
     if requirements is not None:
@@ -311,20 +318,120 @@ def build_deterministic_outline(
     available_capabilities: set[str],
     require_available_capabilities: bool = True,
     requested_capabilities: tuple[str, ...] | None = None,
+    analysis_requirements: AnalysisRequirements | None = None,
+    max_steps: int = 12,
 ) -> JsonObject:
     """为已知任务族构造最小、可验证的 fast/template 计划。"""
+    requirements = analysis_requirements
+    typed = requirements is not None and requirements.schema_version == 2
+    if requirements is not None:
+        requirements.validate_source(user_text.strip())
     requested = (
         list(requested_capabilities)
         if requested_capabilities is not None
-        else _requested_capabilities(user_text, context)
+        else _requested_capabilities(user_text, context, requirements=requirements)
     )
+    operations = requirements.active_operations() if typed and requirements is not None else ()
+    required_capabilities = [_operation_capability(operation.kind) for operation in operations]
+    if typed and requirements is not None:
+        for query in requirements.knowledge_queries:
+            capability = _query_capability(query, requirements)
+            required_capabilities.append(capability)
+            if capability not in requested:
+                requested.insert(0, capability)
+        if requirements.total and not any(
+            operation.kind == "aggregate" for operation in operations
+        ):
+            # A total is a delivery obligation, not an invented group-by task.
+            # Existing governed aggregate tooling may choose a legal grouping.
+            total_providers = ("data.aggregate", "stats.contribution")
+            total_capability = next(
+                (
+                    item
+                    for item in requested
+                    if item in total_providers and item in available_capabilities
+                ),
+                next(
+                    (item for item in total_providers if item in available_capabilities),
+                    "data.aggregate",
+                ),
+            )
+            if total_capability not in requested:
+                requested.append(total_capability)
+            required_capabilities.append(total_capability)
     unavailable = [item for item in requested if item not in available_capabilities]
-    if unavailable and require_available_capabilities:
-        raise ValueError("计划所需能力不可用: " + ", ".join(unavailable))
+    unavailable_required = [
+        item for item in required_capabilities if item not in available_capabilities
+    ]
+    if unavailable_required or (unavailable and require_available_capabilities):
+        raise ValueError(
+            "计划所需能力不可用: " + ", ".join(dict.fromkeys(unavailable_required + unavailable))
+        )
     selected = [item for item in requested if item in available_capabilities]
+    if typed:
+        selected = [
+            item
+            for item in selected
+            if item not in {"knowledge.search", "knowledge.definition.resolve"}
+        ]
+    # Operations are identities, not a capability set. Two transforms remain
+    # two serial steps, even when they use the same governed tool.
+    plan_items: list[tuple[str, str, JsonObject | None]] = []
+    prerequisites = {"data.profile", "data.roles", "data.quality", "knowledge.search"}
+    before = [item for item in selected if item in prerequisites] if typed else selected
+    after = [item for item in selected if item not in prerequisites] if typed else []
+    for capability in before:
+        plan_items.append(
+            (f"{capability.replace('.', '_')}_{len(plan_items) + 1}", capability, None)
+        )
+    knowledge_conditions: dict[str, str] = {}
+    queries = (
+        sorted(requirements.knowledge_queries, key=lambda query: min(query.source_spans))
+        if typed and requirements is not None
+        else []
+    )
+
+    def append_query(query_index: int) -> None:
+        assert requirements is not None and requirements.source_hash is not None
+        query = queries[query_index]
+        step_id = knowledge_query_step_id(query, requirements.source_hash)
+        knowledge_conditions[step_id] = (
+            "查询须匹配冻结的完整对象，来源 Evidence 不得由相似名称代替："
+            + json.dumps(
+                {"path": list(query.path), "all_sources": query.all_sources}, ensure_ascii=False
+            )
+        )
+        plan_items.append((step_id, _query_capability(query, requirements), None))
+
+    query_index = 0
+    for operation in operations:
+        assert requirements is not None
+        while (
+            query_index < len(queries)
+            and min(queries[query_index].source_spans)[0] <= operation.span[0]
+        ):
+            append_query(query_index)
+            query_index += 1
+        plan_items.append(
+            (
+                operation.operation_id,
+                _operation_capability(operation.kind),
+                requirements.operation_arguments(operation.operation_id),
+            )
+        )
+    while query_index < len(queries):
+        append_query(query_index)
+        query_index += 1
+    for capability in after:
+        plan_items.append(
+            (f"{capability.replace('.', '_')}_{len(plan_items) + 1}", capability, None)
+        )
+    if len(plan_items) > max_steps:
+        raise ValueError(
+            f"任务包含 {len(plan_items)} 个必要步骤，超过上限 {max_steps}；请缩小任务范围。"
+        )
     steps: list[JsonObject] = []
-    for index, capability in enumerate(selected, 1):
-        logical_id = f"{capability.replace('.', '_').replace('-', '_')}_{index}"
+    for logical_id, capability, operation_arguments in plan_items:
         dependencies = _step_dependencies(
             capability=capability,
             prior_steps=steps,
@@ -347,6 +454,23 @@ def build_deterministic_outline(
                 }
             ],
         }
+        if logical_id in knowledge_conditions:
+            cast(list[str], step["completion_conditions"]).append(knowledge_conditions[logical_id])
+        if operation_arguments is not None:
+            cast(list[str], step["completion_conditions"]).append(
+                "本步骤须独立调用，完整满足冻结操作参数："
+                + json.dumps(operation_arguments, ensure_ascii=False, sort_keys=True)
+            )
+        if (
+            typed
+            and requirements is not None
+            and requirements.total
+            and capability in {"data.aggregate", "stats.contribution"}
+        ):
+            cast(list[str], step["completion_conditions"]).append(
+                "总计须由当前范围的工具 Evidence 支持，并在最终回答交付："
+                + str(requirements.value_col)
+            )
         steps.append(step)
     assumptions = ["异常检测方法与阈值必须在结论中披露"] if "异常" in user_text else []
     return {
@@ -459,8 +583,30 @@ def _trend_inputs_resolved(user_text: str, context: JsonObject) -> bool:
     return False
 
 
-def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
+def _operation_capability(kind: str) -> str:
+    if kind in {"filter", "drop_nulls", "drop_duplicates"}:
+        return "dataset.transform"
+    if kind == "aggregate":
+        return "data.aggregate"
+    raise ValueError("不支持的冻结操作类型: " + kind)
+
+
+def _query_capability(query: KnowledgeQuery, requirements: AnalysisRequirements) -> str:
+    """A compiled-definition dependency cannot be satisfied by search snippets."""
+    if not query.all_sources and any(
+        operation.parameters.definition_key is not None
+        and query.path == (operation.parameters.definition_key,)
+        for operation in requirements.active_operations()
+    ):
+        return "knowledge.definition.resolve"
+    return "knowledge.search"
+
+
+def _requested_capabilities(
+    user_text: str, context: JsonObject, *, requirements: AnalysisRequirements | None = None
+) -> list[str]:
     request = user_text.lower()
+    typed = requirements is not None and requirements.schema_version == 2
     result: list[str] = []
 
     def add(capability: str) -> None:
@@ -493,11 +639,14 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("data.quality")
     elif profile_requested:
         add("data.profile")
-    if knowledge_search_requested(user_text):
+    if typed and requirements is not None:
+        for query in requirements.knowledge_queries:
+            add(_query_capability(query, requirements))
+    elif knowledge_search_requested(user_text):
         add("knowledge.search")
     if "异常" in request:
         add("stats.anomaly")
-    requests_transform = current_operation_requested(
+    requests_transform = not typed and current_operation_requested(
         user_text, actions=("排除", "过滤", "筛选", "清洗")
     )
     if requests_transform:
@@ -546,10 +695,14 @@ def _requested_capabilities(user_text: str, context: JsonObject) -> list[str]:
         add("stats.correlation")
     if "预测" in request:
         add("stats.forecast")
-    elif any(token in request for token in ("趋势", "随时间", "按月", "按周", "按季度")):
+    elif any(
+        token in request
+        for token in (("趋势", "随时间") if typed else ("趋势", "随时间", "按月", "按周", "按季度"))
+    ):
         add("stats.trend")
     if (
-        not contribution_requested
+        not typed
+        and not contribution_requested
         and not group_compare_requested
         and any(
             token in request
@@ -631,7 +784,11 @@ def criterion_capabilities(
             else None
         )
         if capability is not None:
-            mapping[criterion.criterion_id] = {capability}
+            mapping[criterion.criterion_id] = (
+                {"knowledge.search", "knowledge.definition.resolve"}
+                if capability == "knowledge.search"
+                else {capability}
+            )
     return mapping
 
 
@@ -683,6 +840,7 @@ def _capability_purpose(capability: str) -> str:
         "data.roles": "识别时间、指标、维度和标识字段并披露歧义",
         "data.quality": "检查缺失、重复和类型质量",
         "knowledge.search": "检索并引用业务口径来源",
+        "knowledge.definition.resolve": "解析当前项目的精确版本定义并取得受控公式绑定",
         "data.aggregate": "按用户指定维度聚合指标",
         "dataset.transform": "依据已有 Evidence 创建衍生数据集",
         "dataset.join.preflight": "只读评估两个已确认数据集的 Join 可行性与膨胀风险",
@@ -700,6 +858,8 @@ def _capability_purpose(capability: str) -> str:
 
 
 def _capability_condition(capability: str) -> str:
+    if capability == "knowledge.definition.resolve":
+        return "精确语义键的定义解析 Evidence 已保存，公式与当前数据版本及汇总参数一致"
     if capability == "visualization.chart":
         return "图表 Artifact 已持久化且可发送到前端"
     if capability == "report.generate":

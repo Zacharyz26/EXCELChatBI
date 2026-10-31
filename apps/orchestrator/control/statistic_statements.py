@@ -9,6 +9,7 @@ from typing import Literal
 
 import jieba
 import jieba.posseg
+from packages.common.text_delimiters import quote_token_at
 
 ValueOrigin = Literal["statistic_assignment", "direct_statistic", "count", "relative_quantity"]
 
@@ -288,25 +289,6 @@ def _ordinary_numeric_subword(text: str, left: int, right: int) -> bool:
             return True
         offset = word_end
     return False
-
-
-def quote_token_at(text: str, position: int) -> str | None:
-    """识别原位置的引号；转义符和英文词内撇号不改变引号方向。"""
-    char = text[position]
-    if char not in "\"'`“”‘’「」『』":
-        return None
-    slash = position
-    while slash and text[slash - 1] == "\\":
-        slash -= 1
-    if (position - slash) % 2:
-        return None
-    if (
-        char == "'"
-        and 0 < position < len(text) - 1
-        and all(c.isascii() and c.isalnum() for c in (text[position - 1], text[position + 1]))
-    ):
-        return None
-    return char
 
 
 def _closes_quote_at(text: str, position: int) -> bool:

@@ -11,6 +11,9 @@ from packages.common.identifiers import dataset_reference_arguments
 from packages.orchestration.analysis_requirements import TOTAL_LABEL
 from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
 from packages.orchestration.dataset_scope import (
+    operation_admission_error,
+    operation_progress,
+    required_knowledge_issues,
     selected_analysis_dataset_refs,
     verified_analysis_scope,
 )
@@ -84,6 +87,13 @@ def verify_completion(
         for item in invocations
         if item.run_id == contract.run_id and item.status == "succeeded"
     }
+    if contract.analysis_requirements is not None:
+        try:
+            contract.analysis_requirements.validate_source(contract.goal)
+        except ValueError as exc:
+            return VerificationResult(
+                "BLOCKED", (VerificationIssue("invalid_analysis_contract", str(exc)),)
+            )
     for item in evidence:
         if item.run_id != contract.run_id:
             issues.append(VerificationIssue("foreign_run_evidence", "聊天证据不属于当前任务。"))
@@ -386,6 +396,54 @@ def _verify_analysis_requirements(
     if requirements is None:
         return []
     issues: list[VerificationIssue] = []
+    typed = requirements.schema_version == 2
+    if typed:
+        try:
+            requirements.validate_source(contract.goal)
+            if requirements.needs_clarification():
+                return [
+                    VerificationIssue(
+                        "unresolved_analysis_slot", "冻结任务仍有未解决的分析槽位，不能完成。"
+                    )
+                ]
+            progress = operation_progress(
+                requirements, contract.run_id, invocations, evidence, bindings
+            )
+            if not progress.complete:
+                issues.append(
+                    VerificationIssue(
+                        "required_operation_not_satisfied",
+                        "任务的有序操作缺少匹配参数、成功证据或已登记版本。"
+                        + "；".join(progress.issues),
+                    )
+                )
+            # Recheck actual admissions in their original order. In particular,
+            # a successful forbidden operation cannot be laundered by a later
+            # valid calculation or a plan whose labels all say completed.
+            prior: list[ToolInvocation] = []
+            for performed in invocations:
+                if performed.run_id == contract.run_id and performed.status == "succeeded":
+                    violation = operation_admission_error(
+                        requirements,
+                        run_id=contract.run_id,
+                        tool_name=performed.tool_name,
+                        arguments=performed.args,
+                        invocations=prior,
+                        evidence=evidence,
+                        bindings=bindings,
+                        source_artifacts=source_artifacts,
+                    )
+                    if violation:
+                        issues.append(VerificationIssue("analysis_operation_mismatch", violation))
+                prior.append(performed)
+            issues.extend(
+                VerificationIssue("missing_required_knowledge_query", text)
+                for text in required_knowledge_issues(
+                    requirements, contract.run_id, invocations, evidence
+                )
+            )
+        except ValueError as exc:
+            return [VerificationIssue("invalid_analysis_contract", str(exc))]
     if requirements.filter_error:
         issues.append(VerificationIssue("required_filter_not_satisfied", requirements.filter_error))
     by_id = {item.invocation_id: item for item in invocations if item.run_id == contract.run_id}
@@ -430,6 +488,16 @@ def _verify_analysis_requirements(
                 )
 
     def violates_scope(item: ToolInvocation) -> bool:
+        if (
+            typed
+            and item.status == "succeeded"
+            and item.tool_name in {"transform_dataset", "get_data_profile"}
+        ):
+            # v2 replays admission at each operation's input version above.
+            # A valid transform necessarily reads its parent, not the final
+            # child. Exploratory profiles may also precede cleanup; any profile
+            # used as a delivered fact still faces the final-scope check above.
+            return False
         refs = [ref for _, ref in dataset_reference_arguments(item.args)]
         if item.run_id != contract.run_id or not any(ref not in scope for ref in refs):
             return False

@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from packages.common.identifiers import dataset_reference_arguments, validate_report_id
+from packages.orchestration.analysis_requirements import (
+    AnalysisRequirements,
+    resolve_analysis_slot,
+)
 from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
 from packages.orchestration.hypothesis_followup import (
     decide_hypothesis_followup,
@@ -1035,6 +1039,14 @@ class TaskStore:
                 _checkpoint_from_row(checkpoint_row),
             )
 
+            analysis_resolution = _apply_analysis_slot_answer(
+                connection,
+                current=current,
+                question_id=clean_question_id,
+                waiting_payload=waiting_payload,
+                answer=answer,
+            )
+
             ensure_transition(current.status, "planning")
             next_version = current.state_version + 1
             role_confirmation = _validated_data_role_confirmation(
@@ -1106,6 +1118,8 @@ class TaskStore:
                 )
             if hypothesis_selection is not None:
                 event_payload["hypothesis_selection"] = hypothesis_selection
+            if analysis_resolution is not None:
+                event_payload["analysis_slot_resolution"] = analysis_resolution
             event = TaskEvent(
                 event_id=uuid.uuid4().hex,
                 run_id=run_id,
@@ -1137,6 +1151,8 @@ class TaskStore:
             }
             if hypothesis_selection is not None:
                 snapshot_update["selected_hypothesis"] = hypothesis_selection
+            if analysis_resolution is not None:
+                snapshot_update["analysis_slot_resolution"] = analysis_resolution
             snapshot.update(snapshot_update)
             connection.execute(
                 """
@@ -5102,6 +5118,131 @@ def _valid_clarification_answer(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return len(encoded) <= 20_000
+
+
+def _apply_analysis_slot_answer(
+    connection: sqlite3.Connection,
+    *,
+    current: TaskRun,
+    question_id: str,
+    waiting_payload: JsonObject,
+    answer: object,
+) -> JsonObject | None:
+    """在原答案事务中核验冻结槽并保存新合同，异常时整体回滚。"""
+    raw = waiting_payload.get("analysis_slot_request")
+    if raw is None:
+        if question_id.startswith("analysis:"):
+            raise ControlConflict("分析澄清缺少冻结槽元数据")
+        return None
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema") != "chatbi-analysis-slot-request-v1"
+        or raw.get("schema_version") != 1
+    ):
+        raise ControlConflict("分析澄清请求格式非法")
+    slot, operation_id = raw.get("slot"), raw.get("operation_id")
+    if not isinstance(slot, str) or not (operation_id is None or isinstance(operation_id, str)):
+        raise ControlConflict("分析澄清槽身份非法")
+    expected_id = "analysis:" + slot + ":" + (operation_id or "general")
+    if question_id != expected_id:
+        raise ControlConflict("分析澄清问题与冻结槽不一致")
+    if type(raw.get("plan_version")) is not int or raw["plan_version"] != current.plan_version:
+        raise ControlConflict("分析澄清不属于当前计划版本")
+    if raw.get("data_version_hash") != _data_version_hash(connection, current.run_id):
+        raise ControlConflict("TaskRun 数据版本已变化，分析澄清已失效")
+    latest = connection.execute(
+        "SELECT payload_json FROM task_events WHERE run_id = ? AND event_type = 'waiting_user' "
+        "ORDER BY sequence DESC LIMIT 1",
+        (current.run_id,),
+    ).fetchone()
+    if latest is None or _load_object(str(latest[0])).get("resume_token") != waiting_payload.get(
+        "resume_token"
+    ):
+        raise ControlConflict("分析澄清已不是当前等待的问题")
+    row = connection.execute(
+        "SELECT contract_json, contract_hash FROM task_contracts WHERE run_id = ?",
+        (current.run_id,),
+    ).fetchone()
+    if row is None:
+        raise ControlConflict("分析澄清缺少原任务合同")
+    payload = _load_object(str(row[0]))
+    before_hash = _hash_text(_dump_json(payload))
+    if before_hash != str(row[1]) or payload.get("run_id") != current.run_id:
+        raise ControlConflict("分析澄清原合同 hash 或身份不一致")
+    try:
+        requirements = AnalysisRequirements.from_dict(payload.get("analysis_requirements"))
+        requirements.validate_source(str(payload.get("goal", "")))
+    except ValueError as exc:
+        raise ControlConflict("分析澄清原合同无效") from exc
+    if requirements.schema_version != 2:
+        raise ControlConflict("旧分析合同不能通过新槽澄清隐式升级")
+    revision = raw.get("analysis_revision")
+    if type(revision) is not int or revision != requirements.revision:
+        raise ControlConflict("分析澄清 revision 已过期")
+    pending = requirements.clarification
+    if pending is None or pending.slot != slot or pending.operation_id != operation_id:
+        raise ControlConflict("分析澄清槽与当前未解决义务不一致")
+    candidates = raw.get("candidates")
+    if not isinstance(candidates, list) or candidates != list(pending.candidates):
+        raise ControlConflict("分析澄清候选与冻结合同不一致")
+    if (
+        candidates
+        and slot not in {"filters", "columns"}
+        and (not isinstance(answer, str) or answer.strip() not in candidates)
+    ):
+        raise ControlConflict("分析澄清答案不在允许的候选中")
+    dataset_ref = raw.get("dataset_ref")
+    if not isinstance(dataset_ref, str) or not dataset_ref:
+        raise ControlConflict("分析澄清缺少数据集身份")
+    if requirements.dataset_ref is not None and dataset_ref != requirements.dataset_ref:
+        raise ControlConflict("分析澄清数据集与冻结合同不一致")
+    bound = connection.execute(
+        "SELECT 1 FROM task_dataset_bindings WHERE run_id = ? AND dataset_ref = ?",
+        (current.run_id, dataset_ref),
+    ).fetchone()
+    dataset = connection.execute(
+        "SELECT profile_json FROM datasets WHERE ref = ? AND project_id = ?",
+        (dataset_ref, current.project_id),
+    ).fetchone()
+    if bound is None or dataset is None:
+        raise ControlConflict("分析澄清数据集不属于当前任务")
+    profile = _load_object(str(dataset[0]))
+    columns = tuple(
+        item["name"]
+        for item in profile.get("columns", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    )
+    try:
+        revised = resolve_analysis_slot(
+            requirements,
+            slot=slot,
+            answer=answer,
+            operation_id=operation_id,
+            expected_revision=revision,
+            columns=columns,
+        )
+        revised.validate_source(str(payload["goal"]))
+    except ValueError as exc:
+        raise ControlConflict(str(exc)) from exc
+    updated_payload = {**payload, "analysis_requirements": revised.to_dict()}
+    after_hash = _hash_text(_dump_json(updated_payload))
+    connection.execute(
+        "UPDATE task_contracts SET contract_json = ?, contract_hash = ? WHERE run_id = ?",
+        (_dump_json(updated_payload), after_hash, current.run_id),
+    )
+    return {
+        "schema": "chatbi-analysis-slot-resolution-v1",
+        "schema_version": 1,
+        "slot": slot,
+        "operation_id": operation_id,
+        "dataset_ref": dataset_ref,
+        "data_version_hash": raw["data_version_hash"],
+        "plan_version": current.plan_version,
+        "previous_revision": revision,
+        "revision": revised.revision,
+        "previous_contract_hash": before_hash,
+        "contract_hash": after_hash,
+    }
 
 
 _DATA_ROLES = frozenset({"time", "metric", "dimension", "identifier", "unknown"})

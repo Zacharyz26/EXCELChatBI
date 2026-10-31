@@ -47,6 +47,7 @@ from packages.models.types import Message as ModelMessage
 from packages.models.types import ModelBudgetExceeded, ModelResponse, Scenario, ToolCall
 from packages.orchestration.analysis_requirements import (
     AnalysisRequirements,
+    ColumnRoleBinding,
     explicit_analysis_requirements,
     filter_arguments_match,
 )
@@ -60,8 +61,13 @@ from packages.orchestration.contracts import (
 )
 from packages.orchestration.dataset_scope import (
     is_filter_preserving_cleanup,
+    operation_admission_error,
     selected_analysis_dataset_refs,
     verified_analysis_scope,
+)
+from packages.orchestration.knowledge_intent import (
+    knowledge_query_matches,
+    knowledge_query_step_id,
 )
 from packages.session.compaction import (
     CompactionAccessDenied,
@@ -539,6 +545,15 @@ def _blocking_clarification(
     selected_datasets = [dataset for dataset in datasets if dataset.ref in selected_dataset_refs]
     dataset = selected_datasets[-1] if selected_datasets else datasets[-1]
     requirements = analysis_requirements or explicit_analysis_requirements(clean)
+    if requirements.schema_version == 2:
+        requirements.validate_integrity()
+        question = _analysis_slot_clarification(requirements, dataset)
+        if question is not None:
+            return question
+        # The frozen operation contract owns its grouping and measure slots.
+        # Do not ask a second dimension-only question for a valid time group.
+        if requirements.requires_operation("aggregate"):
+            return None
     missing_columns = sorted(
         {
             str(item["column"])
@@ -677,6 +692,99 @@ def _dataset_column_names(dataset: Dataset) -> list[str]:
     return names
 
 
+def _dataset_role_bindings(dataset: Dataset) -> tuple[ColumnRoleBinding, ...]:
+    """从当前真实画像投影编译输入，不从模型或业务字段名称猜测角色。"""
+    try:
+        inferred = infer_data_roles_from_mapping(dataset.profile, dataset_ref=dataset.ref)
+    except ValueError:
+        return ()
+    items = inferred.get("columns")
+    if not isinstance(items, list):
+        return ()
+    return tuple(
+        ColumnRoleBinding(
+            column=str(item["column"]),
+            primary_role=str(item.get("primary_role", "unknown")),
+            candidate_roles=tuple(
+                str(candidate["role"])
+                for candidate in item.get("candidates", [])
+                if isinstance(candidate, dict) and isinstance(candidate.get("role"), str)
+            ),
+            requires_confirmation=bool(item.get("ambiguous")),
+        )
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get("column"), str)
+    )
+
+
+def _analysis_slot_clarification(
+    requirements: AnalysisRequirements, dataset: Dataset
+) -> JsonObject | None:
+    """将冻结的未决槽投到现有可回答澄清载体，其他任务义务不重编译。"""
+    item = requirements.clarification
+    if item is None:
+        return None
+    labels = {
+        "dataset": "本次数据集",
+        "filters": "完整筛选条件",
+        "operation": "本次操作",
+        "columns": "本次处理的字段",
+        "group_col": "分组字段",
+        "value_col": "分析指标",
+        "aggregation": "汇总方式",
+        "time_grain": "时间分组方式",
+    }
+    label = labels.get(item.slot, item.slot)
+    choices = list(item.candidates)
+    if item.slot == "filters":
+        question = "请用完整比较式确认筛选条件，例如 字段=值 AND 字段=值；或明确取消筛选。"
+    elif item.reason == "unsupported_aggregation":
+        question = (
+            "当前汇总工具不支持原请求的统计方式。"
+            f"若接受更改本次汇总方式，请选择：{'、'.join(choices)}；"
+            "否则请取消本任务，不会自动替换原要求。"
+        )
+    elif choices:
+        question = f"请选择{label}：{'、'.join(choices)}。"
+    elif item.reason == "unsupported_time_grain":
+        question = (
+            "当前工具仅支持按现有列值分组，不能将日级日期转换为月或其他粒度。"
+            "本任务暂不能按原粒度执行；请取消后基于已有分组字段新建请求。"
+        )
+    elif item.reason == "unsupported_row_count":
+        question = (
+            "当前计数工具统计指定列的非空值，不能替代每组全部记录数。"
+            "本任务暂不能执行；如需要列非空计数，请明确字段后新建请求。"
+        )
+    else:
+        question = f"请明确{label}，当前信息不能形成可执行的分析要求。"
+    question_id = "analysis:" + item.slot + ":" + (item.operation_id or "general")
+    payload: JsonObject = {
+        "question_id": question_id,
+        "about": "analysis_" + item.slot,
+        "question": question,
+        "reason": item.reason,
+        "analysis_slot_request": {
+            "schema": "chatbi-analysis-slot-request-v1",
+            "schema_version": 1,
+            "slot": item.slot,
+            "operation_id": item.operation_id,
+            "dataset_ref": requirements.dataset_ref or dataset.ref,
+            "analysis_revision": requirements.revision,
+            "candidates": choices,
+        },
+    }
+    if item.requires_confirmation and len(item.allowed_roles) == 1:
+        payload["data_role_request"] = {
+            "schema": "chatbi-data-role-confirmation-request-v1",
+            "schema_version": 1,
+            "dataset_ref": requirements.dataset_ref or dataset.ref,
+            "role": item.allowed_roles[0],
+            "candidates": choices,
+        }
+    return payload
+
+
 def _role_selection_clarification(
     user_text: str,
     dataset: Dataset,
@@ -812,6 +920,26 @@ def _waiting_user_payload(
         "resume_token": resume_token,
     }
     if source_clarification is None or data_version_hash is None:
+        return payload
+    raw_analysis = source_clarification.get("analysis_slot_request")
+    if isinstance(raw_analysis, dict) and source_clarification.get("question_id") == question.get(
+        "question_id"
+    ):
+        payload["analysis_slot_request"] = {
+            **raw_analysis,
+            "plan_version": plan_version,
+            "data_version_hash": data_version_hash,
+        }
+        candidates = raw_analysis.get("candidates")
+        if isinstance(candidates, list) and candidates and raw_analysis.get("slot") != "filters":
+            payload["answer_schema"] = {"type": "string", "enum": list(candidates)}
+        raw_role = source_clarification.get("data_role_request")
+        if isinstance(raw_role, dict):
+            payload["data_role_request"] = {
+                **raw_role,
+                "plan_version": plan_version,
+                "data_version_hash": data_version_hash,
+            }
         return payload
     raw_hypothesis_request = source_clarification.get("hypothesis_request")
     if isinstance(raw_hypothesis_request, dict) and source_clarification.get(
@@ -1196,6 +1324,15 @@ async def _stream_agent_chat_inner(
                     )
             else:
                 assert reference_resolution is not None
+                selected_refs = {
+                    target.dataset_ref
+                    for target in reference_resolution.targets
+                    if target.dataset_ref is not None
+                }
+                selected_sources = [dataset for dataset in datasets if dataset.ref in selected_refs]
+                if not selected_sources and len(datasets) == 1:
+                    selected_sources = list(datasets)
+                source = selected_sources[0] if len(selected_sources) == 1 else None
                 contract = build_minimal_contract(
                     run_id=run_id,
                     user_text=reference_resolution.rewritten_query,
@@ -1211,13 +1348,8 @@ async def _stream_agent_chat_inner(
                         )
                     )
                     or (tuple(dataset.ref for dataset in datasets) if len(datasets) == 1 else None),
-                    columns=tuple(
-                        dict.fromkeys(
-                            column
-                            for dataset in datasets
-                            for column in _dataset_column_names(dataset)
-                        )
-                    ),
+                    columns=tuple(_dataset_column_names(source)) if source is not None else (),
+                    column_roles=_dataset_role_bindings(source) if source is not None else (),
                 )
                 reference_assumption = reference_resolution.assumption()
                 if reference_assumption is not None:
@@ -1737,6 +1869,7 @@ async def _stream_agent_chat_inner(
                         analysis_requirements=contract.analysis_requirements,
                     )
                     if not resume_existing
+                    or (clarification_question_id or "").startswith("analysis:")
                     or clarification_question_id
                     in {
                         "join_datasets",
@@ -1749,7 +1882,12 @@ async def _stream_agent_chat_inner(
             )
             try:
                 task_outline = create_task_outline(
-                    user_text=planning_text,
+                    user_text=(
+                        contract.goal
+                        if contract.analysis_requirements is not None
+                        and contract.analysis_requirements.schema_version == 2
+                        else planning_text
+                    ),
                     contract=contract,
                     datasets=datasets,
                     artifacts=list(context.artifacts),
@@ -1862,6 +2000,7 @@ async def _stream_agent_chat_inner(
                     and (
                         isinstance(clarification.get("data_role_request"), dict)
                         or isinstance(clarification.get("hypothesis_request"), dict)
+                        or isinstance(clarification.get("analysis_slot_request"), dict)
                     )
                     and clarification.get("question_id") == question_id
                     else None
@@ -1940,6 +2079,11 @@ async def _stream_agent_chat_inner(
             if refreshed_run is None or refreshed_run.status != "planning":
                 return
             run = refreshed_run
+            if question_id.startswith("analysis:"):
+                stored = await run_in_threadpool(task_store.get_verified_contract, run_id)
+                if stored is None:
+                    raise QuantityContractUnavailable("澄清后任务合同缺失")
+                contract = _restore_task_contract(stored, run_id)
             if question_id == "filter_columns":
                 contract = _filter_contract_after_answer(contract, answer)
                 run, contract_event = await run_in_threadpool(
@@ -2002,13 +2146,19 @@ async def _stream_agent_chat_inner(
                                 if target.dataset_ref is not None
                             ),
                         )
-                        if question_id
+                        if question_id.startswith("analysis:")
+                        or question_id
                         in {"join_datasets", "join_keys", "join_type", "filter_columns"}
                         else None
                     )
                 )
                 task_outline = create_task_outline(
-                    user_text=clarified_planning_text,
+                    user_text=(
+                        contract.goal
+                        if contract.analysis_requirements is not None
+                        and contract.analysis_requirements.schema_version == 2
+                        else clarified_planning_text
+                    ),
                     contract=contract,
                     datasets=datasets,
                     artifacts=list(context.artifacts),
@@ -2098,6 +2248,7 @@ async def _stream_agent_chat_inner(
                         and (
                             isinstance(clarification.get("data_role_request"), dict)
                             or isinstance(clarification.get("hypothesis_request"), dict)
+                            or isinstance(clarification.get("analysis_slot_request"), dict)
                         )
                         and clarification.get("question_id") == question_item.get("question_id")
                         else None
@@ -3022,6 +3173,8 @@ async def _stream_agent_chat_inner(
                     break
                 current_steps = await run_in_threadpool(task_store.list_plan_steps, run_id)
                 current_schedule = schedule_plan_steps(current_steps)
+                call_args = _parse_args(call.arguments)
+                knowledge_order_error = None
                 planned_step = match_ready_step(
                     tool_name=call.name,
                     schedule=current_schedule,
@@ -3034,10 +3187,56 @@ async def _stream_agent_chat_inner(
                         steps=current_steps,
                         resolver=registry,
                     )
+                analysis = contract.analysis_requirements
+                if (
+                    call.name in {"kb_search", "domain_definition_lookup"}
+                    and analysis is not None
+                    and analysis.schema_version == 2
+                    and analysis.knowledge_queries
+                ):
+                    matches = [
+                        knowledge_query_step_id(query, analysis.source_hash or "")
+                        for query in analysis.knowledge_queries
+                        if knowledge_query_matches(
+                            str(call_args.get("query", call_args.get("semantic_key", ""))), query
+                        )
+                    ]
+                    if len(matches) == 1:
+                        ready_query_step = next(
+                            (
+                                step
+                                for step in current_schedule.ready
+                                if step.logical_id == matches[0]
+                            ),
+                            None,
+                        )
+                        planned_step = (
+                            ready_query_step
+                            if ready_query_step is not None
+                            and ready_query_step.definition.get("capability")
+                            in registry.capabilities_for_tool(call.name)
+                            else None
+                        )
+                        already_completed = any(
+                            step.logical_id == matches[0] and step.status == "completed"
+                            for step in current_steps
+                        )
+                        if ready_query_step is None and not already_completed:
+                            knowledge_order_error = "该知识查询步骤尚未就绪，不能越过冻结依赖执行。"
+                        # A provider fallback for an already completed query is
+                        # an unplanned read; it cannot consume another object's
+                        # step. A generic KB read also cannot consume a required
+                        # definition-resolution step. The common scope gate
+                        # independently enforces compiled-definition proof.
+                    else:
+                        planned_step = None
+                        if len(matches) > 1:
+                            knowledge_order_error = (
+                                "本次查询对应多个冻结对象，不能把一次模糊查询标记为多个步骤完成。"
+                            )
                 if planned_step is not None:
                     offered_step_ids.discard(planned_step.step_id)
                 logical_step_id = planned_step.logical_id if planned_step is not None else call.id
-                call_args = _parse_args(call.arguments)
                 if call.name in {
                     "gen_chart",
                     "generate_report",
@@ -3150,6 +3349,7 @@ async def _stream_agent_chat_inner(
                     call_args,
                     current_artifacts if call.name == "generate_report" else [],
                 )
+                scope_error = scope_error or knowledge_order_error
                 business_plan_record = await run_in_threadpool(task_store.get_active_plan, run_id)
                 effect_scope = run_id
                 if (
@@ -4144,6 +4344,13 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
         raise ValueError("持久化 TaskContract 至少需要一项完成标准和合法约束")
     if not all(isinstance(item, str) for item in raw_assumptions):
         raise ValueError("持久化 TaskContract 的 assumptions 无效")
+    requirements = (
+        AnalysisRequirements.from_dict(payload["analysis_requirements"])
+        if "analysis_requirements" in payload
+        else None
+    )
+    if requirements is not None:
+        requirements.validate_source(goal)
     return TaskContract(
         run_id=run_id,
         goal=goal,
@@ -4151,11 +4358,7 @@ def _restore_task_contract(payload: JsonObject, run_id: str) -> TaskContract:
         constraints=tuple(cast(list[str], raw_constraints)),
         assumptions=tuple(cast(list[str], raw_assumptions)),
         quantity_contract_version=quantity_version,
-        analysis_requirements=(
-            AnalysisRequirements.from_dict(payload["analysis_requirements"])
-            if "analysis_requirements" in payload
-            else None
-        ),
+        analysis_requirements=requirements,
     )
 
 
@@ -4918,6 +5121,21 @@ def _analysis_scope_error(
     requirements = contract.analysis_requirements
     if requirements is None:
         return None
+    try:
+        requirements.validate_source(contract.goal)
+        if requirements.schema_version == 2:
+            return operation_admission_error(
+                requirements,
+                run_id=run_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                invocations=task_store.list_invocations(run_id),
+                evidence=task_store.list_evidence(run_id),
+                bindings=task_store.list_dataset_bindings(run_id),
+                source_artifacts=source_artifacts,
+            )
+    except ValueError as exc:
+        return "分析合同无法安全执行：" + str(exc)
     if requirements.filter_error:
         return requirements.filter_error
     refs = {ref for _, ref in dataset_reference_arguments(arguments) if isinstance(ref, str)}
@@ -4993,6 +5211,15 @@ async def _try_execute_parallel_frontier(
     conditional anomaly branches and delivery tools retain the sequential path.
     """
     if not 2 <= len(tool_calls) <= config.max_parallel_tools:
+        return None
+    if (
+        contract.analysis_requirements is not None
+        and contract.analysis_requirements.schema_version == 2
+        and contract.analysis_requirements.knowledge_queries
+        and any(call.name in {"kb_search", "domain_definition_lookup"} for call in tool_calls)
+    ):
+        # Capability matching cannot distinguish a required object, unrelated
+        # lookup, or provider fallback. Bind exact objects in the serial path.
         return None
     excluded = {
         "anomaly_detect",

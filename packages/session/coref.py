@@ -13,6 +13,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from packages.common.identifiers import (
+    ANALYSIS_REFERENCE_PATTERN as _ANALYSIS_ID_PATTERN,
+)
+from packages.common.identifiers import MEMORY_REFERENCE_PATTERN as _MEMORY_ID_PATTERN
 from packages.governance.audit import AuditEvent, AuditOutcome
 from packages.governance.audit import record as record_audit
 from packages.governance.permissions import Principal
@@ -25,15 +29,6 @@ _HOST_ANNOTATION_PREFIX = "[Host 已验证引用 coref-v1]"
 _MAX_QUERY_CHARS = 20_000
 _MAX_REFERENCE_TARGETS = 5
 _COMPACT_BINDING_VERSION = "1"
-_ANALYSIS_ID_PATTERN = re.compile(
-    r"(?:(?:analysis[_ ]?id|dataset[_ ]?ref)\s*[:=]\s*)?"
-    r"([0-9a-f]{32}|[0-9a-f]{12})(?![0-9a-f])",
-    re.I,
-)
-_MEMORY_ID_PATTERN = re.compile(
-    r"memory[_ ]?id\s*[:=]\s*[0-9a-f]{32}(?![0-9a-f])",
-    re.I,
-)
 _ORDINAL_PATTERN = re.compile(
     r"第(?P<number>[一二三四五六七八九十百两\d]+)"
     r"(?:张|个|份|条)?(?P<kind>图表?|数据集|数据|报告|表格|结果)"

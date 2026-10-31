@@ -9,7 +9,11 @@ from typing import Literal
 
 from packages.session.models import JsonObject
 
-from .analysis_requirements import AnalysisRequirements, explicit_analysis_requirements
+from .analysis_requirements import (
+    AnalysisRequirements,
+    ColumnRoleBinding,
+    explicit_analysis_requirements,
+)
 
 CriterionKind = Literal["response", "artifact", "evidence", "semantic", "constraint"]
 QUANTITY_CONTRACT_VERSION = "quantity-contract-v1"
@@ -60,6 +64,8 @@ class TaskContract:
     quantity_contract_version: str = QUANTITY_CONTRACT_VERSION
 
     def to_dict(self) -> JsonObject:
+        if self.analysis_requirements is not None:
+            self.analysis_requirements.validate_source(self.goal)
         return {
             "run_id": self.run_id,
             "goal": self.goal,
@@ -130,10 +136,11 @@ def build_minimal_contract(
     chart_dimensions: tuple[str, ...] = (),
     columns: tuple[str, ...] = (),
     dataset_refs: tuple[str, ...] | None = None,
+    column_roles: tuple[ColumnRoleBinding, ...] = (),
 ) -> TaskContract:
     """Compile only high-confidence requirements; stage 2 adds the full interpreter."""
     requirements = explicit_analysis_requirements(
-        user_text, columns=columns, dataset_refs=dataset_refs
+        user_text.strip(), columns=columns, dataset_refs=dataset_refs, column_roles=column_roles
     )
     contract = TaskContract(
         run_id=run_id,
@@ -150,16 +157,7 @@ def build_minimal_contract(
             "成功工具调用必须形成可追溯 Evidence",
             "模型文字不能替代用户要求的 Artifact",
         ),
-        analysis_requirements=(
-            requirements
-            if (
-                requirements.filters
-                or requirements.total
-                or requirements.filter_error
-                or requirements.dataset_ref
-            )
-            else None
-        ),
+        analysis_requirements=requirements,
     )
     if chart_required:
         contract = contract.require_artifact("chart")

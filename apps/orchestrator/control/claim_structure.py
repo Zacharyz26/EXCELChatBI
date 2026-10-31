@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from packages.common.text_delimiters import delimited_spans as delimited_spans
+
 from apps.orchestrator.control.numeric_display import (
     NUMBER_LITERAL,
     has_numeric_symbol,
@@ -14,7 +16,6 @@ from apps.orchestrator.control.numeric_display import (
 from apps.orchestrator.control.statistic_statements import (
     paired_quote_spans,
     quantity_expression_spans,
-    quote_token_at,
     statistic_value_slots,
 )
 
@@ -27,38 +28,6 @@ class ClaimFragment:
     cells: tuple[tuple[str, str], ...] | None = None
     value_span: tuple[int, int] | None = None
     source_map: tuple[int | None, ...] = ()
-
-
-# Delimiters describe assertion scope, never regions to skip numeric checks.
-_PAIRS = dict(zip("(（[［{｛【「『〈《“‘", ")）]］}｝】」』〉》”’", strict=True))
-
-
-def delimited_spans(text: str) -> list[tuple[int, int]]:
-    """Keep nested bracket/quote content together, including an unclosed tail."""
-    stack: list[tuple[str, int]] = []
-    spans: list[tuple[int, int]] = []
-    escaped = False
-    for index, char in enumerate(text):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char in "\"'`“”‘’「」『』" and quote_token_at(text, index) is None:
-            continue
-        if stack and char == stack[-1][0]:
-            _, start = stack.pop()
-            if not stack:
-                spans.append((start, index + 1))
-            continue
-        if char in _PAIRS:
-            stack.append((_PAIRS[char], index))
-        elif char in "\"'`":
-            stack.append((char, index))
-    if stack:
-        spans.append((stack[0][1], len(text)))
-    return spans
 
 
 def split_claim_statements(
