@@ -10,6 +10,7 @@ from typing import Literal
 import jieba
 import jieba.posseg
 from packages.common.text_delimiters import quote_token_at
+from packages.common.text_surface import quote_nodes
 
 ValueOrigin = Literal["statistic_assignment", "direct_statistic", "count", "relative_quantity"]
 
@@ -147,6 +148,8 @@ def count_expressions(
             ) or _ordinary_numeric_subword(text, *match.span("amount")):
                 continue
         left, right = match.span("amount")
+        if _nominal_determiner(text, left, right, measurement_labels, owner_fields):
+            continue
         if _deictic_member_reference(text, left, right, measurement_labels, owner_fields):
             continue
         if re.search(r"(?:第|每|同|任|某)$", text[:left]):
@@ -192,7 +195,57 @@ def count_expressions(
                 referenced_items,
             )
         )
+    # An explicit counting predicate with a terminal amount is an incomplete
+    # quantity assignment, not ordinary wording. Preserve its value with an
+    # unknown object; neither a field nor a denominator is inferred. Complete
+    # classifier/object expressions above retain their own established role.
+    incomplete = re.compile(
+        r"(?P<predicate>"
+        + COUNT_PREDICATE
+        + r")\s*(?:约|大约)?"
+        + _VALUE_OPEN
+        + r"(?P<amount>"
+        + quantity
+        + r")"
+        + _VALUE_CLOSE
+        + r"(?=$|[，,。；;!?！？|\n])"
+    )
+    for match in incomplete.finditer(text):
+        left, right = match.span("amount")
+        if (
+            any(item.value_span == (left, right) for item in expressions)
+            or re.search(r"\n[ \t]*\n", text[match.start() : right])
+            or _crosses_quote_close(text, match.start("predicate"), left)
+        ):
+            continue
+        expressions.append(CountExpression((left, right), (match.start(), right), ""))
+    expressions.sort(key=lambda item: item.value_span)
     return expressions
+
+
+def _nominal_determiner(
+    text: str,
+    left: int,
+    right: int,
+    measurement_labels: set[str] | None,
+    owner_fields: set[str] | None,
+) -> bool:
+    """词法指代后的单一名词不拆出假量词；真实赋值/存在对象优先保留。"""
+    if text[left:right] != "一" or measurement_labels is None:
+        return False
+    prefix = re.split(r"[，,。；;!?！？]|\n[ \t]*\n", text[:left])[-1]
+    prefix_atoms = _lexical_atoms(prefix)
+    tail_atoms = _lexical_atoms(text[right : right + 32])
+    if not prefix_atoms or prefix_atoms[-1][1] != "r" or not tail_atoms:
+        return False
+    noun, role = tail_atoms[0]
+    if len(noun) <= 1 or role not in {"n", "nz"}:
+        return False
+    return not (
+        any(label and label in prefix for label in measurement_labels)
+        or any(field and field in prefix for field in owner_fields or set())
+        or re.search(COUNT_PREDICATE + "|" + ASSIGNMENT_OPERATOR, prefix)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -284,7 +337,7 @@ def _ordinary_numeric_subword(text: str, left: int, right: int) -> bool:
     for word, role in _lexical_atoms(text[start:end]):
         word_end = offset + len(word)
         if (offset == left and right < word_end and role != "m") or (
-            offset < left < right < word_end and role == "d"
+            offset < left < right <= word_end and role in {"d", "r"}
         ):
             return True
         offset = word_end
@@ -292,17 +345,9 @@ def _ordinary_numeric_subword(text: str, left: int, right: int) -> bool:
 
 
 def _closes_quote_at(text: str, position: int) -> bool:
-    pairs = {"“": "”", "‘": "’", "「": "」", "『": "』", '"': '"', "'": "'", "`": "`"}
-    stack: list[str] = []
-    for index in range(position):
-        char = quote_token_at(text, index)
-        if char is None:
-            continue
-        if stack and char == stack[-1]:
-            stack.pop()
-        elif char in pairs:
-            stack.append(pairs[char])
-    return bool(stack and position < len(text) and quote_token_at(text, position) == stack[-1])
+    # Reuse actual source quote/code closures. Interior unmatched backtick
+    # widths are literal content, not a closing boundary that can erase a slot.
+    return any(node.content_span[1] <= position < node.span[1] for node in quote_nodes(text))
 
 
 def _crosses_quote_close(text: str, start: int, end: int) -> bool:
@@ -622,24 +667,8 @@ def statistic_value_slots(
 
 def paired_quote_spans(text: str) -> list[tuple[int, int, int, int]]:
     """原文中的完整引号对，内层先返回；反引号以完整连续宽度匹配。"""
-    pairs = {"“": "”", "‘": "’", "「": "」", "『": "』", '"': '"', "'": "'"}
-    stack: list[tuple[str, int, int]] = []
-    closed: list[tuple[int, int, int, int]] = []
-    index = 0
-    while index < len(text):
-        char = quote_token_at(text, index)
-        if char is None:
-            index += 1
-            continue
-        width = 1
-        if char == "`":
-            while index + width < len(text) and text[index + width] == "`":
-                width += 1
-            char = "`" * width
-        if stack and char == stack[-1][0]:
-            _, opening, opening_width = stack.pop()
-            closed.append((opening, opening + opening_width, index, index + width))
-        elif char in pairs or char.startswith("`"):
-            stack.append((pairs.get(char, char), index, width))
-        index += width
-    return closed
+    return [
+        (node.span[0], node.content_span[0], node.content_span[1], node.span[1])
+        for node in quote_nodes(text)
+        if node.closed
+    ]

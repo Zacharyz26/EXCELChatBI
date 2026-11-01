@@ -990,6 +990,27 @@ def _postfix_count_view(text: str, start: int, end: int) -> str:
     return "".join(view)
 
 
+def profile_statistic_role(label: str) -> str | None:
+    """精确表头复用统计角色语法，不能由单元格数值选择角色。"""
+    roles = {role for role, pattern in _PREFIX.items() if re.fullmatch(pattern, label, re.I)}
+    return next(iter(roles)) if len(roles) == 1 else None
+
+
+def profile_field_header(label: str) -> bool:
+    """表格 schema 的字段身份槽，不从备注中的同名值猜测字段。"""
+    return label.strip().casefold() in {
+        "字段",
+        "字段名",
+        "字段名称",
+        "列",
+        "列名",
+        "column",
+        "column_name",
+        "field",
+        "field_name",
+    }
+
+
 def profile_candidate_matches(
     binding: JsonObject,
     universe: list[JsonObject],
@@ -1180,11 +1201,9 @@ def duplicate_count_feedback(
 
 def profile_heading_sections(text: str, fields: set[str]) -> list[tuple[str, str]]:
     """仅将明确字段标题绑定到紧接的完整统计段落，不跨引用、范围或段落。"""
-    from apps.orchestrator.control.claim_structure import (
-        delimited_spans,
-        inline_numeric_text,
-        mask_fenced_code,
-    )
+    from packages.common.text_surface import parse_text_surface
+
+    from apps.orchestrator.control.claim_structure import inline_numeric_text
 
     lines = text.splitlines(keepends=True)
     offsets: list[int] = []
@@ -1192,42 +1211,34 @@ def profile_heading_sections(text: str, fields: set[str]) -> list[tuple[str, str
     for line in lines:
         offsets.append(offset)
         offset += len(line)
-    quoted = delimited_spans(mask_fenced_code(text))
+    surface = parse_text_surface(text)
+    containers = [
+        node
+        for node in surface.nodes
+        if node.kind in {"fence", "blockquote", "quote", "inline_code"}
+    ]
+    headings = {
+        node.span[0]: node for node in surface.nodes if node.kind in {"heading", "bold_heading"}
+    }
     ancestors: list[tuple[int, bool]] = []
-    fence: tuple[str, int] | None = None
-    blockquote = False
     scope_boundary = False
     previous = ""
     spans: list[tuple[int, int, str]] = []
     for index, line in enumerate(lines):
         raw = line.rstrip("\r\n")
         stripped = raw.strip()
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", raw)
-        if marker:
-            if not fence:
-                fence = (marker[1][0], len(marker[1]))
-            elif (
-                marker[1][0] == fence[0]
-                and len(marker[1]) >= fence[1]
-                and re.fullmatch(r" {0,3}" + re.escape(marker[1]) + r"\s*", raw)
-            ):
-                fence = None
-            previous = stripped
-            continue
-        if fence:
-            continue
-        if raw.lstrip().startswith(">"):
-            blockquote = True
         if not stripped:
-            blockquote = False
+            # A blank line does not retract the preceding explicit example
+            # boundary. Preserve the last nonempty source context as before
+            # the shared-structure migration.
             continue
-        atx = re.fullmatch(r" {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*", raw)
-        bold = re.fullmatch(r" {0,3}\*\*([^\n]+)\*\*\s*", raw)
-        title = (atx[2] if atx else bold[1] if bold else "").strip()
+        node = headings.get(offsets[index])
+        title = text[slice(*node.content_span)].strip() if node else ""
         candidates = {f for f in fields if _normal(title) in {_normal(f), _normal(f) + "的统计"}}
-        outside = not blockquote and not any(a < offsets[index] < b for a, b in quoted)
-        if atx and outside:
-            level = len(atx[1])
+        outside = not any(node.span[0] <= offsets[index] < node.span[1] for node in containers)
+        if node and node.kind == "heading" and outside:
+            assert node.level is not None
+            level = node.level
             while ancestors and ancestors[-1][0] >= level:
                 ancestors.pop()
             blocked = not candidates and title not in {"数据画像", "画像", "统计", "统计结果"}
@@ -1280,7 +1291,15 @@ def profile_heading_sections(text: str, fields: set[str]) -> list[tuple[str, str
 def _heading_statistics_only(text: str, field: str, fields: set[str]) -> bool:
     """标题继承只接受完整统计谓词和该字段的精确单位声明。"""
     normalized = _normal(text).strip()
-    statements = [s.strip() for s in re.split(r"[。；;\n]", normalized) if s.strip()]
+    from apps.orchestrator.control.claim_structure import split_claim_statements
+
+    statements = [
+        s.strip().rstrip("。；;\r\n")
+        for s in split_claim_statements(
+            normalized, profile_statistic_labels(normalized), source_labels=fields
+        )
+        if s.strip()
+    ]
     has_statistic = False
     for statement in statements:
         if _exact_unit_declaration(statement, field):

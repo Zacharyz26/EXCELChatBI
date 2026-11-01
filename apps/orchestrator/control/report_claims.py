@@ -16,7 +16,13 @@ from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
 from packages.common.report_safety import escape_report_markup, sanitize_report_html
-from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, REPORT_QUANTITY_VALIDATOR
+from packages.common.text_surface import parse_text_surface
+from packages.orchestration.contracts import (
+    QUANTITY_CONTRACT_VERSION,
+    QUANTITY_TEXT_PARSER_VERSION,
+    REPORT_QUANTITY_VALIDATOR,
+    require_quantity_contract_version,
+)
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord
 
@@ -163,6 +169,65 @@ def _numeric_data(value: Any) -> Any:
     return None
 
 
+def _fact_identity(ref: JsonObject) -> str | None:
+    """绑定身份与角色共同确定映射；不靠数值相等回查原文。"""
+    if not ref.get("semantic_binding") or not ref.get("evidence_id"):
+        return None
+    return json.dumps(
+        {key: ref.get(key) for key in ("evidence_id", "path", "semantic_binding", "normalized")},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def _source_links(
+    source: str, visible: str, raw: list[ClaimDraft], rendered: list[ClaimDraft]
+) -> list[JsonObject]:
+    """按同一事实身份逐项连接源/显示跨度，渲染不得增删或替换事实。"""
+    pending: dict[str, list[JsonObject]] = {}
+    for claim in raw:
+        for ref in claim.value_refs:
+            identity = _fact_identity(ref)
+            if identity is not None:
+                pending.setdefault(identity, []).append(ref)
+    links: list[JsonObject] = []
+    for claim in rendered:
+        for ref in claim.value_refs:
+            identity = _fact_identity(ref)
+            if identity is None:
+                continue
+            matches = pending.get(identity, [])
+            if not matches:
+                raise ValueError("报告渲染事实与原始声明来源不一致")
+            original = matches.pop(0)
+            span = original.get("source_span")
+            rendered_span = ref.get("source_span")
+            if (
+                not isinstance(span, list | tuple)
+                or len(span) != 2
+                or not 0 <= span[0] < span[1] <= len(source)
+                or source[span[0] : span[1]] != original.get("source_token")
+                or not isinstance(rendered_span, list | tuple)
+                or len(rendered_span) != 2
+                or not 0 <= rendered_span[0] < rendered_span[1] <= len(visible)
+                or visible[rendered_span[0] : rendered_span[1]] != ref.get("source_token")
+            ):
+                raise ValueError("报告事实缺少可核验的原文位置")
+            links.append(
+                {
+                    "source_span": list(span),
+                    "source_token": source[span[0] : span[1]],
+                    "rendered_span": ref["source_span"],
+                    "artifact_id": original["evidence_id"],
+                    "evidence_path": original.get("path"),
+                    "semantic_binding": original["semantic_binding"],
+                }
+            )
+    if any(pending.values()):
+        raise ValueError("报告渲染遗漏了原始事实声明")
+    return links
+
+
 def validate_report_narratives(
     artifacts: list[Artifact],
     args: JsonObject,
@@ -171,8 +236,7 @@ def validate_report_narratives(
     quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
     run_id: str | None = None,
 ) -> JsonObject:
-    if quantity_contract_version != QUANTITY_CONTRACT_VERSION:
-        raise ValueError("报告数量契约版本缺失或不受支持")
+    require_quantity_contract_version(quantity_contract_version)
     dataset_refs = {artifact.dataset_ref for artifact in artifacts if artifact.dataset_ref}
     if len(dataset_refs) > 1:
         raise ValueError("报告分析来自不同数据集版本/总体，请选择同一派生数据集的分析")
@@ -326,6 +390,7 @@ def validate_report_narratives(
     delivered_claims: list[ClaimDraft] = []
     delivered_text: list[str] = []
     prepared_sections: JsonObject = {}
+    text_sources: JsonObject = {}
     for name, text, heading in sections:
         if not text:
             continue
@@ -344,13 +409,14 @@ def validate_report_narratives(
         delivered_text.append(visible)
         # Rendering is not authority: independently check the visible projection
         # against the same selected artifacts after source completeness passed.
-        for claim in extract_numeric_claims(
+        rendered_claims = extract_numeric_claims(
             final_text=visible,
             goal=_visible_text(str(args["title"])),
             evidence=evidence,
             evidence_is_typed=True,
             strip_list_markers=False,
-        ):
+        )
+        for claim in rendered_claims:
             unsupported = [ref["token"] for ref in claim.value_refs if not ref.get("supported")]
             if unsupported:
                 raise ValueError(
@@ -370,6 +436,21 @@ def validate_report_narratives(
                     ],
                 }
             )
+        raw_claims = extract_numeric_claims(
+            final_text=text,
+            goal=str(args["title"]),
+            evidence=evidence,
+            evidence_is_typed=True,
+        )
+        raw_surface, visible_surface = parse_text_surface(text), parse_text_surface(visible)
+        text_sources[name] = {
+            "candidate_hash": hashlib.sha256(prepared.source_text.encode()).hexdigest(),
+            "source_mode": "host_rendered" if draft else "raw_text",
+            "source_hash": raw_surface.source_hash,
+            "rendered_hash": visible_surface.source_hash,
+            "parser_version": raw_surface.parser_version,
+            "fact_links": _source_links(text, visible, raw_claims, rendered_claims),
+        }
     if repair_obligations:
         from apps.orchestrator.control.duplicate_repair import (
             resolve_duplicate_obligations,
@@ -387,6 +468,8 @@ def validate_report_narratives(
         "status": "passed",
         "validator": REPORT_QUANTITY_VALIDATOR,
         "quantity_contract_version": quantity_contract_version,
+        "text_parser_version": QUANTITY_TEXT_PARSER_VERSION,
+        "text_sources": text_sources,
         "run_id": run_id,
         "prepared_sections": prepared_sections,
         "semantic_contract": "typed-measurement-binding-v1",

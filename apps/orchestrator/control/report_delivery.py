@@ -10,6 +10,8 @@ from packages.common.report_safety import escape_report_markup
 from packages.orchestration.contracts import (
     QUANTITY_CONTRACT_VERSION,
     REPORT_QUANTITY_VALIDATOR,
+    QuantityContractUnavailable,
+    require_quantity_contract_version,
 )
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import EvidenceRecord, ToolInvocation
@@ -104,6 +106,10 @@ def verified_report_totals(
     quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
 ) -> list[JsonObject]:
     """重验当前报告与原来源、实际 Markdown/PDF 字节，失配时不给出总计证明。"""
+    try:
+        require_quantity_contract_version(quantity_contract_version)
+    except QuantityContractUnavailable:
+        return []
     validation = (report.payload or {}).get("validation")
     if (
         invocation.tool_name != "generate_report"
@@ -117,7 +123,6 @@ def verified_report_totals(
         or invocation.artifact_id != report.id
         or not isinstance(validation, dict)
         or validation.get("status") != "passed"
-        or quantity_contract_version != QUANTITY_CONTRACT_VERSION
         or validation.get("validator") != REPORT_QUANTITY_VALIDATOR
         or validation.get("quantity_contract_version") != quantity_contract_version
         or evidence.summary.get("report_validation_hash") != validation_hash(validation)

@@ -246,6 +246,22 @@ def _named(text: str, vocabulary: dict[str, tuple[str, ...]]) -> set[str]:
     }
 
 
+def table_column_role(header: str, object_kind: str) -> str:
+    """共享关系表的原列角色；身份值和主体值仍由绑定器分别核验。"""
+    key = header.casefold()
+    if mentioned_roles(header, set(ROLE_LABELS)):
+        return "measurement"
+    if key in {"分析", "工具", "tool"}:
+        return "tool"
+    if key in {"方法", "method"}:
+        return "method"
+    if key in {"数据集", "dataset_ref", "版本", "dataset_version"}:
+        return "identity"
+    if key in {"指标", "metric"} and object_kind == "group_pair":
+        return "metric"
+    return "subject"
+
+
 def identity_matches(
     binding: JsonObject,
     text: str,
@@ -319,22 +335,22 @@ def identity_matches(
     if table_cells is not None:
         table_subjects = []
         for header, cell in table_cells:
-            key = header.casefold()
-            if mentioned_roles(header, set(ROLE_LABELS)):
+            role = table_column_role(header, str(obj.get("kind")))
+            if role == "measurement":
                 continue  # Other measurements receive their own fragments.
-            if key in {"分析", "工具", "tool"}:
+            if role == "tool":
                 if cell.casefold() not in {
                     str(tool).casefold(),
                     *(label.casefold() for label in TOOL_LABELS[tool]),
                 }:
                     return False
-            elif key in {"方法", "method"}:
+            elif role == "method":
                 if cell.casefold() not in {str(method).casefold() for method in allowed_methods}:
                     return False
-            elif key in {"数据集", "dataset_ref", "版本", "dataset_version"}:
+            elif role == "identity":
                 if cell not in {binding.get("dataset_ref"), binding.get("dataset_version")}:
                     return False
-            elif key in {"指标", "metric"} and kind == "group_pair":
+            elif role == "metric":
                 if cell != fields.get("value"):
                     return False
             else:

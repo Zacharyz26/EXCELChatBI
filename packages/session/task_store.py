@@ -17,7 +17,7 @@ from packages.orchestration.analysis_requirements import (
     AnalysisRequirements,
     resolve_analysis_slot,
 )
-from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
+from packages.orchestration.contracts import TaskContract, require_quantity_contract_version
 from packages.orchestration.hypothesis_followup import (
     decide_hypothesis_followup,
     validate_hypothesis_followup,
@@ -495,11 +495,10 @@ class TaskStore:
                         encoded = json.dumps(
                             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                         )
-                        unavailable = (
-                            payload.get("quantity_contract_version") != QUANTITY_CONTRACT_VERSION
-                            or payload.get("run_id") != run_id
-                            or hashlib.sha256(encoded.encode()).hexdigest() != str(contract_row[1])
-                        )
+                        require_quantity_contract_version(payload.get("quantity_contract_version"))
+                        unavailable = payload.get("run_id") != run_id or hashlib.sha256(
+                            encoded.encode()
+                        ).hexdigest() != str(contract_row[1])
                     except (TypeError, ValueError):
                         unavailable = True
                 ensure_quantity_contract_rejection(

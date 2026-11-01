@@ -246,6 +246,40 @@ def numeric_quote_view(
     view = list(text)
     labels: list[tuple[int, int]] = []
     for opening, left, right, end in closed:
+        # Closed adjacent quoted names do not form a value assignment. This
+        # is a source-ownership decision, independent of whether the name is
+        # decimal, Chinese or another unsupported spelling. Any external value
+        # owner still wins; arbitrary assertions inside a quote are not labels.
+        sibling = next(
+            (
+                (a, b, c, d)
+                for a, b, c, d in closed
+                if d <= opening
+                and not text[d:opening].strip()
+                and re.fullmatch(
+                    r"(?:"
+                    + "|".join(
+                        re.escape(label)
+                        for label in sorted(measurement_labels, key=len, reverse=True)
+                    )
+                    + r")+",
+                    text[b:c].rstrip("：: "),
+                    re.I,
+                )
+            ),
+            None,
+        )
+        value_like_label = re.fullmatch(
+            r"\s*[+-]?[\d零〇一二两三四五六七八九十百千万亿点半几多余.％%]+(?:成|倍)?\s*",
+            text[left:right],
+        )
+        if (
+            sibling is not None
+            and value_like_label is not None
+            and numeric_value_owner(text, left, right, measurement_labels) is None
+        ):
+            labels.append((left, right))
+            continue
         match = re.fullmatch(r"\s*(" + NUMBER_LITERAL.pattern + r")\s*", "".join(view[left:right]))
         if match is None:
             if text[left:right] in measurement_labels and re.match(
@@ -258,16 +292,6 @@ def numeric_quote_view(
         owner = numeric_value_owner(text, *number_span, measurement_labels)
         # Adjacent closed quotations are separate labels. An assignment outside
         # the first quotation cannot enter this branch (the gap is not empty).
-        sibling = next(
-            (
-                (a, b, c, d)
-                for a, b, c, d in closed
-                if d <= opening
-                and not text[d:opening].strip()
-                and text[b:c].rstrip("：: ") in measurement_labels
-            ),
-            None,
-        )
         if owner is None and sibling is not None:
             labels.append(number_span)
             continue

@@ -18,17 +18,19 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from packages.common.exact_numbers import decode_exact_number
+from packages.common.text_surface import SourceProjection, parse_text_surface
 from packages.orchestration.artifact_counts import verified_chart_deliveries
+from packages.orchestration.contracts import REPORT_QUANTITY_VALIDATOR
 from packages.orchestration.evidence_facts import OPERATIONS, valid_count_projection
 from packages.orchestration.quality_facts import quality_projection
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord, ToolInvocation
 
 from apps.orchestrator.control.claim_structure import (
+    ProfileTableContext,
     dimension_mentions,
-    inline_numeric_projection,
     split_claim_statements,
-    table_claim_fragments,
+    statement_projections,
 )
 from apps.orchestrator.control.count_claims import (
     CHINESE_COUNT,
@@ -63,13 +65,13 @@ from apps.orchestrator.control.profile_claims import (
     profile_candidate_matches,
     profile_fact,
     profile_field_identity_spans,
-    profile_heading_sections,
     profile_statement_context,
     profile_statistic_labels,
 )
 from apps.orchestrator.control.profile_population import (
     PopulationRequest,
     mask_population,
+    population_filters,
     population_matches,
     requested_population,
     stated_population,
@@ -79,6 +81,7 @@ from apps.orchestrator.control.semantic_identity import (
     analysis_identity,
     annotate_objects,
     identity_matches,
+    table_column_role,
 )
 from apps.orchestrator.control.statistic_roles import (
     ROLE_LABELS,
@@ -88,6 +91,7 @@ from apps.orchestrator.control.statistic_roles import (
     statistic_scope,
 )
 from apps.orchestrator.control.statistic_statements import (
+    ASSIGNMENT_OPERATOR,
     StatisticValueEvaluation,
     count_expressions,
     statistic_value_owner,
@@ -141,7 +145,7 @@ def build_evidence_summary(
     report_proof: JsonObject = {}
     if (
         isinstance(report_validation, dict)
-        and report_validation.get("validator") == "selected-artifact-quantity-v2"
+        and report_validation.get("validator") == REPORT_QUANTITY_VALIDATOR
     ):
         from apps.orchestrator.control.report_delivery import validation_hash
 
@@ -228,9 +232,10 @@ def _verified_identity_spans(
     if not declarations:
         return [], []
     contexts = [
-        record.summary.get("numeric_context") or {}
+        context
         for record in evidence
         if record.kind in {"tool_result", "profile", "stats", "chart", "table"}
+        if isinstance(context := record.summary.get("numeric_context") or {}, dict)
     ]
     for record in evidence:
         projection = record.summary.get("fact_projection")
@@ -267,6 +272,133 @@ def _verified_identity_spans(
         {"token": value, "supported": False, "reason": "unverified_dataset_identity"}
         for _, value, _, _ in declarations
     ]
+
+
+def verified_table_structure_spans(
+    text: str, evidence: list[EvidenceRecord]
+) -> tuple[tuple[int, int], ...]:
+    """证明原表格身份格/主体槽序号，不豁免表头内的其他业务声明。
+
+    身份列必须作为同一元组匹配一个真实来源；主体序号只说明已有
+    关系表结构中的列位置。主体成员是否正确仍须通过关系绑定器。
+    """
+    surface = parse_text_surface(text)
+    tables = sorted({node.table for node in surface.nodes if node.table is not None})
+    if not tables:
+        return ()
+    spans: list[tuple[int, int]] = []
+    bindings = [
+        _semantic_binding(record, str(item.get("path")))
+        for record in evidence
+        if record.source.get("tool") in STATISTICAL_TOOLS
+        if isinstance(record.summary.get("numeric_context") or {}, dict)
+        for item in record.summary.get("value_index", [])
+        if isinstance(item, dict)
+    ]
+    relation_bindings = [
+        binding
+        for binding in bindings
+        if isinstance(obj := binding.get("object"), dict)
+        and isinstance(obj.get("kind"), str)
+        and obj.get("kind") in {"column_pair", "group_pair"}
+    ]
+    for table in tables:
+        headers = sorted(
+            (node for node in surface.nodes if node.table == table and node.kind == "table_header"),
+            key=lambda node: node.column or 0,
+        )
+        labels = [text[slice(*node.content_span)].strip().strip("*`_").strip() for node in headers]
+        rows = sorted(
+            {
+                node.row
+                for node in surface.nodes
+                if node.table == table and node.kind == "table_cell" and node.row is not None
+            }
+        )
+        complete_rows = []
+        for row in rows:
+            cells = sorted(
+                (
+                    node
+                    for node in surface.nodes
+                    if node.table == table and node.row == row and node.kind == "table_cell"
+                ),
+                key=lambda node: node.column or 0,
+            )
+            if len(cells) != len(headers) or not all(node.closed for node in cells):
+                continue
+            complete_rows.append(cells)
+            identities = [
+                (labels[index], text[slice(*cell.content_span)].strip().strip("*`_").strip(), cell)
+                for index, cell in enumerate(cells)
+                if labels[index] in IDENTITY_FIELDS
+            ]
+            if identities:
+                # Clause positions are synthetic here only to reuse the exact
+                # identity tuple checker. Protection uses original cell spans.
+                declarations = "；".join(f"{label}={value}" for label, value, _ in identities)
+                protected, errors = _verified_identity_spans(declarations, evidence, set())
+                if not errors and len(protected) == len(identities):
+                    spans.extend(cell.content_span for _, _, cell in identities)
+        if not complete_rows:
+            continue
+        for binding in relation_bindings:
+            kind = str(binding["object"]["kind"])
+            subjects = [
+                index
+                for index, label in enumerate(labels)
+                if table_column_role(label, kind) == "subject"
+            ]
+            if len(subjects) != 2 or not any(
+                mentioned_roles(label, {str(binding.get("statistic"))}) for label in labels
+            ):
+                continue
+            # These are reserved structural role names, not arbitrary nouns.
+            # The relation's object type chooses the grammar; a default
+            # "subject" classification alone grants no ordinal exemption.
+            role_name = r"(?:变量|列|column|variable)" if kind == "column_pair" else r"(?:组|group)"
+            for ordinal, index in enumerate(subjects, 1):
+                raw = text[slice(*headers[index].content_span)]
+                # Full reserved role + ordinal, or ordinal marker + role.
+                # Extra nouns/clauses cannot be discarded as label metadata.
+                match = re.fullmatch(
+                    r"\s*(?:" + role_name + r"\s*(?P<suffix>[0-9一二三四五六七八九十]+)"
+                    r"|(?P<prefix>[0-9一二三四五六七八九十]+)[.)、]\s*" + role_name + r")\s*",
+                    raw,
+                    re.I,
+                )
+                if match is None:
+                    continue
+                group = "suffix" if match["suffix"] is not None else "prefix"
+                token = match[group]
+                value = (
+                    int(token)
+                    if token.isascii() and token.isdigit()
+                    else parse_chinese_count(token)
+                )
+                left, right = match.span(group)
+                # Slot classification is not authority to erase a value
+                # assignment. Use the shared predicate grammar with its actual
+                # left-hand owner, including an unknown field. This establishes
+                # an obligation only, never an Evidence-supported role.
+                assignment_owners = {
+                    raw[: operator.start()].strip()
+                    for operator in re.finditer(ASSIGNMENT_OPERATOR, raw)
+                    if raw[: operator.start()].strip()
+                }
+                assigned = measurement_value_context(
+                    raw, left, right, assignment_owners, assignment_only=True
+                )
+                if (
+                    value == ordinal
+                    and not measurement_value_context(raw, left, right, _measurement_labels())
+                    and not assigned
+                ):
+                    offset = headers[index].content_span[0]
+                    # The prefix marker's punctuation belongs to the ordinal,
+                    # just like a source list marker; it is not a decimal dot.
+                    spans.append((offset + left, offset + right + (group == "prefix")))
+    return tuple(sorted(set(spans)))
 
 
 def extract_numeric_claims(
@@ -323,6 +455,20 @@ def extract_numeric_claims(
         return bool(refs) and all(ref.get("supported") is True for ref in refs)
 
     surface = analyze_surface(final_text, evidence, fact_validator=fact_member, goal=goal)
+    for ref in surface.refs:
+        span = ref.get("statement_span")
+        if (
+            isinstance(span, list | tuple)
+            and len(span) == 2
+            and all(type(value) is int for value in span)
+            and 0 <= span[0] < span[1] <= len(final_text)
+            and ref.get("token") == final_text[slice(*span)]
+        ):
+            ref["source_span"] = list(span)
+            ref["source_token"] = final_text[slice(*span)]
+        else:
+            ref["supported"] = False
+            ref["reason"] = "invalid_prebound_source_projection"
     # Prebound quantities keep their source spelling for neighboring field/scope
     # grammar. Only their exact source spans are excluded from rebinding; no
     # surrounding heading or statistical sentence is erased with them.
@@ -470,42 +616,23 @@ def _extract_numeric_claims(
         for b in bindings
         if b.get("profile_fact") and b.get("object", {}).get("kind") == "profile_column"
     }
-    statements = []
-    section_offset = 0
-    for section, heading_context in profile_heading_sections(final_text, profile_fields):
-        normalized_section, inline_map = inline_numeric_projection(section)
-        for fragment in table_claim_fragments(
-            normalized_section, set(dimensions), measurement_labels=measurement_labels
-        ):
-            scope = stated_population(fragment.text, profile_fields)
-            parts = (
-                [fragment.text]
-                if fragment.cells is not None
-                else split_claim_statements(
-                    fragment.text,
-                    measurement_labels,
-                    source_labels=source_labels,
-                    protected_spans=(scope.span,) if scope else (),
-                )
-            )
-            cursor = 0
-            for statement in parts:
-                start = fragment.text.find(statement, cursor)
-                if start < 0:
-                    raise ValueError("statement_source_projection_lost")
-                cursor = start + len(statement)
-                source_map = tuple(
-                    section_offset + inline_map[position] if position is not None else None
-                    for position in fragment.source_map[start:cursor]
-                )
-                statements.append(
-                    (statement, fragment.cells, fragment.value_span, heading_context, source_map)
-                )
-        section_offset += len(section)
+    statements = statement_projections(
+        final_text,
+        measurement_labels,
+        source_labels=source_labels,
+        profile_fields=profile_fields,
+        dimensions=set(dimensions),
+    )
+    table_structure_spans = verified_table_structure_spans(final_text, evidence)
     profile_context = ""
     required_population = requested_population(goal, profile_fields)
     population_context = required_population
-    for raw_statement, table_cells, value_span, heading_context, source_map in statements:
+    for projected in statements:
+        raw_statement = projected.text
+        table_cells = projected.cells
+        value_span = projected.value_span
+        heading_context = projected.heading_context
+        source_map = projected.source_map
         # Only a semicolon in the same prose item can carry a profile subject.
         # A table/list boundary precedes the statement, while a trailing raw
         # newline closes its context only after this statement is evaluated.
@@ -544,7 +671,16 @@ def _extract_numeric_claims(
         trim_start = marker.end() if marker else 0
         trim_start += len(raw_statement[trim_start:]) - len(raw_statement[trim_start:].lstrip())
         statement_source_map = source_map[trim_start : trim_start + len(statement)]
+        # Scope can be inherited from the enclosing original header, but its
+        # offsets must never be applied to a separately projected child text.
         local_population = stated_population(statement, profile_fields)
+        enclosing_population = (
+            stated_population(projected.constraint_context, profile_fields)
+            if projected.source_context
+            else None
+        )
+        if enclosing_population is not None:
+            population_context = enclosing_population
         if local_population is not None:
             population_context = local_population
         semantic_statement, quoted_labels = numeric_quote_view(statement, measurement_labels)
@@ -564,17 +700,23 @@ def _extract_numeric_claims(
         )
         refs: list[JsonObject] = []
         reference_positions: dict[int, int] = {}
-        slots = statistic_value_slots(statement, measurement_labels, source_labels)
+        slots = (
+            []
+            if projected.literal_label
+            else statistic_value_slots(statement, measurement_labels, source_labels)
+        )
         evaluations: list[StatisticValueEvaluation] = []
         linked_ids: list[str] = []
         labels = dimension_mentions(statement, dimensions)
         identity_spans, identity_errors = _verified_identity_spans(
             statement, evidence, source_labels
         )
+        if projected.literal_label:
+            identity_spans.append((0, len(statement)))
         if local_population is not None and local_population.valid:
             identity_spans.append(local_population.span)
         identity_spans.extend(quoted_labels)
-        for source_left, source_right in prebound_spans:
+        for source_left, source_right in (*prebound_spans, *table_structure_spans):
             prebound_positions = [
                 i
                 for i, position in enumerate(statement_source_map)
@@ -616,7 +758,8 @@ def _extract_numeric_claims(
             for item in counts
             if not any(a <= item.value_span[0] < item.value_span[1] <= b for a, b in identity_spans)
             and (
-                (
+                not item.noun
+                or (
                     _normalize_number(statement[slice(*item.value_span)]) is None
                     and parse_chinese_count(statement[slice(*item.value_span)]) is None
                 )
@@ -765,6 +908,9 @@ def _extract_numeric_claims(
                     population_context,
                     population_statement,
                     required_population,
+                    projected.table_context,
+                    projected.source_context,
+                    projected.constraint_context,
                 )
                 and (
                     owner is None
@@ -870,6 +1016,14 @@ def _extract_numeric_claims(
                 ),
                 "semantic_binding": _semantic_binding(evidence_by_id[evidence_id], path),
             }
+            if projected.table_context is not None:
+                context = projected.table_context
+                value_ref["source_structure"] = {
+                    "kind": "table_cell",
+                    "field_span": list(context.field_span),
+                    "role_span": list(context.role_span),
+                    "value_span": list(context.value_source_span),
+                }
             if display_factor != Decimal(1):
                 value_ref["display_factor"] = str(display_factor)
             if len(candidates) > 1:
@@ -914,6 +1068,11 @@ def _extract_numeric_claims(
                     assert a is not None and b is not None
                     ref["source_span"] = [a, b + 1]
                     ref["source_token"] = final_text[a : b + 1]
+                    try:
+                        SourceProjection(statement, statement_source_map).source_span(*span)
+                    except ValueError:
+                        ref["supported"] = False
+                        ref["reason"] = "noncontiguous_quantity_source"
             refs.sort(
                 key=lambda ref: reference_positions.get(id(ref), ref.get("statement_span", [-1])[0])
             )
@@ -1518,6 +1677,72 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
     }
 
 
+def _source_context_matches(
+    record: EvidenceRecord,
+    binding: JsonObject,
+    source_context: str,
+    constraint_context: str,
+) -> bool:
+    """Apply original-parent identity/scope before any tool-specific value role.
+
+    Parent containers do not supply a child's metric or statistic. Their
+    explicit source/range constraints nevertheless apply to every child,
+    including branches which return before generic statistic binding.
+    """
+    if not source_context:
+        return True
+    context = record.summary.get("numeric_context") or {}
+    projection = record.summary.get("fact_projection") or {}
+    columns = set(map(str, projection.get("columns", [])))
+    columns.update(map(str, context.get("columns", [])))
+    for item in record.summary.get("value_index", []):
+        if not isinstance(item, dict):
+            continue
+        item_binding = _semantic_binding(record, str(item.get("path")))
+        columns.update(
+            str(item_binding[key]) for key in ("metric", "grain") if item_binding.get(key)
+        )
+    filters = binding.get("filters", [])
+    columns.update(str(item["column"]) for item in filters)
+    # Delimiters around an identity are syntax, not part of its opaque value.
+    # Exact source field names (including unit brackets) remain identities.
+    protected = [
+        match.span()
+        for column in columns
+        for match in re.finditer(re.escape(column), source_context)
+    ]
+    identity_view = list(source_context)
+    for node in parse_text_surface(source_context).nodes:
+        if node.kind != "bracket" or not node.closed:
+            continue
+        if any(a <= node.span[0] < node.span[1] <= b for a, b in protected):
+            continue
+        for left, right in node.marker_spans:
+            identity_view[left:right] = " " * (right - left)
+    if any(
+        match["value"] != binding.get(IDENTITY_FIELDS[match["label"]])
+        for match in identity_declarations("".join(identity_view))
+        if identity_literal(match["value"])
+    ):
+        return False
+    population = stated_population(constraint_context, columns)
+    if population is not None:
+        actual = population_filters(binding) if binding.get("profile_fact") else filters
+        if (
+            not population.valid
+            or actual is None
+            or sorted(json.dumps(item, sort_keys=True) for item in actual)
+            != sorted(json.dumps(item, sort_keys=True) for item in population.filters)
+        ):
+            return False
+    parameters = binding.get("operation_parameters")
+    if isinstance(parameters, dict) and not operation_scope_matches(
+        mask_population(constraint_context, population), parameters, sorted(columns)
+    ):
+        return False
+    return True
+
+
 def _semantic_candidate_matches(
     value: tuple[str, str, Decimal, str],
     statement: str,
@@ -1530,6 +1755,9 @@ def _semantic_candidate_matches(
     population: PopulationRequest | None = None,
     population_statement: str | None = None,
     required_population: PopulationRequest | None = None,
+    table_context: ProfileTableContext | None = None,
+    source_context: str = "",
+    constraint_context: str = "",
 ) -> bool:
     """对完整数字子句绑定指标和分组；不按数字位置猜测或以同值证明关系。"""
     if any(
@@ -1537,7 +1765,10 @@ def _semantic_candidate_matches(
     ):
         return False  # Exact counts do not prove a bound or approximate quantity.
     profile_record = next(record for record in evidence if record.evidence_id == value[0])
-    if _semantic_binding(profile_record, value[1]).get("statistic") == "invalid":
+    source_binding = _semantic_binding(profile_record, value[1])
+    if source_binding.get("statistic") == "invalid" or not _source_context_matches(
+        profile_record, source_binding, source_context, constraint_context
+    ):
         return False
     requested_operation = operation_quantity(statement, *match.span())
     if requested_operation is not None or profile_record.source.get("tool") == "transform_dataset":
@@ -1614,9 +1845,30 @@ def _semantic_candidate_matches(
         profile_text = profile_context + (
             population_statement if population_statement is not None else statement
         )
-        return identity_matches(
-            selected_profile, profile_text, profile_bindings, table_cells
-        ) and profile_candidate_matches(
+        identity_valid = identity_matches(
+            selected_profile, source_context + " " + profile_text, profile_bindings, table_cells
+        )
+        if table_context is not None:
+            # A typed table relation supplies the field and statistic header,
+            # never a candidate value. Preserve the original cell suffix for
+            # units/qualifiers and keep identity checks on the original row.
+            if (
+                value_span is None
+                or not value_span[0] <= match.start() < match.end() <= value_span[1]
+            ):
+                return False
+            prefix = table_context.field + table_context.role_label + "="
+            cell = statement[slice(*value_span)]
+            offset = len(prefix) - value_span[0]
+            return identity_valid and profile_candidate_matches(
+                selected_profile,
+                profile_bindings,
+                prefix + cell,
+                offset + match.start(),
+                offset + match.end(),
+                value[2],
+            )
+        return identity_valid and profile_candidate_matches(
             selected_profile,
             profile_bindings,
             profile_text,

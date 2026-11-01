@@ -16,8 +16,11 @@ from .analysis_requirements import (
 )
 
 CriterionKind = Literal["response", "artifact", "evidence", "semantic", "constraint"]
-QUANTITY_CONTRACT_VERSION = "quantity-contract-v1"
-REPORT_QUANTITY_VALIDATOR = "selected-artifact-quantity-v2"
+# A run freezes one quantity contract. Its parser is a fixed implementation
+# dependency, not another model-provided field or a second persisted truth.
+QUANTITY_CONTRACT_VERSION = "quantity-contract-v2"
+QUANTITY_TEXT_PARSER_VERSION = "text-surface-v2"
+REPORT_QUANTITY_VALIDATOR = "selected-artifact-quantity-v3"
 
 
 class QuantityContractUnavailable(ValueError):
@@ -26,7 +29,9 @@ class QuantityContractUnavailable(ValueError):
 
 def require_quantity_contract_version(value: object) -> str:
     """核对冻结的数量契约版本，历史缺省值不会被补成当前版本。"""
-    if value != QUANTITY_CONTRACT_VERSION:
+    from packages.common.text_surface import SURFACE_PARSER_VERSION
+
+    if value != QUANTITY_CONTRACT_VERSION or SURFACE_PARSER_VERSION != QUANTITY_TEXT_PARSER_VERSION:
         raise QuantityContractUnavailable("数量契约缺失或不兼容，请新建受治理任务。")
     return QUANTITY_CONTRACT_VERSION
 

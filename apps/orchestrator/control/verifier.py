@@ -9,7 +9,11 @@ from typing import Literal, Protocol
 
 from packages.common.identifiers import dataset_reference_arguments
 from packages.orchestration.analysis_requirements import TOTAL_LABEL
-from packages.orchestration.contracts import QUANTITY_CONTRACT_VERSION, TaskContract
+from packages.orchestration.contracts import (
+    QuantityContractUnavailable,
+    TaskContract,
+    require_quantity_contract_version,
+)
 from packages.orchestration.dataset_scope import (
     operation_admission_error,
     operation_progress,
@@ -73,7 +77,9 @@ def verify_completion(
 ) -> VerificationResult:
     """Verify hard postconditions before allowing any semantic judgement."""
     issues: list[VerificationIssue] = []
-    if contract.quantity_contract_version != QUANTITY_CONTRACT_VERSION:
+    try:
+        require_quantity_contract_version(contract.quantity_contract_version)
+    except QuantityContractUnavailable:
         return VerificationResult(
             "BLOCKED",
             (

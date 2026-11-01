@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from packages.common.text_surface import TextSurface, parse_text_surface
 from packages.orchestration.quality_facts import QUALITY_COUNT_PATH, valid_quality_projection
 from packages.session.task_models import EvidenceRecord
 
@@ -16,7 +17,7 @@ from apps.orchestrator.control.dataset_identity import (
     identity_declarations,
     identity_matches_binding,
 )
-from apps.orchestrator.control.numeric_display import NUMBER_PATTERN
+from apps.orchestrator.control.numeric_display import NUMBER_PATTERN, numeric_quote_view
 from apps.orchestrator.control.profile_population import (
     population_matches,
     requested_population,
@@ -110,7 +111,7 @@ def source_targets(evidence: list[EvidenceRecord], *, goal: str = "") -> list[So
 
 def _plain(text: str) -> str:
     # Keep offsets in all numeric views; punctuation/markup never reassigns facts.
-    return re.sub(r"[*_`#]", " ", text)
+    return parse_text_surface(text).marked_view({"bold", "heading", "bold_heading", "list_item"})
 
 
 def _amount(token: str) -> int | None:
@@ -144,42 +145,24 @@ class SurfaceResult:
         return not self.issues
 
 
-def _structure(text: str) -> tuple[list[Member], list[tuple[int, int]], bool]:
-    members = []
-    hidden: list[tuple[int, int]] = []
-    fence: tuple[str, int, int] | None = None
-    offset = 0
-    for line in text.splitlines(keepends=True):
-        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
-        if fence is not None:
-            if (
-                marker
-                and marker[1][0] == fence[0]
-                and len(marker[1]) >= fence[1]
-                and not marker[2].strip()
-            ):
-                hidden.append((fence[2], offset + len(line)))
-                fence = None
-        elif marker:
-            fence = (marker[1][0], len(marker[1]), offset)
-        elif re.match(r"^\s*>", line):
-            hidden.append((offset, offset + len(line)))
-        else:
-            item = re.match(r"^( *)([-+*]|\d+[.)、])\s+(.+?)\s*$", line)
-            if item:
-                members.append(
-                    Member(
-                        offset + item.start(3),
-                        offset + item.end(3),
-                        item[3],
-                        len(item[1]),
-                        (offset + item.start(2), offset + item.end(2)),
-                    )
-                )
-        offset += len(line)
-    if fence:
-        hidden.append((fence[2], len(text)))
-    return members, hidden, fence is None
+def _structure(
+    text: str, surface: TextSurface | None = None
+) -> tuple[list[Member], list[tuple[int, int]], bool]:
+    """兼容文档成员接口，语法边界只消费共同源视图。"""
+    surface = surface or parse_text_surface(text)
+    members = [
+        Member(
+            node.content_span[0],
+            node.content_span[1],
+            text[slice(*node.content_span)],
+            node.level or 0,
+            node.marker_spans[0],
+        )
+        for node in surface.nodes
+        if node.kind == "list_item"
+    ]
+    hidden = [node.span for node in surface.nodes if node.kind in {"fence", "blockquote"}]
+    return members, hidden, "structure_incomplete" not in surface.issues
 
 
 def inspection_member(
@@ -226,8 +209,25 @@ def recommendation_member(
     return choices[0] if len(choices) == 1 else None
 
 
-def _local(text: str, left: int, right: int) -> tuple[str, int, int]:
-    boundaries = list(re.finditer(r"[。；;!?！？]|\n[ \t]*\n", text))
+def _local(
+    text: str,
+    left: int,
+    right: int,
+    *,
+    surface: TextSurface | None = None,
+    protected: tuple[tuple[int, int], ...] = (),
+) -> tuple[str, int, int]:
+    surface = surface or parse_text_surface(text)
+    containers = [
+        node.span
+        for node in surface.nodes
+        if node.kind in {"bracket", "quote", "inline_code"} and node.closed
+    ]
+    boundaries = [
+        match
+        for match in re.finditer(r"[。；;!?！？]|\n[ \t]*\n", text)
+        if not any(a <= match.start() < b for a, b in [*containers, *protected])
+    ]
     start = max((m.end() for m in boundaries if m.end() <= left), default=0)
     end = min((m.start() for m in boundaries if m.start() >= right), default=len(text))
     return text[start:end], start, end
@@ -393,7 +393,8 @@ def analyze_surface(
     ):
         result.issues.append("invalid_numeric_context")
     view = list(text)
-    members, hidden, closed = _structure(text)
+    syntax = parse_text_surface(text)
+    members, hidden, closed = _structure(text, syntax)
     owned_lists: list[tuple[int, int]] = []
     if not closed:
         result.issues.append("structure_incomplete")
@@ -433,14 +434,31 @@ def analyze_surface(
     from apps.orchestrator.control.profile_claims import profile_field_identity_spans
 
     fields = {field for target in source_targets(evidence, goal=goal) for field in target.columns}
-    identity_spans: list[tuple[int, int]] = []
-    for sentence in re.finditer(r"[^。；;!?！？]+", text):
-        identity_spans.extend(
-            (sentence.start() + a, sentence.start() + b)
-            for a, b in profile_field_identity_spans(sentence[0], fields)
-        )
-    from apps.orchestrator.control.claims import _measurement_labels
+    from apps.orchestrator.control.claim_structure import (
+        source_wrapper_view,
+        split_claim_statements,
+    )
+    from apps.orchestrator.control.claims import (
+        _measurement_labels,
+        verified_table_structure_spans,
+    )
 
+    identity_spans = list(verified_table_structure_spans(text, evidence))
+    for node in syntax.nodes:
+        if (
+            node.kind == "table_header"
+            and source_wrapper_view(_plain(text[slice(*node.content_span)])).strip() in fields
+        ):
+            identity_spans.append(node.content_span)
+    offset = 0
+    field_view = source_wrapper_view(text)
+    for sentence in split_claim_statements(field_view, _measurement_labels(), source_labels=fields):
+        identity_spans.extend(
+            (offset + a, offset + b) for a, b in profile_field_identity_spans(sentence, fields)
+        )
+        offset += len(sentence)
+    numeric_view, quoted_labels = numeric_quote_view(_plain(text), _measurement_labels())
+    identity_spans.extend(quoted_labels)
     # Ownership uses observed field identities even when their source is not
     # eligible for support in the requested scope. Such a field can require
     # rejection, but cannot grant a value binding or make a new statistic role.
@@ -451,7 +469,7 @@ def analyze_surface(
         if isinstance(item, dict) and isinstance(item.get("metric"), str)
     }
     expressions = count_expressions(
-        _plain(text), measurement_labels=_measurement_labels(), owner_fields=owner_fields
+        numeric_view, measurement_labels=_measurement_labels(), owner_fields=owner_fields
     )
     for expression in expressions:
         if any(
@@ -460,7 +478,9 @@ def analyze_surface(
             continue
         left, right = expression.value_span
         token = text[left:right]
-        local, start, end = _local(text, left, right)
+        local, start, end = _local(
+            text, left, right, surface=syntax, protected=tuple(identity_spans)
+        )
         # A soft line break belongs to a head; actual member lines end it.
         next_members = [m for m in members if m.start >= right]
         first = next_members[0] if next_members else None
