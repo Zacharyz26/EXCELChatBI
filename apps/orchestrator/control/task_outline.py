@@ -16,6 +16,7 @@ from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
 from packages.orchestration.analysis_requirements import AnalysisRequirements
 from packages.orchestration.contracts import TaskContract
 from packages.orchestration.knowledge_intent import KnowledgeQuery, knowledge_query_step_id
+from packages.orchestration.report_intent import report_source_intent
 from packages.orchestration.task_plan_contract import (
     PlanValidation,
     validate_task_plan,
@@ -25,7 +26,7 @@ from packages.session.models import Artifact, Dataset, JsonObject
 from apps.orchestrator.agent_tools import AgentToolRegistry
 from apps.orchestrator.control.knowledge_intent import knowledge_search_requested
 from apps.orchestrator.control.operation_intent import current_operation_requested
-from apps.orchestrator.request_intent import requests_report
+from apps.orchestrator.request_intent import requests_chart, requests_report
 
 OutlineRoute = Literal["fast", "template"]
 PROMPT_VERSION = "deterministic-outline-v1"
@@ -109,6 +110,7 @@ def create_task_outline(
     selected_hypothesis: JsonObject | None = None,
     max_steps: int = 12,
     capability_catalog: list[JsonObject] | None = None,
+    selection_only: bool = False,
 ) -> TaskOutline:
     """生成并校验不调用模型的 fast/template TaskPlan。"""
     context = build_outline_context(datasets=datasets, artifacts=artifacts)
@@ -153,6 +155,7 @@ def create_task_outline(
         requested_capabilities=selected_capabilities,
         analysis_requirements=requirements,
         max_steps=max_steps,
+        selection_only=selection_only,
     )
     requirements = contract.analysis_requirements
     if requirements is not None:
@@ -320,6 +323,7 @@ def build_deterministic_outline(
     requested_capabilities: tuple[str, ...] | None = None,
     analysis_requirements: AnalysisRequirements | None = None,
     max_steps: int = 12,
+    selection_only: bool = False,
 ) -> JsonObject:
     """为已知任务族构造最小、可验证的 fast/template 计划。"""
     requirements = analysis_requirements
@@ -329,7 +333,9 @@ def build_deterministic_outline(
     requested = (
         list(requested_capabilities)
         if requested_capabilities is not None
-        else _requested_capabilities(user_text, context, requirements=requirements)
+        else _requested_capabilities(
+            user_text, context, requirements=requirements, selection_only=selection_only
+        )
     )
     operations = requirements.active_operations() if typed and requirements is not None else ()
     required_capabilities = [_operation_capability(operation.kind) for operation in operations]
@@ -344,7 +350,11 @@ def build_deterministic_outline(
         ):
             # A total is a delivery obligation, not an invented group-by task.
             # Existing governed aggregate tooling may choose a legal grouping.
-            total_providers = ("data.aggregate", "stats.contribution")
+            total_providers = (
+                ("report.generate",)
+                if report_source_intent(user_text).operands and requests_report(user_text)
+                else ("data.aggregate", "stats.contribution")
+            )
             total_capability = next(
                 (
                     item
@@ -353,7 +363,7 @@ def build_deterministic_outline(
                 ),
                 next(
                     (item for item in total_providers if item in available_capabilities),
-                    "data.aggregate",
+                    total_providers[0],
                 ),
             )
             if total_capability not in requested:
@@ -465,7 +475,7 @@ def build_deterministic_outline(
             typed
             and requirements is not None
             and requirements.total
-            and capability in {"data.aggregate", "stats.contribution"}
+            and capability in {"data.aggregate", "stats.contribution", "report.generate"}
         ):
             cast(list[str], step["completion_conditions"]).append(
                 "总计须由当前范围的工具 Evidence 支持，并在最终回答交付："
@@ -603,7 +613,11 @@ def _query_capability(query: KnowledgeQuery, requirements: AnalysisRequirements)
 
 
 def _requested_capabilities(
-    user_text: str, context: JsonObject, *, requirements: AnalysisRequirements | None = None
+    user_text: str,
+    context: JsonObject,
+    *,
+    requirements: AnalysisRequirements | None = None,
+    selection_only: bool = False,
 ) -> list[str]:
     request = user_text.lower()
     typed = requirements is not None and requirements.schema_version == 2
@@ -710,7 +724,7 @@ def _requested_capabilities(
         )
     ):
         add("data.aggregate")
-    if any(token in request for token in ("图", "可视化", "chart", "plot")):
+    if requests_chart(user_text):
         add("visualization.chart")
     if requests_report(user_text):
         if (
@@ -731,7 +745,11 @@ def _requested_capabilities(
     )
     recomputes_analysis = any(token in request for token in _RECOMPUTE_TOKENS)
 
-    if reuses_artifacts and not recomputes_analysis:
+    if (
+        reuses_artifacts
+        and not recomputes_analysis
+        and not report_source_intent(user_text).operands
+    ):
         if "profile" in artifact_types:
             result = [item for item in result if item != "data.profile"]
         if "stats" in artifact_types:
@@ -746,7 +764,9 @@ def _requested_capabilities(
         if "visualization.chart" not in result:
             result.append("visualization.chart")
 
-    if not result and cast(list[JsonObject], context.get("datasets") or []):
+    # Only the Host's fully validated source-selection proof suppresses this
+    # generic fallback. Explicit capabilities and typed operations above remain.
+    if not result and not selection_only and cast(list[JsonObject], context.get("datasets") or []):
         if any(token in request for token in ("数据", "分析", "看看", "介绍")):
             add("data.profile")
     return result

@@ -30,6 +30,7 @@ import type {
   AgentRunStatus,
   AgentTaskEvent,
   ChatStreamEvent,
+  ConversationExecutionContext,
   LiveTurnItem,
   ToolStep,
   WorkspaceArtifact,
@@ -68,6 +69,7 @@ interface WorkspaceState {
   removeConversation: (conversationId: string) => Promise<void>;
   /** 上下文面板当前查看的数据集（点击侧边栏条目设置） */
   activeDatasetRef: string | null;
+  executionContext: ConversationExecutionContext | null;
   selectDataset: (datasetRef: string) => void;
   renameDataset: (datasetRef: string, filename: string) => Promise<void>;
   /** 删除数据集；被引用时不删除并返回后端的影响面警告文案（由调用方二次确认后 force） */
@@ -97,6 +99,36 @@ interface WorkspaceState {
   clearError: () => void;
 }
 
+/** Fetch only the authoritative read model; no task resume or chat POST. */
+async function refreshExecutionContext(
+  set: StoreApi<WorkspaceState>["setState"],
+  get: StoreApi<WorkspaceState>["getState"],
+): Promise<void> {
+  const conversationId = get().activeConversationId;
+  const generation = workspaceGeneration;
+  const navigation = navigationSequence;
+  if (!conversationId) {
+    set({ executionContext: null });
+    return;
+  }
+  try {
+    const detail = await getConversation(conversationId);
+    if (
+      generation === workspaceGeneration && navigation === navigationSequence
+      && get().activeConversationId === conversationId
+    ) {
+      set({ executionContext: detail.execution_context ?? null });
+    }
+  } catch (error) {
+    if (
+      generation === workspaceGeneration && navigation === navigationSequence
+      && get().activeConversationId === conversationId
+    ) {
+      set((state) => ({ executionContext: null, error: state.error ?? errorMessage(error) }));
+    }
+  }
+}
+
 let navigationSequence = 0;
 let liveItemSequence = 0;
 let workspaceGeneration = 0;
@@ -120,6 +152,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activeProjectId: null,
   activeConversationId: null,
   activeDatasetRef: null,
+  executionContext: null,
   liveTurn: [],
   activeRunId: null,
   activeRun: null,
@@ -151,6 +184,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeProjectId: projectId,
       activeConversationId: null,
       activeDatasetRef: null,
+      executionContext: null,
       conversations: [],
       datasets: [],
       messages: [],
@@ -182,6 +216,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activeConversationId: conversationId,
         messages: detail.messages,
         artifacts: detail.artifacts,
+        executionContext: detail.execution_context ?? null,
       });
       await get().restoreLatestRun(conversationId);
     } catch (error) {
@@ -215,6 +250,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set((state) => ({
         conversations: [conversation, ...state.conversations],
         activeConversationId: conversation.id,
+        activeDatasetRef: null,
+        executionContext: null,
         messages: [],
         artifacts: [],
         liveTurn: [],
@@ -238,6 +275,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const requestSequence = ++navigationSequence;
     set({
       activeConversationId: conversationId,
+      activeDatasetRef: null,
+      executionContext: null,
       messages: [],
       artifacts: [],
       liveTurn: [],
@@ -250,7 +289,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const detail = await getConversation(conversationId);
       if (requestSequence !== navigationSequence) return;
-      set({ messages: detail.messages, artifacts: detail.artifacts });
+      set({
+        messages: detail.messages,
+        artifacts: detail.artifacts,
+        executionContext: detail.execution_context ?? null,
+      });
       await get().restoreLatestRun(conversationId);
     } catch (error) {
       if (requestSequence === navigationSequence) set({ error: errorMessage(error) });
@@ -286,7 +329,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set((state) => ({
       datasets: state.datasets.filter((item) => item.ref !== datasetRef),
       activeDatasetRef: state.activeDatasetRef === datasetRef ? null : state.activeDatasetRef,
+      executionContext: null,
     }));
+    await refreshExecutionContext(set, get);
     return null;
   },
 
@@ -323,6 +368,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const requestSequence = ++navigationSequence;
     set({
       activeConversationId: null,
+      activeDatasetRef: null,
+      executionContext: null,
       messages: [],
       artifacts: [],
       liveTurn: [],
@@ -345,6 +392,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activeConversationId: next.id,
         messages: detail.messages,
         artifacts: detail.artifacts,
+        executionContext: detail.execution_context ?? null,
       });
       await get().restoreLatestRun(next.id);
     } catch (error) {
@@ -375,6 +423,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           conversations,
           messages: detail.messages,
           artifacts: detail.artifacts,
+          executionContext: detail.execution_context ?? null,
         });
       }
     } catch (error) {
@@ -486,6 +535,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({
           messages: detail.messages,
           artifacts: detail.artifacts,
+          executionContext: detail.execution_context ?? null,
           conversations,
           datasets,
           liveTurn: [],
@@ -600,6 +650,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activeRun: detail,
         pendingClarification: pendingClarification(detail, events.events),
       });
+      await refreshExecutionContext(set, get);
     } catch (error) {
       if (
         generation === workspaceGeneration
@@ -812,6 +863,7 @@ async function continueActiveRun(
       set({
         messages: detail.messages,
         artifacts: detail.artifacts,
+        executionContext: detail.execution_context ?? null,
         conversations,
         datasets,
         liveTurn: [],
@@ -1201,6 +1253,7 @@ export function resetWorkspaceForReauthentication(): void {
     activeProjectId: null,
     activeConversationId: null,
     activeDatasetRef: null,
+    executionContext: null,
     liveTurn: [],
     activeRunId: null,
     activeRun: null,

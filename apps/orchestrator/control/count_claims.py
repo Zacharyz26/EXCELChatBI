@@ -8,7 +8,11 @@ from typing import Any
 
 from packages.orchestration.analysis_requirements import comparison_matches, comparison_value
 
-from apps.orchestrator.control.statistic_statements import COUNT_PREDICATE, count_object_at
+from apps.orchestrator.control.statistic_statements import (
+    COUNT_PREDICATE,
+    count_object_at,
+    row_quantity_object,
+)
 
 CHINESE_COUNT = re.compile(r"[零〇一二两三四五六七八九十百千万亿]+")
 _DIGITS = "零一二三四五六七八九"
@@ -168,12 +172,10 @@ def operation_quantity(text: str, left: int, right: int) -> OperationQuantity | 
         role = "after"
     if role is None:
         return None
-    if not re.fullmatch(
-        r"\s*(?:(?:行|条)(?:重复)?(?:数据|记录)?|个(?:数据)?记录)?\s*[)）\]】]*\s*",
-        suffix,
-    ):
+    obj = row_quantity_object(suffix)
+    if obj is None:
         return OperationQuantity("unsupported", operation)
-    return OperationQuantity(role, operation, "重复" in local)
+    return OperationQuantity(role, operation, obj.basis == "duplicate_excess" or "重复" in local)
 
 
 def count_noun(text: str, left: int, right: int) -> str | None:

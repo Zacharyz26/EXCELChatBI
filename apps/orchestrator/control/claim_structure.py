@@ -47,6 +47,15 @@ class ProfileTableContext:
 
 
 @dataclass(frozen=True)
+class AggregateMemberContext:
+    """原文聚合介绍的字段/方法/粒度声明；仍由绑定器逐事实核验。"""
+
+    metric: str
+    aggregation: str
+    grain: str | None
+
+
+@dataclass(frozen=True)
 class StatementProjection:
     """唯一分句投影，保存原文坐标和有界标题/表格上下文。"""
 
@@ -59,6 +68,7 @@ class StatementProjection:
     source_context: str = ""
     literal_label: bool = False
     constraint_context: str = ""
+    aggregate_context: AggregateMemberContext | None = None
 
 
 def delimited_spans(text: str) -> list[tuple[int, int]]:
@@ -195,6 +205,130 @@ def statement_projections(
                     )
                 )
         section_offset += len(section)
+    return _aggregate_member_projections(output, source_labels, dimensions)
+
+
+def _aggregate_member_projections(
+    statements: list[StatementProjection], fields: set[str], dimensions: set[str]
+) -> list[StatementProjection]:
+    """有限介绍＋同一硬句内分号成员；不按数值或已知group选择成员。"""
+    if not fields:
+        return statements
+    field_pattern = "|".join(re.escape(x) for x in sorted(fields, key=len, reverse=True))
+    introduction = re.compile(
+        r"(?P<metric>" + field_pattern + r")各(?P<grain>[^：:；;。!?！？\n]+?)"
+        r"(?P<role>合计|总计|总额|均值|平均值|平均)\s*[:：]"
+    )
+    member = re.compile(
+        r"\s*(?P<group>[^：:；;。!?！？\n=]+?)(?P<op>等于|为|是|[:：=])"
+        r"(?P<value>[^；;。!?！？\n]+?)(?P<ending>[；;。!?！？]?\s*)$"
+    )
+    aliases = {"月": "月份", "年": "年份", "日": "日期"}
+    output: list[StatementProjection] = []
+    # Frozen header material and its source map, never a remembered numeric value.
+    header: (
+        tuple[
+            str,
+            tuple[int | None, ...],
+            str,
+            tuple[int | None, ...],
+            AggregateMemberContext,
+            str,
+            str,
+        ]
+        | None
+    ) = None
+    for statement in statements:
+        raw, mapping = statement.text, statement.source_map
+        if statement.cells is not None or "\n" in raw:
+            header = None
+            output.append(statement)
+            continue
+        intro = introduction.search(raw)
+        body_start = 0
+        if intro is not None:
+            descriptor = intro["grain"]
+            if has_numeric_symbol(descriptor):
+                header = None
+                output.append(statement)
+                continue
+            descriptor_grain = (
+                None
+                if descriptor == "组"
+                else descriptor
+                if descriptor in dimensions
+                else aliases.get(descriptor)
+            )
+            if descriptor != "组" and descriptor_grain not in dimensions:
+                descriptor_grain = "__unsupported_grain__"
+            metric_start, metric_end = intro.span("metric")
+            role_start, role_end = intro.span("role")
+            context = AggregateMemberContext(
+                intro["metric"],
+                "mean" if intro["role"] in {"均值", "平均值", "平均"} else "sum",
+                descriptor_grain,
+            )
+            header = (
+                intro["metric"],
+                mapping[metric_start:metric_end],
+                intro["role"],
+                mapping[role_start:role_end],
+                context,
+                "\n".join(
+                    dict.fromkeys(x for x in (statement.source_context, raw[: intro.end()]) if x)
+                ),
+                "\n".join(
+                    dict.fromkeys(
+                        x for x in (statement.constraint_context, raw[: intro.end()]) if x
+                    )
+                ),
+            )
+            # Preserve every independent quantity before the structural introduction.
+            if raw[:metric_start].strip():
+                output.append(
+                    StatementProjection(
+                        raw[:metric_start],
+                        mapping[:metric_start],
+                        source_context=statement.source_context,
+                        constraint_context=statement.constraint_context,
+                    )
+                )
+            body_start = intro.end()
+        match = member.fullmatch(raw[body_start:]) if header is not None else None
+        if match is None or header is None:
+            header = None
+            output.append(statement)
+            continue
+        metric, metric_map, role, role_map, context, parent, parent_constraints = header
+        group_left, group_right = (body_start + x for x in match.span("group"))
+        op_left, _op_right = (body_start + x for x in match.span("op"))
+        group = raw[group_left:group_right]
+        # Assignment glyph, value and delimiters stay in their original order.
+        projected = group + " " + metric + role + raw[op_left:]
+        projected_map = (
+            *mapping[group_left:group_right],
+            None,
+            *metric_map,
+            *role_map,
+            *mapping[op_left:],
+        )
+        output.append(
+            StatementProjection(
+                projected,
+                tuple(projected_map),
+                source_context="\n".join(
+                    dict.fromkeys(x for x in (statement.source_context, parent) if x)
+                ),
+                constraint_context="\n".join(
+                    dict.fromkeys(
+                        x for x in (statement.constraint_context, parent_constraints) if x
+                    )
+                ),
+                aggregate_context=context,
+            )
+        )
+        if not raw.rstrip().endswith((";", "；")):
+            header = None
     return output
 
 

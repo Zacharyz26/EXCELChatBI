@@ -7,6 +7,7 @@ from packages.common.config import Settings
 from packages.common.dataset_store import delete_dataset as delete_dataset_files
 from packages.common.logging import get_logger
 from packages.governance.permissions import Principal
+from packages.session.execution_context import resolve_execution_context
 from packages.session.file_lifecycle import delete_report_files
 from packages.session.store import SessionStore
 
@@ -25,6 +26,7 @@ from apps.api.schemas import (
     ConversationUpdate,
     DatasetResponse,
     DatasetUpdate,
+    ExecutionContextResponse,
     MessageResponse,
     ProjectCreate,
     ProjectResponse,
@@ -73,9 +75,7 @@ def get_project(
     principal: Principal = Depends(current_principal_dep),
 ) -> ProjectResponse:
     """读取一个项目。"""
-    return ProjectResponse.model_validate(
-        require_project_access(store, project_id, principal)
-    )
+    return ProjectResponse.model_validate(require_project_access(store, project_id, principal))
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectResponse)
@@ -198,8 +198,7 @@ def list_project_conversations(
     """按最近更新时间列出项目历史对话。"""
     require_project_access(store, project_id, principal)
     return [
-        ConversationResponse.model_validate(item)
-        for item in store.list_conversations(project_id)
+        ConversationResponse.model_validate(item) for item in store.list_conversations(project_id)
     ]
 
 
@@ -218,6 +217,9 @@ def get_conversation(
         conversation=ConversationResponse.model_validate(context.conversation),
         messages=[MessageResponse.model_validate(item) for item in context.messages],
         artifacts=[ArtifactResponse.model_validate(item) for item in context.artifacts],
+        execution_context=ExecutionContextResponse.model_validate(
+            resolve_execution_context(store, conversation_id=conversation_id).to_dict()
+        ),
     )
 
 

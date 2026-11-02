@@ -13,6 +13,7 @@ from packages.common.identifiers import explicit_resource_reference_spans
 from packages.common.text_delimiters import delimited_spans, paired_request_examples
 from packages.knowledge.formula import normalize_semantic_key
 
+from .context_selection import contextual_field_requested
 from .operation_intent import (
     DATA_OPERATION_ACTIONS,
     TOTAL_OPERATION_ACTIONS,
@@ -1119,6 +1120,11 @@ def explicit_analysis_requirements(
                 aggregate_named.extend(
                     name for name in _column_mentions(fragment, columns) if name != group
                 )
+        # A dimension mentioned in a grouped total describes the grain; it
+        # cannot replace an explicit aggregate operand. If the request names
+        # only that dimension as the measured operand, preserve clarification.
+        if aggregate_named and group in explicitly_total:
+            explicitly_total = [name for name in explicitly_total if name != group]
         named = list(
             dict.fromkeys(
                 explicitly_total
@@ -1150,7 +1156,11 @@ def explicit_analysis_requirements(
                 question("value_col", "metric_required", metric_roles, allowed_roles=("metric",))
         elif len(named) == 1 and (not role_map or named[0] in metric_roles):
             value = named[0]
-        elif not named and len(metric_roles) == 1:
+        elif (
+            not named
+            and len(metric_roles) == 1
+            and not contextual_field_requested(analysis_text, columns)
+        ):
             value = metric_roles[0]
         else:
             question("value_col", "metric_required", metric_roles, allowed_roles=("metric",))

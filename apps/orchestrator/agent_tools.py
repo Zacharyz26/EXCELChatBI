@@ -1392,6 +1392,13 @@ def _generate_report(
         )
     except ValueError as exc:
         raise AgentToolError(str(exc)) from exc
+    from packages.orchestration.report_intent import report_source_intent
+
+    from apps.orchestrator.control.report_delivery import report_sources_match
+
+    source_intent = report_source_intent(str((report_contract or {}).get("goal", "")))
+    if not report_sources_match(source_intent, artifacts):
+        raise AgentToolError("报告未选择符合所需图型、分组粒度的已有表格/图表，不能替代来源。")
     obligations = restored_duplicate_obligations(
         task_store.list_events_by_type(context.run_id, "verification")
     )
@@ -1425,6 +1432,11 @@ def _generate_report(
 
     try:
         result: dict[str, Any] = report._tools["gen_report_md"].invoke(md_args)
+        from apps.orchestrator.control.report_delivery import report_source_deliveries
+
+        validation["source_deliveries"] = report_source_deliveries(
+            artifacts, validation, md_args, result["markdown"]
+        )
     finally:
         for chart_section in md_args.get("charts", []):
             delete_chart_file(

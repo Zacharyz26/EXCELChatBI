@@ -200,7 +200,48 @@ export interface LineageGraphResponse {
   truncated: boolean;
 }
 
+/** Server-owned, read-only execution source; never derived from browser selection. */
+export interface ConversationExecutionContext {
+  schema_version: 1;
+  availability: "available" | "unavailable" | "ambiguous" | "none";
+  reason_codes: string[];
+  dataset_ref: string | null;
+  /** Server string; only known source kinds get a display label. */
+  source_kind: string | null;
+  source_run_id: string | null;
+  source_invocation_id: string | null;
+  source_artifact_id: string | null;
+  source_occurred_at: string | null;
+  parent_ref: string | null;
+  lineage: Array<Record<string, unknown>>;
+  /** Old servers omit these: prior history remains unknown. */
+  lineage_state?: "verified" | "partial" | "unknown";
+  lineage_boundary_ref?: string | null;
+  run_id: string | null;
+  /** Separate read-model state; TaskRun.status remains the task UI authority. */
+  run_status: string | null;
+  run_state_version: number | null;
+  /** Existing source-run binding-set hash; not a parquet content hash. */
+  scope_version_hash: string | null;
+  scope_version_run_id: string | null;
+  profile_artifact_id: string | null;
+  analysis_ids: string[];
+  field_context: {
+    column: string | null;
+    source_run_id: string | null;
+    /** Additional proof fields may be absent on an older read-model response. */
+    dataset_ref?: string | null;
+    source_invocation_id?: string | null;
+    source_evidence_id?: string | null;
+    source_result_hash?: string | null;
+    source_scope_version_hash?: string | null;
+  };
+  context_hash: string;
+}
+
 export interface ConversationDetail {
+  /** Missing on old servers: source remains unknown, never project-latest fallback. */
+  execution_context?: ConversationExecutionContext | null;
   conversation: WorkspaceConversation;
   messages: WorkspaceMessage[];
   artifacts: WorkspaceArtifact[];
@@ -401,6 +442,8 @@ export interface AgentHypothesisFollowup {
 }
 
 export interface AgentRunDetail {
+  /** Latest conversation source, separate from this requested historical run. */
+  execution_context?: ConversationExecutionContext | null;
   run: AgentRun;
   contract: Record<string, unknown> | null;
   plan: AgentPlan | null;
@@ -582,7 +625,7 @@ export interface ToolStep {
   id: string;
   tool: string;
   label: string;
-  status: "pending" | "running" | "ok" | "error";
+  status: "pending" | "running" | "ok" | "error" | "unknown";
   /** 人话参数摘要（后端 _humanize_args 生成，默认展示） */
   fields?: string;
   /** 原始入参 JSON（仅供“调整参数”表单预填） */

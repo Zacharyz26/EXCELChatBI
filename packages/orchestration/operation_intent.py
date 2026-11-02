@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from packages.common.text_delimiters import delimited_spans
+from packages.orchestration.report_intent import report_source_intent
 
 OperationDisposition = Literal[
     "current", "prohibited", "absent", "deferred", "described", "cancelled"
@@ -36,15 +37,20 @@ DATA_OPERATION_ACTIONS = (
 TOTAL_OPERATION_ACTIONS = ("总计", "合计", "总额", "总量", "total")
 _ACTION = "|".join((*DATA_OPERATION_ACTIONS, *TOTAL_OPERATION_ACTIONS))
 _CONNECTOR = r"(?:、|和|及|以及|或|或者|并(?:且)?|/|／)"
-_EXECUTE = r"执行|应用|落实|采用|实施|按(?:照)?|依照"
+EXECUTION_ACTIONS = ("执行", "应用", "落实", "采用", "实施", "按照", "按", "依照")
+_EXECUTE = "|".join(EXECUTION_ACTIONS)
+_NEGATIVE_PREFIX = (
+    r"暂不|不要|无需|不需要|不必|不用|先别|别|禁止|"
+    r"未(?:做|进行)?(?:任何)?|没有(?:做|进行)?(?:任何)?|尚未|并未|先不|不"
+)
+_DEFERRED_PREFIX = r"以后|后续|下一步|下一轮|下轮|未来|稍后|之后"
 _NEGATIVE_GROUP = re.compile(
-    rf"(?P<prefix>暂不|不要|无需|不需要|不必|不用|先别|别|禁止|"
-    rf"未(?:做|进行)?(?:任何)?|没有(?:做|进行)?(?:任何)?|尚未|并未|先不|不)"
+    rf"(?P<prefix>{_NEGATIVE_PREFIX})"
     rf"\s*(?:再|新增|进行|做|{_EXECUTE})?\s*"
     rf"(?P<body>(?:{_ACTION})(?:\s*{_CONNECTOR}\s*(?:{_ACTION}))*)"
 )
 _DEFERRED_GROUP = re.compile(
-    rf"(?P<prefix>以后|后续|下一步|下一轮|下轮|未来|稍后|之后)"
+    rf"(?P<prefix>{_DEFERRED_PREFIX})"
     rf"\s*(?:再|可以|可|需要|进行|执行|做)?\s*"
     rf"(?P<body>(?:{_ACTION})(?:\s*{_CONNECTOR}\s*(?:{_ACTION}))*)"
 )
@@ -61,6 +67,25 @@ class OperationMention:
     disposition: OperationDisposition
     span: tuple[int, int]
     context_span: tuple[int, int]
+
+
+def operation_prefix_disposition(prefix: str) -> OperationDisposition | None:
+    """复用现有有限否定/延期语法；未知前缀不默认为肯定操作。"""
+    clean = prefix.strip()
+    negative = re.fullmatch(
+        rf"(?P<prefix>{_NEGATIVE_PREFIX})\s*(?:再|新增|进行|做|{_EXECUTE})?\s*", clean
+    )
+    if negative:
+        return "absent" if _FACTUAL_ABSENCE.match(negative["prefix"]) else "prohibited"
+    if re.fullmatch(rf"(?:{_DEFERRED_PREFIX})\s*(?:再|可以|可|需要|进行|执行|做)?", clean):
+        return "deferred"
+    if re.fullmatch(r"(?:取消|撤回)(?:该|此前|之前|本次|本轮|所有|这个)?\s*", clean):
+        return "cancelled"
+    if re.fullmatch(r"(?:请\s*)?(?:现在|本次|本轮)?\s*(?:请\s*)?", clean):
+        return "current"
+    if re.fullmatch(r"(?:请\s*)?(?:建议|说明|区分|描述|介绍|讨论)[^。；;，,]*", clean):
+        return "described"
+    return None
 
 
 def _inside(index: int, spans: list[tuple[int, int]]) -> bool:
@@ -114,6 +139,7 @@ def operation_mentions(
     descriptions = [
         match for match in _DESCRIPTION.finditer(text) if not _inside(match.start(), ignored)
     ]
+    consumed_sources = report_source_intent(text)
     mentions = list(grouped)
     for match in re.finditer(_ACTION, text):
         if _inside(match.start(), ignored) or _inside(match.start(), occupied):
@@ -126,7 +152,10 @@ def operation_mentions(
             and _DESCRIPTION_EXECUTION.search(text[max(0, match.start() - 8) : match.start()])
         )
         disposition: OperationDisposition = (
-            "described" if description and not executes_description else "current"
+            "described"
+            if consumed_sources.consumes(*match.span())
+            or (description and not executes_description)
+            else "current"
         )
         context_span = description.span() if description else match.span()
         mentions.append(

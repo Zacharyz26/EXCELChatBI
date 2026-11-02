@@ -19,14 +19,25 @@ IDENTITY_DECLARATION = re.compile(
 
 
 def identity_declarations(text: str, *, headers_only: bool = False) -> list[re.Match[str]]:
+    # A descriptive outer label can contain another explicit typed label as
+    # its apparent value (数据集 dataset_ref: ...). Enumerate real, nonempty
+    # matches at every label start, so the outer candidate cannot hide it.
+    candidates: list[re.Match[str]] = []
+    position = 0
+    while match := IDENTITY_DECLARATION.search(text, position):
+        candidates.append(match)
+        position = match.start() + 1
     if not headers_only:
-        return list(IDENTITY_DECLARATION.finditer(text))
+        return candidates
     found: list[re.Match[str]] = []
     for clause in re.finditer(r"(?:^|[，,；;])\s*", text):
         position = clause.end()
         while match := IDENTITY_DECLARATION.match(text, position):
-            found.append(match)
-            position = match.end()
+            nested = [item for item in candidates if match.start() <= item.start() < match.end()]
+            for item in nested:
+                if not any(existing.span() == item.span() for existing in found):
+                    found.append(item)
+            position = max(item.end() for item in nested)
             while position < len(text) and text[position].isspace():
                 position += 1
     return found

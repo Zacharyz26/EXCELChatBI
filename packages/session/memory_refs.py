@@ -18,8 +18,9 @@ from packages.common.identifiers import MEMORY_REFERENCE_PATTERN as _MEMORY_ID_P
 from packages.governance.audit import AuditEvent, AuditOutcome
 from packages.governance.audit import record as record_audit
 from packages.governance.permissions import Principal
+from packages.orchestration.context_selection import NamedSelectionProof, source_intent
 from packages.session.coref import ReferenceTarget
-from packages.session.memory_models import MemoryKind, MemoryRecord
+from packages.session.memory_models import MemoryKind, MemoryLink, MemoryRecord
 from packages.session.memory_policy import MIN_MEMORY_SELECTION_CONFIDENCE
 from packages.session.memory_store import MemoryStore
 from packages.session.models import Artifact, Dataset
@@ -251,50 +252,18 @@ class MemoryReferenceResolver:
                 memory_snapshot_id=memory_snapshot_id,
                 principal=principal,
             )
-            snapshot_by_id = {record.memory_id: record for record in snapshot_records}
-            governed_by_id = {record.memory_id: record for record in governed_records}
-            restored: list[MemoryReferenceBinding] = []
-            seen: set[str] = set()
-            for assumption in assumptions:
-                (
-                    memory_id,
-                    version,
-                    expected_hash,
-                    conflict_override,
-                ) = _parse_assumption(assumption)
-                if memory_id in seen:
-                    raise ValueError("记忆引用恢复包含重复目标")
-                seen.add(memory_id)
-                snapshot_record = snapshot_by_id.get(memory_id)
-                live_record = governed_by_id.get(memory_id)
-                if (
-                    snapshot_record is None
-                    or snapshot_record.version != version
-                    or live_record is None
-                    or live_record.version != version
-                    or live_record.status != "active"
-                ):
-                    raise MemoryReferenceAccessDenied("记忆引用版本或状态已失效")
-                if _record_gate_reason(live_record) is not None:
-                    raise MemoryReferenceAccessDenied("记忆引用当前不可选择")
-                if (
-                    snapshot_record.content_summary != live_record.content_summary
-                    or snapshot_record.source_hash != live_record.source_hash
-                    or snapshot_record.semantic_key != live_record.semantic_key
-                ):
-                    raise MemoryReferenceAccessDenied("记忆引用内容发生漂移")
-                if not conflict_override and _has_live_conflict(live_record, governed_records):
-                    raise MemoryReferenceAccessDenied("记忆引用出现未解决冲突")
-                binding = self._binding(
-                    live_record,
+            restored = restore_memory_bindings(
+                assumptions,
+                snapshot_records=snapshot_records,
+                governed_records=governed_records,
+                bind=lambda record, override: self._binding(
+                    record,
                     project_id=project_id,
                     conversation_id=conversation_id,
                     principal=principal,
-                    conflict_override=conflict_override,
-                )
-                if binding.binding_hash != expected_hash:
-                    raise MemoryReferenceAccessDenied("记忆引用 hash 不一致")
-                restored.append(binding)
+                    conflict_override=override,
+                ),
+            )
             result = _resolved(clean, restored)
         except Exception as exc:
             self._audit(
@@ -456,64 +425,13 @@ class MemoryReferenceResolver:
         principal: Principal,
         conflict_override: bool = False,
     ) -> MemoryReferenceBinding:
-        spec = _parse_spec(record)
-        if spec is None:
-            raise _BindingError("memory_reference_contract_invalid")
-        links = self._memories.list_links(record.memory_id, principal=principal)
-        allowed_types = {"dataset"} if record.kind == "field_alias" else {"artifact", "dataset"}
-        target_links = [link for link in links if link.target_type in allowed_types]
-        if len(target_links) != 1:
-            raise _BindingError("memory_reference_link_invalid")
-        link = target_links[0]
-        if link.project_id != project_id:
-            raise _BindingError("memory_reference_cross_project")
-
-        artifacts_by_id = {
-            artifact.id: artifact for artifact in self._sessions.list_artifacts(conversation_id)
-        }
-        datasets_by_ref = {
-            dataset.ref: dataset for dataset in self._sessions.list_datasets(project_id)
-        }
-        target: ReferenceTarget
-        if link.target_type == "artifact":
-            artifact = artifacts_by_id.get(link.target_ref)
-            if artifact is None:
-                raise _BindingError("memory_reference_target_missing")
-            target = _artifact_target(artifact, spec.alias)
-            target_kind: Literal["artifact", "dataset"] = "artifact"
-        else:
-            dataset = datasets_by_ref.get(link.target_ref)
-            if dataset is None:
-                raise _BindingError("memory_reference_target_missing")
-            target = _dataset_target(dataset, spec.alias)
-            target_kind = "dataset"
-
-        payload = {
-            "memory_id": record.memory_id,
-            "memory_version": record.version,
-            "memory_kind": record.kind,
-            "alias": spec.alias,
-            "target_kind": target_kind,
-            "target_ref": link.target_ref,
-            "canonical_field": spec.canonical_field,
-            "source_hash": record.source_hash,
-            "scope": record.scope,
-            "conflict_override": conflict_override,
-        }
-        binding_hash = hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
-        return MemoryReferenceBinding(
-            memory_id=record.memory_id,
-            memory_version=record.version,
-            memory_kind=record.kind,
-            alias=spec.alias,
-            target_kind=target_kind,
-            target_ref=link.target_ref,
-            canonical_field=spec.canonical_field,
-            source_hash=record.source_hash,
-            scope=record.scope,
+        return bind_memory_record(
+            record,
+            project_id=project_id,
+            links=self._memories.list_links(record.memory_id, principal=principal),
+            artifacts=self._sessions.list_artifacts(conversation_id),
+            datasets=self._sessions.list_datasets(project_id),
             conflict_override=conflict_override,
-            target=target,
-            binding_hash=binding_hash,
         )
 
     def _audit_resolution(
@@ -905,4 +823,233 @@ def _stable_json(value: object) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+    )
+
+
+def restore_memory_bindings(
+    assumptions: tuple[str, ...],
+    *,
+    snapshot_records: tuple[MemoryRecord, ...],
+    governed_records: list[MemoryRecord],
+    bind: Callable[[MemoryRecord, bool], MemoryReferenceBinding],
+) -> list[MemoryReferenceBinding]:
+    """同一固定快照/live/hash门；授权目录由调用者先核验，函数不读写状态。"""
+    snapshot_by_id = {record.memory_id: record for record in snapshot_records}
+    governed_by_id = {record.memory_id: record for record in governed_records}
+    restored: list[MemoryReferenceBinding] = []
+    seen: set[str] = set()
+    for assumption in assumptions:
+        (
+            memory_id,
+            version,
+            expected_hash,
+            conflict_override,
+        ) = _parse_assumption(assumption)
+        if memory_id in seen:
+            raise ValueError("记忆引用恢复包含重复目标")
+        seen.add(memory_id)
+        snapshot_record = snapshot_by_id.get(memory_id)
+        live_record = governed_by_id.get(memory_id)
+        if (
+            snapshot_record is None
+            or snapshot_record.version != version
+            or live_record is None
+            or live_record.version != version
+            or live_record.status != "active"
+        ):
+            raise MemoryReferenceAccessDenied("记忆引用版本或状态已失效")
+        if _record_gate_reason(live_record) is not None:
+            raise MemoryReferenceAccessDenied("记忆引用当前不可选择")
+        if (
+            snapshot_record.content_summary != live_record.content_summary
+            or snapshot_record.source_hash != live_record.source_hash
+            or snapshot_record.semantic_key != live_record.semantic_key
+        ):
+            raise MemoryReferenceAccessDenied("记忆引用内容发生漂移")
+        if not conflict_override and _has_live_conflict(live_record, governed_records):
+            raise MemoryReferenceAccessDenied("记忆引用出现未解决冲突")
+        binding = bind(live_record, conflict_override)
+        if binding.binding_hash != expected_hash:
+            raise MemoryReferenceAccessDenied("记忆引用 hash 不一致")
+        restored.append(binding)
+    return restored
+
+
+def bind_memory_record(
+    record: MemoryRecord,
+    *,
+    project_id: str,
+    links: list[MemoryLink],
+    artifacts: list[Artifact],
+    datasets: list[Dataset],
+    conflict_override: bool = False,
+) -> MemoryReferenceBinding:
+    """复用既有精确 Link/字段/hash 投影；输入必须是主体可见目录。"""
+    spec = _parse_spec(record)
+    if spec is None:
+        raise _BindingError("memory_reference_contract_invalid")
+    allowed_types = {"dataset"} if record.kind == "field_alias" else {"artifact", "dataset"}
+    target_links = [link for link in links if link.target_type in allowed_types]
+    if len(target_links) != 1:
+        raise _BindingError("memory_reference_link_invalid")
+    link = target_links[0]
+    if link.project_id != project_id:
+        raise _BindingError("memory_reference_cross_project")
+
+    artifacts_by_id = {artifact.id: artifact for artifact in artifacts}
+    datasets_by_ref = {dataset.ref: dataset for dataset in datasets}
+    target: ReferenceTarget
+    if link.target_type == "artifact":
+        artifact = artifacts_by_id.get(link.target_ref)
+        if artifact is None:
+            raise _BindingError("memory_reference_target_missing")
+        target = _artifact_target(artifact, spec.alias)
+        target_kind: Literal["artifact", "dataset"] = "artifact"
+    else:
+        dataset = datasets_by_ref.get(link.target_ref)
+        if dataset is None:
+            raise _BindingError("memory_reference_target_missing")
+        target = _dataset_target(dataset, spec.alias)
+        target_kind = "dataset"
+
+    payload = {
+        "memory_id": record.memory_id,
+        "memory_version": record.version,
+        "memory_kind": record.kind,
+        "alias": spec.alias,
+        "target_kind": target_kind,
+        "target_ref": link.target_ref,
+        "canonical_field": spec.canonical_field,
+        "source_hash": record.source_hash,
+        "scope": record.scope,
+        "conflict_override": conflict_override,
+    }
+    binding_hash = hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+    return MemoryReferenceBinding(
+        memory_id=record.memory_id,
+        memory_version=record.version,
+        memory_kind=record.kind,
+        alias=spec.alias,
+        target_kind=target_kind,
+        target_ref=link.target_ref,
+        canonical_field=spec.canonical_field,
+        source_hash=record.source_hash,
+        scope=record.scope,
+        conflict_override=conflict_override,
+        target=target,
+        binding_hash=binding_hash,
+    )
+
+
+def no_memory_reference(query: str) -> MemoryReferenceResolution:
+    """冻结任务没有记忆授权；恢复不能从后来新增映射取得新许可。"""
+    return _result(status="no_reference", query=query, bindings=(), choices=(), reason_code=None)
+
+
+def governed_execution_resolution(result: MemoryReferenceResolution) -> MemoryReferenceResolution:
+    """命名解析不是执行许可：共享原文结构排除否定/引文，保留精确名称归属。"""
+    if result.status != "resolved":
+        return result
+    sources: list[tuple[str, str]] = []
+    names_by_memory: dict[str, set[str]] = {}
+    for binding in result.bindings:
+        ref = binding.target.dataset_ref
+        if ref is None:
+            return _result(
+                status="unresolved",
+                query=result.original_query,
+                bindings=(),
+                choices=(),
+                reason_code="memory_source_identity_unknown",
+            )
+        names = {binding.alias}
+        names.update(
+            match[0]
+            for match in _MEMORY_ID_PATTERN.finditer(result.original_query)
+            if match[1].lower() == binding.memory_id
+        )
+        names_by_memory[binding.memory_id] = names
+        sources.extend((name, ref) for name in names)
+    intent = source_intent(result.original_query, named_sources=tuple(sources))
+    kept = []
+    for binding in result.bindings:
+        uses = [
+            use
+            for use in intent.named_operands
+            if use.name in names_by_memory[binding.memory_id]
+            and use.dataset_ref == binding.target.dataset_ref
+        ]
+        if any(use.disposition == "unknown" for use in uses):
+            return _result(
+                status="unresolved",
+                query=result.original_query,
+                bindings=(),
+                choices=(),
+                reason_code="memory_source_intent_unknown",
+            )
+        active = [use for use in uses if use.disposition == "current"]
+        if not active:
+            continue
+        if any(
+            use.disposition in {"prohibited", "deferred", "cancelled", "absent"}
+            and use.span[0] > active[0].span[0]
+            for use in uses
+        ):
+            return _result(
+                status="unresolved",
+                query=result.original_query,
+                bindings=(),
+                choices=(),
+                reason_code="memory_source_intent_conflict",
+            )
+        bound_intent = source_intent(
+            result.original_query,
+            current_dataset_ref=binding.target.dataset_ref,
+            named_sources=tuple(sources),
+        )
+        if bound_intent.reason_code is not None:
+            return _result(
+                status="unresolved",
+                query=result.original_query,
+                bindings=(),
+                choices=(),
+                reason_code=bound_intent.reason_code,
+            )
+        kept.append(binding)
+    return (
+        _resolved(result.original_query, kept)
+        if kept
+        else no_memory_reference(result.original_query)
+    )
+
+
+def governed_bindings_allowed(query: str, bindings: list[MemoryReferenceBinding]) -> bool:
+    """只读来源消费者复用相同用途门；无法授权不能静默回退旧来源。"""
+    original = _resolved(query, bindings)
+    allowed = governed_execution_resolution(original)
+    return allowed.status == "resolved" and allowed.assumptions() == original.assumptions()
+
+
+def governed_selection_proof(
+    query: str, bindings: tuple[MemoryReferenceBinding, ...] | list[MemoryReferenceBinding]
+) -> NamedSelectionProof | None:
+    """从已核真实 Dataset 映射取得纯选择证明，Artifact 消费不切换来源。"""
+    if len(bindings) != 1 or bindings[0].target_kind != "dataset":
+        return None
+    binding = bindings[0]
+    intent = source_intent(query, named_sources=((binding.alias, binding.target_ref),))
+    if (
+        intent.reason_code is not None
+        or intent.selection is None
+        or not intent.selection.selection_only
+    ):
+        return None
+    uses = intent.named_operands
+    if len(uses) != 1 or uses[0].disposition != "current":
+        return None
+    proof = NamedSelectionProof(
+        binding.alias, uses[0].span, binding.target_ref, binding.memory_id, binding.binding_hash
+    )
+    return NamedSelectionProof.from_dict(
+        proof.to_dict(), query=query, dataset_ref=binding.target_ref
     )

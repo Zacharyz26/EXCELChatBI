@@ -6,6 +6,7 @@ import re
 from typing import cast
 
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
+from packages.orchestration.report_intent import report_source_intent
 from packages.session.models import Dataset, JsonObject
 
 _CHART_REQUEST_PATTERN = re.compile(
@@ -91,9 +92,10 @@ _CLAUSE_SPLIT_PATTERN = re.compile(r"[,，;；。.!?！？\n]+")
 
 def requests_chart(user_text: str) -> bool:
     """Return whether the user explicitly requests a chart."""
+    production = report_source_intent(user_text).production_text(user_text)
     return (
-        _CHART_NEGATION_PATTERN.search(user_text) is None
-        and _CHART_REQUEST_PATTERN.search(user_text) is not None
+        _CHART_NEGATION_PATTERN.search(production) is None
+        and _CHART_REQUEST_PATTERN.search(production) is not None
     )
 
 
@@ -105,9 +107,7 @@ def required_chart_dimensions(
     if not requests_chart(user_text) or not datasets:
         return ()
     mentioned = [
-        dataset
-        for dataset in datasets
-        if dataset.ref in user_text or dataset.filename in user_text
+        dataset for dataset in datasets if dataset.ref in user_text or dataset.filename in user_text
     ]
     if len(mentioned) == 1:
         dataset = mentioned[0]
@@ -169,12 +169,9 @@ def requests_report(user_text: str) -> bool:
     for clause in _request_clauses(user_text):
         references_existing = _EXISTING_REPORT_REFERENCE_PATTERN.search(clause) is not None
         creates_updated_report = _NEW_REPORT_FROM_REFERENCE_PATTERN.search(clause) is not None
-        report_requested = (
-            _REPORT_NEGATION_PATTERN.search(clause) is None
-            and (
-                _REPORT_REQUEST_PATTERN.search(clause) is not None
-                or _ENGLISH_REPORT_REQUEST_PATTERN.search(clause) is not None
-            )
+        report_requested = _REPORT_NEGATION_PATTERN.search(clause) is None and (
+            _REPORT_REQUEST_PATTERN.search(clause) is not None
+            or _ENGLISH_REPORT_REQUEST_PATTERN.search(clause) is not None
         )
         if report_requested:
             if not references_existing or creates_updated_report:
@@ -206,7 +203,5 @@ def requests_pdf(user_text: str) -> bool:
 def _request_clauses(user_text: str) -> tuple[str, ...]:
     """Split independent request clauses so a local negation does not mask a later action."""
     return tuple(
-        clause.strip()
-        for clause in _CLAUSE_SPLIT_PATTERN.split(user_text)
-        if clause.strip()
+        clause.strip() for clause in _CLAUSE_SPLIT_PATTERN.split(user_text) if clause.strip()
     )

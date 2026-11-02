@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from packages.common.report_safety import escape_report_markup
@@ -13,6 +16,7 @@ from packages.orchestration.contracts import (
     QuantityContractUnavailable,
     require_quantity_contract_version,
 )
+from packages.orchestration.report_intent import ReportSourceIntent, ReportSourceOperand
 from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import EvidenceRecord, ToolInvocation
 
@@ -97,19 +101,27 @@ def report_total_deliveries(
     return deliveries
 
 
-def verified_report_totals(
+@dataclass(frozen=True, slots=True)
+class _ReportMaterial:
+    selected: tuple[Artifact, ...]
+    validation: JsonObject
+    checked: JsonObject
+    markdown: str
+
+
+def _verified_report_material(
     report: Artifact,
     invocation: ToolInvocation,
     evidence: EvidenceRecord,
     sources: list[Artifact],
     *,
     quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
-) -> list[JsonObject]:
+) -> _ReportMaterial | None:
     """重验当前报告与原来源、实际 Markdown/PDF 字节，失配时不给出总计证明。"""
     try:
         require_quantity_contract_version(quantity_contract_version)
     except QuantityContractUnavailable:
-        return []
+        return None
     validation = (report.payload or {}).get("validation")
     if (
         invocation.tool_name != "generate_report"
@@ -128,7 +140,7 @@ def verified_report_totals(
         or evidence.summary.get("report_validation_hash") != validation_hash(validation)
         or not report.file_ref
     ):
-        return []
+        return None
     wanted = invocation.args.get("analysis_ids", [])
     selected = [
         item
@@ -141,17 +153,17 @@ def verified_report_totals(
         or {(item.params or {}).get("analysis_id", item.id) for item in selected} != set(wanted)
         or {item.id for item in selected} != set(validation.get("source_hashes", {}))
     ):
-        return []
+        return None
     try:
         path = Path(report.file_ref)
         markdown = path.with_suffix(".md").read_text(encoding="utf-8")
         if hashlib.sha256(markdown.encode()).hexdigest() != validation.get("content_sha256"):
-            return []
+            return None
         if invocation.args.get("include_pdf") and (
             path.suffix != ".pdf"
             or hashlib.sha256(path.read_bytes()).hexdigest() != validation.get("pdf_sha256")
         ):
-            return []
+            return None
         checked = validate_report_narratives(
             selected,
             invocation.args,
@@ -159,8 +171,186 @@ def verified_report_totals(
             run_id=invocation.run_id,
         )
         if any(validation.get(key) != value for key, value in checked.items()):
-            return []
-        totals = report_total_deliveries(selected, checked, markdown)
+            return None
     except (OSError, UnicodeError, ValueError):
+        return None
+    return _ReportMaterial(tuple(selected), validation, checked, markdown)
+
+
+def verified_report_totals(
+    report: Artifact,
+    invocation: ToolInvocation,
+    evidence: EvidenceRecord,
+    sources: list[Artifact],
+    *,
+    quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
+) -> list[JsonObject]:
+    """Only the same verified material can supply deterministic total delivery."""
+    material = _verified_report_material(
+        report,
+        invocation,
+        evidence,
+        sources,
+        quantity_contract_version=quantity_contract_version,
+    )
+    if material is None:
         return []
-    return totals if totals == validation.get("total_deliveries") else []
+    totals = report_total_deliveries(list(material.selected), material.checked, material.markdown)
+    return totals if totals == material.validation.get("total_deliveries") else []
+
+
+def _table_fragment(artifact: Artifact) -> str:
+    from mcp_servers.report.tools import _aggregate_table_md
+
+    payload = artifact.payload or {}
+    analysis_id = (artifact.params or {}).get("analysis_id", artifact.id)
+    return "\n".join(
+        _aggregate_table_md(escape_report_markup({**payload, "analysis_id": analysis_id}))
+    )
+
+
+def report_source_deliveries(
+    artifacts: list[Artifact], validation: JsonObject, assembly: JsonObject, markdown: str
+) -> list[JsonObject]:
+    """Called before real screenshot cleanup; bind each rendered fragment to its source."""
+    from mcp_servers.report.tools import _img_data_uri
+
+    charts = iter(assembly.get("charts", []))
+    deliveries: list[JsonObject] = []
+    for artifact in artifacts:
+        if artifact.type not in {"table", "chart"}:
+            continue
+        if artifact.type == "table":
+            if artifact.source_tool != "aggregate_preview":
+                raise ValueError("report_source_table_unsupported")
+            fragment = _table_fragment(artifact)
+        else:
+            section = next(charts, None)
+            if not isinstance(section, dict) or not isinstance(section.get("image_path"), str):
+                raise ValueError("report_source_chart_not_rendered")
+            fragment = f"![chart]({_img_data_uri(section['image_path'])})"
+        if not fragment or fragment not in markdown:
+            raise ValueError("report_source_fragment_not_delivered")
+        deliveries.append(
+            {
+                "artifact_id": artifact.id,
+                "source_hash": validation["source_hashes"][artifact.id],
+                "type": artifact.type,
+                "fragment_sha256": hashlib.sha256(fragment.encode()).hexdigest(),
+            }
+        )
+    if next(charts, None) is not None:
+        raise ValueError("report_source_chart_mapping_invalid")
+    return deliveries
+
+
+def _matches_source_operand(operand: ReportSourceOperand, artifact: Artifact) -> bool:
+    """Match declared material identity using existing tool fields, never titles/values."""
+    if artifact.type != operand.artifact_type:
+        return False
+    params, payload = artifact.params or {}, artifact.payload or {}
+    if artifact.type == "chart":
+        option = payload.get("option")
+        if artifact.source_tool != "gen_chart" or not isinstance(option, dict):
+            return False
+        kind = params.get("chart_type")
+        series = option.get("series")
+        if (
+            not isinstance(kind, str)
+            or payload.get("chart_type") != kind
+            or not isinstance(series, list)
+            or not series
+            or any(not isinstance(item, dict) or item.get("type") != kind for item in series)
+        ):
+            return False
+        if operand.chart_kind is not None and kind != operand.chart_kind:
+            return False
+        encoding = params.get("encoding")
+        group = encoding.get("x") if isinstance(encoding, dict) else None
+    elif artifact.type == "table":
+        if artifact.source_tool != "aggregate_preview":
+            return False
+        group = params.get("group_col")
+        if not isinstance(group, str) or payload.get("group_col") != group:
+            return False
+    else:
+        return False
+    if operand.temporal_grain is not None:
+        # This is the existing finite field-identity contract. The aggregate
+        # tool does not perform arbitrary calendar bucketing. Unknown names
+        # cannot acquire monthly semantics from labels, totals or date-looking rows.
+        field = {"month": "月份", "year": "年份", "quarter": "季度", "day": "日期"}.get(
+            operand.temporal_grain
+        )
+        if field is None or group != field:
+            return False
+    return True
+
+
+def report_sources_match(intent: ReportSourceIntent, sources: list[Artifact]) -> bool:
+    """Every complete source operand needs a matching selected material."""
+    return all(
+        any(_matches_source_operand(operand, source) for source in sources)
+        for operand in intent.operands
+    )
+
+
+def verified_report_sources(
+    report: Artifact,
+    invocation: ToolInvocation,
+    evidence: EvidenceRecord,
+    sources: list[Artifact],
+    *,
+    intent: ReportSourceIntent,
+    quantity_contract_version: str = QUANTITY_CONTRACT_VERSION,
+) -> bool:
+    """Source IDs alone are not delivery: recheck the actual embedded material."""
+    material = _verified_report_material(
+        report,
+        invocation,
+        evidence,
+        sources,
+        quantity_contract_version=quantity_contract_version,
+    )
+    if material is None:
+        return False
+    proofs = material.validation.get("source_deliveries")
+    expected = [a for a in material.selected if a.type in {"table", "chart"}]
+    if (
+        not isinstance(proofs, list)
+        or len(proofs) != len(expected)
+        or any(not isinstance(item, dict) for item in proofs)
+        or {item.get("artifact_id") for item in proofs} != {a.id for a in expected}
+    ):
+        return False
+    # These PNG bytes are inside the hash-verified Markdown/PDF production,
+    # not optional filesystem thumbnails or an earlier chart artifact ID.
+    images = re.findall(r"!\[chart\]\(data:image/png;base64,([A-Za-z0-9+/=]+)\)", material.markdown)
+    image_fragments: set[str] = set()
+    for encoded in images:
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            return False
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False
+        fragment = f"![chart](data:image/png;base64,{encoded})"
+        image_fragments.add(hashlib.sha256(fragment.encode()).hexdigest())
+    for artifact in expected:
+        proof = next(item for item in proofs if item.get("artifact_id") == artifact.id)
+        if (
+            proof.get("source_hash") != material.checked["source_hashes"].get(artifact.id)
+            or proof.get("type") != artifact.type
+        ):
+            return False
+        if artifact.type == "table":
+            if artifact.source_tool != "aggregate_preview":
+                return False
+            fragment = _table_fragment(artifact)
+            if fragment not in material.markdown or hashlib.sha256(
+                fragment.encode()
+            ).hexdigest() != proof.get("fragment_sha256"):
+                return False
+        elif proof.get("fragment_sha256") not in image_fragments:
+            return False
+    return report_sources_match(intent, expected)

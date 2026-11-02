@@ -10,8 +10,8 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal
 
 from packages.common.identifiers import (
     ANALYSIS_REFERENCE_PATTERN as _ANALYSIS_ID_PATTERN,
@@ -20,8 +20,19 @@ from packages.common.identifiers import MEMORY_REFERENCE_PATTERN as _MEMORY_ID_P
 from packages.governance.audit import AuditEvent, AuditOutcome
 from packages.governance.audit import record as record_audit
 from packages.governance.permissions import Principal
-from packages.session.models import Artifact, Dataset
+from packages.orchestration.context_selection import (
+    NamedSelectionProof,
+    contextual_field_requested,
+    explicit_dataset_selection,
+    reference_binding_payload,
+    source_intent,
+)
+from packages.session.models import Artifact, Dataset, JsonObject
 from packages.session.store import SessionStore
+
+if TYPE_CHECKING:
+    from packages.session.execution_context import FieldBinding
+
 
 REFERENCE_POLICY_VERSION = "coref-policy-v1"
 REFERENCE_ASSUMPTION_PREFIX = "HOST_COREF_V1:"
@@ -149,6 +160,10 @@ class ReferenceResolution:
     choices: tuple[ReferenceChoice, ...]
     reason_code: str | None
     resolution_hash: str
+    field_binding: FieldBinding | None = None
+    selection_only: bool = False
+    binding_version: str = "1"
+    named_selection: NamedSelectionProof | None = None
 
     @property
     def has_reference(self) -> bool:
@@ -158,14 +173,24 @@ class ReferenceResolution:
         """生成可随 TaskPlan 持久化且不含业务正文的恢复绑定。"""
         if self.status != "resolved":
             return None
-        payload = {
+        payload: JsonObject = {
             "h": self.resolution_hash,
-            "p": _COMPACT_BINDING_VERSION,
+            "p": self.binding_version,
             "t": [
                 ("a" if target.kind == "artifact" else "d") + target.reference_id
                 for target in self.targets
             ],
         }
+        if self.binding_version == "2":
+            payload.update(
+                {
+                    "q": hashlib.sha256(self.original_query.encode()).hexdigest(),
+                    "f": self.field_binding.to_dict() if self.field_binding is not None else None,
+                    "s": self.selection_only,
+                }
+            )
+        if self.named_selection is not None:
+            payload["n"] = self.named_selection.to_dict()
         return REFERENCE_ASSUMPTION_PREFIX + _stable_json(payload)
 
     def clarification(self) -> dict[str, object] | None:
@@ -227,7 +252,45 @@ class ReferenceResolver:
                 conversation_id=conversation_id,
                 principal=principal,
             )
-            resolution = _resolve(clean, artifacts=artifacts, datasets=datasets)
+            from packages.session.execution_context import resolve_execution_context
+
+            context = resolve_execution_context(self._store, conversation_id=conversation_id)
+            current_dataset = (
+                next((item for item in datasets if item.ref == context.dataset_ref), None)
+                if context.availability == "available"
+                else None
+            )
+            intent = source_intent(
+                clean, current_dataset_ref=current_dataset.ref if current_dataset else None
+            )
+            resolution = _resolve(
+                clean,
+                artifacts=artifacts,
+                datasets=datasets,
+                current_dataset=current_dataset,
+                ignored_reference_spans=intent.ignored_reference_spans,
+            )
+            if intent.reason_code is not None:
+                resolution = _result(
+                    status="ambiguous",
+                    query=clean,
+                    targets=(),
+                    choices=(),
+                    reason_code=intent.reason_code,
+                )
+            if resolution.status == "no_reference" and current_dataset is not None:
+                resolution = _resolved(
+                    clean, [_dataset_target(current_dataset, "conversation_execution_context")]
+                )
+            if resolution.status == "resolved":
+                field_binding = (
+                    context.field_binding
+                    if contextual_field_requested(clean)
+                    and {target.dataset_ref for target in resolution.targets}
+                    == {context.dataset_ref}
+                    else None
+                )
+                resolution = _with_context_binding(resolution, datasets, field_binding)
         except Exception as exc:
             self._audit(
                 project_id=project_id,
@@ -254,6 +317,78 @@ class ReferenceResolver:
         )
         return resolution
 
+    def bind_governed_targets(
+        self,
+        prior: ReferenceResolution,
+        targets: tuple[ReferenceTarget, ...],
+        *,
+        named_selection: NamedSelectionProof | None = None,
+        project_id: str,
+        conversation_id: str,
+        principal: Principal,
+    ) -> ReferenceResolution:
+        """冻结前合并已治理记忆引用；显式目标不可被隐式当前源或别名覆盖。"""
+        if prior.status not in {"no_reference", "resolved"}:
+            return prior
+        refs = {target.dataset_ref for target in targets}
+        if not targets or None in refs or len(refs) != 1:
+            return _result(
+                status="unresolved",
+                query=prior.original_query,
+                targets=(),
+                choices=(),
+                reason_code="governed_source_ambiguous",
+            )
+        artifacts, datasets = self._catalog(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            principal=principal,
+        )
+        catalog = {
+            (target.kind, target.reference_id): target
+            for target in (
+                *(_artifact_target(item, "governed_memory") for item in artifacts),
+                *(_dataset_target(item, "governed_memory") for item in datasets),
+            )
+        }
+        for target in targets:
+            actual = catalog.get((target.kind, target.reference_id))
+            if actual is None or actual.binding_dict() != target.binding_dict():
+                raise ReferenceAccessDenied("记忆引用目标已漂移或不可访问")
+        explicit = [
+            target for target in prior.targets if target.mention != "conversation_execution_context"
+        ]
+        if any(target.dataset_ref not in refs for target in explicit):
+            return _result(
+                status="unresolved",
+                query=prior.original_query,
+                targets=(),
+                choices=(),
+                reason_code="governed_source_conflict",
+            )
+        field = prior.field_binding
+        if field is not None and field.dataset_ref not in refs:
+            field = None
+        resolution = _with_context_binding(
+            _resolved(prior.original_query, [*explicit, *targets]),
+            datasets,
+            None if named_selection is not None else field,
+            named_selection,
+        )
+        self._audit(
+            project_id=project_id,
+            conversation_id=conversation_id,
+            principal=principal,
+            outcome="allowed",
+            detail={
+                "status": resolution.status,
+                "reason_code": "governed_source_frozen",
+                "resolution_hash": resolution.resolution_hash,
+                "target_ids": [target.reference_id for target in resolution.targets],
+            },
+        )
+        return resolution
+
     def restore(
         self,
         assumption: str,
@@ -273,7 +408,7 @@ class ReferenceResolver:
             raise ValueError("指代恢复契约 JSON 无效") from exc
         if (
             not isinstance(payload, dict)
-            or payload.get("p") != _COMPACT_BINDING_VERSION
+            or payload.get("p") not in {_COMPACT_BINDING_VERSION, "2"}
             or not isinstance(payload.get("t"), list)
         ):
             raise ValueError("指代恢复契约版本或目标无效")
@@ -303,7 +438,41 @@ class ReferenceResolver:
                     raise ReferenceAccessDenied("指代目标不存在")
                 target = _dataset_target(dataset, "persisted_reference")
             restored.append(target)
+        restored_refs = {target.dataset_ref for target in restored}
+        current_ref = next(iter(restored_refs)) if len(restored_refs) == 1 else None
+        if source_intent(clean, current_dataset_ref=current_ref).reason_code is not None:
+            raise ReferenceAccessDenied("恢复请求的来源意图未授权执行")
         resolution = _resolved(clean, restored)
+        if payload.get("p") == "2":
+            if payload.get("q") != hashlib.sha256(clean.encode()).hexdigest():
+                raise ReferenceAccessDenied("字段/来源恢复原请求 hash 不一致")
+            raw_field = payload.get("f")
+            field_binding = None
+            if raw_field is not None:
+                if not isinstance(raw_field, dict):
+                    raise ValueError("字段恢复来源格式无效")
+                from packages.session.execution_context import validate_field_binding
+
+                field_binding = validate_field_binding(
+                    self._store, conversation_id=conversation_id, raw=raw_field
+                )
+                if {target.dataset_ref for target in restored} != {field_binding.dataset_ref}:
+                    raise ReferenceAccessDenied("字段恢复目标与冻结来源不一致")
+            named_selection = None
+            if "n" in payload:
+                if (
+                    len(restored) != 1
+                    or restored[0].kind != "dataset"
+                    or current_ref is None
+                    or raw_field is not None
+                ):
+                    raise ReferenceAccessDenied("命名选择缺少唯一 Dataset 目标")
+                named_selection = NamedSelectionProof.from_dict(
+                    payload["n"], query=clean, dataset_ref=current_ref
+                )
+            resolution = _with_context_binding(resolution, datasets, field_binding, named_selection)
+            if type(payload.get("s")) is not bool or payload["s"] != resolution.selection_only:
+                raise ReferenceAccessDenied("来源选择完成义务不一致")
         if payload.get("h") != resolution.resolution_hash:
             raise ReferenceAccessDenied("指代恢复 hash 不一致")
         return resolution
@@ -369,10 +538,12 @@ def _resolve(
     *,
     artifacts: list[Artifact],
     datasets: list[Dataset],
+    current_dataset: Dataset | None = None,
+    ignored_reference_spans: tuple[tuple[int, int], ...] = (),
 ) -> ReferenceResolution:
     targets: list[ReferenceTarget] = []
     issues: list[tuple[str, list[ReferenceChoice]]] = []
-    consumed: list[tuple[int, int]] = []
+    consumed: list[tuple[int, int]] = list(ignored_reference_spans)
 
     artifacts_by_analysis = {_analysis_id(artifact): artifact for artifact in artifacts}
     artifacts_by_id = {artifact.id: artifact for artifact in artifacts}
@@ -382,6 +553,7 @@ def _resolve(
         match
         for match in _ANALYSIS_ID_PATTERN.finditer(query)
         if not _overlaps(match.span(), memory_id_spans)
+        and not _overlaps(match.span(), list(ignored_reference_spans))
     ]
     for match in explicit_matches:
         token = match.group(1).lower()
@@ -438,11 +610,16 @@ def _resolve(
 
     for selector, pattern in _RECENT_PATTERNS:
         for match in pattern.finditer(query):
+            if _overlaps(match.span(), consumed):
+                continue
             if selector == "dataset":
-                if not datasets:
-                    issues.append(("reference_not_found", []))
+                if any(target.kind == "dataset" for target in targets):
+                    consumed.append(match.span())
                     continue
-                targets.append(_dataset_target(datasets[-1], match.group(0)))
+                if current_dataset is None:
+                    issues.append(("execution_source_unavailable", []))
+                    continue
+                targets.append(_dataset_target(current_dataset, match.group(0)))
                 consumed.append(match.span())
                 continue
             artifact_candidates = _artifact_candidates(artifacts, selector)
@@ -470,12 +647,10 @@ def _resolve(
                 consumed.append(match.span())
                 continue
             if selector == "dataset":
-                if len(datasets) == 1:
-                    targets.append(_dataset_target(datasets[0], match.group(0)))
-                elif datasets:
-                    issues.append(("reference_ambiguous", _dataset_choices(datasets)))
+                if current_dataset is not None:
+                    targets.append(_dataset_target(current_dataset, match.group(0)))
                 else:
-                    issues.append(("reference_not_found", []))
+                    issues.append(("execution_source_unavailable", []))
                 continue
             artifact_candidates = _artifact_candidates(artifacts, selector)
             if len(artifact_candidates) == 1:
@@ -534,6 +709,80 @@ def _resolve(
         targets=(),
         choices=(),
         reason_code=None,
+    )
+
+
+def _selection_only_query(
+    query: str, targets: tuple[ReferenceTarget, ...], datasets: list[Dataset]
+) -> bool:
+    """完整来源选择语法；未识别残余或其他操作绝不跳过任务提纲。"""
+    from packages.session.execution_context import dataset_is_readable
+
+    if len(targets) != 1 or targets[0].kind != "dataset":
+        return False
+    target = targets[0]
+    dataset = next((item for item in datasets if item.ref == target.dataset_ref), None)
+    if dataset is None or not dataset_is_readable(dataset):
+        return False
+    selection = explicit_dataset_selection(query, current_dataset_ref=dataset.ref)
+    return bool(selection and selection.selection_only and selection.dataset_ref == dataset.ref)
+
+
+def _with_context_binding(
+    resolution: ReferenceResolution,
+    datasets: list[Dataset],
+    field_binding: FieldBinding | None,
+    named_selection: NamedSelectionProof | None = None,
+) -> ReferenceResolution:
+    selection_only = _selection_only_query(resolution.original_query, resolution.targets, datasets)
+    if named_selection is not None:
+        from packages.session.execution_context import dataset_is_readable
+
+        if (
+            len(resolution.targets) != 1
+            or resolution.targets[0].kind != "dataset"
+            or resolution.targets[0].dataset_ref != named_selection.dataset_ref
+            or field_binding is not None
+            or not any(
+                item.ref == named_selection.dataset_ref and dataset_is_readable(item)
+                for item in datasets
+            )
+        ):
+            raise ReferenceAccessDenied("命名选择目标不可用")
+        NamedSelectionProof.from_dict(
+            named_selection.to_dict(),
+            query=resolution.original_query,
+            dataset_ref=named_selection.dataset_ref,
+        )
+        selection_only = True
+    payload = reference_binding_payload(
+        resolution.original_query,
+        [target.binding_dict() for target in resolution.targets],
+        field_binding.to_dict() if field_binding is not None else None,
+        selection_only,
+        named_selection,
+    )
+    digest = hashlib.sha256(_stable_json(payload).encode()).hexdigest()
+    annotation = (
+        "\n\n"
+        + _HOST_ANNOTATION_PREFIX
+        + " "
+        + _stable_json(
+            {
+                "resolution_hash": digest,
+                "targets": payload["targets"],
+                "field_binding": payload["field_binding"],
+            }
+        )
+    )
+    return replace(
+        resolution,
+        resolution_hash=digest,
+        rewritten_query=resolution.original_query + annotation,
+        field_binding=field_binding,
+        selection_only=selection_only,
+        binding_version="2",
+        named_selection=named_selection,
     )
 
 

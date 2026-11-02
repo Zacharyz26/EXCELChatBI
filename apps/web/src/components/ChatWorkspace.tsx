@@ -8,7 +8,7 @@ import {
 import { ChatPanel } from "@/components/ChatPanel";
 import { LazyLoadBoundary } from "@/components/LazyLoadBoundary";
 import { useWorkspaceStore } from "@/stores/workspace";
-import type { KBOverview, WorkspaceArtifact, WorkspaceDataset } from "@/types";
+import type { ConversationExecutionContext, KBOverview, WorkspaceDataset } from "@/types";
 
 const AgentControlPanel = lazy(async () => {
   const module = await import("@/components/AgentControlPanel");
@@ -49,6 +49,7 @@ export function ChatWorkspace() {
   const renameDataset = useWorkspaceStore((state) => state.renameDataset);
   const removeDataset = useWorkspaceStore((state) => state.removeDataset);
   const activeDatasetRef = useWorkspaceStore((state) => state.activeDatasetRef);
+  const executionContext = useWorkspaceStore((state) => state.executionContext);
   const sendMessage = useWorkspaceStore((state) => state.sendMessage);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -61,7 +62,7 @@ export function ChatWorkspace() {
   const [lineagePanelOpen, setLineagePanelOpen] = useState(false);
   const [agentControlOpen, setAgentControlOpen] = useState(false);
 
-  // 本对话正在使用的数据集：以对话工件的 dataset_ref 为事实来源
+  // 产物只证明本会话历史使用；当前执行源来自服务端 execution_context。
   const usedDatasetRefs = new Set(
     artifacts.map((item) => item.dataset_ref).filter((ref): ref is string => !!ref),
   );
@@ -371,7 +372,7 @@ export function ChatWorkspace() {
           <ChatPanel />
           <DatasetContext
             datasets={datasets}
-            artifacts={artifacts}
+            executionContext={executionContext}
             activeDatasetRef={activeDatasetRef}
             usedDatasetRefs={usedDatasetRefs}
             onView={selectDataset}
@@ -436,7 +437,7 @@ function runStatusText(status: string): string {
 
 function DatasetContext({
   datasets,
-  artifacts,
+  executionContext,
   activeDatasetRef,
   usedDatasetRefs,
   onView,
@@ -444,20 +445,35 @@ function DatasetContext({
   busy,
 }: {
   datasets: WorkspaceDataset[];
-  artifacts: WorkspaceArtifact[];
+  executionContext: ConversationExecutionContext | null;
   activeDatasetRef: string | null;
   usedDatasetRefs: Set<string>;
   onView: (datasetRef: string) => void;
   onUse: (dataset: WorkspaceDataset) => void;
   busy: boolean;
 }) {
-  const profileArtifact = [...artifacts]
-    .reverse()
-    .find((artifact) => artifact.type === "profile" && artifact.dataset_ref);
-  // 优先级：侧边栏点选 → 本对话最近画像 → 项目最新数据集
-  const dataset = datasets.find((item) => item.ref === activeDatasetRef)
-    ?? datasets.find((item) => item.ref === profileArtifact?.dataset_ref)
-    ?? datasets[datasets.length - 1];
+  const executionDataset = executionContext?.schema_version === 1
+    && executionContext.availability === "available"
+    ? datasets.find((item) => item.ref === executionContext.dataset_ref)
+    : undefined;
+  // A browser selection changes only this read-only preview, never execution.
+  const dataset = activeDatasetRef
+    ? datasets.find((item) => item.ref === activeDatasetRef)
+    : executionDataset;
+  const unavailableText = !executionContext || executionContext.schema_version !== 1
+    ? "执行数据尚未确认。"
+    : executionContext.availability === "none"
+      ? "本会话尚未连接执行数据。"
+      : executionContext.availability === "ambiguous"
+        ? "执行数据来源存在歧义，请明确选择。"
+        : "执行数据来源不可用，请核对后明确选择。";
+  const sourceLabel = executionContext?.source_kind === "selection" ? "明确选择"
+    : executionContext?.source_kind === "transform" ? "本次变换已核验"
+      : executionContext?.source_kind === "upload" ? "本会话上传" : "";
+  const lineageNotice = executionContext?.lineage_state === "verified" ? null
+    : executionContext?.lineage_state === "partial"
+      ? "仅部分处理历史已核验，较早来源尚未核实。"
+      : "当前输入可用，此前的处理历史尚未核实。";
   const columns = dataset && Array.isArray(dataset.profile.columns)
     ? dataset.profile.columns
     : [];
@@ -465,9 +481,18 @@ function DatasetContext({
 
   return (
     <aside className="dataset-context" aria-label="数据上下文">
+      <section role="region" aria-label="执行数据上下文">
+        <div className="context-heading"><h2>当前执行数据</h2></div>
+        {executionDataset ? (
+          <p><strong>{executionDataset.filename}</strong><br />
+            <small>{executionDataset.profile.row_count} 行{sourceLabel ? ` · ${sourceLabel}` : ""}</small>
+            {lineageNotice && <><br /><small>{lineageNotice}</small></>}
+          </p>
+        ) : <p className="context-more">{unavailableText}</p>}
+      </section>
       {dataset ? (
         <>
-          <div className="context-heading"><span>CONTEXT</span><h2>当前数据集</h2></div>
+          <div className="context-heading"><span>CONTEXT</span><h2>正在浏览的数据集</h2></div>
           <div className="context-dataset-name">
             <div><DatasetIcon /></div>
             <span><strong>{dataset.filename}</strong><small>{dataset.profile.row_count} 行 · {dataset.profile.column_count} 列</small></span>
@@ -478,7 +503,7 @@ function DatasetContext({
               {dataset.transform && ` · 变换：${JSON.stringify(dataset.transform).slice(0, 60)}`}
             </p>
           )}
-          {!usedDatasetRefs.has(dataset.ref) && (
+          {dataset.ref !== executionDataset?.ref && (
             <button
               type="button"
               className="context-use-button"
@@ -497,7 +522,7 @@ function DatasetContext({
               </div>
             ))}
           </div>
-          <div className="context-section-title">本对话使用的数据集</div>
+          <div className="context-section-title">本对话曾使用的数据集</div>
           {usedDatasets.length > 0 ? (
             <div className="context-used-datasets">
               {usedDatasets.map((item) => (
@@ -523,8 +548,8 @@ function DatasetContext({
           <div className="context-heading"><span>CONTEXT</span><h2>数据上下文</h2></div>
           <div className="context-empty">
             <DatasetIcon />
-            <strong>尚未连接数据</strong>
-            <p>从输入框左侧上传 XLSX、XLS 或 CSV 后，字段画像会显示在这里。</p>
+            <strong>尚未选择查看的数据</strong>
+            <p>可以上传表格或在侧栏查看数据；查看不会改变当前执行数据。</p>
           </div>
         </>
       )}

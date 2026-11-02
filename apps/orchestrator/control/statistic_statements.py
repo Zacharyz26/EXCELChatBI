@@ -53,6 +53,46 @@ class CountExpression:
     referenced_items: int | None = None
 
 
+@dataclass(frozen=True)
+class RowQuantityObject:
+    """有限完整行宾语，span仅为原文词法归属，不证明任何计数。"""
+
+    basis: Literal["rows", "duplicate_excess"]
+    span: tuple[int, int]
+    noun_span: tuple[int, int] | None
+
+
+def row_quantity_object(suffix: str) -> RowQuantityObject | None:
+    match = re.fullmatch(
+        r"\s*(?:(?P<counter>行|条|个)(?P<basis>重复多余|重复|多余)?"
+        r"(?P<noun>数据记录|记录|数据)?)?\s*[)）\]】]*\s*",
+        suffix,
+    )
+    if match is None:
+        return None
+    if match["counter"] == "个" and match["noun"] not in {"记录", "数据记录"}:
+        return None
+    if match["basis"] in {"多余", "重复多余"} and match["noun"] not in {"记录", "数据记录"}:
+        return None
+    parts = [match.span(key) for key in ("basis", "noun") if match[key]]
+    return RowQuantityObject(
+        "duplicate_excess" if match["basis"] else "rows",
+        match.span(),
+        (parts[0][0], parts[-1][1]) if parts else None,
+    )
+
+
+def row_quantity_noun_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """只给完整量词宾语内部修饰归属，数字值本身从不受保护。"""
+    result = []
+    for amount in re.finditer(r"[+-]?\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万亿]+|半", text):
+        tail = re.split(r"[，,。；;!?！？]|\n[ \t]*\n", text[amount.end() :], maxsplit=1)[0]
+        obj = row_quantity_object(tail)
+        if obj is not None and obj.noun_span is not None:
+            result.append((amount.end() + obj.noun_span[0], amount.end() + obj.noun_span[1]))
+    return tuple(result)
+
+
 def _quantity_context(
     text: str, left: int, noun: str, tail: str
 ) -> tuple[int, bool, bool, int | None]:
@@ -131,7 +171,10 @@ def count_expressions(
         r"[\s*`\"'“”‘’「」『』)）\]］}｝】〉》]*(?P<counter>[\u3400-\u9fff])"
     )
     expressions = []
+    noun_regions = row_quantity_noun_spans(text)
     for match in pattern.finditer(text):
+        if any(a <= match.start("amount") < match.end("amount") <= b for a, b in noun_regions):
+            continue
         if re.search(r"\n[ \t]*\n", match[0]):
             continue  # Hard paragraphs cannot join an owner to a distant count.
         counter_atoms = _lexical_atoms(match["counter"])
@@ -384,6 +427,8 @@ def numeric_value_owner(
 ) -> NumericValueOwner | None:
     """统一直接统计、赋值及有界计数来源，原文位置不因词法识别而消失。"""
     if not measurement_labels:
+        return None
+    if any(a <= left < right <= b for a, b in row_quantity_noun_spans(text)):
         return None
     # A quantity-shaped word can be part of the statistic's own name (such as
     # 多余 in 重复多余记录数). A shorter label must not assign that inner word

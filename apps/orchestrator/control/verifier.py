@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 from packages.common.identifiers import dataset_reference_arguments
 from packages.orchestration.analysis_requirements import TOTAL_LABEL
+from packages.orchestration.context_selection import contract_source_intent, selection_only_dataset
 from packages.orchestration.contracts import (
     QuantityContractUnavailable,
     TaskContract,
@@ -23,6 +24,7 @@ from packages.orchestration.dataset_scope import (
 )
 from packages.orchestration.evidence_facts import valid_count_projection
 from packages.orchestration.quality_facts import valid_quality_projection
+from packages.orchestration.report_intent import report_source_intent
 from packages.session.models import Artifact
 from packages.session.task_models import (
     ClaimDraft,
@@ -99,6 +101,38 @@ def verify_completion(
         except ValueError as exc:
             return VerificationResult(
                 "BLOCKED", (VerificationIssue("invalid_analysis_contract", str(exc)),)
+            )
+    intent = contract_source_intent(contract)
+    if intent.reason_code is not None:
+        return VerificationResult(
+            "BLOCKED",
+            (VerificationIssue(intent.reason_code, "当前请求没有有效的来源执行授权。"),),
+        )
+    selection_ref = selection_only_dataset(contract)
+    if intent.selection is not None and intent.selection.selection_only and selection_ref is None:
+        return VerificationResult(
+            "BLOCKED",
+            (
+                VerificationIssue(
+                    "selection_source_unverified", "来源选择缺少有效的冻结任务与引用证明。"
+                ),
+            ),
+        )
+    if selection_ref is not None:
+        initial = [
+            binding
+            for binding in dataset_bindings or []
+            if binding.binding_kind == "initial" and binding.run_id == contract.run_id
+        ]
+        if not any(binding.dataset_ref == selection_ref for binding in initial):
+            issues.append(
+                VerificationIssue("selection_source_unverified", "来源选择缺少唯一授权数据集绑定。")
+            )
+        if invocation_by_id:
+            issues.append(
+                VerificationIssue(
+                    "selection_only_operation_executed", "仅选择来源的任务执行了未授权工具。"
+                )
             )
     for item in evidence:
         if item.run_id != contract.run_id:
@@ -221,6 +255,35 @@ def verify_completion(
             source_artifacts or [],
         )
     )
+    required_sources = report_source_intent(contract.goal)
+    if required_sources.operands:
+        from apps.orchestrator.control.report_delivery import verified_report_sources
+
+        delivered = False
+        for record in evidence:
+            call = invocation_by_id.get(record.invocation_id)
+            report = next(
+                (a for a in artifacts if a.id == record.artifact_id and a.type == "report"), None
+            )
+            if call is None or report is None or record.run_id != contract.run_id:
+                continue
+            if verified_report_sources(
+                report,
+                call,
+                record,
+                source_artifacts or [],
+                intent=required_sources,
+                quantity_contract_version=contract.quantity_contract_version,
+            ):
+                delivered = True
+                break
+        if not delivered:
+            issues.append(
+                VerificationIssue(
+                    "missing_required_report_material",
+                    "报告未证明完整交付所要求的现有表格/图表及实际文件内容。",
+                )
+            )
     if not final_text.strip():
         issues.append(
             VerificationIssue(

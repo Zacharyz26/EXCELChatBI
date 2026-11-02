@@ -14,6 +14,7 @@ from packages.common.config import Settings
 from packages.governance.permissions import Principal
 from packages.models.gateway import ModelGateway
 from packages.rag.retriever import HybridRetriever
+from packages.session.execution_context import resolve_execution_context
 from packages.session.store import SessionStore
 from packages.session.task_models import (
     CancellationNode,
@@ -475,6 +476,11 @@ async def get_agent_run(
     )
     return {
         "run": _run_payload(run),
+        "execution_context": (
+            await run_in_threadpool(
+                resolve_execution_context, store, conversation_id=run.conversation_id
+            )
+        ).to_dict(),
         "contract": contract,
         "plan": (_plan_payload(plan) if plan is not None else None),
         "steps": [_step_payload(step) for step in steps],

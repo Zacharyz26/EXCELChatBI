@@ -111,31 +111,9 @@ export function ChatPanel() {
     );
   }
 
-  // 历史执行卡精确回放：role=tool 消息记录了每步 {tool_call_id, status, 摘要/错误}
-  const toolOutcomes = useMemo(() => {
-    const map: Record<string, ToolOutcome> = {};
-    for (const message of messages) {
-      if (message.role !== "tool") continue;
-      try {
-        const parsed: unknown = JSON.parse(message.content);
-        if (
-          parsed && typeof parsed === "object"
-          && typeof (parsed as Record<string, unknown>).tool_call_id === "string"
-        ) {
-          const record = parsed as Record<string, unknown>;
-          map[String(record.tool_call_id)] = {
-            status: record.status === "error" ? "error" : "ok",
-            summary: typeof record.summary === "string" ? record.summary : undefined,
-            message: typeof record.message === "string" ? record.message : undefined,
-            fields: typeof record.fields === "string" ? record.fields : undefined,
-          };
-        }
-      } catch {
-        /* 阶段3 之前的旧对话没有结果消息，忽略 */
-      }
-    }
-    return map;
-  }, [messages]);
+  // Tool IDs are response-local; historical outcomes may only bind to their
+  // owning assistant message and the immediately following tool-result block.
+  const toolOutcomes = useMemo(() => historicalToolOutcomes(messages), [messages]);
 
   const taskPending = activeRun !== null && !TERMINAL_RUN_STATUSES.has(activeRun.run.status);
   const busy = streaming || uploading || taskPending;
@@ -354,10 +332,59 @@ const TOOL_LABELS: Record<string, string> = {
 // ── 消息与卡片 ──
 
 interface ToolOutcome {
-  status: "ok" | "error";
+  status: "ok" | "error" | "unknown";
   summary?: string;
   message?: string;
   fields?: string;
+}
+
+
+function toolOutcomeKey(messageId: string, callId: string): string {
+  return JSON.stringify([messageId, callId]);
+}
+
+function historicalToolOutcomes(messages: WorkspaceMessage[]): Record<string, ToolOutcome> {
+  const outcomes: Record<string, ToolOutcome> = {};
+  const unknown = (): ToolOutcome => ({ status: "unknown", summary: "结果未知" });
+  for (let index = 0; index < messages.length; index += 1) {
+    const owner = messages[index];
+    if (owner.role !== "assistant") continue;
+    const calls = owner.tool_calls ?? [];
+    const callCounts = new Map<string, number>();
+    const toolNames = new Map<string, string>();
+    for (const call of calls) {
+      const id = stringOf(call.id);
+      if (!id) continue;
+      callCounts.set(id, (callCounts.get(id) ?? 0) + 1);
+      toolNames.set(id, stringOf(call.name));
+      outcomes[toolOutcomeKey(owner.id, id)] = unknown();
+    }
+    const resultCounts = new Map<string, number>();
+    for (let cursor = index + 1; cursor < messages.length; cursor += 1) {
+      const result = messages[cursor];
+      if (result.role !== "tool") break;
+      let parsed: unknown;
+      try { parsed = JSON.parse(result.content); } catch { continue; }
+      if (!isRecord(parsed) || typeof parsed.tool_call_id !== "string") continue;
+      const id = parsed.tool_call_id;
+      if (callCounts.get(id) !== 1) continue;
+      const key = toolOutcomeKey(owner.id, id);
+      resultCounts.set(id, (resultCounts.get(id) ?? 0) + 1);
+      if (resultCounts.get(id) !== 1
+        || (parsed.status !== "ok" && parsed.status !== "error")
+        || (parsed.tool !== undefined && parsed.tool !== toolNames.get(id))) {
+        outcomes[key] = unknown();
+        continue;
+      }
+      outcomes[key] = {
+        status: parsed.status,
+        summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
+        message: typeof parsed.message === "string" ? parsed.message : undefined,
+        fields: typeof parsed.fields === "string" ? parsed.fields : undefined,
+      };
+    }
+  }
+  return outcomes;
 }
 
 function MessageItem({
@@ -393,7 +420,7 @@ function MessageItem({
               {toolCalls.map((call, index) => {
                 const tool = stringOf(call.name);
                 const args = prettyArguments(call.arguments);
-                const outcome = toolOutcomes[stringOf(call.id)];
+                const outcome = toolOutcomes[toolOutcomeKey(message.id, stringOf(call.id))];
                 return (
                   <ToolStepRow
                     key={stringOf(call.id) || index}
@@ -401,8 +428,8 @@ function MessageItem({
                       id: stringOf(call.id),
                       tool,
                       label: TOOL_LABELS[tool] ?? tool,
-                      status: outcome?.status ?? "ok",
-                      summary: outcome?.summary,
+                      status: outcome?.status ?? "unknown",
+                      summary: outcome?.summary ?? (outcome ? undefined : "结果未知"),
                       message: outcome?.message,
                       fields: outcome?.fields,
                       argsPreview: args,
@@ -498,7 +525,7 @@ function ToolStepRow({
     <div className={`tool-step tool-step--${step.status}`}>
       <div className="tool-step__row">
         <span className="tool-step__status" aria-hidden="true">
-          {step.status === "ok" ? "✓" : step.status === "error" ? "✗" : <LoadingRing />}
+          {step.status === "ok" ? "✓" : step.status === "error" ? "✗" : step.status === "unknown" ? "?" : <LoadingRing />}
         </span>
         <span className="tool-step__label">{step.label}</span>
         <span className="tool-step__summary">
@@ -605,7 +632,7 @@ function ProfileArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
           <span>数据画像</span>
           <strong>Excel 字段概况</strong>
         </div>
-        <span className="artifact-status">已完成</span>
+        <span className="artifact-status">已生成</span>
       </div>
       <div className="profile-artifact__stats">
         <div><strong>{rowCount ?? "—"}</strong><span>数据行</span></div>
@@ -691,15 +718,19 @@ function TableArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
   const rows = Array.isArray(payload.rows) ? payload.rows.filter(isRecord) : [];
   if (rows.length === 0) return null;
   const groupCol = stringOf(payload.group_col) || "分组";
-  const valueLabel = stringOf(payload.value_col)
-    ? `${payload.agg}(${stringOf(payload.value_col)})`
-    : "计数";
+  const isAggregatePreview = artifact.source_tool === "aggregate_preview";
+  const valueCol = stringOf(payload.value_col);
+  const countedColumn = valueCol || groupCol;
+  const valueLabel = valueCol
+    ? `${payload.agg}(${valueCol})`
+    : isAggregatePreview && payload.agg === "count" ? `count(${groupCol})` : "计数";
   const total = numberValue(payload.group_total);
+  const hasTotal = Object.prototype.hasOwnProperty.call(payload, "total_value");
   return (
     <section className="table-artifact">
       <table>
         <thead>
-          <tr><th>{groupCol}</th><th>{valueLabel}</th><th>样本数</th></tr>
+          <tr><th>{groupCol}</th><th>{valueLabel}</th><th>{isAggregatePreview ? `非空数（${countedColumn}）` : "样本数"}</th></tr>
         </thead>
         <tbody>
           {rows.map((row, index) => (
@@ -710,7 +741,13 @@ function TableArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
             </tr>
           ))}
         </tbody>
+        {hasTotal && (
+          <tfoot><tr><th scope="row">总计</th><td>{formatNumber(payload.total_value)}</td><td>—</td></tr></tfoot>
+        )}
       </table>
+      {isAggregatePreview && (
+        <p className="table-artifact__note">计数口径：「{countedColumn}」的非空值。缺失的汇总值显示为 —，不补为 0。</p>
+      )}
       {payload.truncated === true && total !== null && (
         <p className="table-artifact__note">共 {total} 组，仅展示前 {rows.length} 组</p>
       )}
@@ -757,7 +794,7 @@ function StatsArtifact({ artifact }: { artifact: WorkspaceArtifact }) {
     <section className="stats-artifact">
       <div className="stats-artifact__heading">
         <span>{STATS_KIND_LABELS[kind] ?? kind}</span>
-        <span className="artifact-status">已完成</span>
+        <span className="artifact-status">已生成</span>
       </div>
       {highlights.length > 0 && (
         <dl>

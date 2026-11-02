@@ -353,7 +353,7 @@ def verify_probe(
         audit_recorder=lambda _event: None,
     ).restore(
         reference_assumption,
-        query="恢复固定对象引用",
+        query="继续使用刚才的报告",
         project_id=probe.project_id,
         conversation_id=probe.conversation_id,
         principal=principal,
@@ -364,7 +364,7 @@ def verify_probe(
         audit_recorder=lambda _event: None,
     ).restore(
         memory_assumptions,
-        query="恢复固定记忆引用",
+        query="继续使用恢复报告",
         project_id=probe.project_id,
         conversation_id=probe.conversation_id,
         memory_snapshot_id=memory_snapshot_id,

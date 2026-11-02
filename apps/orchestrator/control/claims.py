@@ -27,6 +27,7 @@ from packages.session.models import Artifact, JsonObject
 from packages.session.task_models import ClaimDraft, EvidenceRecord, ToolInvocation
 
 from apps.orchestrator.control.claim_structure import (
+    AggregateMemberContext,
     ProfileTableContext,
     dimension_mentions,
     split_claim_statements,
@@ -911,6 +912,7 @@ def _extract_numeric_claims(
                     projected.table_context,
                     projected.source_context,
                     projected.constraint_context,
+                    projected.aggregate_context,
                 )
                 and (
                     owner is None
@@ -1758,6 +1760,7 @@ def _semantic_candidate_matches(
     table_context: ProfileTableContext | None = None,
     source_context: str = "",
     constraint_context: str = "",
+    aggregate_context: AggregateMemberContext | None = None,
 ) -> bool:
     """对完整数字子句绑定指标和分组；不按数字位置猜测或以同值证明关系。"""
     if any(
@@ -1768,6 +1771,16 @@ def _semantic_candidate_matches(
     source_binding = _semantic_binding(profile_record, value[1])
     if source_binding.get("statistic") == "invalid" or not _source_context_matches(
         profile_record, source_binding, source_context, constraint_context
+    ):
+        return False
+    if aggregate_context is not None and (
+        profile_record.source.get("tool") != "aggregate_preview"
+        or source_binding.get("metric") != aggregate_context.metric
+        or source_binding.get("aggregation") != aggregate_context.aggregation
+        or (
+            aggregate_context.grain is not None
+            and source_binding.get("grain") != aggregate_context.grain
+        )
     ):
         return False
     requested_operation = operation_quantity(statement, *match.span())

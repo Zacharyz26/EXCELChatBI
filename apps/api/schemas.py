@@ -237,12 +237,52 @@ class LineageGraphResponse(BaseModel):
     truncated: bool
 
 
+class ExecutionFieldContextResponse(BaseModel):
+    """已验证字段来源；为空时前端不得推断或补选列。"""
+
+    column: str | None = None
+    dataset_ref: str | None = None
+    source_run_id: str | None = None
+    source_invocation_id: str | None = None
+    source_evidence_id: str | None = None
+    source_result_hash: str | None = None
+    source_scope_version_hash: str | None = None
+
+
+class ExecutionContextResponse(BaseModel):
+    """来源与任务状态两个维度的同快照只读投影。"""
+
+    schema_version: Literal[1]
+    availability: Literal["available", "unavailable", "ambiguous", "none"]
+    reason_codes: list[str]
+    dataset_ref: str | None
+    source_kind: str | None
+    source_run_id: str | None
+    source_invocation_id: str | None
+    source_artifact_id: str | None
+    source_occurred_at: str | None
+    parent_ref: str | None
+    lineage: list[dict[str, Any]]
+    lineage_state: Literal["verified", "partial", "unknown"]
+    lineage_boundary_ref: str | None
+    run_id: str | None
+    run_status: str | None
+    run_state_version: int | None
+    scope_version_hash: str | None
+    scope_version_run_id: str | None
+    profile_artifact_id: str | None
+    analysis_ids: list[str]
+    field_context: ExecutionFieldContextResponse
+    context_hash: str
+
+
 class ConversationDetailResponse(BaseModel):
     """历史对话及其消息、工件快照。"""
 
     conversation: ConversationResponse
     messages: list[MessageResponse]
     artifacts: list[ArtifactResponse]
+    execution_context: ExecutionContextResponse
 
 
 class ChatStreamRequest(BaseModel):

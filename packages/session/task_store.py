@@ -674,13 +674,7 @@ class TaskStore:
             ).fetchone()
         if row is None:
             return None
-        contract = _load_object(str(row[0]))
-        encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if hashlib.sha256(encoded.encode()).hexdigest() != str(row[1]):
-            raise ValueError("冻结数量契约 hash 不一致，不能恢复或发布")
-        if contract.get("run_id") != run_id:
-            raise ValueError("冻结数量契约不属于指定 run")
-        return contract
+        return verified_contract_record(run_id, str(row[0]), str(row[1]))
 
     def record_quantity_candidate(self, run_id: str, payload: JsonObject) -> TaskEvent:
         """追加未赋权候选审计，不写消息/Evidence，不改变状态或预算。"""
@@ -4372,6 +4366,17 @@ def _validate_checkpoint(
     ).fetchone()
     if unknown is not None:
         raise ControlConflict("TaskRun 存在结果未知的工具调用，禁止自动恢复")
+
+
+def verified_contract_record(run_id: str, contract_json: str, contract_hash: str) -> JsonObject:
+    """共用冻结契约读取校验；既不升级版本，也不建立新的执行授权。"""
+    contract = _load_object(contract_json)
+    encoded = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(encoded.encode()).hexdigest() != contract_hash:
+        raise ValueError("冻结数量契约 hash 不一致，不能恢复或发布")
+    if contract.get("run_id") != run_id:
+        raise ValueError("冻结数量契约不属于指定 run")
+    return contract
 
 
 def _run_from_row(row: sqlite3.Row) -> TaskRun:

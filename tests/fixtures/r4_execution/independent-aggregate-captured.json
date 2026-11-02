@@ -1,0 +1,614 @@
+{
+  "run": {
+    "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+    "project_id": "f9761699edd04afcb0212275714e0853",
+    "conversation_id": "f116de5e123f4a688d16c0599c724171",
+    "user_message_id": "9617ba42e7f54a3fa721e4126550d95d",
+    "parent_run_id": null,
+    "goal": "按月份汇总当前结果的播出时长（分钟），给出各月合计和总计。",
+    "status": "blocked",
+    "state_version": 8,
+    "plan_version": 1,
+    "budget": {
+      "max_parallelism": 1,
+      "max_replans": 3,
+      "max_tool_calls": 6
+    },
+    "usage": {
+      "invalid_tool_calls": 0,
+      "tool_attempts": 1,
+      "tool_calls": 1
+    },
+    "terminal_reason": "model_budget_exhausted",
+    "created_at": "2026-11-02T00:38:50.346505Z",
+    "updated_at": "2026-11-02T00:38:51.070056Z",
+    "finished_at": "2026-11-02T00:38:51.070056Z"
+  },
+  "events": [
+    {
+      "event": "meta",
+      "data": "{\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"message_id\":\"8b12767011a14215a1eb611d03517506\",\"user_message_id\":\"9617ba42e7f54a3fa721e4126550d95d\",\"title\":\"broadcast.csv\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"resumed\":false,\"parent_run_id\":null,\"memory_snapshot_id\":\"db80c2103f5e4b439f882b5bc4ffc973\",\"capability_catalog_snapshot_id\":\"f374dc136fec431cbb2afb6ef5bef1e4\",\"capability_catalog_hash\":\"b9e3d1651aff67d0da28dbc87ff0dbad059707ef02cd70c0c901637ac35240ab\",\"compaction_id\":null,\"reference_status\":\"resolved\",\"reference_resolution_hash\":\"1bbea35fb4ed8dfa07682554d6ba53aadbc1004739e21ab98475926eb4dfdb77\",\"memory_reference_status\":\"no_reference\",\"memory_reference_resolution_hash\":\"407db4fd4e81c639474115cad33f33518c9302da9314591f8d67b39973b6c90c\"}"
+    },
+    {
+      "event": "goal",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"b9acbb98ca544f1f9ea1bc42c533527e\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":1,\"occurred_at\":\"2026-11-02T00:38:50.346505Z\",\"payload\":{\"goal\":\"按月份汇总当前结果的播出时长（分钟），给出各月合计和总计。\",\"success_criteria\":[{\"criterion_id\":\"response.non_empty\",\"kind\":\"response\",\"description\":\"交付非空的最终答复\",\"required\":true,\"artifact_type\":null,\"artifact_format\":null,\"artifact_dimensions\":[]}],\"constraints\":[\"任务只有在 Verifier 通过后才能完成\",\"成功工具调用必须形成可追溯 Evidence\",\"模型文字不能替代用户要求的 Artifact\"]}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:1"
+    },
+    {
+      "event": "plan.created",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"90748ce2d1304060b77979c02cc7366e\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":2,\"occurred_at\":\"2026-11-02T00:38:50.377297Z\",\"payload\":{\"plan_id\":\"db13efc4442d48b098f0b934aa913aa5\",\"plan_version\":1,\"supersedes_version\":null,\"reason\":\"initial:template\",\"summary\":\"按已知任务族执行最小可验证步骤。\",\"steps\":[{\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"purpose\":\"按用户指定维度聚合指标\",\"capability\":\"data.aggregate\",\"dependencies\":[],\"status\":\"pending\"}],\"assumptions\":[\"HOST_COREF_V1:{\\\"f\\\":null,\\\"h\\\":\\\"1bbea35fb4ed8dfa07682554d6ba53aadbc1004739e21ab98475926eb4dfdb77\\\",\\\"p\\\":\\\"2\\\",\\\"q\\\":\\\"8231059453b237b7d25b2fb9c58d32b8558ba68ede5447501c86d09ec3c6da8e\\\",\\\"s\\\":false,\\\"t\\\":[\\\"d340a8b2ee9294774b2641d4b408fe10c\\\"]}\"],\"clarifications\":[],\"planner\":{\"route\":\"template\",\"prompt_version\":\"deterministic-outline-v1\",\"response_hash\":\"65d82c0dd3995a9123029ac4fafb99da586110dfa977a717c0fceff8d1b32cea\"}}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:2"
+    },
+    {
+      "event": "run.started",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"775ad786426f456b8234d290e6d29b1d\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":3,\"occurred_at\":\"2026-11-02T00:38:50.385327Z\",\"payload\":{\"reason\":\"task_plan_created\",\"plan_id\":\"db13efc4442d48b098f0b934aa913aa5\",\"plan_version\":1,\"outline_route\":\"template\"}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:3"
+    },
+    {
+      "event": "text.delta",
+      "data": "{\"delta\":\"正在准备校验并执行：分组聚合取数。\"}"
+    },
+    {
+      "event": "understanding",
+      "data": "{\"text\":\"正在准备校验并执行：分组聚合取数。\"}"
+    },
+    {
+      "event": "plan",
+      "data": "{\"message_id\":\"f14cfb0b361842aca3f9bb2773aeb51a\",\"steps\":[{\"id\":\"r4-one-real-tool\",\"tool\":\"aggregate_preview\",\"label\":\"分组聚合取数\"}]}"
+    },
+    {
+      "event": "step.started",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"2bd8970934654a1c8fbc0969de225601\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":5,\"occurred_at\":\"2026-11-02T00:38:50.577564Z\",\"payload\":{\"plan_version\":1,\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"persisted_step_id\":\"40ad10f420ce4fcebbbc6185db98ff11\",\"attempt\":1,\"tool\":\"aggregate_preview\",\"invocation_id\":\"870e0921c41b4ef4bc002d7cf18bc5de\",\"branch_node_id\":\"10277b86f72e4252a4b6787868c5feab\",\"data_version_hash\":\"f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19\",\"arguments_hash\":\"7044e81c0979a0fc3e4366fddc001b7abee9194eb1f6e9e88048209f70f79395\",\"policy\":{\"allowed\":true,\"code\":\"policy_allowed\",\"reason\":\"工具、项目范围和预算检查通过。\",\"policy_version\":\"tool-policy-v1\",\"permission_snapshot_id\":\"a6c8c7af6a46ba52e1d3644e10b6f820720f29e2f8b0ae7719ccae42ca3e75e8\",\"arguments_hash\":\"7044e81c0979a0fc3e4366fddc001b7abee9194eb1f6e9e88048209f70f79395\",\"tool_contract\":{\"service_name\":\"agent-tools\",\"tool_name\":\"aggregate_preview\",\"tool_version\":\"1.0.0\",\"risk_level\":\"low\",\"required_permissions\":[\"analysis:execute\"],\"artifact_types\":[\"table\"],\"read_only\":true,\"idempotent\":true,\"contract_hash\":\"6495db49a85868684f02f18d9e9e649b602f0654510ee91a4b4717d8c41bce91\"},\"data_role_preconditions\":{\"schema\":\"chatbi-data-role-preconditions-v1\",\"allowed\":true,\"code\":\"data_role_preconditions_satisfied\",\"checks\":[{\"argument\":\"group_col\",\"column\":\"月份\",\"allowed_roles\":[\"dimension\",\"time\"],\"effective_role\":\"time\",\"source\":\"deterministic_profile\",\"ambiguous\":false},{\"argument\":\"value_col\",\"column\":\"播出时长（分钟）\",\"allowed_roles\":[\"metric\"],\"effective_role\":\"metric\",\"source\":\"deterministic_profile\",\"ambiguous\":false}]}}}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:5"
+    },
+    {
+      "event": "tool_start",
+      "data": "{\"id\":\"r4-one-real-tool\",\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"tool\":\"aggregate_preview\",\"label\":\"分组聚合取数\",\"fields\":\"分组列: 月份 · 数值列: 播出时长（分钟） · 聚合: sum · 排序: group · 数据集: 340a8b2e\",\"args_preview\":\"{\\\"group_col\\\":\\\"月份\\\",\\\"value_col\\\":\\\"播出时长（分钟）\\\",\\\"agg\\\":\\\"sum\\\",\\\"sort\\\":\\\"group\\\",\\\"dataset_ref\\\":\\\"340a8b2ee9294774b2641d4b408fe10c\\\"}\"}"
+    },
+    {
+      "event": "artifact",
+      "data": "{\"id\":\"1749b392f619471e91ecae7c0dee734d\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"message_id\":\"f14cfb0b361842aca3f9bb2773aeb51a\",\"type\":\"table\",\"payload\":{\"total_value\":1350.0,\"rows\":[{\"group\":\"2026-01\",\"value\":75.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6},{\"group\":\"2026-02\",\"value\":135.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6},{\"group\":\"2026-03\",\"value\":195.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6},{\"group\":\"2026-04\",\"value\":255.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6},{\"group\":\"2026-05\",\"value\":315.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6},{\"group\":\"2026-06\",\"value\":375.0,\"count\":6,\"row_count\":6,\"valid_value_count\":6}],\"group_total\":6,\"truncated\":false,\"agg\":\"sum\",\"group_col\":\"月份\",\"value_col\":\"播出时长（分钟）\"},\"file_ref\":null,\"source_tool\":\"aggregate_preview\",\"params\":{\"group_col\":\"月份\",\"value_col\":\"播出时长（分钟）\",\"agg\":\"sum\",\"sort\":\"group\",\"dataset_ref\":\"340a8b2ee9294774b2641d4b408fe10c\",\"analysis_id\":\"2c56da438b35\",\"data_version_hash\":\"f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19\"},\"dataset_ref\":\"340a8b2ee9294774b2641d4b408fe10c\",\"created_at\":\"2026-11-02T00:38:50.620948Z\"}"
+    },
+    {
+      "event": "step.completed",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"31d8aff811384531a63d0a1399b6c56d\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":6,\"occurred_at\":\"2026-11-02T00:38:50.620948Z\",\"payload\":{\"plan_version\":1,\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"persisted_step_id\":\"40ad10f420ce4fcebbbc6185db98ff11\",\"attempt\":1,\"status\":\"completed\",\"tool\":\"aggregate_preview\",\"invocation_id\":\"870e0921c41b4ef4bc002d7cf18bc5de\",\"branch_node_id\":\"10277b86f72e4252a4b6787868c5feab\",\"evidence_ledger_sequence\":1,\"data_version_hash\":\"f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19\",\"summary\":\"6 组，返回前 6 组\",\"observation\":{\"schema_version\":1,\"observation_id\":\"dcd833acc69143b5a0a2db511c33cc17\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"invocation_id\":\"870e0921c41b4ef4bc002d7cf18bc5de\",\"source\":\"tool\",\"status\":\"ok\",\"code\":\"tool_succeeded\",\"summary\":\"6 组，返回前 6 组\",\"retryable\":false,\"payload_ref\":\"8c045772a42842349514f76324da5469\",\"created_at\":\"2026-11-02T00:38:50.620948Z\"},\"evidence_ids\":[\"8c045772a42842349514f76324da5469\"],\"artifact_ids\":[\"1749b392f619471e91ecae7c0dee734d\"]}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:6"
+    },
+    {
+      "event": "tool_end",
+      "data": "{\"id\":\"r4-one-real-tool\",\"step_id\":\"op_989e5ab4e13da4d0558734682e12669f\",\"tool\":\"aggregate_preview\",\"status\":\"ok\",\"summary\":\"6 组，返回前 6 组\",\"transport\":\"in_process\",\"degraded\":false,\"mcp_service\":\"agent-tools\"}"
+    },
+    {
+      "event": "verification.started",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"18c12aad187f42438464c3b75624254b\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":7,\"occurred_at\":\"2026-11-02T00:38:50.648249Z\",\"payload\":{\"candidate_characters\":100}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:7"
+    },
+    {
+      "event": "verification",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"5f5f59d98eca4971a47bafed73d232fb\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":9,\"occurred_at\":\"2026-11-02T00:38:51.058987Z\",\"payload\":{\"verdict\":\"NEEDS_ACTION\",\"checks\":[{\"code\":\"unresolved_quantity_obligation\",\"message\":\"数量来源、覆盖或交付义务尚未通过：unresolved_quantity_obligation\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：2026-01为75\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：135\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：195\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：255\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：315\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：375\",\"criterion_id\":null},{\"code\":\"unsupported_numeric_claim\",\"message\":\"数值结论缺少当前任务 Evidence：[coverage]\",\"criterion_id\":null},{\"code\":\"invalid_quantity_presentation\",\"message\":\"数量表达或交付结构尚未通过验证：unparsed_statistic_value；unsupported_quantity；unresolved_quantity_obligation\",\"criterion_id\":null}],\"quantity_candidate\":{\"phase\":\"final\",\"source_text\":\"播出时长（分钟）各月合计：2026-01为75；2026-02为135；2026-03为195；2026-04为255；2026-05为315；2026-06为375。播出时长（分钟）总计为1350。\",\"source_sha256\":\"e3381ba4ad13a02eb3fdf9660ed96989d5dc57d9a42e8efbf3e4070419b681aa\",\"rendered_text\":\"播出时长（分钟）各月合计：2026-01为75；2026-02为135；2026-03为195；2026-04为255；2026-05为315；2026-06为375。播出时长（分钟）总计为1350。\",\"rendered_sha256\":\"e3381ba4ad13a02eb3fdf9660ed96989d5dc57d9a42e8efbf3e4070419b681aa\",\"valid\":false,\"issues\":[\"unparsed_statistic_value\",\"unsupported_quantity\",\"unresolved_quantity_obligation\"],\"source_refs\":[]},\"next_action\":\"retry\"}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:9"
+    },
+    {
+      "event": "run.blocked",
+      "data": "{\"schema_version\":\"2.0\",\"event_id\":\"c5ffb91f3d6c4739bee497c385488d65\",\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"conversation_id\":\"f116de5e123f4a688d16c0599c724171\",\"sequence\":10,\"occurred_at\":\"2026-11-02T00:38:51.070056Z\",\"payload\":{\"reason\":\"model_budget_exhausted\",\"message\":\"模型请求预算守卫已阻止本轮请求，未向供应商发送该请求，任务未完成。请先核对可用额度和限制，再决定是否继续。\"}}",
+      "id": "a5403e39196d41cb8bc5450cd46209a9:10"
+    },
+    {
+      "event": "error",
+      "data": "{\"code\":\"model_budget_exhausted\",\"message\":\"模型请求预算守卫已阻止本轮请求，未向供应商发送该请求，任务未完成。请先核对可用额度和限制，再决定是否继续。\",\"retryable\":false,\"run_id\":\"a5403e39196d41cb8bc5450cd46209a9\",\"run_status\":\"blocked\"}"
+    }
+  ],
+  "model_calls": 3,
+  "invocations": [
+    {
+      "invocation_id": "870e0921c41b4ef4bc002d7cf18bc5de",
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "step_id": "40ad10f420ce4fcebbbc6185db98ff11",
+      "tool_call_id": "r4-one-real-tool",
+      "tool_name": "aggregate_preview",
+      "idempotency_key": "bf52af96ae37a0322bb52a5332f054ec92fe290c5ec3390c4e6ef3e285b72165",
+      "args_hash": "7044e81c0979a0fc3e4366fddc001b7abee9194eb1f6e9e88048209f70f79395",
+      "args": {
+        "agg": "sum",
+        "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+        "group_col": "月份",
+        "sort": "group",
+        "value_col": "播出时长（分钟）"
+      },
+      "status": "succeeded",
+      "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+      "error_text": null,
+      "artifact_id": "1749b392f619471e91ecae7c0dee734d",
+      "started_at": "2026-11-02T00:38:50.577564Z",
+      "completed_at": "2026-11-02T00:38:50.620948Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "8c045772a42842349514f76324da5469",
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "invocation_id": "870e0921c41b4ef4bc002d7cf18bc5de",
+      "artifact_id": "1749b392f619471e91ecae7c0dee734d",
+      "kind": "tool_result",
+      "source": {
+        "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+        "mcp_contract_equivalent": true,
+        "mcp_contract_validation": "equivalent",
+        "mcp_degraded": false,
+        "mcp_execution": "canonical_gateway",
+        "mcp_gateway_generation": 1,
+        "mcp_gateway_health": "healthy",
+        "mcp_service": "agent-tools",
+        "tool": "aggregate_preview",
+        "tool_call_id": "r4-one-real-tool",
+        "tool_contract": {
+          "artifact_types": [
+            "table"
+          ],
+          "contract_hash": "6495db49a85868684f02f18d9e9e649b602f0654510ee91a4b4717d8c41bce91",
+          "idempotent": true,
+          "read_only": true,
+          "required_permissions": [
+            "analysis:execute"
+          ],
+          "risk_level": "low",
+          "service_name": "agent-tools",
+          "tool_name": "aggregate_preview",
+          "tool_version": "1.0.0"
+        },
+        "transport": "in_process"
+      },
+      "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+      "summary": {
+        "analysis_context": {
+          "kind": null,
+          "method": null,
+          "slope_unit": null
+        },
+        "artifact_id": "1749b392f619471e91ecae7c0dee734d",
+        "fact_projection": {
+          "arguments": {
+            "agg": "sum",
+            "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+            "group_col": "月份",
+            "sort": "group",
+            "value_col": "播出时长（分钟）"
+          },
+          "branch_hash": "f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19",
+          "columns": [],
+          "count_state": "available",
+          "input_ref": "340a8b2ee9294774b2641d4b408fe10c",
+          "invalid": false,
+          "invocation_id": "870e0921c41b4ef4bc002d7cf18bc5de",
+          "output_ref": "340a8b2ee9294774b2641d4b408fe10c",
+          "paths": [
+            "$.group_total"
+          ],
+          "producer": "aggregate_preview",
+          "projection_hash": "002e63e942f1f2bd2acea9c806d4ca0cfe2c242ff883b5212c2080e774468fcf",
+          "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+          "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+          "schema": "operation-count-facts-v1",
+          "step_count": 1
+        },
+        "knowledge_empty": null,
+        "numeric_context": {
+          "agg": "sum",
+          "data_version_hash": "f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19",
+          "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+          "group_col": "月份",
+          "sort": "group",
+          "value_col": "播出时长（分钟）"
+        },
+        "source_index": [],
+        "source_index_truncated": false,
+        "summary": "6 组，返回前 6 组",
+        "value_index": [
+          {
+            "group_key": null,
+            "metric": null,
+            "object": {
+              "kind": "analysis"
+            },
+            "path": "$.total_value",
+            "source_kind": "number",
+            "value": "1350.0"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].value",
+            "source_kind": "number",
+            "value": "75.0"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].value",
+            "source_kind": "number",
+            "value": "135.0"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].value",
+            "source_kind": "number",
+            "value": "195.0"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].value",
+            "source_kind": "number",
+            "value": "255.0"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].value",
+            "source_kind": "number",
+            "value": "315.0"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].value",
+            "source_kind": "number",
+            "value": "375.0"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "fact": {
+              "basis": "groups",
+              "columns": [
+                "月份"
+              ],
+              "operation": "aggregate",
+              "role": "group_total",
+              "step": null
+            },
+            "path": "$.group_total",
+            "source_kind": "number",
+            "value": "6"
+          }
+        ],
+        "value_index_truncated": false
+      },
+      "created_at": "2026-11-02T00:38:50.620948Z"
+    }
+  ],
+  "bindings": [
+    {
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+      "binding_kind": "initial",
+      "parent_ref": "8b26fcb2d759491989b99d1fca7f2490",
+      "producing_invocation_id": null,
+      "dataset_created_at": "2026-11-02T00:38:50.196021Z",
+      "bound_at": "2026-11-02T00:38:50.346505Z"
+    },
+    {
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "dataset_ref": "8b26fcb2d759491989b99d1fca7f2490",
+      "binding_kind": "initial",
+      "parent_ref": "e0786acc0a3c47c6afd3283eba6ad687",
+      "producing_invocation_id": null,
+      "dataset_created_at": "2026-11-02T00:38:49.817521Z",
+      "bound_at": "2026-11-02T00:38:50.346505Z"
+    },
+    {
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "dataset_ref": "acc4257f69594e71b8916a751d5f80aa",
+      "binding_kind": "initial",
+      "parent_ref": null,
+      "producing_invocation_id": null,
+      "dataset_created_at": "2026-11-02T00:38:48.037784Z",
+      "bound_at": "2026-11-02T00:38:50.346505Z"
+    },
+    {
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "dataset_ref": "c25edaf5865b41b39100e4314b958366",
+      "binding_kind": "initial",
+      "parent_ref": "acc4257f69594e71b8916a751d5f80aa",
+      "producing_invocation_id": null,
+      "dataset_created_at": "2026-11-02T00:38:49.061813Z",
+      "bound_at": "2026-11-02T00:38:50.346505Z"
+    },
+    {
+      "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+      "dataset_ref": "e0786acc0a3c47c6afd3283eba6ad687",
+      "binding_kind": "initial",
+      "parent_ref": "c25edaf5865b41b39100e4314b958366",
+      "producing_invocation_id": null,
+      "dataset_created_at": "2026-11-02T00:38:49.442478Z",
+      "bound_at": "2026-11-02T00:38:50.346505Z"
+    }
+  ],
+  "contract": {
+    "analysis_requirements": {
+      "aggregation": "sum",
+      "clarifications": [],
+      "dataset_ref": "340a8b2ee9294774b2641d4b408fe10c",
+      "filter_error": null,
+      "filters": [],
+      "group_col": "月份",
+      "knowledge_prohibitions": [],
+      "knowledge_queries": [],
+      "operations": [
+        {
+          "context_span": [
+            0,
+            28
+          ],
+          "disposition": "current",
+          "kind": "aggregate",
+          "operation_id": "op_989e5ab4e13da4d0558734682e12669f",
+          "order": 0,
+          "parameters": {
+            "columns": [],
+            "definition_key": null,
+            "filters": [],
+            "whole_row": false
+          },
+          "span": [
+            3,
+            5
+          ]
+        }
+      ],
+      "revision": 0,
+      "schema_version": 2,
+      "source_hash": "8231059453b237b7d25b2fb9c58d32b8558ba68ede5447501c86d09ec3c6da8e",
+      "source_length": 29,
+      "time_grain": null,
+      "total": true,
+      "total_column": "播出时长（分钟）",
+      "value_col": "播出时长（分钟）"
+    },
+    "assumptions": [
+      "HOST_COREF_V1:{\"f\":null,\"h\":\"1bbea35fb4ed8dfa07682554d6ba53aadbc1004739e21ab98475926eb4dfdb77\",\"p\":\"2\",\"q\":\"8231059453b237b7d25b2fb9c58d32b8558ba68ede5447501c86d09ec3c6da8e\",\"s\":false,\"t\":[\"d340a8b2ee9294774b2641d4b408fe10c\"]}"
+    ],
+    "constraints": [
+      "任务只有在 Verifier 通过后才能完成",
+      "成功工具调用必须形成可追溯 Evidence",
+      "模型文字不能替代用户要求的 Artifact"
+    ],
+    "goal": "按月份汇总当前结果的播出时长（分钟），给出各月合计和总计。",
+    "quantity_contract_version": "quantity-contract-v2",
+    "run_id": "a5403e39196d41cb8bc5450cd46209a9",
+    "success_criteria": [
+      {
+        "artifact_dimensions": [],
+        "artifact_format": null,
+        "artifact_type": null,
+        "criterion_id": "response.non_empty",
+        "description": "交付非空的最终答复",
+        "kind": "response",
+        "required": true
+      }
+    ]
+  },
+  "data_version_hash": "f27e83e6bf3c252e7a512be4d2a807d86ba8982ba8a8f6ba8d675551cd7cbe19",
+  "layer": "real local Host/tools/SQLite; scripted model; no browser/provider"
+}
