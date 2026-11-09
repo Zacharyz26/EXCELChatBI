@@ -21,6 +21,7 @@ export function ClarificationPrompt({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const actionLocked = useRef(false);
   const options = clarificationOptions(clarification);
+  const answerReadOnly = clarification.answer_schema.readOnly === true;
   const disabled = busy || pendingAction !== null;
 
   useEffect(() => {
@@ -31,7 +32,7 @@ export function ClarificationPrompt({
 
   async function submitAnswer(answer: string) {
     const clean = answer.trim();
-    if (!clean || disabled || actionLocked.current) return;
+    if (answerReadOnly || !clean || disabled || actionLocked.current) return;
     actionLocked.current = true;
     setPendingAction(clean);
     try {
@@ -74,7 +75,7 @@ export function ClarificationPrompt({
       <h3>{clarification.question}</h3>
       {clarification.reason && <p>{clarification.reason}</p>}
 
-      {options.length > 0 ? (
+      {answerReadOnly ? null : options.length > 0 ? (
         <div className="clarification-options" role="group" aria-label="澄清选项">
           {options.map((option) => (
             <button
@@ -112,7 +113,9 @@ export function ClarificationPrompt({
 
       {onCancel && (
         <div className="clarification-prompt__actions">
-          <span>选择后继续原任务，或取消后重新提问。</span>
+          <span>{answerReadOnly
+            ? "请取消当前任务后，按单一明确操作重新提问。"
+            : "选择后继续原任务，或取消后重新提问。"}</span>
           <button
             type="button"
             className="clarification-cancel"

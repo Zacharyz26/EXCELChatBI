@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from packages.common.text_surface import SourceProjection, parse_text_surface, table_cell_parts
 
@@ -56,6 +56,15 @@ class AggregateMemberContext:
 
 
 @dataclass(frozen=True)
+class ProfileProseContext:
+    """同段完整字段口径介绍，不能跨空段或借给另一明确字段。"""
+
+    field: str
+    field_span: tuple[int, int]
+    non_null_population: bool
+
+
+@dataclass(frozen=True)
 class StatementProjection:
     """唯一分句投影，保存原文坐标和有界标题/表格上下文。"""
 
@@ -69,6 +78,18 @@ class StatementProjection:
     literal_label: bool = False
     constraint_context: str = ""
     aggregate_context: AggregateMemberContext | None = None
+    profile_prose_context: ProfileProseContext | None = None
+
+
+def statement_parent_context(text: str, start: int, end: int) -> str:
+    """同段父文本只供身份/范围约束，不给子声明推断字段或事实角色。
+
+    `end` is the child's existing local statement boundary. Earlier sentences
+    in that paragraph may declare source constraints; later sentences (such as
+    an output Dataset reference) are not silently made the child's owner.
+    """
+    boundary = max((match.end() for match in re.finditer(r"\n[ \t]*\n", text[:start])), default=0)
+    return text[boundary:end]
 
 
 def delimited_spans(text: str) -> list[tuple[int, int]]:
@@ -120,6 +141,7 @@ def statement_projections(
     source_labels: set[str],
     profile_fields: set[str],
     dimensions: set[str],
+    structure_source: str | None = None,
 ) -> list[StatementProjection]:
     """标题、内联、表格与分句使用唯一组合和源位置映射，不按同值回查。"""
     from apps.orchestrator.control.profile_claims import (
@@ -205,7 +227,230 @@ def statement_projections(
                     )
                 )
         section_offset += len(section)
+    output = _profile_prose_projections(text, output, profile_fields)
+    output = _aggregate_list_projections(text, output, source_labels, dimensions, structure_source)
     return _aggregate_member_projections(output, source_labels, dimensions)
+
+
+def _profile_prose_projections(
+    source: str, statements: list[StatementProjection], fields: set[str]
+) -> list[StatementProjection]:
+    """介绍必须是段首字段身份＋统计口径；所有范围原文仍交公共门核验。"""
+    if not fields:
+        return statements
+    from apps.orchestrator.control.profile_population import mask_population, stated_population
+
+    declarations = []
+    for paragraph in re.finditer(r"(?:\A|(?<=\n\n))[^\n]*(?:\n(?!\n)[^\n]*)*", source):
+        for field in fields:
+            match = re.match(re.escape(field) + r"(?:的)?统计口径\s*[:：]", paragraph[0])
+            if match is None:
+                continue
+            # The declaration ends at its first actual sentence boundary.
+            end = re.search(r"[。!?！？]", paragraph[0])
+            if end is None:
+                continue
+            introduction = paragraph[0][: end.end()]
+            population = stated_population(introduction, fields)
+            if population is not None and not population.valid:
+                continue
+            metadata = mask_population(introduction, population)[match.end() :].rstrip("。!?！？")
+            declaration = re.fullmatch(
+                r"\s*(?:基于\s*)?(?:当前(?:上传)?数据|全表)\s*[、，,\s]*"
+                r"(?:统计对象(?:为|是)该列全部(?P<nonnull>非空)?(?:记录|行)"
+                r"(?:[（(]\s*非空数\s*(?:为|是|[:：=])?\s*\d+\s*[）)])?)?\s*",
+                metadata,
+            )
+            if declaration is None:
+                continue  # Unknown scope prose never becomes an unfiltered field heading.
+            declared_non_null = declaration["nonnull"] is not None
+            declarations.append(
+                (
+                    paragraph.span(),
+                    introduction,
+                    ProfileProseContext(
+                        field,
+                        (paragraph.start(), paragraph.start() + len(field)),
+                        declared_non_null,
+                    ),
+                )
+            )
+    result = []
+    for statement in statements:
+        positions = [p for p in statement.source_map if p is not None and not source[p].isspace()]
+        matches = [
+            (intro, context)
+            for (a, b), intro, context in declarations
+            if positions and a <= positions[0] < positions[-1] < b
+        ]
+        if len(matches) != 1 or statement.cells is not None:
+            result.append(statement)
+            continue
+        introduction, context = matches[0]
+        result.append(
+            replace(
+                statement,
+                profile_prose_context=context,
+                source_context="\n".join(x for x in (statement.source_context, introduction) if x),
+                constraint_context="\n".join(
+                    x for x in (statement.constraint_context, introduction) if x
+                ),
+            )
+        )
+    return result
+
+
+def _aggregate_list_projections(
+    source: str,
+    statements: list[StatementProjection],
+    fields: set[str],
+    dimensions: set[str],
+    structure_source: str | None,
+) -> list[StatementProjection]:
+    """完整聚合介绍只拥有紧接的同级列表；裸段落和其它正文没有继承权。"""
+    from apps.orchestrator.control.profile_claims import _field_spellings, _field_unit
+
+    surface = parse_text_surface(structure_source if structure_source is not None else source)
+    containers = [
+        n.span for n in surface.nodes if n.kind in {"quote", "inline_code", "fence", "blockquote"}
+    ]
+    nodes = [
+        n
+        for n in surface.nodes
+        if n.kind == "list_item" and not any(a <= n.span[0] < b for a, b in containers)
+    ]
+    roles = r"(?P<role>合计|总计|总额|均值|平均值|平均)"
+    ownership: dict[int, tuple[str, tuple[int, int], tuple[int, int], AggregateMemberContext]] = {}
+    closings = []
+    for index, node in enumerate(nodes):
+        # Only the first item of a contiguous list can acquire a heading.
+        if index and not source[nodes[index - 1].span[1] : node.span[0]].strip():
+            continue
+        prefix = source[: node.span[0]].rstrip()
+        line_start = prefix.rfind("\n") + 1
+        heading = prefix[line_start:]
+        boundary = source.rfind("\n\n", 0, line_start)
+        parent_start = boundary + 2 if boundary >= 0 else 0
+        parent = source[parent_start : len(prefix)]
+        choices = []
+        for field in fields:
+            for spelling in _field_spellings(field, heading):
+                # Normalize only the field's bracket width; source positions stay raw.
+                field_pattern = (
+                    re.escape(spelling).replace(r"\(", r"[（(]").replace(r"\)", r"[）)]")
+                )
+                for grammar in (
+                    r"各(?P<grain>.+?)(?P<metric>" + field_pattern + ")" + roles,
+                    r"(?P<metric>" + field_pattern + r")各(?P<grain>.+?)" + roles,
+                ):
+                    match = re.fullmatch(
+                        grammar + r"(?:[（(](?P<unit>[^()（）]+)[）)])?(?:如下)?\s*[:：]", heading
+                    )
+                    if match is None:
+                        continue
+                    if match["unit"] and match["unit"] != _field_unit(field):
+                        continue
+                    descriptor = match["grain"]
+                    grain = (
+                        None
+                        if descriptor == "组"
+                        else {"月": "月份", "年": "年份", "日": "日期"}.get(descriptor, descriptor)
+                    )
+                    if grain is not None and grain not in dimensions:
+                        continue
+                    choices.append(
+                        (
+                            field,
+                            match,
+                            AggregateMemberContext(
+                                field,
+                                "mean" if match["role"] in {"均值", "平均值", "平均"} else "sum",
+                                grain,
+                            ),
+                        )
+                    )
+        if len(choices) != 1:
+            continue
+        _field, match, context = choices[0]
+        metric_span = (line_start + match.start("metric"), line_start + match.end("metric"))
+        role_span = (line_start + match.start("role"), line_start + match.end("role"))
+        end = index
+        while end < len(nodes):
+            item = nodes[end]
+            if item.level != node.level or (
+                end > index and source[nodes[end - 1].span[1] : item.span[0]].strip()
+            ):
+                break
+            ownership[item.span[0]] = (parent, metric_span, role_span, context)
+            end += 1
+        closings.append((nodes[end - 1].span[1], parent, context))
+    result = []
+    for statement in statements:
+        positions = [p for p in statement.source_map if p is not None]
+        item_node = next((n for n in nodes if positions and positions[0] == n.span[0]), None)
+        proof = ownership.get(item_node.span[0]) if item_node is not None else None
+        if proof is None or statement.cells is not None:
+            start = next((p for p in positions if not source[p].isspace()), None)
+            closing = [
+                (heading, context)
+                for end, heading, context in closings
+                if start is not None and end <= start and not source[end:start].strip()
+            ]
+            if len(closing) == 1 and re.fullmatch(
+                r"\s*整个期间(?:[（(][^()（）]+[）)])?总计\s*(?:为|是|[:：=])?\s*"
+                + NUMBER_LITERAL.pattern
+                + r"\s*[^\d\s。!?！？]*[。!?！？]?\s*",
+                statement.text,
+            ):
+                heading, context = closing[0]
+                result.append(
+                    replace(
+                        statement,
+                        aggregate_context=context,
+                        source_context="\n".join(
+                            x for x in (statement.source_context, heading) if x
+                        ),
+                        constraint_context="\n".join(
+                            x for x in (statement.constraint_context, heading) if x
+                        ),
+                    )
+                )
+                continue
+            result.append(statement)
+            continue
+        assert item_node is not None
+        body = source[slice(*item_node.content_span)]
+        member = re.fullmatch(r"(?P<group>[^：:=\n]+?)(?P<op>等于|为|是|[:：=])(?P<value>.+)", body)
+        if member is None:
+            result.append(statement)
+            continue
+        heading, metric_span, role_span, context = proof
+        group_start, group_end = (item_node.content_span[0] + p for p in member.span("group"))
+        op_start = item_node.content_span[0] + member.start("op")
+        metric, role = source[slice(*metric_span)], source[slice(*role_span)]
+        result.append(
+            replace(
+                statement,
+                text=source[group_start:group_end]
+                + " "
+                + metric
+                + role
+                + source[op_start : item_node.content_span[1]],
+                source_map=(
+                    *range(group_start, group_end),
+                    None,
+                    *range(*metric_span),
+                    *range(*role_span),
+                    *range(op_start, item_node.content_span[1]),
+                ),
+                source_context="\n".join(x for x in (statement.source_context, heading) if x),
+                constraint_context="\n".join(
+                    x for x in (statement.constraint_context, heading) if x
+                ),
+                aggregate_context=context,
+            )
+        )
+    return result
 
 
 def _aggregate_member_projections(
@@ -240,6 +485,10 @@ def _aggregate_member_projections(
     ) = None
     for statement in statements:
         raw, mapping = statement.text, statement.source_map
+        if statement.aggregate_context is not None:
+            header = None
+            output.append(statement)
+            continue
         if statement.cells is not None or "\n" in raw:
             header = None
             output.append(statement)
@@ -447,9 +696,22 @@ def table_claim_fragments(
             continue
         if cursor < table:
             output.append(ClaimFragment(text[cursor:table], source_map=tuple(range(cursor, table))))
+        # A table owns the preceding source declaration in its hard paragraph,
+        # never the cells of an earlier table. Values retain their local role
+        # and source coordinates; the parent only constrains identity/scope.
+        parent = statement_parent_context(text[cursor:], table - cursor, table - cursor)
         header_values = [_plain(text[slice(*node.content_span)]) for node in headers]
         for header in headers:
-            output.extend(_header_fragments(text, header.content_span, source_labels or set()))
+            output.extend(
+                replace(
+                    fragment,
+                    source_context="\n".join(x for x in (parent, fragment.source_context) if x),
+                    constraint_context="\n".join(
+                        x for x in (parent, fragment.constraint_context) if x
+                    ),
+                )
+                for fragment in _header_fragments(text, header.content_span, source_labels or set())
+            )
         last_end = table
         for row in rows:
             cells = sorted(
@@ -467,7 +729,11 @@ def table_claim_fragments(
             if len(cells) != len(headers) or not all(node.closed for node in cells):
                 output.append(
                     ClaimFragment(
-                        text[row_start:row_end], (), source_map=tuple(range(row_start, row_end))
+                        text[row_start:row_end],
+                        (),
+                        source_map=tuple(range(row_start, row_end)),
+                        source_context=parent,
+                        constraint_context=parent,
                     )
                 )
                 continue
@@ -508,6 +774,8 @@ def table_claim_fragments(
                             if i != column
                         ),
                         headers[column].content_span,
+                        source_context=parent,
+                        constraint_context=parent,
                     )
                 )
         cursor = last_end

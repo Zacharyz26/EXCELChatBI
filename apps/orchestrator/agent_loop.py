@@ -748,8 +748,14 @@ def _analysis_slot_clarification(
     }
     label = labels.get(item.slot, item.slot)
     choices = list(item.candidates)
+    operation_read_only = item.slot == "operation" and not choices
     if item.slot == "filters":
         question = "请用完整比较式确认筛选条件，例如 字段=值 AND 字段=值；或明确取消筛选。"
+    elif operation_read_only:
+        question = (
+            "当前请求包含无法由单一操作槽表达的要求，不能通过填写一个操作名继续。"
+            "原要求保持不变；请取消本任务后，分别提出明确的操作请求。"
+        )
     elif item.reason == "unsupported_aggregation":
         question = (
             "当前汇总工具不支持原请求的统计方式。"
@@ -776,6 +782,7 @@ def _analysis_slot_clarification(
         "about": "analysis_" + item.slot,
         "question": question,
         "reason": item.reason,
+        "answer_read_only": operation_read_only,
         "analysis_slot_request": {
             "schema": "chatbi-analysis-slot-request-v1",
             "schema_version": 1,
@@ -945,6 +952,8 @@ def _waiting_user_payload(
         candidates = raw_analysis.get("candidates")
         if isinstance(candidates, list) and candidates and raw_analysis.get("slot") != "filters":
             payload["answer_schema"] = {"type": "string", "enum": list(candidates)}
+        elif source_clarification.get("answer_read_only") is True:
+            payload["answer_schema"] = {"type": "string", "readOnly": True}
         raw_role = source_clarification.get("data_role_request")
         if isinstance(raw_role, dict):
             payload["data_role_request"] = {
@@ -1624,6 +1633,22 @@ async def _stream_agent_chat_inner(
                     ):
                         raise ValueError("计划和合同的冻结来源绑定不一致")
                     reference_resolution = restored_plan_reference
+            if clarification_question_id == "reference_target":
+                contract, reference_resolution = await _answered_reference_contract(
+                    contract,
+                    answer=clarification_answer,
+                    task_store=task_store,
+                    reference_resolver=reference_resolver,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                    principal=active_principal,
+                    datasets=datasets,
+                )
+                run, _reference_contract_event = await run_in_threadpool(
+                    task_store.update_contract,
+                    contract,
+                    expected_version=run.state_version,
+                )
             if clarification_question_id == "memory_reference_target":
                 (
                     contract,
@@ -1978,6 +2003,7 @@ async def _stream_agent_chat_inner(
                     or (clarification_question_id or "").startswith("analysis:")
                     or clarification_question_id
                     in {
+                        "reference_target",
                         "join_datasets",
                         "join_keys",
                         "join_type",
@@ -2210,6 +2236,23 @@ async def _stream_agent_chat_inner(
             working.append(ModelMessage(role="user", content=clarified_text))
             try:
                 clarified_reference_query = f"{user_text}\n\n用户澄清：{str(answer)[:20_000]}"
+                if question_id == "reference_target":
+                    contract, reference_resolution = await _answered_reference_contract(
+                        contract,
+                        answer=answer,
+                        task_store=task_store,
+                        reference_resolver=reference_resolver,
+                        project_id=project_id,
+                        conversation_id=conversation_id,
+                        principal=active_principal,
+                        datasets=datasets,
+                    )
+                    run, reference_contract_event = await run_in_threadpool(
+                        task_store.update_contract,
+                        contract,
+                        expected_version=run.state_version,
+                    )
+                    yield _task_event(reference_contract_event, conversation_id)
                 if question_id == "memory_reference_target":
                     (
                         contract,
@@ -2235,7 +2278,8 @@ async def _stream_agent_chat_inner(
                     yield _task_event(memory_contract_event, conversation_id)
                 frozen_reference = find_reference_assumption(contract.assumptions)
                 if (
-                    question_id.startswith("analysis:") or question_id == "memory_reference_target"
+                    question_id.startswith("analysis:")
+                    or question_id in {"memory_reference_target", "reference_target"}
                 ) and frozen_reference is not None:
                     reference_resolution = await run_in_threadpool(
                         reference_resolver.restore,
@@ -2306,7 +2350,13 @@ async def _stream_agent_chat_inner(
                         )
                         if question_id.startswith("analysis:")
                         or question_id
-                        in {"join_datasets", "join_keys", "join_type", "filter_columns"}
+                        in {
+                            "join_datasets",
+                            "join_keys",
+                            "join_type",
+                            "filter_columns",
+                            "reference_target",
+                        }
                         else None
                     )
                 )
@@ -4592,6 +4642,82 @@ def _plan_system_content(
     )
 
 
+async def _answered_reference_contract(
+    contract: TaskContract,
+    *,
+    answer: object,
+    task_store: TaskStore,
+    reference_resolver: ReferenceResolver,
+    project_id: str,
+    conversation_id: str,
+    principal: Principal,
+    datasets: list[Dataset],
+) -> tuple[TaskContract, ReferenceResolution]:
+    """正式引用回答只补原任务来源；原 goal、义务和已冻结作用域保持。"""
+    run = await run_in_threadpool(task_store.get_run, contract.run_id)
+    calls = await run_in_threadpool(task_store.list_invocations, contract.run_id)
+    events = await run_in_threadpool(
+        task_store.list_events_by_type, contract.run_id, "clarification.answered"
+    )
+    answered = next(
+        (
+            event
+            for event in reversed(events)
+            if event.payload.get("question_id") == "reference_target"
+        ),
+        None,
+    )
+    if (
+        run is None
+        or run.status != "planning"
+        or calls
+        or not isinstance(answer, str)
+        or answered is None
+        or answered.payload.get("answer") != answer
+        or find_reference_assumption(contract.assumptions) is not None
+    ):
+        raise ValueError("引用选择缺少正式未执行澄清上下文")
+    resolution = await run_in_threadpool(
+        reference_resolver.resolve_answer,
+        contract.goal,
+        answer,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        principal=principal,
+    )
+    refs = {target.dataset_ref for target in resolution.targets}
+    sources = [dataset for dataset in datasets if dataset.ref in refs]
+    if len(sources) != 1:
+        raise ValueError("引用回答未冻结唯一真实数据来源")
+    source = sources[0]
+    previous = contract.analysis_requirements
+    if previous is None or previous.schema_version != 2:
+        raise ValueError("引用澄清不能隐式升级未知任务合同")
+    previous.validate_source(contract.goal)
+    if previous.dataset_ref is not None:
+        if previous.dataset_ref != source.ref:
+            raise ValueError("引用回答不能替换原冻结的数据范围")
+        requirements = previous
+    else:
+        requirements = explicit_analysis_requirements(
+            contract.goal,
+            dataset_refs=(source.ref,),
+            columns=tuple(_dataset_column_names(source)),
+            column_roles=_dataset_role_bindings(source),
+        )
+        if previous.total != requirements.total or previous.filters != requirements.filters:
+            raise ValueError("来源确认不能删除原任务总计或筛选条件")
+        requirements = replace(requirements, revision=previous.revision + 1)
+    assumption = resolution.assumption()
+    if assumption is None:
+        raise ValueError("引用回答缺少可恢复证明")
+    return replace(
+        contract,
+        analysis_requirements=requirements,
+        assumptions=(*contract.assumptions, assumption),
+    ), resolution
+
+
 async def _answered_memory_contract(
     contract: TaskContract,
     *,
@@ -5050,7 +5176,7 @@ def _enrich_tool_arguments(
             if isinstance(analysis_ids, list)
             else []
         )
-        if referenced_analysis_ids:
+        if referenced_analysis_ids and not requested_analysis_ids:
             enriched["analysis_ids"] = referenced_analysis_ids
         elif not requested_analysis_ids:
             # No all-history fallback. Even a current-run artifact must have

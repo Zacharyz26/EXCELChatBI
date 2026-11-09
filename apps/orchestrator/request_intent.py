@@ -6,7 +6,7 @@ import re
 from typing import cast
 
 from mcp_servers.excel_parser.advisor import infer_data_roles_from_mapping
-from packages.orchestration.report_intent import report_source_intent
+from packages.orchestration.report_intent import report_creation_mentions, report_source_intent
 from packages.session.models import Dataset, JsonObject
 
 _CHART_REQUEST_PATTERN = re.compile(
@@ -166,6 +166,9 @@ def required_chart_dimensions(
 
 def requests_report(user_text: str) -> bool:
     """Return whether the user explicitly requests a generated report."""
+    structural = report_creation_mentions(user_text)
+    if structural:
+        return any(disposition == "current" for _span, disposition in structural)
     for clause in _request_clauses(user_text):
         references_existing = _EXISTING_REPORT_REFERENCE_PATTERN.search(clause) is not None
         creates_updated_report = _NEW_REPORT_FROM_REFERENCE_PATTERN.search(clause) is not None

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from packages.common.dataset_store import (
@@ -82,6 +82,11 @@ def transform_dataset(args: dict[str, Any]) -> dict[str, Any]:
                 "rows_before": before,
                 "rows_after": len(df),
                 "removed_count": before - len(df),
+                **(
+                    {"retention_policy": _DEDUP_RETENTION_POLICY}
+                    if operation == "drop_duplicates"
+                    else {}
+                ),
                 "count_basis": "duplicate_excess"
                 if operation == "drop_duplicates"
                 else "removed_rows",
@@ -503,11 +508,14 @@ def _drop_nulls(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return df.dropna()
 
 
+_DEDUP_RETENTION_POLICY: Literal["first"] = "first"
+
+
 def _drop_duplicates(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     if columns:
         _require_columns(df, columns)
-        return df.drop_duplicates(subset=columns, keep="first")
-    return df.drop_duplicates(keep="first")
+        return df.drop_duplicates(subset=columns, keep=_DEDUP_RETENTION_POLICY)
+    return df.drop_duplicates(keep=_DEDUP_RETENTION_POLICY)
 
 
 def _sort(df: pd.DataFrame, keys: list[dict[str, Any]]) -> pd.DataFrame:

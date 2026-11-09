@@ -255,14 +255,19 @@ function persistCollaborationTurn(
 
   if (prompt.includes("选择指标") || prompt.includes("补充说明")) {
     const openAnswer = prompt.includes("补充说明");
+    const readOnly = prompt.includes("不可执行操作");
     const waitingPayload = {
       question_id: openAnswer ? "analysis_goal" : "metric",
-      question: openAnswer
+      question: readOnly
+        ? "当前组合操作无法通过一个答案继续，请取消后分别提出单一操作。"
+        : openAnswer
         ? "请补充本次分析想解决的业务问题。"
         : "请选择本次分析指标：销售额或订单量。",
       reason: openAnswer ? "当前目标范围过宽。" : "不同指标会改变分析结果。",
       about: openAnswer ? "analysis_goal" : "metric",
-      answer_schema: openAnswer
+      answer_schema: readOnly
+        ? { type: "string", readOnly: true }
+        : openAnswer
         ? { type: "string", minLength: 1 }
         : { type: "string", enum: ["销售额", "订单量"] },
       resume_token: "resume-token-metric-0001",
@@ -1585,6 +1590,39 @@ test("无枚举候选的澄清仍使用开放文本回答", async ({ page }) => 
 
   await expect(page.getByText("已按所选指标完成任务。")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("不可执行操作的只读澄清不提供无效答案入口且可以取消", async ({ page }) => {
+  const state = await installMockApi(page);
+  await page.goto("/");
+  await send(page, "请让我补充说明不可执行操作");
+  const prompt = page.locator(".chat-clarification-card");
+  await expect(prompt).toContainText("请取消后分别提出单一操作");
+  await expect(prompt.getByRole("textbox", { name: "澄清答案" })).toHaveCount(0);
+  await expect(prompt.getByRole("button", { name: "提交答案并继续" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeDisabled();
+  expect(state.chatRequests).toHaveLength(1);
+  page.once("dialog", (dialog) => void dialog.accept());
+  await prompt.getByRole("button", { name: "取消当前任务" }).click();
+  await expect(prompt).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "消息内容" })).toBeEnabled();
+});
+
+test("只读澄清刷新和协作面板保持相同能力边界", async ({ page }) => {
+  await installMockApi(page);
+  await page.goto("/");
+  await send(page, "请让我补充说明不可执行操作");
+  await expect(page.locator(".chat-clarification-card")).toBeVisible();
+  await page.reload();
+  const prompt = page.locator(".chat-clarification-card");
+  await expect(prompt).toContainText("请取消后分别提出单一操作");
+  await expect(prompt.getByRole("textbox", { name: "澄清答案" })).toHaveCount(0);
+  await page.getByRole("button", { name: "任务协作" }).click();
+  const panel = page.getByRole("dialog", { name: "任务协作" });
+  await expect(panel).toContainText("请取消后分别提出单一操作");
+  await expect(panel.getByRole("textbox", { name: "澄清答案" })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "提交答案并继续" })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "取消任务", exact: true })).toBeVisible();
 });
 
 test("初始化失败在刷新后仍可见并可从原目标重试", async ({ page }) => {

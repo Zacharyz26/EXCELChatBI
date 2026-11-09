@@ -760,6 +760,7 @@ _OUTPUT_SCHEMAS: dict[str, JsonSchema] = {
                                 "rows_after": {"type": "integer", "minimum": 0},
                                 "removed_count": {"type": "integer", "minimum": 0},
                                 "count_basis": {"enum": ["removed_rows", "duplicate_excess"]},
+                                "retention_policy": {"const": "first"},
                                 "columns": {"type": ["array", "null"], "items": {"type": "string"}},
                             },
                         },

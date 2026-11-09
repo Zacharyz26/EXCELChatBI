@@ -58,7 +58,7 @@ _PREFIX = {
     "column_count": r"列数|字段数",
     "duplicate_rows": r"整行重复多余记录数",
     "duplicate_excess_count": r"重复多余记录数",
-    "duplicate_ratio": r"重复率",
+    "duplicate_ratio": r"重复率|重复比例",
 }
 
 
@@ -281,6 +281,49 @@ def _field_spellings(field: str, context: str) -> list[str]:
     label = _normal(field)
     parts = _field_unit_parts(label)
     return [label, parts[1]] if parts is not None and parts[2] in _normal(context) else [label]
+
+
+def unit_qualified_field_mentions(text: str, fields: set[str]) -> set[str]:
+    """聚合与画像共用实际字段和既有单位契约，不把未知单位当别名。"""
+    normalized = _normal(text)
+    result = set()
+    for field in fields:
+        for spelling in _field_spellings(field, normalized):
+            for match in re.finditer(re.escape(spelling), normalized):
+                prefix, suffix = normalized[: match.start()], normalized[match.end() :]
+                if prefix and re.search(r"[A-Za-z0-9_]$", prefix):
+                    continue
+                if (
+                    spelling != _normal(field)
+                    and prefix
+                    and re.search(r"\w$", prefix)
+                    and re.fullmatch(r"\s*(?:整个|全部)?期间", prefix) is None
+                ):
+                    continue  # An alias cannot be the suffix of another named field.
+                if spelling != _normal(field) and re.match(r"\s*\(", suffix):
+                    continue
+                if suffix and not re.match(
+                    r"\s*(?:的|各|合计|总计|总额|平均|均值|[：:=，,。;；])", suffix
+                ):
+                    continue
+                result.add(field)
+    return {
+        field for field in result if not any(field != other and field in other for other in result)
+    }
+
+
+def explicit_field_unit_matches(field: str, suffix: str) -> bool:
+    """现有白名单仅允许核对原字段单位，不定义换算或未知单位别名。"""
+    declared = _field_unit(field)
+    if declared is None:
+        return True  # This helper does not invent metadata for untyped legacy fields.
+    tail = _normal(suffix).lstrip()
+    if tail.casefold().startswith(declared.casefold()):
+        tail = tail[len(declared) :]
+    # No declaration is only proven by an actual expression boundary. An
+    # unknown attached word is not silently treated as a missing unit; even a
+    # known prefix must end before another unit/qualifier (e.g. 分钟桶).
+    return not tail or bool(re.match(r"[\s，,。.!?！？;；:)\]】」』\"'`”’]", tail))
 
 
 def _exact_unit_declaration(clause: str, field: str) -> bool:
@@ -1031,6 +1074,8 @@ def profile_candidate_matches(
     left, right = _clause_span(text, start, end, fields)
     prefix, suffix = text[left:start], text[end:right]
     display = parse_numeric_display(text[start:end], suffix)
+    if binding["unit"] == "raw" and not explicit_field_unit_matches(str(binding["metric"]), suffix):
+        return False
     displayed_unit = re.match(r"\s*(%|[千万亿]?元|小时|分钟|秒|天|人)", suffix)
     if binding["unit"] == "count" and (display.percent or displayed_unit):
         return False
@@ -1061,6 +1106,11 @@ def profile_candidate_matches(
         return False
     role: str | None = None
     role_start: int | None = None
+    explicit_excess = (
+        re.fullmatch(r"\s*(?:条|行)\s*整行重复(?:的)?多余记录\s*[。.!！?？;；]?\s*", suffix)
+        is not None
+        and re.fullmatch(r"\s*(?:存在|有|共有)?\s*", prefix) is not None
+    )
     matches = [
         (candidate, match)
         for candidate, pattern in _PREFIX.items()
@@ -1087,6 +1137,10 @@ def profile_candidate_matches(
             role = "null_ratio"
             role_start = restatement.label_span[0] - left
     if role is None:
+        if explicit_excess:
+            role = "duplicate_rows"
+            role_start = 0
+    if role is None:
         postfix = [
             (r"\s*个?\s*(?:不同取值|不同值|唯一值)", "distinct_count"),
             (r"\s*个?\s*(?:缺失值|空值)", "null_count"),
@@ -1103,7 +1157,10 @@ def profile_candidate_matches(
             return False  # Ambiguous duplicate counts are not dataset row counts.
     if role is None or role != binding["statistic"]:
         return False
-    if role in {"non_null_count", "duplicate_excess_count", "duplicate_rows"}:
+    if (
+        role in {"non_null_count", "duplicate_excess_count", "duplicate_rows"}
+        and not explicit_excess
+    ):
         count_end = r"\s*(?:条|行|个)?\s*"
         if role == "duplicate_rows":
             # A whole-dataset excess count may have its same-basis ratio aside.
@@ -1143,6 +1200,43 @@ def profile_candidate_matches(
         if leading in {"", "该列", "该列的"}:
             mentioned = _inherited_field(text, left, fields)
     return len(mentioned) == 1 and binding["object"].get("column") in mentioned
+
+
+def profile_prose_candidate_matches(
+    binding: JsonObject,
+    universe: list[JsonObject],
+    text: str,
+    start: int,
+    end: int,
+    evidence_value: Decimal,
+    field: str,
+) -> bool:
+    """完整口径介绍只给无主语统计槽字段身份，不能覆盖显式别的字段。"""
+    if not binding.get("profile_fact") or (binding.get("object") or {}).get("column") != field:
+        return False
+    fields = {
+        str(b["object"]["column"])
+        for b in universe
+        if b.get("profile_fact") and b.get("object", {}).get("kind") == "profile_column"
+    }
+    left, right = _clause_span(text, start, end, fields)
+    # A parenthetic statistic is itself a bounded member, with the same raw
+    # value location. Its surrounding scope remains checked by the caller.
+    for match in re.finditer(r"[（(]([^()（）]+)[）)]", text):
+        if match.start(1) <= start < end <= match.end(1):
+            left, right = match.span(1)
+    prefix = text[left:start]
+    role = re.fullmatch(
+        r"\s*(?:该列(?:的)?)?\s*(?:" + _STAT_LABEL + r")\s*(?:为|是|等于|[:：=])?\s*", prefix, re.I
+    )
+    if role is not None:
+        projected = field + text[left:right]
+        shift = len(field) - left
+        return profile_candidate_matches(
+            binding, universe, projected, start + shift, end + shift, evidence_value
+        )
+    # Explicit complete subjects still use the original strict subject parser.
+    return profile_candidate_matches(binding, universe, text, start, end, evidence_value)
 
 
 DUPLICATE_COUNT_INCOMPLETE = (

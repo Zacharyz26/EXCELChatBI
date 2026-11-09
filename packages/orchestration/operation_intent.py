@@ -21,6 +21,7 @@ OperationDisposition = Literal[
 DATA_OPERATION_ACTIONS = (
     "筛选",
     "过滤",
+    "保留",
     "排除",
     "清洗",
     "删除",
@@ -144,6 +145,13 @@ def operation_mentions(
     for match in re.finditer(_ACTION, text):
         if _inside(match.start(), ignored) or _inside(match.start(), occupied):
             continue
+        if match[0] == "保留" and not re.search(
+            r"(?:[=<>≥≤≠]|等于|大于|小于|为|是)",
+            re.split(r"[，,。；;\n]", text[match.end() :], maxsplit=1)[0],
+        ):
+            # Retaining report material/units is not a data filter. A bounded
+            # comparison operand is required before this lexical action exists.
+            continue
         description = next(
             (item for item in descriptions if item.start() <= match.start() < item.end()), None
         )
@@ -153,7 +161,7 @@ def operation_mentions(
         )
         disposition: OperationDisposition = (
             "described"
-            if consumed_sources.consumes(*match.span())
+            if consumed_sources.material_owns(*match.span())
             or (description and not executes_description)
             else "current"
         )
@@ -220,7 +228,7 @@ def operation_family(action: str) -> str:
     """Stable lexical family, not an authorization decision."""
     if action in TOTAL_OPERATION_ACTIONS:
         return "total"
-    if action in {"筛选", "过滤", "排除"}:
+    if action in {"筛选", "过滤", "排除", "保留"}:
         return "filter"
     if action == "去重":
         return "drop_duplicates"

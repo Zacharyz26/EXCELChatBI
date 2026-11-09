@@ -283,6 +283,22 @@ def population_request(text: str, fields: set[str]) -> PopulationRequest | None:
     return stated_population(text, fields)
 
 
+def declared_population(text: str, fields: set[str]) -> PopulationRequest | None:
+    """显式范围头是独立来源声明；普通操作叙述不创建该义务。
+
+    Reuse the existing scope grammar and parser. The structural separator
+    distinguishes a typed declaration from prose such as 筛选结果如下.
+    Invalid declarations still return their unresolved PopulationRequest.
+    """
+    request = stated_population(text, fields)
+    if request is None:
+        return None
+    marker = _SCOPE.match(text, request.span[0])
+    if marker is None or re.match(r"\s*[:：=]", text[marker.end() :]) is None:
+        return None
+    return request
+
+
 def population_matches(binding: JsonObject, request: PopulationRequest | None) -> bool:
     """所有画像统计共用范围门禁；数值相同不放宽条件或版本。"""
     actual = population_filters(binding)

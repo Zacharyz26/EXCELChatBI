@@ -36,6 +36,7 @@ def seal_count_facts(
         return summary
     result = result if isinstance(result, dict) else {}
     facts: list[dict[str, Any]] = []
+    policies: list[dict[str, Any]] = []
     input_ref = arguments.get("dataset_ref")
     output_ref = result.get("dataset_ref") if tool == "transform_dataset" else input_ref
     operations = {key: arguments[key] for key in OPERATIONS if key in arguments}
@@ -82,6 +83,15 @@ def seal_count_facts(
         operation = next(iter(operations)) if len(operations) == 1 else "transform"
         add("$.rows_before", result.get("rows_before"), "before", operation, "rows", None)
         add("$.rows_after", result.get("rows_after"), "after", operation, "rows", None)
+        columns = result.get("columns")
+        if (
+            isinstance(columns, list)
+            and all(isinstance(column, str) for column in columns)
+            and len(columns) == len(set(columns))
+        ):
+            add(
+                "$.column_count", len(columns), "column_count", operation, "schema_columns", columns
+            )
         changes = result.get("row_changes")
         if changes is not None:
             if (
@@ -131,6 +141,19 @@ def seal_count_facts(
                             or (step_op == "sort" and removed != 0)
                         ):
                             invalid = True
+                        if "retention_policy" in step:
+                            if step_op != "drop_duplicates" or step["retention_policy"] != "first":
+                                invalid = True
+                            else:
+                                policies.append(
+                                    {
+                                        "path": f"$.row_changes.steps[{i}].retention_policy",
+                                        "operation": step_op,
+                                        "value": step["retention_policy"],
+                                        "columns": step_columns,
+                                        "step": i,
+                                    }
+                                )
                         previous = step_after
                         if len(steps) == 1:
                             continue  # The top-level facts already represent this step.
@@ -215,6 +238,7 @@ def seal_count_facts(
         "invalid": invalid,
         "count_state": count_state,
         "paths": [item["path"] for item in facts],
+        **({"policies": policies} if policies else {}),
     }
     projection["projection_hash"] = _hash({"envelope": projection, "facts": facts})
     return {

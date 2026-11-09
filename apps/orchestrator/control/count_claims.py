@@ -31,6 +31,11 @@ _OPS = {
     "操作": "transform",
 }
 _WRAPPERS = r"[\s*`\"'“”‘’「」『』()（）]*"
+_ROW_TRANSITION = re.compile(
+    r"\s*(?:数据(?:行数|量)?|行数|记录数)?\s*从\s*"
+    r"(?P<before>\d+)\s*(?:行|条记录)\s*(?:变为|变成|降为|增加到|减少到)\s*"
+    r"(?P<after>\d+)\s*(?:行|条记录)\s*"
+)
 
 
 def _chinese(value: int, *, initial: bool = True) -> str:
@@ -105,6 +110,7 @@ class OperationQuantity:
     role: str
     operation: str | None
     duplicate: bool = False
+    null_rows: bool = False
 
 
 def operation_quantity(text: str, left: int, right: int) -> OperationQuantity | None:
@@ -124,6 +130,11 @@ def operation_quantity(text: str, left: int, right: int) -> OperationQuantity | 
     operation = (
         next(iter(operations)) if len(operations) == 1 else "ambiguous" if operations else None
     )
+    transition = _ROW_TRANSITION.fullmatch(local)
+    if transition is not None:
+        for phase_name in ("before", "after"):
+            if transition.span(phase_name) == (left - local_start, right - local_start):
+                return OperationQuantity(phase_name, "transform")
     role = None
     before = re.search(
         r"(?:输入|变换前|处理前|操作前|(?:筛选|过滤|清洗空值|删除空值|清洗|去空|去重|排序|排除行)(?:之)?前)",
@@ -175,13 +186,30 @@ def operation_quantity(text: str, left: int, right: int) -> OperationQuantity | 
     obj = row_quantity_object(suffix)
     if obj is None:
         return OperationQuantity("unsupported", operation)
-    return OperationQuantity(role, operation, obj.basis == "duplicate_excess" or "重复" in local)
+    return OperationQuantity(
+        role,
+        operation,
+        obj.basis == "duplicate_excess" or "重复" in local,
+        obj.basis == "null_rows",
+    )
 
 
 def count_noun(text: str, left: int, right: int) -> str | None:
     """返回显式数量宾语；未知宾语仍形成义务，不借别的计数证明。"""
     found = count_object_at(text, left, right)
     return found[0] if found else None
+
+
+def column_quantity_matches(text: str, left: int, right: int, columns: list[str]) -> bool:
+    """列数由实际schema投影证明；完整列名列表不能错借另一列集合。"""
+    prefix, suffix = text[:left], text[right:]
+    if re.match(r"\s*列(?:[，,。；;!?！？]|$)", suffix) is None:
+        return False
+    plain = re.split(r"[，,。；;!?！？]", prefix)[-1]
+    if re.fullmatch(r"\s*(?:(?:仍|共|共有)|(?:列数|字段数)(?:为|是|[:：=])?)\s*", plain):
+        return True
+    listing = re.search(r"(?:列结构|字段列表)(?:仍)?为[“\"`](?P<fields>[^”\"`]+)[”\"`]\s*$", prefix)
+    return bool(listing and re.split(r"[、，,]", listing["fields"]) == columns)
 
 
 def operation_scope_matches(text: str, operations: dict[str, Any], columns: list[str]) -> bool:
@@ -199,25 +227,44 @@ def operation_scope_matches(text: str, operations: dict[str, Any], columns: list
             and set(selected) != set(columns)
         ):
             return False
-        for match in re.finditer(r"(?:按|依据|基于)\s*(.+?)\s*(?:进行)?(?:" + action + ")", text):
+        for match in re.finditer(
+            r"(?:按|依据|基于)\s*([^：:，,；;。!?！？\n]+?)\s*(?:进行)?(?:" + action + ")", text
+        ):
             named = [s.strip(" \t\"'`“”") for s in re.split(r"[、,，]|以及|和", match[1])]
             if named in (["整行"], ["全行"]):
                 if selected and set(selected) != set(columns):
                     return False
             elif set(named) != set(selected or columns):
                 return False
+    # Operation syntax owns these assignments before the shared filter parser.
+    # The original quantities remain audited independently; only this scope
+    # view removes a fully recognized row transition or exact null-operation.
+    scope_view = list(text)
+    for clause in re.finditer(r"[^，,、；;。!?！？]+", text):
+        if _ROW_TRANSITION.fullmatch(clause[0]):
+            scope_view[clause.start() : clause.end()] = " " * len(clause[0])
+        for field in operations.get("drop_nulls", []):
+            null_action = re.fullmatch(
+                r"\s*(?:删除|移除|剔除)(?:了)?\s*[“\"`]?"
+                + re.escape(field)
+                + r"[”\"`]?\s*为空(?:值)?的(?:数据)?记录(?:后)?\s*",
+                clause[0],
+            )
+            if null_action:
+                scope_view[clause.start() : clause.end()] = " " * len(clause[0])
+    comparison_text = "".join(scope_view)
     filters = operations.get("filters", [])
     fields = set(columns) | {item["column"] for item in filters}
     # Discover symbolic comparisons before consulting known fields. An unknown
     # field is an unsupported obligation, never an absent condition. Symbolic
     # and natural equality use the same field validation.
     matches = comparison_matches(
-        text,
+        comparison_text,
         natural_equal=True,
         following_boundary="(?:" + "|".join(_OPS) + ")",
         columns=tuple(fields),
     )
-    remainder = text
+    remainder = comparison_text
     for match in reversed(matches):
         remainder = remainder[: match.start()] + remainder[match.end() :]
     if re.search(r"[=<>]|!=", remainder):

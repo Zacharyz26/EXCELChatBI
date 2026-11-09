@@ -245,53 +245,22 @@ def report_source_deliveries(
 
 
 def _matches_source_operand(operand: ReportSourceOperand, artifact: Artifact) -> bool:
-    """Match declared material identity using existing tool fields, never titles/values."""
-    if artifact.type != operand.artifact_type:
-        return False
-    params, payload = artifact.params or {}, artifact.payload or {}
-    if artifact.type == "chart":
-        option = payload.get("option")
-        if artifact.source_tool != "gen_chart" or not isinstance(option, dict):
-            return False
-        kind = params.get("chart_type")
-        series = option.get("series")
-        if (
-            not isinstance(kind, str)
-            or payload.get("chart_type") != kind
-            or not isinstance(series, list)
-            or not series
-            or any(not isinstance(item, dict) or item.get("type") != kind for item in series)
-        ):
-            return False
-        if operand.chart_kind is not None and kind != operand.chart_kind:
-            return False
-        encoding = params.get("encoding")
-        group = encoding.get("x") if isinstance(encoding, dict) else None
-    elif artifact.type == "table":
-        if artifact.source_tool != "aggregate_preview":
-            return False
-        group = params.get("group_col")
-        if not isinstance(group, str) or payload.get("group_col") != group:
-            return False
-    else:
-        return False
-    if operand.temporal_grain is not None:
-        # This is the existing finite field-identity contract. The aggregate
-        # tool does not perform arbitrary calendar bucketing. Unknown names
-        # cannot acquire monthly semantics from labels, totals or date-looking rows.
-        field = {"month": "月份", "year": "年份", "quarter": "季度", "day": "日期"}.get(
-            operand.temporal_grain
-        )
-        if field is None or group != field:
-            return False
-    return True
+    from packages.orchestration.report_intent import source_operand_matches
+
+    return source_operand_matches(
+        operand,
+        artifact_type=artifact.type,
+        source_tool=artifact.source_tool,
+        params=artifact.params or {},
+        payload=artifact.payload or {},
+    )
 
 
 def report_sources_match(intent: ReportSourceIntent, sources: list[Artifact]) -> bool:
     """Every complete source operand needs a matching selected material."""
     return all(
         any(_matches_source_operand(operand, source) for source in sources)
-        for operand in intent.operands
+        for operand in intent.required_operands
     )
 
 

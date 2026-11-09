@@ -27,6 +27,7 @@ from packages.orchestration.context_selection import (
     reference_binding_payload,
     source_intent,
 )
+from packages.orchestration.report_intent import report_source_intent, source_operand_matches
 from packages.session.models import Artifact, Dataset, JsonObject
 from packages.session.store import SessionStore
 
@@ -389,6 +390,46 @@ class ReferenceResolver:
         )
         return resolution
 
+    def resolve_answer(
+        self,
+        query: str,
+        answer: str,
+        *,
+        project_id: str,
+        conversation_id: str,
+        principal: Principal,
+    ) -> ReferenceResolution:
+        """在正式回答入口验证可见引用，并让引用证明继续归属原任务。"""
+        prior = self.resolve(
+            query, project_id=project_id, conversation_id=conversation_id, principal=principal
+        )
+        if prior.status not in {"ambiguous", "unresolved"}:
+            raise ValueError("原引用不是待澄清状态")
+        selected = self.resolve(
+            answer, project_id=project_id, conversation_id=conversation_id, principal=principal
+        )
+        if (
+            selected.status != "resolved"
+            or not selected.targets
+            or any(
+                target.mention == "conversation_execution_context" for target in selected.targets
+            )
+        ):
+            raise ValueError("引用回答没有明确选择可见对象")
+        refs = {target.dataset_ref for target in selected.targets}
+        if len(refs) != 1 or None in refs:
+            raise ValueError("引用回答必须绑定唯一数据来源")
+        choices = {item.reference_id for item in prior.choices}
+        if choices and not any(target.reference_id in choices for target in selected.targets):
+            raise ValueError("引用回答未选择原歧义候选")
+        clean = _clean_query(query)
+        if source_intent(clean, current_dataset_ref=next(iter(refs))).reason_code is not None:
+            raise ReferenceAccessDenied("原请求未授权该来源用途")
+        _artifacts, datasets = self._catalog(
+            project_id=project_id, conversation_id=conversation_id, principal=principal
+        )
+        return _with_context_binding(_resolved(clean, list(selected.targets)), datasets, None)
+
     def restore(
         self,
         assumption: str,
@@ -584,6 +625,47 @@ def _resolve(
                     )
                 )
 
+    # Report source operands carry their own type/grain, shared with the
+    # producer and final verifier. Resolve only this conversation's matching
+    # materials; a project-wide recent artifact is never an execution source.
+    source_request = report_source_intent(query)
+    report_issue_indices: set[int] = set()
+    for operand in source_request.operands:
+        if explicit_matches and targets:
+            # Exact IDs supplied to a reference clarification remain exact;
+            # report material/type and current-version gates still validate them.
+            consumed.append(operand.noun_span)
+            continue
+        if current_dataset is None:
+            issues.append(("execution_source_unavailable", []))
+            consumed.append(operand.noun_span)
+            continue
+        source_candidates = [
+            artifact
+            for artifact in artifacts
+            if artifact.dataset_ref == current_dataset.ref
+            and source_operand_matches(
+                operand,
+                artifact_type=artifact.type,
+                source_tool=artifact.source_tool,
+                params=artifact.params or {},
+                payload=artifact.payload or {},
+            )
+        ]
+        if len(source_candidates) > 1 and operand.selection == "unique":
+            report_issue_indices.add(len(issues))
+            issues.append(("reference_ambiguous", _artifact_choices(source_candidates)))
+            consumed.append(operand.noun_span)
+        elif source_candidates:
+            targets.append(
+                _artifact_target(source_candidates[-1], query[slice(*operand.noun_span)])
+            )
+            consumed.append(operand.noun_span)
+        else:
+            report_issue_indices.add(len(issues))
+            issues.append(("reference_not_found", []))
+            consumed.append(operand.noun_span)
+
     for match in _ORDINAL_PATTERN.finditer(query):
         if _overlaps(match.span(), consumed):
             continue
@@ -631,7 +713,10 @@ def _resolve(
 
     if "刚才" in query or "上次" in query:
         for token, selector in (("趋势", "trend"), ("图表", "chart")):
-            if token not in query:
+            if not any(
+                not _overlaps(match.span(), consumed)
+                for match in re.finditer(re.escape(token), query)
+            ):
                 continue
             candidates = _artifact_candidates(artifacts, selector)
             if candidates:
@@ -681,7 +766,17 @@ def _resolve(
         return _result(
             status=status,
             query=query,
-            targets=(),
+            # An unresolved material does not erase the independently proven
+            # current data source. Keep only that dataset anchor, never a
+            # partially resolved artifact set. Status remains blocking and no
+            # successful reference assumption/Host annotation is generated.
+            targets=(
+                (_dataset_target(current_dataset, "conversation_execution_context"),)
+                if current_dataset is not None
+                and not explicit_matches
+                and report_issue_indices == set(range(len(issues)))
+                else ()
+            ),
             choices=tuple(choices),
             reason_code=reason_code,
         )

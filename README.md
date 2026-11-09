@@ -1,13 +1,15 @@
 # ChatBI 智能体
 
+> **当前交付状态（2026-11-09）：阶段 2／V1 BLOCKED，整体 NO_GO。** R1–R4 已有独立限定检查点；最新真实验收仅月汇总等分段通过，画像／处理说明、图表意图和新 PDF 仍有阻塞。预算、覆盖及证据见[当前状态记录](./docs/项目状态与文档同步记录_2026-11-09.md)。历史工程关闭、免费测试和提交推送均不等于完整交接通过。
+
 中文优先的对话式数据分析 Agent：通过自然语言完成知识问答、表格数据分析、可视化和报告生成。
 
 > 开发约束见 [`CLAUDE.md`](./CLAUDE.md)，完整架构见
-> [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)，当前开发路线见
-> [`docs/Agent自主化开发规划.md`](./docs/Agent自主化开发规划.md)。文档入口和现行/历史边界见
+> [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)，当前开发与交付以
+> [六阶段总纲](./docs/项目当前开发与交付计划_2026-10-27.md)及[阶段 2 子计划](./docs/对话式数据Agent结构性修复实施计划_2026-10-27.md)为准。文档入口和现行/历史边界见
 > [`docs/README.md`](./docs/README.md)。
 
-> 文档状态：2026-08-27。当前版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
+> 以下为 2026-08-27 历史工程状态：当时版本为 `v2.5-closeout` 单机、单租户技术预览；v2.4 阶段
 > 2A–2E、v2.5 阶段 3–6，以及 C1“启动依赖契约”和 C2“未实现工具撤出目录”均已工程完成。
 > 2026-08-24 已在 WSL2/CPU 上实测完整 BGE-M3 + BGE reranker + Docker Milvus
 > Standalone：API/Web readiness、2 文档 6 片段重建和 semantic 门禁均通过。
@@ -20,7 +22,7 @@
 |---|---|---|---|
 | 第一次跑通、日常前端/API 开发 | `hashing + lexical + local` | 不需要 | [方案 A：轻量本地启动](#方案-a轻量本地启动推荐新开发者) |
 | 使用完整中文语义模型和独立向量库 | `bge-m3 + bge-reranker-v2-m3 + Milvus` | 只运行 Milvus | [方案 B：完整 BGE + Docker Milvus](#方案-b完整-bge--docker-milvus) |
-| 验证生产结构、多 MCP 服务和统一入口 | 由 Compose profile 决定 | 全栈 | [方案 C：根 Compose](#方案-c根-compose-生产结构验收) |
+| 验证生产结构、多 MCP 服务和统一入口 | 由 Compose profile 决定 | 全栈 | [方案 C：根 Compose](#方案-c根-compose生产结构验收) |
 
 如果你刚接触本项目，先用方案 A；需要真实 RAG 时再切方案 B。方案 B 的逐项安装、模型
 侧载、RBAC、WSL2/Docker Desktop 排错见
@@ -33,10 +35,10 @@
 - API readiness：`http://127.0.0.1:8000/health/ready`；
 - 根 Compose 统一入口：`http://127.0.0.1:8080`。
 
-## 当前进度
+## 历史工程进度（截至 2026-08-27）
 
-当前可运行基线是带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；最新
-Compose/容器 CI 已全绿。自然语言对话是唯一前端入口；
+以下版本基线为带 **v2.4 阶段 2E 生产工具服务结构** 的对话式 Agent；所列
+Compose/容器 CI 通过仅适用于对应历史提交，不代表当前修复版本验收。自然语言对话是唯一前端入口；
 模型可循环调用画像、统计、图表、数据变换、知识检索和报告工具，过程与 Artifact 通过
 SSE 展示。SQLite schema v11 已包含 TaskRun/Contract/Event/Snapshot、Invocation、
 Evidence、Claim、Checkpoint、项目成员、报告所有权，以及 v2.5 受控记忆记录、

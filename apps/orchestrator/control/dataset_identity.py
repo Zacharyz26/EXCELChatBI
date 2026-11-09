@@ -10,11 +10,12 @@ IDENTITY_FIELDS = {
     "dataset_ref": "dataset_ref",
     "数据集": "dataset_ref",
     "dataset_version": "dataset_version",
+    "数据版本": "dataset_version",
     "版本": "dataset_version",
 }
 IDENTITY_DECLARATION = re.compile(
-    r"(?P<label>(?<![A-Za-z0-9_])(?:dataset_version|dataset_ref)|数据集|版本)"
-    r"\s*[:：=]?\s*(?P<value>(?:(?!数据集|版本)[^\s，,；;。！？!?：:=])+)"
+    r"(?P<label>(?<![A-Za-z0-9_])(?:dataset_version|dataset_ref)|数据版本|数据集|版本)"
+    r"\s*[:：=]?\s*(?P<value>(?:(?!数据版本|数据集|版本)[^\s，,；;。！？!?：:=])+)"
 )
 
 
@@ -25,7 +26,11 @@ def identity_declarations(text: str, *, headers_only: bool = False) -> list[re.M
     candidates: list[re.Match[str]] = []
     position = 0
     while match := IDENTITY_DECLARATION.search(text, position):
-        candidates.append(match)
+        # Prefer the complete typed label; a suffix inside 数据版本 is not a
+        # second declaration. Nested labels in its value remain independently
+        # visible (e.g. 数据集 dataset_ref: ...).
+        if not any(item.start("label") <= match.start() < item.end("label") for item in candidates):
+            candidates.append(match)
         position = match.start() + 1
     if not headers_only:
         return candidates

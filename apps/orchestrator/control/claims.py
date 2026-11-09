@@ -28,6 +28,7 @@ from packages.session.task_models import ClaimDraft, EvidenceRecord, ToolInvocat
 
 from apps.orchestrator.control.claim_structure import (
     AggregateMemberContext,
+    ProfileProseContext,
     ProfileTableContext,
     dimension_mentions,
     split_claim_statements,
@@ -36,6 +37,7 @@ from apps.orchestrator.control.claim_structure import (
 from apps.orchestrator.control.count_claims import (
     CHINESE_COUNT,
     chart_delivery_role,
+    column_quantity_matches,
     count_noun,
     operation_quantity,
     operation_scope_matches,
@@ -60,6 +62,7 @@ from apps.orchestrator.control.numeric_display import (
 )
 from apps.orchestrator.control.profile_claims import (
     annotate_profile_values,
+    explicit_field_unit_matches,
     has_column_profile,
     parse_profile_stat_header,
     profile_assignment_role,
@@ -68,6 +71,7 @@ from apps.orchestrator.control.profile_claims import (
     profile_field_identity_spans,
     profile_statement_context,
     profile_statistic_labels,
+    unit_qualified_field_mentions,
 )
 from apps.orchestrator.control.profile_population import (
     PopulationRequest,
@@ -270,8 +274,13 @@ def _verified_identity_spans(
     if valid:
         return [(start, end) for _, _, start, end in declarations], []
     return [], [
-        {"token": value, "supported": False, "reason": "unverified_dataset_identity"}
-        for _, value, _, _ in declarations
+        {
+            "token": value,
+            "supported": False,
+            "reason": "unverified_dataset_identity",
+            "statement_span": [start, end],
+        }
+        for _, value, start, end in declarations
     ]
 
 
@@ -450,12 +459,10 @@ def extract_numeric_claims(
         chart_source_evidence=chart_source_evidence,
     )
 
-    def fact_member(text: str) -> bool:
-        claims = _extract_numeric_claims(final_text=text, **options)
-        refs = [ref for claim in claims for ref in claim.value_refs]
-        return bool(refs) and all(ref.get("supported") is True for ref in refs)
+    def fact_member(text: str) -> list[ClaimDraft]:
+        return _extract_numeric_claims(final_text=text, **options)
 
-    surface = analyze_surface(final_text, evidence, fact_validator=fact_member, goal=goal)
+    surface = analyze_surface(final_text, evidence, fact_resolver=fact_member, goal=goal)
     for ref in surface.refs:
         span = ref.get("statement_span")
         if (
@@ -482,7 +489,10 @@ def extract_numeric_claims(
             numeric_view[left:right] = final_text[left:right]
             prebound_spans.append((left, right))
     claims = _extract_numeric_claims(
-        final_text="".join(numeric_view), prebound_spans=tuple(prebound_spans), **options
+        final_text="".join(numeric_view),
+        structure_source=final_text,
+        prebound_spans=tuple(prebound_spans),
+        **options,
     )
     refs = [
         *surface.refs,
@@ -555,6 +565,7 @@ def _extract_numeric_claims(
     artifacts: list[Artifact] | None = None,
     chart_source_evidence: list[EvidenceRecord] | None = None,
     prebound_spans: tuple[tuple[int, int], ...] = (),
+    structure_source: str | None = None,
 ) -> list[ClaimDraft]:
     """Extract numeric statements and link each number to current-run Evidence.
 
@@ -623,6 +634,7 @@ def _extract_numeric_claims(
         source_labels=source_labels,
         profile_fields=profile_fields,
         dimensions=set(dimensions),
+        structure_source=structure_source,
     )
     table_structure_spans = verified_table_structure_spans(final_text, evidence)
     profile_context = ""
@@ -913,6 +925,7 @@ def _extract_numeric_claims(
                     projected.source_context,
                     projected.constraint_context,
                     projected.aggregate_context,
+                    projected.profile_prose_context,
                 )
                 and (
                     owner is None
@@ -1032,7 +1045,10 @@ def _extract_numeric_claims(
                 value_ref["candidate_paths"] = [
                     {"evidence_id": item[0], "path": item[1]} for item in candidates
                 ]
-                value_ref["ambiguous_value"] = True
+                # Repeated producer paths for one exact immutable identity and
+                # value are corroboration, not competing facts. Identity/value
+                # conflicts were rejected before numerical matching above.
+                value_ref["ambiguous_value"] = len(identities) > 1
             refs.append(value_ref)
             reference_positions[id(value_ref)] = match.start()
             for candidate_id, _candidate_path, _candidate_value in candidates:
@@ -1506,9 +1522,18 @@ def _evidence_summary_fallback(evidence: list[EvidenceRecord]) -> str:
 
 def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
     """把数值路径绑定到工具入参、不可变数据集及具体分组，不靠数值反推语义。"""
-    context = record.summary.get("numeric_context") or {}
-    context = {**context, **context.get("tool_args", {})}
-    context = {**context, **context.get("encoding", {})}
+    context = record.summary.get("numeric_context", {})
+    if not isinstance(context, dict):
+        return {"statistic": "invalid", "evidence_path": path, "reason": "invalid_numeric_context"}
+    for key in ("tool_args", "encoding"):
+        nested = context.get(key, {})
+        if not isinstance(nested, dict):
+            return {
+                "statistic": "invalid",
+                "evidence_path": path,
+                "reason": "invalid_numeric_context",
+            }
+        context = {**context, **nested}
     projection = record.summary.get("fact_projection")
     if isinstance(projection, dict) and valid_count_projection(
         record.summary,
@@ -1526,12 +1551,25 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
         projection = record.summary.get("fact_projection")
         if "fact_projection" in record.summary and not isinstance(projection, dict):
             return {"statistic": "invalid", "evidence_path": path}
+        policy = next(
+            (fact for fact in (projection or {}).get("policies", []) if fact.get("path") == path),
+            None,
+        )
         fact = (
-            item.get("fact", {})
-            if projection
-            else {
-                "role": {"$.rows_before": "before", "$.rows_after": "after"}.get(path),
+            {
+                "role": "retention_policy",
+                "operation": policy["operation"],
+                "basis": "operation_policy",
+                "columns": policy["columns"],
             }
+            if policy
+            else (
+                item.get("fact", {})
+                if projection
+                else {
+                    "role": {"$.rows_before": "before", "$.rows_after": "after"}.get(path),
+                }
+            )
         )
         operations = {key: context[key] for key in OPERATIONS if key in context}
         operation = fact.get("operation") or (
@@ -1551,9 +1589,14 @@ def _semantic_binding(record: EvidenceRecord, path: str) -> JsonObject:
             "dataset_version": context.get("data_version_hash", input_ref),
             "input_ref": input_ref,
             "output_ref": output_ref,
-            "metric": "row_count",
+            "metric": "retention_policy"
+            if policy
+            else "column_count"
+            if fact.get("role") == "column_count"
+            else "row_count",
             "statistic": fact.get("role"),
-            "unit": "count",
+            "unit": "policy" if policy else "count",
+            **({"policy": policy["value"]} if policy else {}),
             "operation": operation,
             "operation_parameters": operations,
             "count_basis": fact.get("basis", "rows"),
@@ -1761,6 +1804,7 @@ def _semantic_candidate_matches(
     source_context: str = "",
     constraint_context: str = "",
     aggregate_context: AggregateMemberContext | None = None,
+    profile_prose_context: ProfileProseContext | None = None,
 ) -> bool:
     """对完整数字子句绑定指标和分组；不按数字位置猜测或以同值证明关系。"""
     if any(
@@ -1785,6 +1829,16 @@ def _semantic_candidate_matches(
         return False
     requested_operation = operation_quantity(statement, *match.span())
     if requested_operation is not None or profile_record.source.get("tool") == "transform_dataset":
+        if source_binding.get("statistic") == "column_count":
+            projection = profile_record.summary.get("fact_projection") or {}
+            return (
+                requested_operation is None
+                and column_quantity_matches(statement, *match.span(), projection.get("columns", []))
+                and operation_scope_matches(
+                    statement, source_binding["operation_parameters"], projection.get("columns", [])
+                )
+                and identity_matches(source_binding, statement, [source_binding], table_cells)
+            )
         if requested_operation is None or profile_record.source.get("tool") != "transform_dataset":
             return False
         selected_operation = _semantic_binding(profile_record, value[1])
@@ -1800,6 +1854,8 @@ def _semantic_candidate_matches(
             requested_operation.duplicate
             and selected_operation.get("count_basis") != "duplicate_excess"
         ):
+            return False
+        if requested_operation.null_rows and selected_operation.get("operation") != "drop_nulls":
             return False
         projection = profile_record.summary.get("fact_projection") or {}
         if (
@@ -1851,6 +1907,12 @@ def _semantic_candidate_matches(
             if item.get("source_kind") == "number"
         ]
         selected_profile = _semantic_binding(profile_record, value[1])
+        if (
+            profile_prose_context is not None
+            and profile_prose_context.non_null_population
+            and selected_profile.get("statistic") in {"null_count", "null_ratio", "row_count"}
+        ):
+            return False
         if not population_matches(selected_profile, population) or not population_matches(
             selected_profile, required_population
         ):
@@ -1880,6 +1942,18 @@ def _semantic_candidate_matches(
                 offset + match.start(),
                 offset + match.end(),
                 value[2],
+            )
+        if profile_prose_context is not None:
+            from apps.orchestrator.control.profile_claims import profile_prose_candidate_matches
+
+            return identity_valid and profile_prose_candidate_matches(
+                selected_profile,
+                profile_bindings,
+                statement,
+                match.start(),
+                match.end(),
+                value[2],
+                profile_prose_context.field,
             )
         return identity_valid and profile_candidate_matches(
             selected_profile,
@@ -1941,6 +2015,12 @@ def _semantic_candidate_matches(
         ),
         {},
     )
+    if (
+        selected.get("statistic") in {"value", "total_value"}
+        and selected.get("metric")
+        and not explicit_field_unit_matches(str(selected["metric"]), statement[match.end() :])
+    ):
+        return False
     if not identity_matches(selected, local, [binding for _, binding in bindings], table_cells):
         return False
     aggregations = {
@@ -1972,6 +2052,9 @@ def _semantic_candidate_matches(
     mentioned = {
         field for field in fields if unicodedata.normalize("NFKC", field) in normalized_metric_text
     }
+    mentioned |= unit_qualified_field_mentions(metric_text, fields)
+    if aggregate_context is not None:
+        mentioned = {aggregate_context.metric}
     # Match field display spelling locally without rewriting the value text or
     # merging distinct source fields that happen to normalize to one spelling.
     if len({unicodedata.normalize("NFKC", field) for field in mentioned}) < len(mentioned):
@@ -1985,6 +2068,34 @@ def _semantic_candidate_matches(
     mentioned_groups = {
         (dimension, group) for _, _, dimension, group in dimension_mentions(local, dimensions)
     }
+    if selected.get("statistic") == "total_value" and len(mentioned_groups) > 1:
+        interval = re.search(
+            r"整个期间[（(]\s*(?P<start>\d{4}-\d{2}(?:-\d{2})?)\s*至\s*"
+            r"(?P<end>\d{4}-\d{2}(?:-\d{2})?)\s*[）)]",
+            local,
+        )
+        keys = {
+            str(b.get("group_key"))
+            for record, b in bindings
+            if record.evidence_id == profile_record.evidence_id and b.get("group_key") is not None
+        }
+        # An explicit whole-period interval must cover this source's exact
+        # returned group domain, never a different subset with the same sum.
+        if (
+            interval is not None
+            and keys
+            and all(re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", k) for k in keys)
+            and (
+                interval["start"] == min(keys)
+                and interval["end"] == max(keys)
+                and mentioned_groups
+                == {
+                    (str(selected.get("grain")), interval["start"]),
+                    (str(selected.get("grain")), interval["end"]),
+                }
+            )
+        ):
+            mentioned_groups = set()
     structured_object = (selected.get("object") or {}).get("kind") in {
         "group_pair",
         "observation",

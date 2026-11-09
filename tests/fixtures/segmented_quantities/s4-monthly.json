@@ -1,0 +1,407 @@
+{
+  "task_runs": [
+    {
+      "run_id": "575096cf318b4652b852bfc3f7b179f8",
+      "project_id": "3b40b002e01f4cf0a65a52f21aa3ca3e",
+      "conversation_id": "c3c404feb0cf42d4a60a556ace4c80a7",
+      "user_message_id": "a7f7837cc4a8404180faf308e3ecec24",
+      "parent_run_id": null,
+      "goal": "请按月份汇总播出时长（分钟），列出各月合计，并给出整个期间的总计。",
+      "status": "blocked",
+      "state_version": 8,
+      "plan_version": 1,
+      "budget_json": "{\"max_parallelism\":1,\"max_replans\":3,\"max_tool_calls\":12}",
+      "usage_json": "{\"invalid_tool_calls\":0,\"tool_attempts\":1,\"tool_calls\":1}",
+      "terminal_reason": "model_budget_exhausted",
+      "created_at": "2026-11-03T06:23:12.098225Z",
+      "updated_at": "2026-11-03T06:23:22.898222Z",
+      "finished_at": "2026-11-03T06:23:22.898222Z",
+      "budget": {
+        "max_parallelism": 1,
+        "max_replans": 3,
+        "max_tool_calls": 12
+      },
+      "usage": {
+        "invalid_tool_calls": 0,
+        "tool_attempts": 1,
+        "tool_calls": 1
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "3c6bf36cfbed4daea0fbb077eb827460",
+      "run_id": "575096cf318b4652b852bfc3f7b179f8",
+      "invocation_id": "0adac393eaf24e338f2cde1dc1cab8a2",
+      "artifact_id": "8f697d090790447fbd1de94258ba0ccf",
+      "kind": "tool_result",
+      "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+      "created_at": "2026-11-03T06:23:18.269424Z",
+      "source": {
+        "dataset_ref": "109160b71076460cbdd13f836e0d32f0",
+        "mcp_contract_equivalent": true,
+        "mcp_contract_validation": "equivalent",
+        "mcp_degraded": false,
+        "mcp_execution": "canonical_gateway",
+        "mcp_gateway_generation": 1,
+        "mcp_gateway_health": "healthy",
+        "mcp_service": "agent-tools",
+        "tool": "aggregate_preview",
+        "tool_call_id": "call_00_4qgAvx8bb4rvsz2uoT7K1528",
+        "tool_contract": {
+          "artifact_types": [
+            "table"
+          ],
+          "contract_hash": "6495db49a85868684f02f18d9e9e649b602f0654510ee91a4b4717d8c41bce91",
+          "idempotent": true,
+          "read_only": true,
+          "required_permissions": [
+            "analysis:execute"
+          ],
+          "risk_level": "low",
+          "service_name": "agent-tools",
+          "tool_name": "aggregate_preview",
+          "tool_version": "1.0.0"
+        },
+        "transport": "in_process"
+      },
+      "summary": {
+        "analysis_context": {
+          "kind": null,
+          "method": null,
+          "slope_unit": null
+        },
+        "artifact_id": "8f697d090790447fbd1de94258ba0ccf",
+        "fact_projection": {
+          "arguments": {
+            "agg": "sum",
+            "dataset_ref": "109160b71076460cbdd13f836e0d32f0",
+            "group_col": "月份",
+            "sort": "group",
+            "value_col": "播出时长（分钟）"
+          },
+          "branch_hash": "cd608cc8cc27c8d1ee14c67dacc6415deb039f6c8e71d067c12bed0ce67eb015",
+          "columns": [],
+          "count_state": "available",
+          "input_ref": "109160b71076460cbdd13f836e0d32f0",
+          "invalid": false,
+          "invocation_id": "0adac393eaf24e338f2cde1dc1cab8a2",
+          "output_ref": "109160b71076460cbdd13f836e0d32f0",
+          "paths": [
+            "$.group_total"
+          ],
+          "producer": "aggregate_preview",
+          "projection_hash": "73d125381ca824d4fa9b82c0133e5b73cfefbaec8e65e3da61b49fc7000a8ade",
+          "result_hash": "c2908514bbdbd34edd2ad6210dfbfbb1ca7bbdf8e644b7b3940ab4b59429e010",
+          "run_id": "575096cf318b4652b852bfc3f7b179f8",
+          "schema": "operation-count-facts-v1",
+          "step_count": 1
+        },
+        "knowledge_empty": null,
+        "numeric_context": {
+          "agg": "sum",
+          "data_version_hash": "cd608cc8cc27c8d1ee14c67dacc6415deb039f6c8e71d067c12bed0ce67eb015",
+          "dataset_ref": "109160b71076460cbdd13f836e0d32f0",
+          "group_col": "月份",
+          "sort": "group",
+          "value_col": "播出时长（分钟）"
+        },
+        "source_index": [],
+        "source_index_truncated": false,
+        "summary": "6 组，返回前 6 组",
+        "value_index": [
+          {
+            "group_key": null,
+            "metric": null,
+            "object": {
+              "kind": "analysis"
+            },
+            "path": "$.total_value",
+            "source_kind": "number",
+            "value": "1350.0"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].value",
+            "source_kind": "number",
+            "value": "75.0"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-01",
+            "metric": null,
+            "object": {
+              "group": "2026-01",
+              "kind": "group"
+            },
+            "path": "$.rows[0].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].value",
+            "source_kind": "number",
+            "value": "135.0"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-02",
+            "metric": null,
+            "object": {
+              "group": "2026-02",
+              "kind": "group"
+            },
+            "path": "$.rows[1].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].value",
+            "source_kind": "number",
+            "value": "195.0"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-03",
+            "metric": null,
+            "object": {
+              "group": "2026-03",
+              "kind": "group"
+            },
+            "path": "$.rows[2].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].value",
+            "source_kind": "number",
+            "value": "255.0"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-04",
+            "metric": null,
+            "object": {
+              "group": "2026-04",
+              "kind": "group"
+            },
+            "path": "$.rows[3].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].value",
+            "source_kind": "number",
+            "value": "315.0"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-05",
+            "metric": null,
+            "object": {
+              "group": "2026-05",
+              "kind": "group"
+            },
+            "path": "$.rows[4].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].value",
+            "source_kind": "number",
+            "value": "375.0"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].row_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "group_key": "2026-06",
+            "metric": null,
+            "object": {
+              "group": "2026-06",
+              "kind": "group"
+            },
+            "path": "$.rows[5].valid_value_count",
+            "source_kind": "number",
+            "value": "6"
+          },
+          {
+            "fact": {
+              "basis": "groups",
+              "columns": [
+                "月份"
+              ],
+              "operation": "aggregate",
+              "role": "group_total",
+              "step": null
+            },
+            "path": "$.group_total",
+            "source_kind": "number",
+            "value": "6"
+          }
+        ],
+        "value_index_truncated": false
+      }
+    }
+  ],
+  "candidate": "各月播出时长（分钟）合计如下：\n\n- 2026-01：75.0\n- 2026-02：135.0\n- 2026-03：195.0\n- 2026-04：255.0\n- 2026-05：315.0\n- 2026-06：375.0\n\n整个期间（2026-01 至 2026-06）播出时长总计为 1350.0 分钟。"
+}

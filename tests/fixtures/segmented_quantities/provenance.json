@@ -1,0 +1,32 @@
+{
+  "s0-chain-profile": {
+    "source": "/tmp/full-segmented-acceptance-20261103T055934Z/real-agent-review/s0-chain-profile",
+    "capture_sha256": "c4f0423a118cd2eebe601d8a0423ce1d48035a7a3646185c897a8444ce71a036",
+    "candidate_sha256": "03f5c42c1c80cc854b00229dd57d426944784ecf8d31440383327a28f9f43a0f",
+    "data": "pure synthetic examples/handoff broadcast; actual captured tool Evidence, offline replay only"
+  },
+  "s2-clean": {
+    "source": "/tmp/full-segmented-acceptance-20261103T055934Z/real-agent-review/s2-clean",
+    "capture_sha256": "b886c3a83adf321177a4f7a3916949456c239798113a6ecf30df366e8f8420f4",
+    "candidate_sha256": "1ed70e4b649cbeb2d89c00cd3747868e7d8240a39e7e5dcf80f55f09a8fdf288",
+    "data": "pure synthetic examples/handoff broadcast; actual captured tool Evidence, offline replay only"
+  },
+  "s3-dedup": {
+    "source": "/tmp/full-segmented-acceptance-20261103T055934Z/real-agent-review/s3-dedup",
+    "capture_sha256": "e4622b290bfac604ce26aad8200ddbddc69e9d6e1e0919c52fae7d8c2947dfb4",
+    "candidate_sha256": "e4cc35905c92bc2ed9c7334d19f47a085c23ee41d6c03bbfbb99103ebb584891",
+    "data": "pure synthetic examples/handoff broadcast; actual captured tool Evidence, offline replay only"
+  },
+  "s4-monthly": {
+    "source": "/tmp/full-segmented-acceptance-20261103T055934Z/real-agent-review/s4-monthly",
+    "capture_sha256": "7ea08c4d555fc46b651df62966a60faaff70d8115f45e9fd08e0fae11f2b1ca6",
+    "candidate_sha256": "b1496df864d100895fda41e918a7edf2e4ef792d1eacfaf7df17252fbf010e83",
+    "data": "pure synthetic examples/handoff broadcast; actual captured tool Evidence, offline replay only"
+  },
+  "s5-chart": {
+    "source": "/tmp/full-segmented-acceptance-20261103T055934Z/real-agent-review/s5-chart",
+    "capture_sha256": "09fcafde359824630b832dc8193af2c3c2f232668623669142dcb367ba659735",
+    "candidate_sha256": "a479b6f11398e06103a1dfec5a26747c095e6f3fe99341e7dfd57ef69f362557",
+    "data": "pure synthetic examples/handoff broadcast; actual captured tool Evidence, offline replay only"
+  }
+}

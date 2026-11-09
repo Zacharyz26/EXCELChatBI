@@ -452,6 +452,32 @@ def _explicit_withdrawal(text: str, item: JsonObject, obligations: list[JsonObje
     return result
 
 
+def source_disposition_proofs(text: str, evidence: list[EvidenceRecord]) -> list[JsonObject]:
+    """只读识别既有撤回协议的精确对象，不创建或完成任何任务义务。
+
+    The candidate set comes from the same real profile targets used by repair.
+    This gives source metadata an explicitly typed purpose even when withdrawal
+    intentionally adds no new number. Required obligations still use the
+    unchanged resolver below and cannot be satisfied by this proof.
+    """
+    _fields, targets = _targets(
+        [record for record in evidence if isinstance(record.summary.get("numeric_context"), dict)]
+    )
+    candidates = [
+        {
+            "id": hashlib.sha256(json.dumps(target, sort_keys=True).encode()).hexdigest(),
+            "subject": "整行" if target["statistic"] == "duplicate_rows" else target["metric"],
+            "target": target,
+        }
+        for target in targets
+    ]
+    return [
+        {"target": item["target"], "statement": statement, "kind": "explicit_withdrawal"}
+        for item in candidates
+        if (statement := _explicit_withdrawal(text, item, candidates)) is not None
+    ]
+
+
 def resolve_duplicate_obligations(
     obligations: list[JsonObject],
     claims: list[ClaimDraft],

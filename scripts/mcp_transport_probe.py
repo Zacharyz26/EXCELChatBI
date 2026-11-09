@@ -21,6 +21,7 @@ from typing import Any
 
 import duckdb
 import httpx
+from fastapi import FastAPI
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -34,6 +35,7 @@ from mcp_servers.dataset_ops.tools import aggregate_preview
 from packages.common.config import get_settings
 from packages.governance.permissions import Principal
 from packages.session.coref import ReferenceResolver
+from packages.session.execution_context import resolve_execution_context
 from packages.session.memory_models import MemoryDraft
 from packages.session.memory_refs import (
     MemoryReferenceResolver,
@@ -179,7 +181,7 @@ def _publish_resource_state(path: Path) -> None:
     )
 
 
-def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]:
+async def _resolve_probe_reference(database: Path) -> dict[str, str]:
     """从 Host 真相源解析同一 Dataset 和记忆映射，供双传输调用共享。"""
     session = SessionStore(str(database))
     project = session.create_project(
@@ -188,12 +190,41 @@ def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]
         tenant_id=_PRINCIPAL.tenant_scope,
     )
     conversation = session.create_conversation(project.id)
-    session.register_dataset(
-        ref=dataset_ref,
-        project_id=project.id,
-        filename="协议样本.parquet",
-        profile={"column_count": 2},
-    )
+    # The current source is established by the real upload transaction, not by
+    # project-wide dataset registration or a fabricated upload Artifact.
+    from apps.api.auth import current_principal_dep
+    from apps.api.deps import session_store_dep
+    from apps.api.routers.upload import router
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[session_store_dep] = lambda: session
+    app.dependency_overrides[current_principal_dep] = lambda: _PRINCIPAL
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://probe.local"
+    ) as client:
+        uploaded = await client.post(
+            "/upload/excel",
+            data={"project_id": project.id, "conversation_id": conversation.id},
+            files={
+                "file": (
+                    "协议样本.csv",
+                    b"region,amount\neast,10\neast,15\nwest,8\n",
+                    "text/csv",
+                )
+            },
+        )
+    uploaded.raise_for_status()
+    dataset_ref = str(uploaded.json()["dataset_ref"])
+    current = resolve_execution_context(session, conversation_id=conversation.id)
+    if (
+        current.availability != "available"
+        or current.dataset_ref != dataset_ref
+        or current.source_kind != "upload"
+        or current.source_artifact_id is None
+        or current.source_artifact_id != uploaded.json()["artifact"]["id"]
+    ):
+        raise RuntimeError("MCP 探针上传未建立可验证的当前会话来源")
     confirmation = session.append_message(
         conversation_id=conversation.id,
         role="user",
@@ -270,6 +301,8 @@ def _resolve_probe_reference(database: Path, dataset_ref: str) -> dict[str, str]
         "conversation_resolution_hash": conversation_reference.resolution_hash,
         "memory_resolution_hash": memory_reference.resolution_hash,
         "target_ref_hash": stable_hash(dataset_ref),
+        "source_kind": current.source_kind,
+        "source_artifact_id": current.source_artifact_id,
     }
 
 
@@ -762,16 +795,19 @@ async def run_probe(output: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="chatbi-mcp-probe-") as temp:
         dataset_dir = Path(temp) / "datasets"
         dataset_dir.mkdir()
-        previous_dataset_dir = os.environ.get("DATASET_DIR")
-        os.environ["DATASET_DIR"] = str(dataset_dir)
+        settings = {"DATASET_DIR": str(dataset_dir), "UPLOAD_DIR": str(Path(temp) / "uploads")}
+        previous = {key: os.environ.get(key) for key in settings}
+        os.environ.update(settings)
         get_settings.cache_clear()
         try:
-            dataset_ref = "2" * 32
-            host_reference = _resolve_probe_reference(
-                Path(temp) / "reference.db",
-                dataset_ref,
-            )
-            arguments = _write_dataset(dataset_dir, host_reference["dataset_ref"])
+            host_reference = await _resolve_probe_reference(Path(temp) / "reference.db")
+            arguments = {
+                "dataset_ref": host_reference["dataset_ref"],
+                "group_col": "region",
+                "value_col": "amount",
+                "agg": "sum",
+                "sort": "group",
+            }
             direct = aggregate_preview(arguments)
             direct_hash = stable_hash(direct)
             stdio = await _probe_stdio(
@@ -791,10 +827,11 @@ async def run_probe(output: Path) -> dict[str, Any]:
                 host_reference["conversation_id"],
             )
         finally:
-            if previous_dataset_dir is None:
-                os.environ.pop("DATASET_DIR", None)
-            else:
-                os.environ["DATASET_DIR"] = previous_dataset_dir
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
             get_settings.cache_clear()
     hashes = {direct_hash, stdio.result_hash, http_result.result_hash}
     if len(hashes) != 1:
@@ -831,6 +868,8 @@ async def run_probe(output: Path) -> dict[str, Any]:
             "target_ref_hash": host_reference["target_ref_hash"],
             "memory_snapshot_id": host_reference["memory_snapshot_id"],
             "same_binding_across_transports": True,
+            "source_kind": host_reference["source_kind"],
+            "source_artifact_id": host_reference["source_artifact_id"],
         },
         "direct_result_hash": direct_hash,
         "transports": [stdio.public_dict(), http_result.public_dict()],

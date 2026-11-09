@@ -343,15 +343,10 @@ def quantity_audit(
     """按原文跨度合流结构与真实绑定；不以同值数字推定数量所有者。"""
     from apps.orchestrator.control.claims import _extract_numeric_claims
 
-    def supported_fact(member: str) -> bool:
-        refs = [
-            r
-            for c in _extract_numeric_claims(final_text=member, goal=goal, evidence=evidence)
-            for r in c.value_refs
-        ]
-        return bool(refs) and all(r.get("supported") is True for r in refs)
+    def supported_fact(member: str) -> list[ClaimDraft]:
+        return _extract_numeric_claims(final_text=member, goal=goal, evidence=evidence)
 
-    surface = analyze_surface(text, evidence, fact_validator=supported_fact, goal=goal)
+    surface = analyze_surface(text, evidence, fact_resolver=supported_fact, goal=goal)
     by_span = {tuple(q["source_span"]): dict(q) for q in surface.quantities}
     audit_issues = list(surface.issues)
     for claim in claims:

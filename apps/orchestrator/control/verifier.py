@@ -256,7 +256,7 @@ def verify_completion(
         )
     )
     required_sources = report_source_intent(contract.goal)
-    if required_sources.operands:
+    if required_sources.required_operands:
         from apps.orchestrator.control.report_delivery import verified_report_sources
 
         delivered = False

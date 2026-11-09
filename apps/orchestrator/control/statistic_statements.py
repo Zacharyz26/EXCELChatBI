@@ -57,16 +57,52 @@ class CountExpression:
 class RowQuantityObject:
     """有限完整行宾语，span仅为原文词法归属，不证明任何计数。"""
 
-    basis: Literal["rows", "duplicate_excess"]
+    basis: Literal["rows", "duplicate_excess", "null_rows"]
     span: tuple[int, int]
     noun_span: tuple[int, int] | None
 
 
+_RETENTION_VALUE = r"(?:首|末|第?[零一二两三四五六七八九十百千万\d]+)条"
+_RETENTION_CLAUSE = re.compile(
+    r"(?<!\w)每组保留\s*(?P<value>"
+    + _RETENTION_VALUE
+    + r")(?=\s*(?:[，,。；;!?！？\n)）\]】\"'`”’]|$))"
+)
+
+
+@dataclass(frozen=True)
+class RetentionPolicyClause:
+    """闭合策略值槽及原文位置；序数可解析不等于工具支持该策略。"""
+
+    span: tuple[int, int]
+    value_span: tuple[int, int]
+    policy: Literal["first"] | None
+
+
+def retention_policy_clauses(text: str) -> tuple[RetentionPolicyClause, ...]:
+    result = []
+    for match in _RETENTION_CLAUSE.finditer(text):
+        if re.search(r"\n[ \t]*\n", match[0]):
+            continue
+        result.append(
+            RetentionPolicyClause(
+                match.span(),
+                match.span("value"),
+                "first" if match["value"] in {"首条", "第一条", "第1条"} else None,
+            )
+        )
+    return tuple(result)
+
+
 def row_quantity_object(suffix: str) -> RowQuantityObject | None:
+    # A closed retention clause is a separate policy obligation. Parsing its
+    # container here never proves its policy value or erases it from auditing.
+    policy = re.search(r"[（(]\s*每组保留" + _RETENTION_VALUE + r"\s*[）)]\s*$", suffix)
+    object_text = suffix[: policy.start()] if policy else suffix
     match = re.fullmatch(
-        r"\s*(?:(?P<counter>行|条|个)(?P<basis>重复多余|重复|多余)?"
+        r"\s*(?:(?P<counter>行|条|个)(?P<basis>完全重复的|完全重复|重复多余|重复|多余|空值)?"
         r"(?P<noun>数据记录|记录|数据)?)?\s*[)）\]】]*\s*",
-        suffix,
+        object_text,
     )
     if match is None:
         return None
@@ -76,7 +112,11 @@ def row_quantity_object(suffix: str) -> RowQuantityObject | None:
         return None
     parts = [match.span(key) for key in ("basis", "noun") if match[key]]
     return RowQuantityObject(
-        "duplicate_excess" if match["basis"] else "rows",
+        "null_rows"
+        if match["basis"] == "空值"
+        else "duplicate_excess"
+        if match["basis"]
+        else "rows",
         match.span(),
         (parts[0][0], parts[-1][1]) if parts else None,
     )

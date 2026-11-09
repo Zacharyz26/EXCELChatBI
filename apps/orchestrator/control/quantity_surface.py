@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from packages.common.text_surface import TextSurface, parse_text_surface
+from packages.orchestration.evidence_facts import valid_count_projection
 from packages.orchestration.quality_facts import QUALITY_COUNT_PATH, valid_quality_projection
-from packages.session.task_models import EvidenceRecord
+from packages.session.task_models import ClaimDraft, EvidenceRecord
 
 from apps.orchestrator.control.count_claims import parse_chinese_count
 from apps.orchestrator.control.dataset_identity import (
@@ -19,6 +21,8 @@ from apps.orchestrator.control.dataset_identity import (
 )
 from apps.orchestrator.control.numeric_display import NUMBER_PATTERN, numeric_quote_view
 from apps.orchestrator.control.profile_population import (
+    declared_population,
+    population_filters,
     population_matches,
     requested_population,
     stated_population,
@@ -382,11 +386,20 @@ def analyze_surface(
     text: str,
     evidence: list[EvidenceRecord],
     *,
-    fact_validator: Callable[[str], bool] | None = None,
+    fact_resolver: Callable[[str], list[ClaimDraft]] | None = None,
     goal: str = "",
 ) -> SurfaceResult:
     """解析有限源结构；文档证明只消费已核准的成员，业务声明另行绑定。"""
     result = SurfaceResult(text, text, hashlib.sha256(text.encode()).hexdigest())
+
+    def verified_refs(member: str) -> list[dict[str, Any]]:
+        refs = (
+            [ref for claim in fact_resolver(member) for ref in claim.value_refs]
+            if fact_resolver
+            else []
+        )
+        return refs if refs and all(ref.get("supported") is True for ref in refs) else []
+
     if any(
         "numeric_context" in e.summary and not isinstance(e.summary["numeric_context"], dict)
         for e in evidence
@@ -403,6 +416,63 @@ def analyze_surface(
     for member in members:
         a, b = member.marker
         view[a:b] = " " * (b - a)
+    # Retention order is an enum emitted by the deterministic transformation,
+    # not a business count inferred from the word 首. Keep a typed reference to
+    # the same sealed projection; legacy records lacking that fact stay unknown.
+    from apps.orchestrator.control.claim_structure import statement_parent_context
+    from apps.orchestrator.control.claims import _semantic_binding, _source_context_matches
+    from apps.orchestrator.control.statistic_statements import retention_policy_clauses
+
+    for policy in retention_policy_clauses(text):
+        start, end = policy.span
+        _statement, _start, local_end = _local(text, start, end, surface=syntax)
+        parent = statement_parent_context(text, start, local_end)
+        choices = []
+        for record in evidence:
+            if record.source.get("tool") != "transform_dataset" or not valid_count_projection(
+                record.summary,
+                tool="transform_dataset",
+                run_id=record.run_id,
+                invocation_id=record.invocation_id,
+                result_hash=record.result_hash,
+            ):
+                continue
+            projection = record.summary["fact_projection"]
+            for fact in projection.get("policies", []):
+                binding = _semantic_binding(record, fact["path"])
+                if (
+                    policy.policy == "first"
+                    and fact.get("operation") == "drop_duplicates"
+                    and fact.get("value") == "first"
+                    and fact.get("columns") == projection["arguments"].get("drop_duplicates")
+                    and source_binding_matches_goal(binding, set(projection["columns"]), goal)
+                    and _source_context_matches(record, binding, parent, parent)
+                ):
+                    choices.append((record, fact, binding))
+        left, right = policy.value_span
+        if len(choices) != 1:
+            result.refs.append(
+                {
+                    "token": text[left:right],
+                    "supported": False,
+                    "statement_span": [left, right],
+                    "reason": "unverified_retention_policy",
+                }
+            )
+            continue
+        record, fact, binding = choices[0]
+        result.refs.append(
+            {
+                "token": text[left:right],
+                "supported": True,
+                "kind": "operation_policy",
+                "statement_span": [left, right],
+                "evidence_id": record.evidence_id,
+                "path": fact["path"],
+                "semantic_binding": binding,
+            }
+        )
+        view[left:right] = " " * (right - left)
     # Source-authored instruction parameters are not observed business values.
     # Match the complete statement, not a substring inside a model assertion.
     advice_spans = [(m.start, m.end) for m in members]
@@ -440,10 +510,50 @@ def analyze_surface(
     )
     from apps.orchestrator.control.claims import (
         _measurement_labels,
+        _verified_identity_spans,
         verified_table_structure_spans,
     )
 
     identity_spans = list(verified_table_structure_spans(text, evidence))
+    # Metadata without a quantity is still a source obligation. Reuse the
+    # exact fact binding and parent gate; a standalone declaration cannot
+    # disappear just because a blank paragraph separates it from a table.
+    source_bindings = [
+        (record, _semantic_binding(record, str(item.get("path"))))
+        for record in evidence
+        for item in record.summary.get("value_index", [])
+        if isinstance(item, dict)
+    ]
+    if any(
+        binding.get("reason") == "invalid_numeric_context" for _record, binding in source_bindings
+    ):
+        result.issues.append("invalid_numeric_context")
+
+    def source_identity(binding: dict[str, Any]) -> tuple[str, str, str] | None:
+        filters = (
+            population_filters(binding)
+            if binding.get("profile_fact")
+            else binding.get("filters", [])
+        )
+        if (
+            not binding.get("dataset_ref")
+            or not binding.get("dataset_version")
+            or binding.get("statistic") == "invalid"
+            or filters is None
+        ):
+            return None
+        return (
+            str(binding["dataset_ref"]),
+            str(binding["dataset_version"]),
+            json.dumps(
+                sorted(filters, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True
+            ),
+        )
+
+    source_identities = {
+        identity for _record, binding in source_bindings if (identity := source_identity(binding))
+    }
+    table_starts = {node.table for node in syntax.nodes if node.table is not None}
     for node in syntax.nodes:
         if (
             node.kind == "table_header"
@@ -456,6 +566,109 @@ def analyze_surface(
         identity_spans.extend(
             (offset + a, offset + b) for a, b in profile_field_identity_spans(sentence, fields)
         )
+        protected_identities, identity_errors = _verified_identity_spans(sentence, evidence, fields)
+        declaration = declared_population(sentence, fields)
+        if identity_errors:
+            result.issues.append("unverified_source_declaration")
+        if declaration is not None or protected_identities:
+            # Keep the full typed tuple from preceding lines in this exact
+            # paragraph (two datasets can legitimately share a version hash).
+            parent_prefix = statement_parent_context(text, offset, offset + len(sentence))
+            matching_source_ids = {
+                identity
+                for record, binding in source_bindings
+                if (identity := source_identity(binding))
+                and _source_context_matches(record, binding, parent_prefix, parent_prefix)
+            }
+            parent_start = offset + len(sentence) - len(parent_prefix)
+            parent_tail = text[offset + len(sentence.rstrip()) :]
+            hard_end = re.search(r"\n[ \t]*\n", parent_tail)
+            parent_end = (
+                offset
+                + len(sentence.rstrip())
+                + (hard_end.start() if hard_end else len(parent_tail))
+            )
+            parent_text = text[parent_start:parent_end]
+            parent_refs = verified_refs(parent_text)
+            numeric_refs = [
+                ref
+                for ref in parent_refs
+                if isinstance(ref.get("semantic_binding"), dict)
+                and isinstance(ref.get("source_span"), list | tuple)
+            ]
+            # A boolean "this text passed" is not an ownership proof: retain
+            # the actual value ref, original span, record and complete binding,
+            # then apply the same parent gate to every related business fact.
+            evidence_by_id = {record.evidence_id: record for record in evidence}
+            fact_source_ids: set[tuple[str, str, str]] = set()
+            for ref in numeric_refs:
+                binding = ref["semantic_binding"]
+                span = ref["source_span"]
+                fact_record = evidence_by_id.get(str(ref.get("evidence_id", "")))
+                if (
+                    fact_record is None
+                    or len(span) != 2
+                    or not all(type(i) is int for i in span)
+                    or not 0 <= span[0] < span[1] <= len(parent_text)
+                    or parent_text[slice(*span)] != ref.get("source_token")
+                    or not _source_context_matches(fact_record, binding, parent_text, parent_text)
+                    or (identity := source_identity(binding)) is None
+                    or identity not in matching_source_ids
+                ):
+                    fact_source_ids.clear()
+                    break
+                fact_source_ids.add(identity)
+            attached_fact = bool(numeric_refs) and len(fact_source_ids) == 1
+
+            # Reuse the existing exact-object disposition protocol; this only
+            # classifies source purpose, never changes required obligations or
+            # makes an unsupported quantity true.
+            from apps.orchestrator.control.duplicate_repair import source_disposition_proofs
+
+            disposition_ids = {
+                identity
+                for proof in source_disposition_proofs(parent_text, evidence)
+                if (identity := source_identity(proof["target"])) in matching_source_ids
+            }
+            attached_disposition = len(disposition_ids) == 1
+            owned_ids = (
+                fact_source_ids
+                if attached_fact
+                else disposition_ids
+                if attached_disposition
+                else matching_source_ids
+            )
+            if (declaration is not None and not declaration.valid) or len(owned_ids) != 1:
+                result.issues.append("unverified_source_declaration")
+            # Use the real parent's source boundary, not the split statement's
+            # trailing layout (which may already contain a hard blank line).
+            # Only existing table or sealed policy ownership counts; arbitrary
+            # prose in the same paragraph cannot discharge this obligation.
+            declaration_spans = [*protected_identities]
+            if declaration is not None:
+                declaration_spans.append(declaration.span)
+            declared_left = offset + min(left for left, _right in declaration_spans)
+            declared_right = offset + max(right for _left, right in declaration_spans)
+
+            def owns_declaration(
+                child_start: int, left: int = declared_left, right: int = declared_right
+            ) -> bool:
+                parent = statement_parent_context(text, child_start, child_start)
+                return child_start - len(parent) <= left < right <= child_start
+
+            attached_table = any(owns_declaration(start) for start in table_starts)
+            attached_policy = any(
+                ref.get("kind") == "operation_policy"
+                and ref.get("supported") is True
+                and source_identity(ref["semantic_binding"]) in matching_source_ids
+                and owns_declaration(ref["statement_span"][0])
+                for ref in result.refs
+            )
+            if (
+                not (attached_table or attached_policy or attached_fact or attached_disposition)
+                and len(source_identities) != 1
+            ):
+                result.issues.append("unowned_source_declaration")
         offset += len(sentence)
     numeric_view, quoted_labels = numeric_quote_view(_plain(text), _measurement_labels())
     identity_spans.extend(quoted_labels)
@@ -610,7 +823,7 @@ def analyze_surface(
         approved = [
             inspection_member(m.text, evidence, goal=goal) is not None
             or recommendation_member(m.text, evidence, goal=goal) is not None
-            or (fact_validator is not None and fact_validator(m.text))
+            or bool(verified_refs(m.text))
             for m in selected
         ]
         if all(approved) and amount == len(selected) and not expression.qualified:

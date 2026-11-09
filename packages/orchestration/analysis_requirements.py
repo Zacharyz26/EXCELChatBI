@@ -649,7 +649,7 @@ class AnalysisRequirements:
 
 
 def _parse_filter(
-    expression: str, columns: tuple[str, ...]
+    expression: str, columns: tuple[str, ...], *, natural_equal: bool = False
 ) -> tuple[tuple[FilterCondition, ...], str | None]:
     connector_view = list(expression)
     for left, right in delimited_spans(expression):
@@ -658,7 +658,7 @@ def _parse_filter(
     if re.search(r"\bOR\b|或者|或|\|\|", "".join(connector_view), re.I):
         return (), "当前筛选仅支持完整AND条件，请澄清OR条件。"
     expression = re.sub(r"^\s*(?:条件)?\s*(?:为|是|[:：])?\s*", "", expression)
-    matches = comparison_matches(expression, columns=columns)
+    matches = comparison_matches(expression, columns=columns, natural_equal=natural_equal)
     remainder = list(expression)
     values: list[FilterCondition] = []
     for match in matches:
@@ -683,6 +683,22 @@ def _parse_filter(
     ):
         return tuple(values), "未加引号的值与记录范围描述边界不明确，请明确完整条件。"
     return tuple(values), None
+
+
+def _parse_retained_filter(
+    expression: str, columns: tuple[str, ...]
+) -> tuple[tuple[FilterCondition, ...], str | None]:
+    """保留谓语的条件从句；记录宾语不是比较字面值，不裁剪引号内值。"""
+    view = _boundary_view(expression)
+    relative = re.search(r"的[^的，,。；;\n]*(?:记录|行)\s*(?=[，,]|$)", view)
+    if relative is not None:
+        tail = view[relative.end() :].strip(" ，,")
+        # This tail is a result-description clause, not another predicate or
+        # permission to omit a partially parsed conjunction.
+        if tail and re.fullmatch(r"(?:并)?(?:说明|描述)(?:筛选|过滤)?结果", tail) is None:
+            return (), "保留条件后的要求尚未完整归属，请明确完整筛选范围。"
+        expression = expression[: relative.start()]
+    return _parse_filter(expression, columns, natural_equal=True)
 
 
 def parse_filter_answer(answer: str, columns: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
@@ -914,7 +930,11 @@ def explicit_analysis_requirements(
         if mention.disposition in {"current", "cancelled", "prohibited", "deferred"}:
             if kind == "filter":
                 expr = text[mention.span[1] : end]
-                filters, error = _parse_filter(expr, columns)
+                filters, error = (
+                    _parse_retained_filter(expr, columns)
+                    if mention.action == "保留"
+                    else _parse_filter(expr, columns)
+                )
                 params = OperationParameters(filters=filters)
                 if error and mention.disposition == "current":
                     filter_errors[identity] = error
@@ -1294,6 +1314,28 @@ def resolve_analysis_slot(
         if answer != "column_values":
             raise ValueError("当前工具不支持该时间分桶")
         changes["time_grain"] = "column_values"
+    elif slot == "operation":
+        # A frozen local ambiguity can be resolved by its finite operation
+        # candidates. Global multi-operation requests are not replaced by one
+        # arbitrary action or by recompiling an unrelated answer.
+        found = next(
+            (i for i, op in enumerate(operations) if op.operation_id == query.operation_id), None
+        )
+        if (
+            found is None
+            or answer not in {"drop_nulls", "drop_duplicates"}
+            or answer not in query.candidates
+        ):
+            raise ValueError("此请求不能用一个操作槽表达；请取消后分别提交明确任务，原要求未删除")
+        operation = operations[found]
+        if operation.disposition != "current" or operation.kind not in {
+            "drop_nulls",
+            "drop_duplicates",
+        }:
+            raise ValueError("澄清不能覆盖禁止、延期或其他已冻结操作")
+        operations[found] = replace(operation, kind=answer)
+        changes["operations"] = tuple(operations)
+        changes["filters"] = _filter_projection(tuple(operations))
     elif slot in {"filters", "columns"}:
         found = next(
             (i for i, x in enumerate(operations) if x.operation_id == query.operation_id), None
