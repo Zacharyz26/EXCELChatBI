@@ -33,3 +33,18 @@ owner/group/ACL，使默认容器 UID/GID `10001:10001` 可读，并在启动前
 
 尖括号内容只是 schema 占位符，不能直接用于部署。`roles` 可为空数组；`user_id` 和
 `tenant_id` 必须是非空字符串。其余六个文件均为单值文本文件：五个 MCP 服务 token
+和一个独立的上下文签名 HMAC key。七个路径均须在 `deploy/.env.production` 中配置：
+
+| 环境变量 | 文件内容 |
+|---|---|
+| `AUTH_TOKENS_FILE_PATH` | 上述认证 JSON 映射 |
+| `MCP_CONTEXT_SIGNING_KEY_FILE_PATH` | 独立上下文签名 key |
+| `MCP_DATA_TOKEN_FILE_PATH` | data-tools 服务 token |
+| `MCP_STATS_TOKEN_FILE_PATH` | stats-tools 服务 token |
+| `MCP_CHART_TOKEN_FILE_PATH` | chart-tools 服务 token |
+| `MCP_REPORT_TOKEN_FILE_PATH` | report-tools 服务 token |
+| `MCP_KNOWLEDGE_TOKEN_FILE_PATH` | knowledge-tools 服务 token |
+
+HMAC key 与各服务 token 不复用。根 Compose 的必填路径定义见
+[`compose.yaml`](../../compose.yaml)；启动步骤见根
+[README](../../README.md#方案-c根-compose生产结构验收)。

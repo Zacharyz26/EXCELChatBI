@@ -1,15 +1,15 @@
 # ChatBI 智能体 — 项目依赖与工具配置（uv 管理）
-# 技术栈与版本锁定见 CLAUDE.md 第 4 节，不擅自更换或升级。
+# 技术栈与版本锁定见 AGENTS.md 第 4 节，不擅自更换或升级。
 
 [project]
 name = "excel-chatbi"
 version = "0.1.0"
 description = "中文优先的目标驱动、受约束自主分析 ChatBI Agent"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"        # CLAUDE 第4节锁定 Python 3.11
+requires-python = ">=3.11,<3.12"        # AGENTS.md 第4节锁定 Python 3.11
 license = { text = "Proprietary" }
 
-# ── 核心运行时依赖（第一个垂直切片：Excel→画像→出图 即用这组，按 CLAUDE 第4节选型）──
+# ── 核心运行时依赖（第一个垂直切片：Excel→画像→出图 即用这组，按 AGENTS.md 第4节选型）──
 # API 启动会导入的确定性统计依赖属于核心运行时。Prophet/RAG/截图/报告/
 # 存储按域拆进 optional-dependencies，避免未启用的重能力拖慢默认安装。
 dependencies = [

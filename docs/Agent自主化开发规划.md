@@ -553,7 +553,7 @@ schema、权限和数据版本足以复现结论。
    `rag` extra 和显式配置启用。
 4. CI 新增干净环境安装、API import/lifespan 和 `/health/ready` 冒烟，固定
    README 的默认命令。
-5. README、`CLAUDE.md`、容器构建和开发命令使用同一依赖档位，禁止文档与
+5. README、`AGENTS.md`、容器构建和开发命令使用同一依赖档位，禁止文档与
    实际 import 路径再次分叉。
 
 ### C2：未实现工具撤出公开目录（已完成，2026-08-26）

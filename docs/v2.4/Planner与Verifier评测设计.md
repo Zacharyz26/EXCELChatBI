@@ -19,6 +19,8 @@
 
 ## 2. 混合 Planner
 
+以下第 2–5 节是历史混合 Planner／Replanner 方案，不再描述当前运行时。提交 `fb1954b37ece57ded5784f5d7935e30083ea8855` 删除了独立 Planner prompt、Replanner、`agent_planner_eval.py` 和 G7 签字入口；当前 [`task_outline.py`](../../apps/orchestrator/control/task_outline.py) 只生成不调用模型的 fast/template 提纲，执行与反馈由同一个 Agent 完成。旧接口与评测结果保留，不能据此重新启用旧路径。
+
 三条路径必须实现同一接口：
 
 ```text
@@ -123,6 +125,8 @@ Planner 输出 JSON：
 6. 每次产生新计划版本和简短变更原因。
 
 ## 6. Verifier 分层评测
+
+本节的证据、范围、失败关闭和配对测试原则继续作为测试依据；语义 Verifier 的历史实现与评测不等于生产启用。当前生产完成门以确定性 Verifier 为准，最新实际验收仍见[当前状态记录](../项目状态与文档同步记录_2026-11-09.md)。
 
 ### 6.1 确定性套件
 
@@ -289,6 +293,8 @@ heldout 后才能评价下一候选，禁止在同一组样本上调参并宣称
 
 ### 10.5 阶段 2 结构化计划行为对照（2026-07-28）
 
+下文固定为 2026-07-28 原始执行模式和结果。现存 [`stage2_behavior_eval.py`](../../scripts/stage2_behavior_eval.py) 已迁移到 `single_agent_outline`，不再执行此处历史的独立 Planner/Replanner；用现存脚本重跑也不能当作该历史模式的原样复现。
+
 `scripts/stage2_behavior_eval.py` 对冻结的 20 个场景运行 3 次，只隔离
 `deepseek-v4-flash`，并开启生产 `TaskPlan → Executor → Replanner → deterministic
 Verifier` 真路径，共 60 runs：
@@ -324,6 +330,8 @@ Verifier` 真路径，共 60 runs：
 
 ### 10.6 提议冻结的验收门槛（历史提议；人工签字已取消）
 
+以下“已实现签字门禁”只描述当时状态；`scripts/g7_review_gate.py` 随单一 Agent 收尾在 `fb1954b` 删除。保留提议数值及未签字结论，不把旧脚本名作为当前可执行入口。
+
 基线已产生，可据实测分布提议门槛；**最终数值由评审冻结（item 6，尚未完成），本表为提议值**：
 `scripts/g7_review_gate.py` 已把这些提议值实现为拒绝式签字门禁；人工评分或签字缺失时只会
 输出 `review_required`。阶段 2A–2E 已复用本文件的生产路由规则；
@@ -341,6 +349,8 @@ Verifier` 真路径，共 60 runs：
 | Planner condition_specificity / fallback_actionability | 盲评均值 ≥ 1.0（0/1/2） | 软门槛；待盲评 |
 
 ### 10.7 场景代表性与人工盲评修订（2026-07-29）
+
+本节保留人工盲评取消前提出的修订条件，不启动该历史评测；文末的 G7 脚本修改要求也不再是当前待办。任何后续真实验收由当前总纲和当次授权决定。
 
 冻结的 20 个 Agent 行为场景全部围绕订单、销售额、利润、地区、渠道、产品或复购率。
 这些场景覆盖画像、质量、聚合、图表、报告、追问、重规划、恢复和安全等控制面路径，

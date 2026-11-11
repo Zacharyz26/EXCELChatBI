@@ -1,7 +1,16 @@
-# CLAUDE.md
+# AGENTS.md
 
 > AI 编码工作基准。安全约束以本文件为准；当前交付顺序以[六阶段总纲](./docs/项目当前开发与交付计划_2026-10-27.md)为准，阶段 2 细节见[结构性修复子计划](./docs/对话式数据Agent结构性修复实施计划_2026-10-27.md)。完整架构见[技术设计](./docs/ChatBI设计文档.md)，MCP/Docker 设计见[跨阶段设计](./docs/MCP与Docker全阶段演进设计.md)。
 > [Agent 自主化规划](./docs/Agent自主化开发规划.md)保留历史版本与长期候选路线，不覆盖当前六阶段。文档索引见 [docs/README.md](./docs/README.md)。原技术基准于 2026-08-26 复核；2026-11-09 同步交付入口，产品仍 **NO_GO／V1 BLOCKED**，证据见[状态记录](./docs/项目状态与文档同步记录_2026-11-09.md)。不改变下列安全约束、工具契约或执行授权。
+
+本文件是仓库级编码代理指导，于 2026-11-10 从 `CLAUDE.md` 更名为 `AGENTS.md`，保留既有未提交内容。
+历史记录和尚未迁移的源码注释中的 `CLAUDE`／`CLAUDE.md` 指本文件旧名，不是另一套规则。
+Codex 在启动时发现并读取项目 `AGENTS.md`；目录层级与覆盖规则见
+[官方说明](https://learn.chatgpt.com/docs/agent-configuration/agents-md)。本次未另启模型会话核验自动加载日志，
+其他客户端是否读取仍由其配置决定。更名前“未发现 AGENTS.md”是历史检查结果，不再表示当前状态；
+不可读运行数据卷仍未审查。
+执行任务时应阅读本文件和适用计划，并服从当轮用户授权及执行环境限制。现有代码不代表所有
+规范都已落实：例如仍有公共函数使用英文 docstring；这是需逐步核对的存量差异，不取消中文规范。
 
 ## 1. 项目一句话
 
@@ -206,9 +215,12 @@ tests/                 单元、集成与 Agent 行为评测
 
 ## 7. v2.4 及后续实施约束
 
+本节“阶段 3–8”指历史技术版本编号，不是当前六阶段交付总纲。已有安全与接口约束继续适用；
+尚未实施的长期候选须另行批准，不能据此启动新阶段。
+
 - 任务提纲只由本地 fast/template 规则生成，不调用模型、不限制 Agent 可见的冻结工具目录；
   工具失败返回同一个 Agent 继续处理，不得新增旁路 Planner/Replanner。
-- Verifier 以确定性 TaskContract 检查为主，LLM 只判断语义覆盖等软条件，输出 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。
+- 生产 Verifier 使用确定性 TaskContract、事实与 Evidence 检查，输出 `PASS/NEEDS_ACTION/WAITING_USER/BLOCKED/FAILED`。可选 LLM 语义检查仅保留为实验／评测接口；因历史 false PASS 仍为 `NO_GO`，不得将其描述为已启用的生产完成门。
 - 图表/报告正则不能直接删除；先与新后置条件影子运行，回归等价后再降级和移除。
 - 任务持久化采用追加 TaskEvent + 当前快照，计划修订有版本，工具调用有幂等键。
 - 暂停/恢复承诺必须同时具备 `run_id`、Checkpoint、取消令牌和明确断线语义。
@@ -242,39 +254,53 @@ tests/                 单元、集成与 Agent 行为评测
 
 ## 9. 常用命令
 
+以下各块均从仓库根目录执行，按需要选择；不是应连续执行的一份脚本。
+配置初始化只创建不存在的文件，已有本机配置应先审查，不能覆盖。
+
 ```bash
-# 一次性配置
-cp .env.example .env
-cp config/models.example.yaml config/models.yaml
-cp config/data_policy.example.yaml config/data_policy.yaml  # 可选
+test -e .env || cp .env.example .env
+test -e config/models.yaml || cp config/models.example.yaml config/models.yaml
+# 可选策略配置
+test -e config/data_policy.yaml || cp config/data_policy.example.yaml config/data_policy.yaml
+```
 
-# 安装与后端（基础统计属于核心运行时）
-uv sync
-uv run uvicorn apps.api.main:app --reload
+轻量后端（基础统计属于核心运行时）：
 
-# 现有 .env 若启用 bge + Milvus，需在同次同步中声明 rag；
-# 完整模型不要开 --reload，完成同步后用 --no-sync 防止环境被重新精确同步
-uv sync --extra rag
+```bash
+uv sync --frozen
+uv run --no-sync uvicorn apps.api.main:app --reload
+```
+
+现有配置若启用 BGE + Milvus，在同一次同步中声明所需 extras；完整模型不要开 `--reload`。
+完成同步后使用 `--no-sync`，避免启动时重新精确同步移除可选依赖：
+
+```bash
+uv sync --frozen --extra rag
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   uv run --no-sync uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+```
 
-# 前端
-cd apps/web
-pnpm install
-pnpm dev
+前端在另一终端启动，仍从仓库根目录执行：
 
-# 后端检查
-uv run pytest
-uv run ruff check .
-uv run mypy .
+```bash
+pnpm --dir apps/web install --frozen-lockfile
+pnpm --dir apps/web dev
+```
 
-# 前端检查与 E2E
-cd apps/web
-pnpm lint
-pnpm build
-pnpm test:e2e
+免费检查使用隔离测试环境；示例 registry 避免读取个人模型配置，禁止将这些命令改为真实模型验收：
 
-# 知识库
+```bash
+MODEL_REGISTRY_PATH=config/models.example.yaml uv run --no-sync pytest
+uv run --no-sync ruff check .
+uv run --no-sync mypy apps mcp_servers packages
+pnpm --dir apps/web lint
+pnpm --dir apps/web build
+pnpm --dir apps/web test:e2e
+```
+
+知识库维护会读取所选运行配置；重建属于写操作，应在明确授权的环境执行：
+
+```bash
 uv run --no-sync python scripts/kb_rebuild.py --mode incremental
 uv run --no-sync python scripts/kb_eval.py --enforce --json-output .data/kb-eval.json
 uv run --no-sync python scripts/kb_admin.py status
@@ -321,4 +347,4 @@ Milvus Lite 对本地数据库使用独占文件锁；常驻后端与测试不�
 10. 标准 MCP 接口提前进入 v2.4：stdio 与 Streamable HTTP 是目标传输，独立 HTTP+SSE
     不作为新实现；v2.5 在同一 Gateway 上扩展记忆、知识和分析契约，v3.0 再扩展外部 MCP 治理。
 11. Docker 是 v2.4 的正式交付要求；v2.5 演进状态恢复与资源 profile，v3.0 演进外置状态、镜像供应链和多实例。容器不替代 Code Interpreter 安全沙箱，不向业务容器挂载 Docker Socket。
-12. 严格按 v2.4→v2.5→v3.0 的阶段门禁推进，每阶段独立验证和提交。
+12. v2.4→v2.5→v3.0 保留为历史版本与候选路线；当前执行顺序、批次门槛及授权以六阶段总纲和阶段 2 子计划为准。阶段独立验证，提交／推送须服从当轮授权。

@@ -218,7 +218,7 @@ Web 和 API 都宣传接受 `.xls`，但依赖清单没有 `xlrd`，当前环境
 - `docs/PROJECT_HANDOVER.md`：作为代码地图和维护手册，加入 Git 并从两级 README 链接。
 - `docs/全栈部署与E2E.md`、`docs/本地完整BGE与Milvus启动指南.md`、`docs/知识库部署与运维.md`：分别负责根 Compose、本地完整 RAG、KB 运维。
 - `docs/数据画像安全策略.md` 和 `docs/知识库升级验收基线.md`：保留为明确的安全/质量契约。
-- `CLAUDE.md`：仍被根 README 和设计文档引用，属于项目开发约束，不是可随手删除的聊天残留。
+- `CLAUDE.md`：在本次 2026-09-28 审查时仍被根 README 和设计文档引用，属于项目开发约束，不是可随手删除的聊天残留。后于 2026-11-10 更名为 [`AGENTS.md`](../AGENTS.md)，此处保留历史名称。
 - `deploy/secrets/README.md`：虽然没有普通 Markdown 入链，仍解释公开开发 secret 与生产 secret 的区别。
 
 ### 可以移出主阅读路线，但不建议直接删

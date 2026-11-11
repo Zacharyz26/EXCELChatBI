@@ -6,6 +6,8 @@
 
 ## 1. 现状与边界
 
+本节第一段“当前”指 v2.4 设计前的 v2.3 状态；现行接口已有持久 run、序号与游标。下文旧 `plan.updated` 名称保留为原稿锚点，当前实际事件名是 `plan.revised`：由 [`TaskStore`](../../packages/session/task_store.py) 落库，前端 [`workspace.ts`](../../apps/web/src/stores/workspace.ts) 消费。
+
 当前 `/chat/stream` 发送 `meta`、`understanding`、`plan`、`tool_start`、`tool_end`、`artifact`、`text.delta`、`error` 和 `done`。其中 `plan` 只是当前模型轮次的工具调用列表，事件没有 run ID、持久序号或恢复游标。
 
 v2.4 保留 `/chat/stream`，在 `meta`/`done` 事件和 `X-ChatBI-Run-ID` 响应头中返回同一个
@@ -68,6 +70,8 @@ TaskContract 已建立。
 
 ### 3.2 `clarification`
 
+**历史独立事件设计。** 当前 [`agent_loop.py`](../../apps/orchestrator/agent_loop.py) 将问题和回答约束写入 `waiting_user` 的 payload，再发送 `text.delta` 与 `done(run_status=waiting_user)`；回答落库事件为 `clarification.answered`。前端从 `waiting_user` 提取待回答问题，不应等待本标题的独立 `clarification` 事件。
+
 发出一个可回答问题；一个事件只包含一个问题，便于独立校验和恢复。
 
 ```json
@@ -85,6 +89,8 @@ TaskContract 已建立。
 客户端不得把自由文本答案直接写入计划，必须经服务端 answer schema 和权限校验。
 
 ### 3.3 `plan.created`
+
+以下 JSON 保留原稿形状。现行 TaskStore payload 使用 `plan_version`，并含确定性提纲的审计元数据；历史 `route=llm` 不表示当前存在独立 LLM Planner。
 
 ```json
 {
@@ -105,6 +111,8 @@ TaskContract 已建立。
 ```
 
 ### 3.4 `plan.updated`
+
+**历史名称；现行事件为 `plan.revised`。** 保留本标题用于旧链接和设计追溯，下方 JSON 是原稿示例。当前事件的完整 payload 由 TaskStore 生成，不能把旧示例字段当成接口的全部必需字段。
 
 ```json
 {
@@ -190,13 +198,13 @@ TaskContract 已建立。
 
 ## 4. v1 兼容映射
 
-阶段 1/2 采用双发，不要求旧前端理解新事件：
+本表保留阶段 1/2 的兼容设计，计划修订名称已按当前源码校正；`clarification` 行只属于历史独立事件方案，当前澄清发送方式见 §3.2。阶段 1/2 当时采用双发，不要求旧前端理解新事件：
 
 | v2 事件 | v2.3 兼容事件 | 规则 |
 |---|---|---|
 | `goal` | `understanding` | 使用目标摘要，不重复模型开场白 |
 | `plan.created` | `plan` | 把步骤快照映射为旧卡片结构 |
-| `plan.updated` | `plan` | 发送最新完整快照，旧 UI 替换当前计划 |
+| `plan.revised` | `plan` | 发送最新完整快照，旧 UI 替换当前计划；原稿名称为 `plan.updated` |
 | `step.started` | `tool_start` | 使用解析后的 tool 和字段摘要 |
 | `step.completed` | `tool_end` | 状态映射为 ok/error |
 | `verification` | 无 | 旧客户端忽略 |
@@ -208,6 +216,8 @@ TaskContract 已建立。
 
 ## 5. 顺序与故障语义
 
+以下顺序与约束保留原设计，计划修订名已按当前源码更新为 `plan.revised`；原稿写作 `plan.updated`，这一历史名称不是当前应订阅的事件。现行生命周期还包含 `run.started`、`verification.started`、`clarification.answered` 等持久事件，以 TaskStore 和 Agent 发送路径为准；下文 Replanner 是已撤下的独立组件，失败反馈由同一 Agent 处理。
+
 正常顺序：
 
 ```text
@@ -215,7 +225,7 @@ meta(v1 扩展 run_id)
 goal
 plan.created
 step.started → artifact? → step.completed
-plan.updated? → step.started ...
+plan.revised? → step.started ...
 verification (可能重复)
 text.delta*
 done(run_status=completed)

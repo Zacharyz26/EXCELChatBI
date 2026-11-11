@@ -2,9 +2,11 @@
 
 > **当前交付状态（2026-11-09）：阶段 2／V1 BLOCKED，整体 NO_GO。** R1–R4 已有独立限定检查点；最新真实验收仅月汇总等分段通过，画像／处理说明、图表意图和新 PDF 仍有阻塞。预算、覆盖及证据见[当前状态记录](./docs/项目状态与文档同步记录_2026-11-09.md)。历史工程关闭、免费测试和提交推送均不等于完整交接通过。
 
+接手开发请先读 [PROJECT_HANDOVER.md](./docs/PROJECT_HANDOVER.md)：2026-11-10 已依据实际源码和原始失败核对架构、恢复／报告边界、启动及预算；不代表新增真实验收通过。
+
 中文优先的对话式数据分析 Agent：通过自然语言完成知识问答、表格数据分析、可视化和报告生成。
 
-> 开发约束见 [`CLAUDE.md`](./CLAUDE.md)，完整架构见
+> 开发约束见 [`AGENTS.md`](./AGENTS.md)，完整架构见
 > [`docs/ChatBI设计文档.md`](./docs/ChatBI设计文档.md)，当前开发与交付以
 > [六阶段总纲](./docs/项目当前开发与交付计划_2026-10-27.md)及[阶段 2 子计划](./docs/对话式数据Agent结构性修复实施计划_2026-10-27.md)为准。文档入口和现行/历史边界见
 > [`docs/README.md`](./docs/README.md)。
@@ -194,8 +196,7 @@ FastAPI/Starlette 锁定到 0.121.3/0.49.3，Excel 不再信任后缀和 dimensi
 
 - 任务提纲进度映射、同一 Agent 的 Observation 纠错、结构化澄清回答、单步重试、SSE 游标重连和
   服务端最近 Run 恢复已实现；Web/API/工具服务重启浏览器门禁已通过真实 Compose CI；
-- 当前 TaskContract 解释器只覆盖非空答复与高置信图表/报告后置条件；语义覆盖首轮模型评测
-  未通过，生产保持禁用；
+- 当前 TaskContract 已包含 R1–R4 的数量、操作、范围与交付义务；真实用例仍有来源绑定、既有材料意图及报告阻塞，见开发交接。语义模型验证实验仍未通过生产门槛；
 - 更广泛的非数值 Claim 和同值路径语义消歧尚未完成；
 - 记忆控制面、TaskRun 快照、确定性上下文压缩和 3C 指代质量/恢复门禁已完成；
   3D 用户治理与 3E 五阶段血缘/恢复已通过真实本机 full-stack E2E 和
@@ -219,7 +220,7 @@ FastAPI/Starlette 锁定到 0.121.3/0.49.3，Excel 不再信任后缀和 dimensi
 - SQLite v11 以不可变边表保存多父 Dataset 血缘和 TaskRun 双父版本绑定；受治理 Join 先预检，
   再由 Host 校验完全一致的参数和数据版本后自动执行，并继承两侧更严格的数据策略；
 - 知识库仍是实例级共享资源；当前收尾版本明确限定单租户部署，不承诺跨租户索引隔离；
-- 前端主包仍较大，需对 ECharts 与报告卡片做动态拆包。
+- 2026-11-10 源码核对：ECharts、审计／血缘／记忆面板已动态加载；历史“尚未拆包”不再适用。当前包体和交互质量仍须按前端阶段验收。
 
 ### 已规划但未实现
 
@@ -328,14 +329,15 @@ React + Zustand
 FastAPI + Bearer/项目隔离 + Agent 控制面 + ModelGateway
       ↓
 Governance → MCP Client Gateway
-             ├─ stdio（本地）
+             ├─ in_process（默认开发/测试）
+             ├─ stdio（SDK 子进程）
              └─ 认证 Streamable HTTP（部署）
       ↓
 parquet/报告文件 + SQLite v11 + Local/Milvus 知识库
 ```
 
 Dify 已放弃。Agent 生产执行已使用 MCP 单源契约、官方 SDK Server/Client 和受治理
-Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已把 17 个 Agent 工具分配到
+Client Gateway；默认开发/测试使用进程内适配，stdio/HTTP 才经官方 SDK；部署环境强制 HTTP。根 Compose 已把 17 个 Agent 工具分配到
 五个独立服务，v3.0 再扩展外部 MCP 的动态发现、授权与准入治理。
 
 ## 目录速览
@@ -346,7 +348,9 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 | `apps/orchestrator` | 当前 Agent 循环；v2.4 控制面组件落点 |
 | `apps/web` | React 18 + ECharts 5 + Zustand 对话工作区 |
 | `mcp_servers` | Excel、统计、图表、报告和数据变换等确定性工具 |
-| `packages/models` | 模型网关与 registry |
+| `packages/models` | 模型网关、usage 未知保真与 registry；不内置验收累计美元账本 |
+| `packages/orchestration` | 共享任务/操作契约、Evidence 计数投影与范围要求 |
+| `packages/common/text_surface.py` | 聊天/报告共用文本结构与原文来源映射 |
 | `packages/governance` | schema、数据边界、项目权限、策略、审计与 trace |
 | `packages/rag` | embedding、稀疏检索、rerank、Milvus |
 | `packages/session` | SQLite 工作区、schema 迁移、Task/Event/Evidence、受控记忆与快照 |
@@ -370,15 +374,17 @@ Client Gateway；进程内适配只用于迁移兼容/测试。根 Compose 已�
 
 ### 方案 A：轻量本地启动（推荐新开发者）
 
-首次配置和安装：
+首次配置和安装（已有文件不覆盖；已有验收环境不在此升级／重装依赖）：
 
 ```bash
-cp .env.example .env
-cp config/models.example.yaml config/models.yaml
-cp config/data_policy.example.yaml config/data_policy.yaml
-uv sync
-pnpm --dir apps/web install
+test -e .env || cp .env.example .env
+test -e config/models.yaml || cp config/models.example.yaml config/models.yaml
+test -e config/data_policy.yaml || cp config/data_policy.example.yaml config/data_policy.yaml
+uv sync --frozen
+pnpm --dir apps/web install --frozen-lockfile
 ```
+
+普通启动不自动接入累计费用账本。任何真实模型操作前须按[交接预算说明](./docs/PROJECT_HANDOVER.md#h7-真实调用预算与凭据边界)核对授权、双层余额及实际守卫；上传画像／health 可用不表示模型已通过。
 
 确认 `.env` 使用轻量 RAG：
 
@@ -393,7 +399,7 @@ EMBEDDING_DEVICE=cpu
 终端 1 启动 API：
 
 ```bash
-uv run uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
+uv run --no-sync uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 终端 2 启动 Web：
@@ -434,11 +440,17 @@ uv run --no-sync python scripts/kb_admin.py status
 
 ### 方案 C：根 Compose（生产结构验收）
 
-默认根 Compose 使用轻量 RAG，构建 API、Web、edge 和五个 MCP 服务：
+默认根 Compose 使用轻量 RAG，构建 API、Web、edge 和五个 MCP 服务。
+先按 [secret 配置说明](./deploy/secrets/README.md)准备七个独立凭据文件，并在
+`deploy/.env.production` 中填写对应的 `*_FILE_PATH`。缺少任一必需文件时 Compose 应拒绝启动；
+合成 E2E 凭据不能用于真实部署。以下命令从仓库根目录执行，初始化不会覆盖已有配置：
 
 ```bash
-docker compose up --build -d
-docker compose ps
+test -e deploy/.env.production || cp deploy/.env.production.example deploy/.env.production
+# 按上述说明填写本机文件路径后，再检查和启动
+docker compose --env-file deploy/.env.production config --quiet
+docker compose --env-file deploy/.env.production up --build -d
+docker compose --env-file deploy/.env.production ps
 curl --fail http://127.0.0.1:8080/api/health/ready
 ```
 

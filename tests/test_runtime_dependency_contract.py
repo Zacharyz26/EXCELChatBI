@@ -79,7 +79,7 @@ def test_container_dependency_tier_uses_forecast_extra_not_removed_stats_extra()
 def test_current_setup_docs_do_not_require_removed_stats_extra() -> None:
     current_docs = (
         "README.md",
-        "CLAUDE.md",
+        "AGENTS.md",
         "docs/本地完整BGE与Milvus启动指南.md",
         "docs/知识库升级验收基线.md",
         "docs/知识库部署与运维.md",

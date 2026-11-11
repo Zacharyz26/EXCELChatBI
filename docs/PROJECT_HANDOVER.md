@@ -1,6 +1,250 @@
 # EXCELChatBI 项目开发交接文档
 
-> **当前入口（2026-11-09）：** R1–R4 限定通过检查点已核实；阶段 2／V1 仍 BLOCKED，整体 NO_GO。最新实测仍为 11 月 4 日；本轮仅同步文档、免费复核并按授权提交／推送已有改动。实际版本、覆盖、预算及发布边界统一见[项目状态记录](./项目状态与文档同步记录_2026-11-09.md)；本轮不实施新修复或部署。
+> **2026-11-10 源码交接核对：阶段 2／V1 仍 BLOCKED，整体 NO_GO。** 本页前半部依据实际源码与 11 月 4 日原始验收材料更新；本轮没有新模型验收、产品修复、提交或推送。R1–R4 的限定通过、工具分段成功及历史 CI 均不能替代同一会话的完整主链。
+
+执行优先级仍为[六阶段总纲](./项目当前开发与交付计划_2026-10-27.md) → [阶段 2 子计划 R1–R4／V1](./对话式数据Agent结构性修复实施计划_2026-10-27.md)。本页解释实际实现、运行和排错入口，不授予下一批修复或付费调用权限。开发约束见根目录 [AGENTS.md](../AGENTS.md)，证据快照见[11 月 9 日状态记录](./项目状态与文档同步记录_2026-11-09.md)和[11 月 4 日实测记录](./分段阻塞修复与续验记录_2026-11-04.md)。文末折叠区保留旧交接正文及历史锚点，其中旧版本、测试数、启动限制和预算按当时理解。
+
+## H1 当前版本与接手顺序
+
+本次在实际 WSL 仓库核对的分支为 `handoff/manual07-wip-checkpoint-20261025`，HEAD 为 `61537fc636386de8ccce51efb9ab32842a4a2e68`。工作树并不干净：已有 Markdown 整理、`CLAUDE.md` → `AGENTS.md` 更名、`pyproject.toml` 注释和 `tests/test_runtime_dependency_contract.py` 文档路径调整；旧 `docs/同事交接与CLI实测_2026-10-15.md` 在本轮开始前已删除。本轮保留这些状态，只更新文档，不恢复被删文件、不代为提交。远端和 CI 没有在本轮联网重验。
+
+| 检查点 | 实际提交 | 证据边界 |
+|---|---|---|
+| R1 | `8e32ead3dbf0ba0d83d02bd0543abab65924a9fb` | 核心数量门槛限定通过；不是所有自然语言事实已可靠覆盖 |
+| R2 | `ab3f3eb978973ca0365963e00e6c55ff944d2073` | 任务契约和澄清限定通过；后续真实请求仍暴露意图问题 |
+| R3 | `9741ce9e5ffed53ead81a166c5ca1cabfd8302e1` | 共享文本结构限定通过；格式及来源继承仍有缺口 |
+| R4 | `f2397b39d98daf3666aadf1a83ea9386f061ceda` | 共享上下文、真实工具／SQLite 与脚本模型流程限定通过 |
+| 后续分段阻塞修复与文档同步 | `61537fc636386de8ccce51efb9ab32842a4a2e68` | 包含 11 月 4 日有限修复；真实主链仍阻塞 |
+
+对 11 月 4 日 `freeze4-code-manifest.sha256` 中 **597 个非 Markdown 文件**逐项比较，本轮开始时 595 个相同，只有上述依赖文件注释与测试文档路径两项既有差异；产品实现与该归档对应。文件数量不是版本证明，旧 504 文件源指纹不能作为当前基线。完整文件清单、差异及本轮校验日志见 H9 的本地归档。
+
+接手时先执行只读 `git status --short`、`git branch --show-current`、`git rev-parse HEAD`、`git log -6 --oneline`、`git diff --stat`，核对未提交归属；然后按 H2 追踪实际路径，按 H4 阅读首次失败，按 H6 准备隔离运行。不要根据旧报告重新应用补丁。
+
+## H2 当前架构与真实调用路径
+
+产品是单机、单租户技术预览：React／Zustand 浏览器工作区，FastAPI HTTP／SSE，单个 function-calling Agent，受治理的工具目录，SQLite 控制面和 parquet／报告文件。没有独立 LLM Planner／Replanner；确定性提纲、模型动态工具选择、执行准入和最终验证各有职责，**目前仍可能失配**。生产确定性 Verifier 不是一个独立事实生成器；可选语义模型验证仍是实验能力，不能当作生产兜底。
+
+```mermaid
+flowchart TD
+  UI[浏览器工作区] --> UP[上传路由：解析与上传画像]
+  UP --> DS[Dataset + parquet + 上传 Artifact]
+  UI --> CHAT[chat/stream + 当前执行上下文]
+  CHAT --> HOST[AgentHost：合同、计划、模型循环]
+  HOST --> MODEL[ModelGateway 与供应商适配器]
+  HOST --> GOV[Schema / 权限 / 意图 / 范围 / 版本门禁]
+  GOV --> MCP[MCPClientGateway：实际传输按配置]
+  MCP --> TOOL[数据、统计、图表、知识、报告工具]
+  TOOL --> COMMIT[事务提交 Invocation / Evidence / Artifact / 血缘]
+  COMMIT --> CAND[候选回答与数量审计、逐事实绑定]
+  CAND --> VERIFY[完整 Verifier 与交付后置条件]
+  VERIFY --> STATE[完成 / 澄清 / 暂停 / 阻塞等状态]
+  COMMIT --> DB[(SQLite 事件、快照、工件索引)]
+  STATE --> DB
+  DB --> SSE[SSE 事件与历史读取]
+  SSE --> UI
+  TOOL --> FILE[报告 Markdown / PDF 与图表截图]
+  UI --> DOWN[鉴权下载路由]
+  DOWN --> FILE
+```
+
+| 边界 | 当前代码入口与职责 | 必须核对的绑定／限制 |
+|---|---|---|
+| UI 与 API | [ChatWorkspace.tsx](../apps/web/src/components/ChatWorkspace.tsx)、[workspace.ts](../apps/web/src/stores/workspace.ts)、[client.ts](../apps/web/src/api/client.ts)；后端 [chat.py](../apps/api/routers/chat.py)、[agent_runs.py](../apps/api/routers/agent_runs.py) | POST 派发、GET 订阅、澄清和恢复不能互相替代；执行结果以 Run／Event 为准 |
+| 上传 | [upload.py](../apps/api/routers/upload.py) | 直接调用解析、schema／画像工具并写入 Dataset 与会话上传 Artifact；**没有模型调用，也不证明远程 MCP 或 Agent 画像通过** |
+| 主循环与执行合同 | [agent_loop.py](../apps/orchestrator/agent_loop.py)、[task_outline.py](../apps/orchestrator/control/task_outline.py)、[contracts.py](../packages/orchestration/contracts.py)、[operation_intent.py](../packages/orchestration/operation_intent.py) | 用户当前要求、暂缓／禁止、数据源、required 操作、分组／指标／总计与澄清必须贯通；动态工具调用不必都来自提纲 |
+| 工具适配与执行 | [agent_tools.py](../apps/orchestrator/agent_tools.py)、[client_gateway.py](../mcp_servers/common/client_gateway.py) | 参数、工具目录版本、RequestContext、项目权限、输入版本及输出契约先于持久化；协议见 H5 |
+| 数据计算 | [excel_parser/tools.py](../mcp_servers/excel_parser/tools.py)、[dataset_ops/tools.py](../mcp_servers/dataset_ops/tools.py)、[dataset_store.py](../packages/common/dataset_store.py)、[stats/tools.py](../mcp_servers/stats/tools.py) | 画像／筛选／清洗／去重／聚合产生真实结果；衍生数据、父版本、操作参数与 lineage 必须一致 |
+| 可信数量事实 | [evidence_facts.py](../packages/orchestration/evidence_facts.py) 的 `seal_count_facts`／`valid_count_projection` | 前行数、后行数、删除差量有不同角色；相同数字不能互借。投影来自真实工具结果，不是模型自报 |
+| 文本结构与事实绑定 | [text_surface.py](../packages/common/text_surface.py)、[claim_structure.py](../apps/orchestrator/control/claim_structure.py)、[claims.py](../apps/orchestrator/control/claims.py)、[quantity_presentation.py](../apps/orchestrator/control/quantity_presentation.py) | 原文 span／字段归属／数值角色／来源身份保留；闭合草稿与旧文本均须过数量审计。列表长度只证明文档成员数 |
+| 最终完成门 | [verifier.py](../apps/orchestrator/control/verifier.py) 的 `verify_completion`／`_verify_analysis_requirements` | required 义务、Evidence 版本和范围、Claim、产物与文件、未恢复失败共同决定状态；空 claims 不能豁免实际数量审计 |
+| 持久化 | [task_store.py](../packages/session/task_store.py) 的 `commit_tool_success`／`commit_tool_failure`；[store.py](../packages/session/store.py) | 同一事务提交 Invocation、Evidence、Artifact、事件与 Checkpoint；不可把历史 Artifact 当作本轮完成证明 |
+| 执行上下文 | [execution_context.py](../packages/session/execution_context.py) 的 `resolve_execution_context` | 一次只读 SQLite 快照重验合同、版本、Ledger、字段／来源及状态；受治理切换需要来源证明，读取历史工件本身不隐式切换数据 |
+| 知识／领域与受控记忆 | [rag](../packages/rag/)、[memory_refs.py](../packages/session/memory_refs.py)、[knowledge_intent.py](../packages/orchestration/knowledge_intent.py) | 检索和定义依项目／主体／会话受控；明确要求查询时不能直接无证据完成，统计“口径”不等于自动知识查询 |
+
+当前状态存储仍是 SQLite／本地 parquet；`.env.example` 中 Redis／Postgres／MinIO 预留变量和 `storage` extra 不代表已接入外部状态。Settings 已移除对应预留字段，示例中的旧注释不可当实现证明。
+
+共享模块已存在，应先查其契约与消费者，避免继续在聊天、报告各加一套独立数字／关键词解析。`claims.py` 的语义绑定、提纲／意图及报告交付之间仍有复杂依赖；“已有共享结构”不表示所有来源映射问题已经解决。
+
+### H2a 数据状态与恢复
+
+必须分清三个对象：服务端 `execution_context` 是实际执行源；浏览器 `activeDatasetRef` 是可切换的**预览**；按消息归属的 Artifact 是历史产物。仅点击数据列表不会改变 `/chat/stream` 的数据源；“在当前对话中使用此数据集”动作会发送含明确 `dataset_ref` 的请求，再由服务端解析／治理。不要把预览结果写成当前 Agent 已分析的版本。
+
+恢复也分三条路径：
+
+1. SSE 断开后，客户端通过 GET 和 `Last-Event-ID` 续订，不能重放原 POST 造成重复任务。
+2. 重开会话读取 conversation、latest run、detail 和 events，恢复展示；**不会自动恢复执行**。
+3. 用户显式 `answer`／`resume`／单步 `retry` 经 `If-Match`、幂等键及 Checkpoint 恢复同一 Run；未知调用结果不得自动重试。相关测试入口是 [test_run_manager.py](../tests/test_run_manager.py) 与 `tests/test_segmented_*` 中的上下文／恢复场景，历史结果仍需按 H3 分层理解。
+
+SSE `done` 只表示订阅结束，不等于 completed；waiting_user／paused 也会结束订阅。只读的 cancel-only 澄清不能提交答案恢复；UI“失败后重试原请求”会创建新 Run，不能与同 Run 单步重试混淆。
+
+前端“预算”显示的是 `tool_attempts/max_tool_calls`，不是累计美元账本；报告卡“已生成”表明存在报告 Artifact，不等于当前 Run 已完成，也不是每次下载都重验内容哈希。后端工具提交后，即使最终文字被拒，真实衍生数据与工件也可能已落库，恢复必须读取实际状态，不能以回答中的“失败”推断操作未发生。
+
+### H2b 图表和报告
+
+[chart/tools.py](../mcp_servers/chart/tools.py) 产生 ECharts option／截图；[EChartsRenderer.tsx](../apps/web/src/components/EChartsRenderer.tsx) 消费 option，不应重新推算业务数值。ECharts／审计等面板已使用动态加载，旧“尚未拆包”结论不适用于当前代码；包体和交互质量仍需后续前端阶段验证。
+
+报告流程在 [agent_tools.py](../apps/orchestrator/agent_tools.py) 的 `_generate_report`／`_assemble_report_args`：从当前会话选择真实分析工件，验证 insights 与所选来源，再将画像、聚合表、统计和图表组装。不能跳过失败工件静默生成残缺报告。[report_claims.py](../apps/orchestrator/control/report_claims.py) 与 [report_delivery.py](../apps/orchestrator/control/report_delivery.py) 负责正文事实、所选来源和实际总计交付证明。
+
+[report/tools.py](../mcp_servers/report/tools.py) 的 `gen_report_md`／`export_pdf` 是确定性渲染：月表保留返回行、`analysis_id`、有效值数量、截断说明和 `total_value`；Markdown → 清洗后的 HTML → WeasyPrint PDF，不自行请模型补数。[report_safety.py](../packages/common/report_safety.py) 限制 HTML、图片和资源读取；中文字体、WeasyPrint／pydyf、Playwright Chromium 是运行依赖，渲染限制不等于操作系统级沙箱。
+
+[report.py](../apps/api/routers/report.py) 下载先验证报告所有权和项目读权限，再返回文件；文件生成、Artifact 发布与会话恢复是不同证据。验收时须同时检查新产物、关键表格／总计／单位／空值与截断说明、实际页面和 UI 下载哈希。当前真实 Agent 被挡在报告生成前，不能拿确定性工具 PDF 代替主链成功。
+
+## H3 已实现能力与实际验证层级
+
+以下**历史实测**来自 11 月 4 日归档；本轮只核对源码、原始失败和文档，不重复付费。
+
+| 能力 | 已有实测结果 | 尚不能声称 |
+|---|---|---|
+| 上传／原始画像 | 浏览器上传得到 75 行 5 列；真实画像工具产生 Evidence | Agent 的完整画像回答仍被阻塞；上传成功不代表回答通过 |
+| 两次筛选 | 频道 A：75→38；状态已播出：38→38，参数／血缘正确，后一次经 UI 澄清恢复 | 最终处理说明仍被拒；相同行数不能替代检查第二个条件 |
+| 空值／整行去重 | 真实工具 38→37→36，保留派生数据与父子血缘 | 画像／处理角色及来源误拒仍阻碍最终交付 |
+| 月汇总及总计 | 真实 Agent 独立分段完成；六个月 75/135/195/255/315/375，总计 1350，7 个有支持声明及 Verifier PASS | 不能向前拼接被阻塞步骤成为完整主链 |
+| 折线图 | 独立前置数据场景实际计算／浏览器展示 6 点；原会话因意图误编，在执行准入时被阻止 | 图表正确不等于候选回答全部有支持；yAxis 缺少独立单位名仍有 P2 限制 |
+| 新 PDF | 确定性模型替身＋实际工具／DB／新 PDF；ASGI 下载、SessionStore 重开、原生 Chromium 查看两页（不是前端点击下载验收） | 11 月 4 日真实 Agent 未生成 PDF，真实下载／打开检查 NOT_RUN |
+| 会话重开 | 三个真实会话刷新／重开后上下文、数据和既有工件一致，blocked 未伪装 completed | 没有真实 Agent PDF 可供恢复；未证明所有中断故障与目标机器场景 |
+| MCP | 真实 Host＋工具＋Scripted 模型在 in_process／stdio／HTTP 分段验证 | 不能推导真实供应商全链、五服务全目录、Docker 或当前 CI 通过 |
+| RAG、定义、Join、受控分析 | 源码与历史工程／专项证据存在 | 本轮未执行代表性业务验收；不等于多租户、CPU/GPU 等价或企业授权完成 |
+
+11 月 4 日真实续验共 **22 个物理模型请求、11 个任务：1 completed／10 blocked**；Agent 工具 Invocation 17 个中 14 成功／3 失败（不含上传）。这是分段诊断，完整 V1 始终 BLOCKED。原响应同时可能含正确统计和无依据判断，不能因为一句正确就批准整篇，也不能把所有拒绝都归为验证器误拒。
+
+## H4 核心阻塞、证据与继续开发入口
+
+首次业务交付阻塞发生在 `02-chain-profile`；后续是隔离分段续测，不是绕过画像后整条主链成功。下表按共因组织，不按失败时间排序。
+
+本地证据根 `E` 为 `/mnt/c/Users/33549/Documents/Codex/2026-10-23/task/segmented-blockers-fix-20261104T042326Z/`。这是**本机归档**，不是接手机器必有路径；源码、合成样本和本节机制说明可独立阅读。原始失败、候选回答、工具入参、Evidence 和数据库快照需要迁移时，应另行脱敏打包，不复制真实运行数据库／凭据进 Git。
+
+| 优先级／分类 | 已确认触发与原因 | 定位与关闭条件 |
+|---|---|---|
+| P1：必要绘图步骤误拒 | 原会话“刚才按月份汇总”指已完成输入，却被编成当前 aggregate 义务；模型绘图参数正确但工具执行前被挡 | `E/real-v2/diagnostics/08-intent-admission/`；`operation_intent.py`、`task_outline.py`、执行准入。区分既有输入和当前动作；新请求确需汇总时仍必须执行 |
+| P1：画像／处理事实归属误拒 | 清洗原文明确给源数据 38 行、空值 1、缺失比例 0.0263，再给删除后 37；真实父画像与变换 Evidence 存在，词法绑定与最终范围规则仍把它们混用 | `claims.py`／`profile_claims.py`、`verifier.py::_verify_analysis_requirements`、`E/real-v2/real-review/final-three-scene-review/`。应按输入／输出／差量角色结合真实同次变换血缘绑定；不能放开任意旧父数据 |
+| P1：报告计划／执行／交付分叉 | 13 场景初始 report-only 合同正确，模型自己加 aggregate／chart；aggregate 被挡，chart 成功，始终没有 generate_report 调用 | `E/real-v2/diagnostics/13-report-consumption/`；`agent_loop.py` 动态 artifact 义务与 ad-hoc 调用、`report_intent.py`。新计划、准入、来源及交付义务需一致；本证据不等于已发生虚假 completed |
+| P1：报告总计来源误拒 | 16 场景已有正确月表／折线分析与 total_value=1350；“按月份汇总…；期间总计”在分句后丢失指标归属 | `claim_structure.py::_aggregate_list_projections`／`_aggregate_member_projections`、`claims.py` 聚合绑定、`report_claims.py`。等事实显式字段对照通过、1351 错值仍拒绝；修复需保留结构来源而非数值白名单 |
+| 合理拒绝，不能放宽 | “每月增加 60”可由独立 oracle 算出，但候选没有相应变化量 Evidence；部分重复参与数／组数也无支持 | 保留安全负例。数学巧合、相同数字、正确段落都不能补出缺失事实来源 |
+| 已知限制／后续范围 | 疑问＋确认句过度提取、少见格式误拒、未知单位别名、定义自动填槽、异常行自动引用、图表轴单位和 PDF 版式等 | 以现有延期登记逐项核对；若阻断必要结果，不能继续当作非关键。单位白名单不是通用 typed-unit 体系 |
+
+根因传播需要分层看：用户引用既有材料 → 意图误建义务 → 准入挡工具；工具正确结果 → 结构／字段／角色归属丢失 → Claim 被拒；父源画像 → 最终范围的一刀切检查 → 正确处理说明被拒；模型改计划 → 合同／执行／报告目标未同步。**不建议再用句式特判或删除陈述规避**。计算、图表、PDF、事务和预算保守路径优先保留，修复共享契约边界及消费者衔接。
+
+`E/real-v2/real-review/original-replay-v2/05-independent-clean-review.json`、`06-independent-dedup-review.json` 是父画像／去重原文；`late-original-replay/16-report-original.json` 和 `late-format-comparison/16-total-owner-control.json`（均在 `real-review/` 下）是报告总计对照。`real-v2/workspace/safe-model-evidence/` 保存原响应，`real-v2/snapshots/final-all-scenes/tables.json` 保存实际状态／工具／Evidence。归档的 `model_budget_exhausted` 在部分场景是编排停止后续请求的终止载体，不代表正式美元额度已经耗尽。
+
+免费复现入口先看现有 [test_segmented_intent_report_fix.py](../tests/test_segmented_intent_report_fix.py) 等专项是否存在对应场景（精确测试清单以 `rg --files tests | rg segmented` 为准），再核对归档 replay 的 source manifest／路径／守卫；旧脚本有硬编码，不能直接执行其 paid runtime。本轮复核是代码与原始证据交叉阅读，不冒充重新运行这些缺陷测试。后续修复须冻结原回答／Evidence、正确表达与错值／错角色／错范围成对预期，再验证真实 Host／DB 和完整 Verifier。
+
+## H5 MCP 的实现与验证边界
+
+[service_catalog.py](../mcp_servers/common/service_catalog.py) 把 17 个 Agent 工具划入 `data-tools`、`stats-tools`、`chart-tools`、`knowledge-tools`、`report-tools` 五个服务；[agent_tools.py](../apps/orchestrator/agent_tools.py) 的 `mcp_client_config_from_settings` 将配置传给 Gateway。工具经过 `execute_mcp` 不足以证明走了网络，必须记录实际 transport、服务、Host／Invocation 与 Evidence。
+
+- 默认开发／测试 `AGENT_MCP_TRANSPORT=in_process`；这是当前默认可用路径。stdio 需要 `mcp` extra／官方 SDK 和子进程环境；HTTP 需要认证服务端；根 Compose 使用五服务路由，配置也支持单逻辑端点。
+- API／Host 进程在 `APP_ENV=staging/production` 时要求 `streamable_http`，不允许 in_process 降级。服务 token 与签名 Host RequestContext 分工不同，服务认证不是最终用户身份；token、签名 key 不得写进文档或 Git。
+- 11 月 4 日 [mcp_transport_probe.py](../scripts/mcp_transport_probe.py) 的修复先经过真实上传事务，创建会话上传 Artifact，再交给 ReferenceResolver。旧探针只有 Dataset、没有会话来源，不代表产品工具坏了；实际 Host 三传输回归见 [test_segmented_mcp_host.py](../tests/test_segmented_mcp_host.py)。
+- 三传输 Host 探针使用 Scripted 模型＋真实 data-tools：相同 A=21／B=57／总计78、Invocation、Evidence、版本／哈希与持久化核对。低层 `mcp_transport_probe.py` 的部分资源 fixture 不能冒充全部服务真实业务覆盖。
+- Docker 旧 WSL 集成不可用；本轮未重新启动容器或验证目标机器。Compose 文件存在、静态契约通过及 stdio／HTTP 通过，都不等于 Docker 验收。当前 CI 工作流仅匹配 main push／面向 main 的 PR，当前开发分支推送本身不会自动证明 CI 通过。
+
+## H6 配置、启动与免费检查
+
+依赖以 [pyproject.toml](../pyproject.toml)、[uv.lock](../uv.lock) 和 [apps/web/package.json](../apps/web/package.json)／pnpm lock 为准：Python 3.11、Node 20、pnpm 9；不要因文档整理升级 SDK。本轮只读已安装版本：Python 3.11.15、OpenAI 1.109.1、httpx 0.28.1、MCP 1.28.0、WeasyPrint 62.3、pydyf 0.10.0、Node 20.20.2、pnpm 9.15.9；没有升级或重装。完整启动导航仍见根 [README](../README.md#启动导航)，本节强调接手的安全差异。
+
+只在**新环境首次配置**时复制示例，已有文件不能覆盖；示例 registry 不含可用密钥：
+
+```bash
+test -e .env || cp .env.example .env
+test -e config/models.yaml || cp config/models.example.yaml config/models.yaml
+test -e config/data_policy.yaml || cp config/data_policy.example.yaml config/data_policy.yaml
+# 新环境安装；已有验收环境不要重新同步或升级依赖。
+uv sync --frozen
+pnpm --dir apps/web install --frozen-lockfile
+```
+
+轻量 RAG 使用 `RAG_EMBEDDER=hashing`、`RAG_RERANKER=lexical`、`RAG_STORE=local`、`RAG_RUNTIME_PROFILE=baseline`；不是完整 BGE 语义验收。完整 BGE／Milvus 另看[启动指南](./本地完整BGE与Milvus启动指南.md)。纯 API 核心安装不含 PDF、截图或远程 MCP 的全部依赖：PDF 要 `report` extra（WeasyPrint 62／pydyf 0.10.0）及中文字体；截图要 `chart-screenshot` 和匹配 Chromium；stdio／HTTP 要 `mcp` extra（SDK 1.28.0）。多 extra 应一次声明，`uv sync` 可能移除未声明 extras；额外安装需按本轮权限执行。
+
+以下是已有依赖环境的**开发启动**，不是累计预算受控验收入口；真实模型操作前必须先落实 H7：
+
+```bash
+# 两个终端；先检查端口占用，不停用户已有服务。
+uv run --no-sync uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+pnpm --dir apps/web dev --host 127.0.0.1 --port 5173
+```
+
+默认 Vite 代理与 API 端口配套；换隔离端口时同时核对 [vite.config.ts](../apps/web/vite.config.ts) 的 `VITE_API_PROXY_TARGET`。临时实例的 `CHAT_DB_PATH`、`DATASET_DIR`、`UPLOAD_DIR`、`REPORT_DIR`、KB 等目录要一并指向独立 Linux `/tmp`，不使用真实业务运行数据库。不要把创建空测试库当成当前数据恢复；退出只关闭自己创建的进程。鉴权／部署选项见 [config.py](../packages/common/config.py)、[.env.example](../.env.example) 和[全栈部署与 E2E](./全栈部署与E2E.md)。
+
+已有依赖环境的免费检查示例（先读所选测试，确认没有供应商网络调用）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/test_runtime_dependency_contract.py tests/test_stage6a_compose_contract.py
+.venv/bin/ruff check . --no-cache
+.venv/bin/mypy apps mcp_servers packages --cache-dir /tmp/excelchatbi-mypy-cache
+pnpm --dir apps/web lint
+```
+
+[tests/conftest.py](../tests/conftest.py) 会在应用导入前将 DB／文件目录隔离到系统临时目录、设 testing／example registry，避免读取开发 `.env`。这不代表任何名称含 integration 的脚本都自动免费：独立 eval／MCP probe／real runtime 各自有副作用；本轮没有运行它们。完整后端命令为 `.venv/bin/python -m pytest -q`，前端 `build` 为 tsc＋Vite，`test:e2e` 的 API fixture 浏览器测试不同于 `test:e2e:fullstack` 的真实 API／工具，Compose 测试还需要 Docker；均须按实际配置单独判定。
+
+### H6a 测试状态必须按日期读
+
+| 时间／范围 | 结果 | 含义 |
+|---|---|---|
+| 11 月 4 日完整免费后端 | 4299 PASS／495 FAIL，0 ERROR／SKIP／XFAIL | 完整套件仍失败。旧更早 strict xfail 数字不应套到本次 |
+| 同日 495 失败分类 | 309 夹具／契约迁移、173 文案／精确断言、3 已知非关键误拒、1 旧 probe API、8 renderer 契约、1 格式 | 历史分类不是通过，不能自动归类将来未知失败或掩盖真实 P1 |
+| 11 月 9 日免费复核 | 246 专项／usage PASS；Ruff、Mypy 198 文件、前端 tsc／build；56 个 Chromium API fixture PASS | 见状态记录；不是本轮执行，不证明完整后端或真实主链通过 |
+| 11 月 10 日本轮文档检查 | 9 项依赖／Compose 文件契约 PASS；四样例哈希／独立 oracle 一致；76 个 Markdown 的 533 个本地链接／锚点检查无断链，历史锚点保留；差异／敏感信息检查见本轮归档 | 不重复全套产品验收；不能以文档检查提高 V1 状态 |
+
+## H7 真实调用预算与凭据边界
+
+唯一续跑入口（本机绝对路径）：`/mnt/c/Users/33549/Documents/Codex/2026-10-14/task/handoff-closeout/latest-ledger.json`。**每次真实验收前沿指针读取实际账本并校验 hash、授权、批次起点、在途和 halt；本页数值只是 2026-11-10 只读核对快照，不是新授权或永久余额。** 当前指向 `/tmp/excelchatbi-stage2-20261025/workspace/model-budget-ledger.json`，迁移及恢复记录由指针给出；若临时目录丢失，必须先正式对账恢复，不能新建零余额账本。
+
+| 口径 | 本次只读核对值 |
+|---|---|
+| 授权序列／总请求上限 | 83／280，剩余197 |
+| 全历史物理请求 | 95，含单列早期12次；不与83混为一谈 |
+| 保守累计费用／总上限 | USD 2.43758688／13.00，剩余 USD 10.56241312 |
+| 未知历史费用保留 | USD 1.38817536，已含在累计中，不能清零或重复扣除 |
+| 延续诊断批次80次／USD10 | 已用44次／USD0.60957996，剩36次／USD9.39042004；须重新确认批次授权仍适用 |
+| 账本在途预留／halt | 0／false；只是读取时状态，开跑前仍须排查并发任务 |
+| 本轮 | 0 次真实模型调用，USD0；账本和指针只读 |
+
+底层账本 `physical_requests=48`／`actual_cost_usd=0.64969344` 是该账本段相对历史基线的累计，不是本轮使用量。UI／TaskRun 工具调用预算、AgentLoop 模型轮次／字符上下文上限、ModelGateway 费用估计与外部累计 USD 守卫是不同概念；不能据此假设已有 TaskRun 累计 token 硬限额。
+
+[usage.py](../packages/models/usage.py)、[openai_compatible.py](../packages/models/adapters/openai_compatible.py)、[gateway.py](../packages/models/gateway.py) 保留缺失／null／非法 usage 的未知语义；明确0不等于整次免费。**普通开发服务不会因为模型网关存在就自动受上述累计账本保护**。付费验收编排必须把每个物理请求接到既有已修复守卫，先预留后结算；重试、自动修复和 fallback 同样计数计费，受本批和总预算双限。未知费用／halt 时停止，不能补零、手动释放保守预留或换入口继续。价格以已审计配置为准，不输出或复制实际密钥。
+
+## H8 下一步与不可省略的验收
+
+1. 按 H4 冻结首次失败及等事实正反例，优先处理范围／角色、既有材料意图、动态计划与报告来源衔接；复用现有投影和完成门。是否实施由下一批授权决定，本轮没有新修复。
+2. 修复后先免费专项、实际 Host／工具／SQLite 路径、完整回归和独立复审；明确新回归与已登记历史失败。完整套件失败不得改写成全绿。
+3. 另获准真实 V1 后，在同一新浏览器会话执行：上传 → 原始画像（暂不筛选或清洗）→ 频道 A → 已播出 → 指标空值 → 整行去重 → 月表与总计 → 折线图 → 新 PDF／UI 下载打开 → 离开重开。失败先保存现场，不用独立工具结果补成整链成功。
+
+样例契约见 [examples/handoff/README.md](../examples/handoff/README.md) 与 [oracle.json](../examples/handoff/oracle.json)。本轮以 Python 标准库 CSV／Decimal 独立复算四个样例及文件哈希，均与 oracle 一致（这只是夹具检查，不是产品通过）。标准 broadcast 为 75→38→38→37→36，月度75/135/195/255/315/375、总计1350。实际测试前重算输入哈希和独立 oracle；这些答案不能提供给模型。记录数不是独立人数；四业务样例数字相同也不能跨数据集借 Evidence。
+
+**仍未完成的交接门槛保留：** 设备／活动／销售对照、日期散点（原生 XLSX、ISO CSV、非法／空日期及轴交换）、缺列／含糊指标／必要查询、失败恢复／重复提交／取消重连、性能与大数据边界、完整 HTTP／Docker、当前版本 CI、前端阶段 3 设计确认及阶段 4 打磨、阶段 5 最终完整验收、阶段 6 同事目标机器。已有专项或历史结果按其范围引用，不一律当作从未做过，也不当作最终版本通过。自动定义填槽、异常行自动引用仍单列延期，不因本页整理重新开启。
+
+旧四批／A–G／长期 v2.5／v3.0 编号都是历史或候选路线，不能替换六阶段总纲。R4 负责数据、版本和状态显示正确；前端阶段负责视觉、交互、可访问性，两者复用契约。V1 即使将来通过，也不替代最终全面验收和目标机器交接。
+
+## H9 证据索引与本轮边界
+
+仓库内持久入口：
+
+- [11 月 9 日项目状态](./项目状态与文档同步记录_2026-11-09.md)：提交与当时免费复核、预算快照。
+- [11 月 4 日分段阻塞修复与续验](./分段阻塞修复与续验记录_2026-11-04.md)：最新真实分段、失败与协议覆盖。
+- [11 月 3 日 V1](./V1_真实主链验收记录_2026-11-03.md)及[全项目分段](./全项目分段验收记录_2026-11-03.md)：前次失败和分层证据，不能覆盖后次结果。
+- [R4 限定检查点](./R4_限定检查点与延期登记_2026-11-02.md)、[R3／R4 实施记录](./R3_R4_文本结构与交付上下文实施记录_2026-11-01.md)、原 `EXCELChatBI_交付收尾执行清单_2026-10-15.md`（已删除，历史可查 Git）及[风险台账](./交付收尾风险台账_2026-10-15.md)：保留各自阶段、延期任务及历史局限。
+
+本机原始归档（路径在其他机器可能不存在）：
+
+- `E/final-report.txt`、`E/freeze4-code-manifest.sha256`、`E/real-v2/`：原模型输入输出、工具／Evidence／状态、数据库快照、截图和诊断；图像例 `real-v2/browser/12-artifact-line.png`。
+- `/tmp/docs-sync-publish-20261109T014347Z/`：上次同步及免费复核，临时目录不是远程 CI。
+- `/tmp/handover-refresh-20261110T080306Z/`：本轮只读基线、文档前副本、归档源比较、命令与检查日志、独立文档复核、最终差异和 hash。正式交接须按需要另行保存此临时归档。
+
+本轮没有新浏览器／服务、真实模型、PDF、MCP／Docker 实测或目标机器结果；没有修改产品／测试、预算、提交、推送、部署。源码审阅覆盖主链与相关边界，不是全项目安全审计；外部服务、历史远程 CI、运行时故障和代表性性能尚未在本轮重新验证。
+
+---
+
+<details>
+<summary>历史交接正文与各日期快照（保留引用；不作为当前启动及验收结论）</summary>
+
+以下原文保留历史查证价值。旧“当前／已完成”、预算、测试数及未实现判断只对各自时点有效；本页 H1–H9 为当前接手入口。旧命令在执行前必须按 H6 核对，不要覆盖已有配置。
+
+
+> **交付状态入口：** R1–R4 限定通过检查点及 11 月 4 日验收结果，见[2026-11-09 项目状态记录](./项目状态与文档同步记录_2026-11-09.md)。阶段 2／V1 仍 BLOCKED，整体 NO_GO。2026-11-10 仅整理文档，未新增产品验收证据；历史提交／推送授权不适用于本轮。执行顺序以[六阶段总纲](./项目当前开发与交付计划_2026-10-27.md)为准。
+
+<details>
+<summary>展开 2026-10-16 至 11-04 历史快照（同文快照保留处）</summary>
 
 > **2026-11-04 验收快照：阶段2/V1完整主链仍BLOCKED，整体NO_GO。** 本轮有限修复、独立复审及免费回归已完成（4299 PASS／495 FAIL）；真实续验22次，月汇总分段PASS，画像/处理说明、旧材料图表意图及新PDF总计归属仍有阻塞。三个会话重开通过，真实PDF未生成。MCP三传输真实Host/工具验证使用Scripted模型，不等于真实供应商完整链或Docker。详见[分段阻塞修复与续验记录](./分段阻塞修复与续验记录_2026-11-04.md)。该轮未提交、推送或部署；以下按日期保留历史结果，当前文档同步与发布边界见上方状态入口。
 
@@ -153,8 +397,9 @@ MANUAL-02作者免费修复与全后端验证完成：2177通过、1个原有str
 > 2026-10-16 历史状态：作者完成免费复验，待再次独立复核，真实CLI仍未通过。旧作者1641项及独立未关闭结论均保留。
 
 
-> 2026-10-15/16 历史收尾补充：当时基线 main=41897b62da13e6022ac7954b739af5926c0d7bec，另有未提交修复。该时点记录见[旧交付执行清单](EXCELChatBI_交付收尾执行清单_2026-10-15.md)、[同事交接与 CLI 实测](同事交接与CLI实测_2026-10-15.md)和[风险台账](交付收尾风险台账_2026-10-15.md)。当时的免费完整工具链、1563 后端测试及 Ruff/Mypy 通过属于历史证据，真实 CLI 失败、目标环境未演练；不覆盖本文顶部的当前规划入口。
+> 2026-10-15/16 历史收尾补充：当时基线 main=41897b62da13e6022ac7954b739af5926c0d7bec，另有未提交修复。该时点记录见原 `EXCELChatBI_交付收尾执行清单_2026-10-15.md`（已删除，历史可查 Git）、`同事交接与CLI实测_2026-10-15.md`（本轮开始前已删除，原文可从 Git 历史查阅）和[风险台账](交付收尾风险台账_2026-10-15.md)。当时的免费完整工具链、1563 后端测试及 Ruff/Mypy 通过属于历史证据，真实 CLI 失败、目标环境未演练；不覆盖本文顶部的当前规划入口。
 
+</details>
 
 > 文档基线：`main` 分支，提交 `42f133d`（2026-08-27）
 >
@@ -1217,3 +1462,5 @@ pnpm --dir apps/web test:e2e
 ### 2026-11-04 收尾记录
 
 按授权完成阶段2分段阻塞的有限修复及真实续验，不新增R5、不改写R1–R4历史限定通过。新真实P1保留，V1未通过；阶段3–6和原业务/协议/CI/目标机器门槛保持。后续执行以前述最新记录及唯一预算入口现场核验为准，不沿用旧余额，不自动扩项。
+
+</details>
